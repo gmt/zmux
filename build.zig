@@ -1,0 +1,177 @@
+// Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
+//
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+// IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+// OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // --------------------------------------------------
+    // Feature options (mirroring pkgbuild configure flags)
+    // --------------------------------------------------
+    const opt_systemd = b.option(bool, "systemd", "Enable systemd integration [default: true on Linux]") orelse
+        (target.result.os.tag == .linux);
+    const opt_utempter = b.option(bool, "utempter", "Enable libutempter support [default: true on Linux]") orelse
+        (target.result.os.tag == .linux);
+    const opt_sixel = b.option(bool, "sixel", "Enable sixel image support [default: true]") orelse true;
+    const opt_utf8proc = b.option(bool, "utf8proc", "Enable utf8proc for Unicode width [default: false]") orelse false;
+    const opt_fuzzing = b.option(bool, "fuzzing", "Build fuzz targets [default: false]") orelse false;
+
+    // --------------------------------------------------
+    // Build-options module
+    // --------------------------------------------------
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "have_systemd", opt_systemd);
+    build_options.addOption(bool, "have_utempter", opt_utempter);
+    build_options.addOption(bool, "enable_sixel", opt_sixel);
+    build_options.addOption(bool, "have_utf8proc", opt_utf8proc);
+    build_options.addOption([]const u8, "version", "3.6a-dev");
+    build_options.addOption([]const u8, "tmux_conf",
+        "/etc/tmux.conf:~/.tmux.conf:$XDG_CONFIG_HOME/tmux/tmux.conf:~/.config/tmux/tmux.conf");
+    build_options.addOption([]const u8, "tmux_sock", "$TMUX_TMPDIR:/tmp");
+    build_options.addOption([]const u8, "tmux_term", "tmux-256color");
+    build_options.addOption([]const u8, "tmux_lock_cmd", "vlock");
+
+    // --------------------------------------------------
+    // Shared C compile flags
+    // --------------------------------------------------
+    const common_cflags: []const []const u8 = &.{
+        "-std=gnu99",
+        "-O2",
+        "-Wall",
+        "-Wno-unused-result",
+        "-Isrc/compat",
+        "-D_DEFAULT_SOURCE",
+    };
+
+    // --------------------------------------------------
+    // Main executable
+    // --------------------------------------------------
+    const exe = b.addExecutable(.{
+        .name = "zmux",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tmux.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Attach build-options
+    exe.root_module.addOptions("build_options", build_options);
+
+    // C source bridges
+    exe.root_module.addIncludePath(b.path("src/compat"));
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg.c"), .flags = common_cflags });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+
+    // System libraries  (link_libc + system libs must go on the exe's root_module or the exe directly)
+    exe.linkLibC();
+    exe.linkSystemLibrary("event_core");
+    exe.linkSystemLibrary("ncursesw");
+
+    if (opt_systemd)  exe.linkSystemLibrary("systemd");
+    if (opt_utempter) exe.linkSystemLibrary("utempter");
+    if (opt_utf8proc) exe.linkSystemLibrary("utf8proc");
+
+    if (opt_sixel) {
+        // image-sixel.zig is deferred – acknowledged here for the feature flag
+    }
+
+    b.installArtifact(exe);
+
+    // --------------------------------------------------
+    // `zig build run`
+    // --------------------------------------------------
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    b.step("run", "Run zmux").dependOn(&run_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build smoke` – harness against zmux
+    // --------------------------------------------------
+    const smoke_step = b.step("smoke", "Run smoke harness against zig-out/bin/zmux");
+    smoke_step.dependOn(b.getInstallStep());
+    const smoke_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh" });
+    smoke_cmd.step.dependOn(b.getInstallStep());
+    smoke_step.dependOn(&smoke_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build smoke-oracle` – harness against installed tmux
+    // --------------------------------------------------
+    const oracle_step = b.step("smoke-oracle", "Run smoke harness against installed tmux (oracle)");
+    const oracle_cmd = b.addSystemCommand(&.{ "sh", "-c",
+        "TEST_ZMUX=$(command -v tmux) sh regress/run-all.sh" });
+    oracle_step.dependOn(&oracle_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build test`
+    // --------------------------------------------------
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tmux.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    unit_tests.root_module.addOptions("build_options", build_options);
+    unit_tests.root_module.addIncludePath(b.path("src/compat"));
+    unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg.c"), .flags = common_cflags });
+    unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
+    unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
+    unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+    unit_tests.linkLibC();
+    unit_tests.linkSystemLibrary("event_core");
+    unit_tests.linkSystemLibrary("ncursesw");
+    const test_step = b.step("test", "Run Zig unit tests");
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
+    // --------------------------------------------------
+    // `zig build fuzz`
+    // --------------------------------------------------
+    if (opt_fuzzing) {
+        // The fuzz target imports from the zmux source tree
+        const zmux_mod = b.createModule(.{
+            .root_source_file = b.path("src/tmux.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        zmux_mod.addOptions("build_options", build_options);
+        zmux_mod.addIncludePath(b.path("src/compat"));
+        zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/imsg.c"), .flags = common_cflags });
+        zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
+        zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
+        zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+
+        const fuzz_exe = b.addExecutable(.{
+            .name = "zmux-input-fuzzer",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("fuzz/input-fuzzer.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zmux", .module = zmux_mod },
+                },
+            }),
+        });
+        fuzz_exe.linkLibC();
+        fuzz_exe.linkSystemLibrary("event_core");
+        fuzz_exe.linkSystemLibrary("ncursesw");
+        b.installArtifact(fuzz_exe);
+        b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)").dependOn(&fuzz_exe.step);
+    }
+}

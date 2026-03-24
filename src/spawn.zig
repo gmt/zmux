@@ -27,6 +27,8 @@ const opts = @import("options.zig");
 const win = @import("window.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
+const format_mod = @import("format.zig");
+const names_mod = @import("names.zig");
 const c = @import("c.zig");
 
 extern fn openpty(
@@ -66,6 +68,16 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
         spawn_pane_exec(wp, sc) catch |err| {
             log.log_warn("spawn_pane_exec failed: {}", .{err});
         };
+    }
+
+    if (w.name.len == 0) {
+        xm.allocator.free(w.name);
+        if (sc.name) |name| {
+            w.name = format_mod.format_single(sc.item, name, null, s, null, null);
+            opts.options_set_number(w.options, "automatic-rename", 0);
+        } else {
+            w.name = names_mod.default_window_name(w);
+        }
     }
 
     if (s.curw == null) s.curw = wl;
@@ -108,9 +120,14 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
 
     const cwd: []const u8 = sc.cwd orelse (if (s) |ss| ss.cwd else "/");
 
-    const argv = if (sc.argv) |argv_in| argv_in else blk: {
-        break :blk try alloc.dupe([]u8, &.{try alloc.dupe(u8, shell)});
-    };
+    const argv = if (sc.argv) |argv_in|
+        duplicate_argv(argv_in)
+    else
+        duplicate_argv(&.{shell});
+
+    wp.argv = argv;
+    wp.shell = xm.xstrdup(shell);
+    wp.cwd = xm.xstrdup(cwd);
 
     // Open PTY
     var master: i32 = -1;
@@ -154,6 +171,14 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     std.posix.close(slave);
     wp.pid = pid;
     log.log_debug("new pane %%%{d} pid={d}", .{ wp.id, pid });
+}
+
+fn duplicate_argv(argv: []const []const u8) [][]u8 {
+    var out = xm.allocator.alloc([]u8, argv.len) catch unreachable;
+    for (argv, 0..) |arg, idx| {
+        out[idx] = xm.xstrdup(arg);
+    }
+    return out;
 }
 
 fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8) !void {

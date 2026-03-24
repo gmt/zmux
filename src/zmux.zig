@@ -261,3 +261,8 @@ pub fn checkshell(shell: ?[]const u8) bool {
 pub fn getversion() []const u8 {
     return T.ZMUX_VERSION;
 }
+
+test {
+    _ = @import("attributes.zig");
+    _ = @import("names.zig");
+}

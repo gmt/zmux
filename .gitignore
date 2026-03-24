@@ -10,7 +10,3 @@ tmux-*.log
 .vscode/
 *.swp
 *~
-*.code-workspace
-
-# VS Code / editor workspace files
-*.code-workspace

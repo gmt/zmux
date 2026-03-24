@@ -29,7 +29,7 @@ const sess = @import("session.zig");
 const win = @import("window.zig");
 const server_client_mod = @import("server-client.zig");
 const cmdq = @import("cmd-queue.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
 const key_bindings = @import("key-bindings.zig");
 const cfg_mod = @import("cfg.zig");
@@ -37,7 +37,7 @@ const build_options = @import("build_options");
 
 // ── Global server state ───────────────────────────────────────────────────
 
-pub var server_proc: ?*T.TmuxProc = null;
+pub var server_proc: ?*T.ZmuxProc = null;
 pub var server_fd: i32 = -1;
 pub var server_client_flags: u64 = 0;
 pub var server_exit: bool = false;
@@ -183,7 +183,7 @@ fn server_loop() bool {
 /// Returns the fd to communicate with the new server (in the parent),
 /// or runs forever in the server child.
 pub fn server_start(
-    client_proc: *T.TmuxProc,
+    client_proc: *T.ZmuxProc,
     flags: u64,
     _base: *c.libevent.event_base,
     lockfd: i32,

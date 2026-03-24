@@ -115,6 +115,7 @@ pub fn cmd_find_entry(name: []const u8) ?*const CmdEntry {
 pub const ParseError = error{
     UnknownCommand,
     ParseFailed,
+    UnterminatedQuote,
 };
 
 /// Parse a single command from an argv slice.
@@ -179,14 +180,26 @@ pub fn cmd_parse_from_string(
     while (it.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t\n");
         if (trimmed.len == 0) continue;
-        // Tokenise into argv
-        var argv: std.ArrayList([]const u8) = .{};
-        defer argv.deinit(xm.allocator);
-        var tok_it = std.mem.tokenizeAny(u8, trimmed, " \t");
-        while (tok_it.next()) |tok| argv.append(xm.allocator, tok) catch unreachable;
+        // Tokenise into argv, preserving quoted segments.
+        var argv = split_command_words(xm.allocator, trimmed) catch |err| {
+            const msg = switch (err) {
+                ParseError.UnterminatedQuote => xm.xstrdup("unterminated quote"),
+                else => xm.xstrdup("parse error"),
+            };
+            cmd_list_free(list);
+            return .{
+                .status = .@"error",
+                .@"error" = msg,
+            };
+        };
+        defer free_split_command_words(&argv);
 
         var cause: ?[]u8 = null;
-        const cmd = cmd_parse_one(argv.items, null, &cause) catch {
+        const argv_const = xm.allocator.alloc([]const u8, argv.items.len) catch unreachable;
+        defer xm.allocator.free(argv_const);
+        for (argv.items, 0..) |word, idx| argv_const[idx] = word;
+
+        const cmd = cmd_parse_one(argv_const, null, &cause) catch {
             const err = cause orelse xm.xstrdup("parse error");
             cmd_list_free(list);
             return .{
@@ -198,6 +211,87 @@ pub fn cmd_parse_from_string(
     }
 
     return .{ .status = .success, .cmdlist = @ptrCast(list) };
+}
+
+pub fn split_command_words(
+    alloc: std.mem.Allocator,
+    input: []const u8,
+) ParseError!std.ArrayList([]u8) {
+    var words: std.ArrayList([]u8) = .{};
+    errdefer free_split_command_words(&words);
+
+    var current: std.ArrayList(u8) = .{};
+    defer current.deinit(alloc);
+
+    const QuoteState = enum { none, single, double };
+    var state: QuoteState = .none;
+    var escaped = false;
+    var token_open = false;
+
+    for (input) |ch| {
+        if (escaped) {
+            current.append(alloc, ch) catch unreachable;
+            escaped = false;
+            token_open = true;
+            continue;
+        }
+
+        switch (state) {
+            .none => switch (ch) {
+                ' ', '\t', '\r', '\n' => {
+                    if (token_open) {
+                        words.append(alloc, current.toOwnedSlice(alloc) catch unreachable) catch unreachable;
+                        token_open = false;
+                    }
+                },
+                '\'' => {
+                    state = .single;
+                    token_open = true;
+                },
+                '"' => {
+                    state = .double;
+                    token_open = true;
+                },
+                '\\' => {
+                    escaped = true;
+                    token_open = true;
+                },
+                else => {
+                    current.append(alloc, ch) catch unreachable;
+                    token_open = true;
+                },
+            },
+            .single => {
+                if (ch == '\'') {
+                    state = .none;
+                } else {
+                    current.append(alloc, ch) catch unreachable;
+                }
+            },
+            .double => {
+                if (ch == '"') {
+                    state = .none;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else {
+                    current.append(alloc, ch) catch unreachable;
+                }
+            },
+        }
+    }
+
+    if (escaped or state != .none) {
+        return ParseError.UnterminatedQuote;
+    }
+    if (token_open) {
+        words.append(alloc, current.toOwnedSlice(alloc) catch unreachable) catch unreachable;
+    }
+    return words;
+}
+
+pub fn free_split_command_words(words: *std.ArrayList([]u8)) void {
+    for (words.items) |word| xm.allocator.free(word);
+    words.deinit(xm.allocator);
 }
 
 pub fn cmd_free(cmd: *Cmd) void {

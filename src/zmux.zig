@@ -17,7 +17,7 @@
 //   Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
 
-//! tmux.zig – main entry point for zmux.
+//! zmux.zig – main entry point for zmux.
 //!
 //! Parses the command line, initialises global state, and hands control
 //! to client_main() which manages the libevent loop and IPC to the server.
@@ -184,9 +184,9 @@ pub fn main() !void {
 
     // Resolve socket path
     if (path == null) {
-        if (std.posix.getenv("TMUX")) |tmux_env| {
-            const comma = std.mem.indexOfScalar(u8, tmux_env, ',');
-            const socket_str = if (comma) |ci| tmux_env[0..ci] else tmux_env;
+        if (std.posix.getenv("ZMUX")) |zmux_env| {
+            const comma = std.mem.indexOfScalar(u8, zmux_env, ',');
+            const socket_str = if (comma) |ci| zmux_env[0..ci] else zmux_env;
             if (socket_str.len > 0) {
                 path = xm.xstrdup(socket_str);
             }
@@ -203,7 +203,7 @@ pub fn main() !void {
     if (label) |l| xm.allocator.free(l);
 
     // UTF-8 detection
-    if (std.posix.getenv("TMUX")) |_| {
+    if (std.posix.getenv("ZMUX")) |_| {
         flags |= T.CLIENT_UTF8;
     } else {
         const s = std.posix.getenv("LC_ALL") orelse
@@ -235,9 +235,9 @@ fn getshell() []const u8 {
 fn make_label(label: ?[]u8) ?[]u8 {
     const lname = if (label) |l| l else "default";
     const uid = std.os.linux.getuid();
-    const tmpdir = std.posix.getenv("TMUX_TMPDIR") orelse "/tmp";
+    const tmpdir = std.posix.getenv("ZMUX_TMPDIR") orelse "/tmp";
 
-    const base = xm.xasprintf("{s}/tmux-{d}", .{ tmpdir, uid });
+    const base = xm.xasprintf("{s}/zmux-{d}", .{ tmpdir, uid });
     defer xm.allocator.free(base);
 
     std.fs.makeDirAbsolute(base) catch |err| {
@@ -259,5 +259,5 @@ pub fn checkshell(shell: ?[]const u8) bool {
 }
 
 pub fn getversion() []const u8 {
-    return T.TMUX_VERSION;
+    return T.ZMUX_VERSION;
 }

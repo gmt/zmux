@@ -17,11 +17,10 @@
 # should produce identical window/session structure.
 # Based on tmux/regress/command-order.sh.
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX="$TEST_ZMUX -Ltest"
+smoke_init command-order
 
 TMP1=$(mktemp)
 TMP2=$(mktemp)
@@ -41,15 +40,14 @@ cat <<'EOF' >"$TMP2"
 new -d -s s1; neww -t s1; neww -t s1
 EOF
 
-$ZMUX kill-server 2>/dev/null || true
-$ZMUX -f"$TMP1" start
-$ZMUX list-windows -t s1 -F '#{window_index}' | sort >"$TMP3"
-$ZMUX kill-server 2>/dev/null || true
+smoke_bin -f"$TMP1" start
+smoke_cmd list-windows -t s1 -F '#{window_index}' | sort >"$TMP3"
+smoke_try_kill_server
 sleep 0.5
 
-$ZMUX -f"$TMP2" start
-$ZMUX list-windows -t s1 -F '#{window_index}' | sort >"$TMP4"
-$ZMUX kill-server 2>/dev/null || true
+smoke_bin -f"$TMP2" start
+smoke_cmd list-windows -t s1 -F '#{window_index}' | sort >"$TMP4"
+smoke_try_kill_server
 
 cmp -s "$TMP3" "$TMP4" || {
     echo "window order mismatch:"

@@ -102,7 +102,11 @@ pub fn cmd_find_target(
                     if (std.mem.indexOfScalar(u8, win_part, '.')) |dot|
                         win_part = win_part[0..dot];
                     const sess_name = if (sess_part.len > 0 and sess_part[0] == '=') sess_part[1..] else sess_part;
-                    if (sess.session_find(sess_name)) |s| {
+                    const target_session = if (sess_name.len == 0)
+                        if (cl) |c| c.session else null
+                    else
+                        sess.session_find(sess_name);
+                    if (target_session) |s| {
                         const idx = std.fmt.parseInt(i32, win_part, 10) catch -1;
                         if (sess.winlink_find_by_index(&s.windows, idx)) |wl| {
                             fs.s = s;
@@ -141,7 +145,11 @@ pub fn cmd_find_target(
                     var win_part = rest;
                     if (std.mem.indexOfScalar(u8, rest, '.')) |dot|
                         win_part = rest[0..dot];
-                    if (sess.session_find(sess_part)) |s_val| {
+                    const target_session = if (sess_part.len == 0)
+                        if (cl) |c| c.session else null
+                    else
+                        sess.session_find(sess_part);
+                    if (target_session) |s_val| {
                         const idx = std.fmt.parseInt(i32, win_part, 10) catch -1;
                         if (sess.winlink_find_by_index(&s_val.windows, idx)) |wl| {
                             fs.s = s_val;

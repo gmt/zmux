@@ -13,24 +13,39 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# new-session-no-client.sh – starting with no client should create a detached
-# session and not attach; has-session should find it afterwards.
-# Based on tmux/regress/new-session-no-client.sh (issue #869).
+# attach-detach-client.sh – attach and detach a control client without hanging.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-smoke_init new-session-no-client
+smoke_init attach-detach-client
 
-TMP=$(mktemp)
-trap 'rm -f $TMP' 0 1 15
+OUT="$TEST_TMPDIR/control.out"
+ERR="$TEST_TMPDIR/control.err"
 
-cat <<EOF >"$TMP"
-new -stest
-EOF
+smoke_cmd new-session -d -s main || exit 1
 
-smoke_bin -f"$TMP" start || exit 1
-sleep 1
-smoke_cmd has -t=test: || exit 1
+(
+    printf 'refresh-client -C 90,30\n'
+    sleep 5
+    printf 'detach-client\n'
+) | smoke_bin -f/dev/null -C attach-session -t main >"$OUT" 2>"$ERR" &
+CLIENT_PID=$!
+
+n=0
+while [ "$n" -lt 20 ]; do
+    if smoke_cmd list-clients 2>/dev/null | grep -q .; then
+        break
+    fi
+    sleep 0.2
+    n=$((n + 1))
+done
+
+smoke_cmd list-clients 2>/dev/null | grep -q . || {
+    echo "client never attached"
+    exit 1
+}
+
+wait "$CLIENT_PID" || exit 1
 
 exit 0

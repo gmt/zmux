@@ -13,24 +13,22 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# new-session-no-client.sh – starting with no client should create a detached
-# session and not attach; has-session should find it afterwards.
-# Based on tmux/regress/new-session-no-client.sh (issue #869).
+# kill-server-cleanup.sh – kill-server should return promptly and stop serving.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-smoke_init new-session-no-client
+smoke_init kill-server-cleanup
 
-TMP=$(mktemp)
-trap 'rm -f $TMP' 0 1 15
+smoke_cmd new-session -d -s cleanup || exit 1
+timeout 4 "$TEST_ZMUX" -S "$TEST_SOCKET" -f/dev/null kill-server >/dev/null 2>&1 || {
+    echo "kill-server timed out"
+    exit 1
+}
 
-cat <<EOF >"$TMP"
-new -stest
-EOF
-
-smoke_bin -f"$TMP" start || exit 1
-sleep 1
-smoke_cmd has -t=test: || exit 1
+smoke_cmd has-session -t cleanup 2>/dev/null && {
+    echo "server still answered after kill-server"
+    exit 1
+}
 
 exit 0

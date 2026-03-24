@@ -136,7 +136,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "allow-rename",         .@"type" = .flag,    .scope = WP, .default_num = 1 },
     .{ .name = "alternate-screen",     .@"type" = .flag,    .scope = WP, .default_num = 1 },
     .{ .name = "automatic-rename",     .@"type" = .flag,    .scope = W, .default_num = 1 },
-    .{ .name = "automatic-rename-format", .@"type" = .string, .scope = W, .default_str = "#{?pane_in_mode,[tmux],#{pane_current_command}}#{?pane_dead,dead,}" },
+    .{ .name = "automatic-rename-format", .@"type" = .string, .scope = W, .default_str = "#{?pane_in_mode,[zmux],#{pane_current_command}}#{?pane_dead,dead,}" },
     .{ .name = "clock-mode-colour",    .@"type" = .colour,  .scope = W, .default_num = 4 },
     .{ .name = "clock-mode-style",     .@"type" = .choice,  .scope = W, .default_num = 1,
        .choices = &.{ "12", "24" } },

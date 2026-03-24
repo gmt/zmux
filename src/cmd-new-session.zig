@@ -37,6 +37,7 @@ const server_mod = @import("server.zig");
 fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const cl = cmdq.cmdq_get_client(item);
+    var target: T.CmdFindState = .{};
 
     // has-session: just validate the -t target (cmd_find_target already did it)
     if (cmd.entry == &entry_has) {
@@ -97,6 +98,13 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // Determine CWD
     const cwd = server_client_mod.server_client_get_cwd(cl, null);
 
+    var group_target: ?*T.Session = null;
+    if (args.get('t')) |target_name| {
+        if (cmd_find.cmd_find_target(&target, item, target_name, .session, 0) != 0)
+            return .@"error";
+        group_target = target.s;
+    }
+
     // Create session
     const new_env = env_mod.environ_create();
     if (cl) |c| env_mod.environ_copy(c.environ, new_env);
@@ -112,40 +120,69 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null,
     );
 
-    // Spawn the initial window
-    var cause: ?[]u8 = null;
-    var sc = T.SpawnContext{
-        .item = @ptrCast(item),
-        .s = s,
-        .idx = -1,
-        .cwd = cwd,
-        .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
-    };
-    // Inherit command from positional args
-    if (args.count() > 0) {
-        // TODO: pass argv from positional args to spawn context
-    }
-    const wl = spawn_mod.spawn_window(&sc, &cause);
-    if (wl == null) {
-        cmdq.cmdq_error(item, "create window failed: {s}", .{cause orelse "unknown"});
-        sess.session_destroy(s, false, "exec_new_session");
-        return .@"error";
+    var wl: ?*T.Winlink = null;
+    if (group_target) |group_session| {
+        var keys: std.ArrayList(i32) = .{};
+        defer keys.deinit(xm.allocator);
+        var it = group_session.windows.keyIterator();
+        while (it.next()) |idx| keys.append(xm.allocator, idx.*) catch unreachable;
+        std.sort.block(i32, keys.items, {}, std.sort.asc(i32));
+
+        var cause: ?[]u8 = null;
+        for (keys.items) |idx| {
+            const existing = sess.winlink_find_by_index(&group_session.windows, idx) orelse continue;
+            const new_wl = sess.session_attach(s, existing.window, idx, &cause) orelse {
+                cmdq.cmdq_error(item, "attach grouped window failed", .{});
+                sess.session_destroy(s, false, "exec_new_session");
+                return .@"error";
+            };
+            if (group_session.curw != null and existing.idx == group_session.curw.?.idx) {
+                s.curw = new_wl;
+            }
+        }
+        wl = s.curw;
+    } else {
+        // Spawn the initial window
+        var cause: ?[]u8 = null;
+        var sc = T.SpawnContext{
+            .item = @ptrCast(item),
+            .s = s,
+            .idx = -1,
+            .cwd = cwd,
+            .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
+        };
+        // Inherit command from positional args
+        if (args.count() > 0) {
+            // TODO: pass argv from positional args to spawn context
+        }
+        wl = spawn_mod.spawn_window(&sc, &cause);
+        if (wl == null) {
+            cmdq.cmdq_error(item, "create window failed: {s}", .{cause orelse "unknown"});
+            sess.session_destroy(s, false, "exec_new_session");
+            return .@"error";
+        }
     }
 
     // Apply explicit -x/-y dimensions
-    if (args.has('x') or args.has('y')) {
-        const w = wl.?.window;
-        w.sx = sx;
-        w.sy = sy;
-        for (w.panes.items) |wp| {
-            wp.sx = sx;
-            wp.sy = sy;
+    if (wl) |created_wl| {
+        if (args.has('x') or args.has('y')) {
+            const w = created_wl.window;
+            w.sx = sx;
+            w.sy = sy;
+            for (w.panes.items) |wp| {
+                wp.sx = sx;
+                wp.sy = sy;
+            }
         }
     }
 
     // Attach client if not detached
     if (!args.has('d')) {
         if (cl) |c| {
+            if (args.has('x') or args.has('y')) {
+                c.tty.sx = sx;
+                c.tty.sy = sy;
+            }
             server_client_mod.server_client_set_session(c, s);
         }
     }

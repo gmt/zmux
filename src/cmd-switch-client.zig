@@ -22,6 +22,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const cl = tc orelse cmdq.cmdq_get_client(item);
 
     var target: T.CmdFindState = .{};
+    const tflag = args.get('t');
 
     // -n: next session
     if (args.has('n')) {
@@ -63,10 +64,18 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    // Resolve -t target
-    const tflag = args.get('t');
-    if (cmd_find.cmd_find_target(&target, item, tflag, .session, 0) != 0)
+    if (tflag) |t| {
+        const is_window_target = std.mem.indexOfScalar(u8, t, ':') != null or
+            std.mem.indexOfScalar(u8, t, '.') != null;
+        if (is_window_target) {
+            if (cmd_find.cmd_find_target(&target, item, tflag, .window, 0) != 0)
+                return .@"error";
+        } else if (cmd_find.cmd_find_target(&target, item, tflag, .session, 0) != 0) {
+            return .@"error";
+        }
+    } else if (cmd_find.cmd_find_target(&target, item, null, .session, 0) != 0) {
         return .@"error";
+    }
 
     const s = target.s orelse {
         cmdq.cmdq_error(item, "no session", .{});
@@ -87,6 +96,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
+    if (wl) |target_wl| s.curw = target_wl;
     if (cl) |c| server_client_mod.server_client_set_session(c, s);
     if (cl) |c| server_client_mod.server_client_set_key_table(c, null);
     return .normal;

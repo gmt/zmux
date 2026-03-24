@@ -13,24 +13,27 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# new-session-no-client.sh – starting with no client should create a detached
-# session and not attach; has-session should find it afterwards.
-# Based on tmux/regress/new-session-no-client.sh (issue #869).
+set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-. "$SCRIPT_DIR/common.sh"
+mkdir -p /run/sshd /root/.ssh
+chmod 700 /root/.ssh
 
-smoke_init new-session-no-client
+if [ -n "${AUTHORIZED_KEY:-}" ]; then
+    printf '%s\n' "$AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+fi
 
-TMP=$(mktemp)
-trap 'rm -f $TMP' 0 1 15
+ssh-keygen -A
 
-cat <<EOF >"$TMP"
-new -stest
+cat >>/etc/ssh/sshd_config <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication no
+PubkeyAuthentication yes
+UsePAM no
+PrintMotd no
+PermitUserEnvironment yes
+ClientAliveInterval 30
+ClientAliveCountMax 3
 EOF
 
-smoke_bin -f"$TMP" start || exit 1
-sleep 1
-smoke_cmd has -t=test: || exit 1
-
-exit 0
+exec /usr/bin/sshd -D -e

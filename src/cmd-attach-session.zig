@@ -15,7 +15,7 @@ const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
 const server_client_mod = @import("server-client.zig");
 const proc_mod = @import("proc.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 
 fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);

@@ -16,23 +16,19 @@
 # has-session-return.sh – has-session exit codes and no-server behavior.
 # Based on tmux/regress/has-session-return.sh.
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX="$TEST_ZMUX -Ltest"
-$ZMUX kill-server 2>/dev/null || true
+smoke_init has-session-return
 
 # has-session with no server running should return non-zero
-$ZMUX has-session 2>/dev/null && exit 1
+smoke_cmd has-session 2>/dev/null && exit 1
 
 # start a session; has-session should now succeed
-$ZMUX -f/dev/null start-server
-$ZMUX -f/dev/null new-session -d -s smoke || exit 1
-$ZMUX has-session -t smoke || exit 1
+smoke_cmd start-server
+smoke_cmd new-session -d -s smoke || exit 1
+smoke_cmd has-session -t smoke || exit 1
 
 # nonexistent session should fail
-$ZMUX has-session -t nosuchsession 2>/dev/null && exit 1
-
-$ZMUX kill-server 2>/dev/null || true
+smoke_cmd has-session -t nosuchsession 2>/dev/null && exit 1
 exit 0

@@ -17,28 +17,32 @@
 # Exercises two-socket, multi-server client attachment patterns.
 # Based on the socket-isolation pattern from tmux/regress/tty-keys.sh.
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX1="$TEST_ZMUX -Ltest1"
-ZMUX2="$TEST_ZMUX -Ltest2"
-$ZMUX1 kill-server 2>/dev/null || true
-$ZMUX2 kill-server 2>/dev/null || true
+smoke_init second-socket-attach
 
-TMP=$(mktemp)
-trap 'rm -f $TMP; $ZMUX1 kill-server 2>/dev/null; $ZMUX2 kill-server 2>/dev/null' 0 1 15
+SOCK1="$TEST_TMPDIR/socket1"
+SOCK2="$TEST_TMPDIR/socket2"
+
+zmux1() {
+    "$TEST_ZMUX" -S "$SOCK1" -f/dev/null "$@"
+}
+
+zmux2() {
+    "$TEST_ZMUX" -S "$SOCK2" -f/dev/null "$@"
+}
 
 # Start a detached session on socket 1
-$ZMUX1 -f/dev/null new-session -d -s main || exit 1
-$ZMUX1 has-session -t main || exit 1
+zmux1 new-session -d -s main || exit 1
+zmux1 has-session -t main || exit 1
 
 # Connect from a second socket; it should start a fresh independent server
-$ZMUX2 -f/dev/null new-session -d -s peer || exit 1
-$ZMUX2 has-session -t peer || exit 1
+zmux2 new-session -d -s peer || exit 1
+zmux2 has-session -t peer || exit 1
 
 # Sessions on different sockets must be isolated
-$ZMUX1 has-session -t peer 2>/dev/null && { echo "socket isolation failed"; exit 1; }
-$ZMUX2 has-session -t main 2>/dev/null && { echo "socket isolation failed"; exit 1; }
+zmux1 has-session -t peer 2>/dev/null && { echo "socket isolation failed"; exit 1; }
+zmux2 has-session -t main 2>/dev/null && { echo "socket isolation failed"; exit 1; }
 
 exit 0

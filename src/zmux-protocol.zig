@@ -17,7 +17,7 @@
 //   Copyright (c) 2021 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
 
-//! tmux-protocol.zig – IPC wire protocol constants and message structs.
+//! zmux-protocol.zig – IPC wire protocol constants and message structs.
 //!
 //! This is a near-verbatim port of tmux-protocol.h.  The protocol version
 //! must stay in sync with the C header; bump PROTOCOL_VERSION when any wire

@@ -13,65 +13,195 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# run-all.sh – Master smoke harness runner.
-# Usage:  ./run-all.sh                       (uses zig-out/bin/zmux)
-#         TEST_ZMUX=/usr/bin/tmux ./run-all.sh  (oracle against installed tmux)
+# run-all.sh – tiered smoke harness runner.
+# Usage:
+#   ./run-all.sh fast
+#   ./run-all.sh oracle
+#   ./run-all.sh soak
+#   ./run-all.sh docker
+#   ./run-all.sh all
 
-set -e
+set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 : "${TEST_ZMUX:=$ROOT_DIR/zig-out/bin/zmux}"
-export TEST_ZMUX
+: "${TEST_ORACLE_TMUX:=/usr/bin/tmux}"
+: "${SMOKE_ARTIFACT_ROOT:=/tmp}"
+: "${SMOKE_TEST_TIMEOUT:=20}"
+: "${SMOKE_PYTHON_TIMEOUT:=600}"
+: "${SMOKE_DOCKER_TIMEOUT:=1200}"
 
-if [ ! -x "$TEST_ZMUX" ]; then
-    echo "SKIP: $TEST_ZMUX not found or not executable" >&2
-    echo "      Build with 'zig build' or set TEST_ZMUX" >&2
-    exit 77
-fi
-
+SUITE=${1:-fast}
+RUN_DIR=$(mktemp -d "${SMOKE_ARTIFACT_ROOT%/}/zmux-smoke-run.XXXXXX")
 PASS=0
 FAIL=0
 SKIP=0
 
-run_test() {
-    local script="$1"
-    local name
-    name="$(basename "$script" .sh)"
-    printf "  %-40s " "$name"
-    if sh "$script"; then
-        printf "PASS\n"
-        PASS=$((PASS + 1))
-    else
-        status=$?
-        if [ "$status" -eq 77 ]; then
-            printf "SKIP\n"
-            SKIP=$((SKIP + 1))
-        else
-            printf "FAIL (exit %d)\n" "$status"
-            FAIL=$((FAIL + 1))
-        fi
+cleanup() {
+    reap_smoke_processes
+    rm -rf "$RUN_DIR"
+}
+trap cleanup 0 1 2 3 15
+
+reap_smoke_processes() {
+    pids=$(ps -eo pid=,args= | awk '
+        index($0, "/tmp/zmux-") || index($0, "/tmp/zmux-smoke-") { print $1 }
+    ')
+    if [ -n "$pids" ]; then
+        kill -9 $pids >/dev/null 2>&1 || true
     fi
 }
 
-echo "zmux smoke harness  ($TEST_ZMUX)"
-echo "----------------------------------------------"
+require_bin() {
+    bin=$1
+    if [ ! -x "$bin" ]; then
+        echo "SKIP: $bin not found or not executable" >&2
+        exit 77
+    fi
+}
 
-for f in \
-    "$SCRIPT_DIR/new-session-no-client.sh" \
-    "$SCRIPT_DIR/has-session-return.sh" \
-    "$SCRIPT_DIR/new-session-size.sh" \
-    "$SCRIPT_DIR/kill-session-process-exit.sh" \
-    "$SCRIPT_DIR/control-client-size.sh" \
-    "$SCRIPT_DIR/session-group-resize.sh" \
-    "$SCRIPT_DIR/second-socket-attach.sh" \
-    "$SCRIPT_DIR/command-order.sh" \
-; do
-    [ -f "$f" ] && run_test "$f"
-done
+run_sh_test() {
+    name=$1
+    bin=$2
+    script=$3
+    log="$RUN_DIR/$name.log"
+
+    printf "  %-40s " "$name"
+    if TEST_ZMUX="$bin" SMOKE_ARTIFACT_ROOT="$SMOKE_ARTIFACT_ROOT" timeout "$SMOKE_TEST_TIMEOUT" sh "$script" >"$log" 2>&1; then
+        printf "PASS\n"
+        PASS=$((PASS + 1))
+        reap_smoke_processes
+        return 0
+    else
+        status=$?
+    fi
+
+    if [ "$status" -eq 77 ]; then
+        printf "SKIP\n"
+        SKIP=$((SKIP + 1))
+        reap_smoke_processes
+        return 0
+    fi
+
+    printf "FAIL (exit %d)\n" "$status"
+    sed -n '1,80p' "$log"
+    FAIL=$((FAIL + 1))
+    reap_smoke_processes
+    return 0
+}
+
+run_py_test() {
+    name=$1
+    bin=$2
+    shift 2
+    log="$RUN_DIR/$name.log"
+
+    printf "  %-40s " "$name"
+    if TEST_ZMUX="$bin" SMOKE_ARTIFACT_ROOT="$SMOKE_ARTIFACT_ROOT" timeout "$SMOKE_PYTHON_TIMEOUT" python3 "$SCRIPT_DIR/smoke_harness.py" "$@" >"$log" 2>&1; then
+        printf "PASS\n"
+        PASS=$((PASS + 1))
+        reap_smoke_processes
+        return 0
+    else
+        status=$?
+    fi
+
+    if [ "$status" -eq 77 ]; then
+        printf "SKIP\n"
+        SKIP=$((SKIP + 1))
+        reap_smoke_processes
+        return 0
+    fi
+
+    printf "FAIL (exit %d)\n" "$status"
+    sed -n '1,120p' "$log"
+    FAIL=$((FAIL + 1))
+    reap_smoke_processes
+    return 0
+}
+
+run_fast_suite() {
+    bin=$1
+    require_bin "$bin"
+
+    echo "zmux fast suite  ($bin)"
+    echo "----------------------------------------------"
+
+    for f in \
+        "$SCRIPT_DIR/new-session-no-client.sh" \
+        "$SCRIPT_DIR/has-session-return.sh" \
+        "$SCRIPT_DIR/new-session-size.sh" \
+        "$SCRIPT_DIR/kill-session-process-exit.sh" \
+        "$SCRIPT_DIR/control-client-size.sh" \
+        "$SCRIPT_DIR/session-group-resize.sh" \
+        "$SCRIPT_DIR/second-socket-attach.sh" \
+        "$SCRIPT_DIR/command-order.sh" \
+        "$SCRIPT_DIR/attach-detach-client.sh" \
+        "$SCRIPT_DIR/list-and-display.sh" \
+        "$SCRIPT_DIR/kill-server-cleanup.sh" \
+    ; do
+        [ -f "$f" ] && run_sh_test "$(basename "$f" .sh)" "$bin" "$f"
+    done
+
+    run_py_test command-sweep "$bin" sweep --mode implemented
+    run_py_test inside-session "$bin" inside
+}
+
+run_oracle_suite() {
+    require_bin "$TEST_ORACLE_TMUX"
+
+    echo "oracle tmux suite  ($TEST_ORACLE_TMUX)"
+    echo "----------------------------------------------"
+    run_py_test oracle-command-sweep "$TEST_ORACLE_TMUX" sweep --mode oracle
+    run_py_test oracle-inside-session "$TEST_ORACLE_TMUX" inside
+}
+
+run_soak_suite() {
+    bin=$1
+    require_bin "$bin"
+
+    echo "zmux soak suite  ($bin)"
+    echo "----------------------------------------------"
+    run_py_test soak "$bin" soak
+}
+
+run_docker_suite() {
+    require_bin "$TEST_ORACLE_TMUX"
+
+    echo "docker oracle suite"
+    echo "----------------------------------------------"
+    old_timeout=$SMOKE_TEST_TIMEOUT
+    SMOKE_TEST_TIMEOUT=$SMOKE_DOCKER_TIMEOUT
+    run_sh_test docker-ssh "$TEST_ORACLE_TMUX" "$SCRIPT_DIR/docker-ssh.sh"
+    SMOKE_TEST_TIMEOUT=$old_timeout
+}
+
+case "$SUITE" in
+    fast)
+        run_fast_suite "$TEST_ZMUX"
+        ;;
+    oracle)
+        run_oracle_suite
+        ;;
+    soak)
+        run_soak_suite "$TEST_ZMUX"
+        ;;
+    docker)
+        run_docker_suite
+        ;;
+    all)
+        run_fast_suite "$TEST_ZMUX"
+        run_oracle_suite
+        run_docker_suite
+        ;;
+    *)
+        echo "usage: $0 [fast|oracle|soak|docker|all]" >&2
+        exit 2
+        ;;
+esac
 
 echo "----------------------------------------------"
 echo "PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
-
 [ "$FAIL" -eq 0 ]

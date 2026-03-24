@@ -1,4 +1,3 @@
-#!/bin/sh
 # Copyright (c) 2026 Greg Turner <gmt@pobox.com>
 #
 # Permission to use, copy, modify, and distribute this software for any
@@ -13,22 +12,20 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# has-session-return.sh – has-session exit codes and no-server behavior.
-# Based on tmux/regress/has-session-return.sh.
+FROM archlinux:latest
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-. "$SCRIPT_DIR/common.sh"
+RUN pacman -Sy --noconfirm --needed \
+    ffmpeg \
+    jack2 \
+    libcaca \
+    ncurses \
+    openssh \
+    procps-ng \
+    python \
+    tmux
 
-smoke_init has-session-return
+COPY docker-sshd-entrypoint.sh /usr/local/bin/docker-sshd-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-sshd-entrypoint.sh
 
-# has-session with no server running should return non-zero
-smoke_cmd has-session 2>/dev/null && exit 1
-
-# start a session; has-session should now succeed
-smoke_cmd start-server
-smoke_cmd new-session -d -s smoke || exit 1
-smoke_cmd has-session -t smoke || exit 1
-
-# nonexistent session should fail
-smoke_cmd has-session -t nosuchsession 2>/dev/null && exit 1
-exit 0
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/docker-sshd-entrypoint.sh"]

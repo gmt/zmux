@@ -25,7 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
 const proc_mod = @import("proc.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 
 // ── Concrete types for the opaque T.CmdqItem / T.CmdqList ────────────────
 
@@ -129,11 +129,12 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
             }
         }
 
-        // Send exit notification to the client with the return code
         if (item.client) |c_ptr| {
-            if (c_ptr.peer) |peer| {
-                const retval: i32 = if (overall_retval == .@"error") 1 else 0;
-                _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+            if (c_ptr.flags & T.CLIENT_CONTROL == 0 or c_ptr.flags & T.CLIENT_EXIT != 0) {
+                if (c_ptr.peer) |peer| {
+                    const retval: i32 = if (overall_retval == .@"error") 1 else 0;
+                    _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+                }
             }
         }
 

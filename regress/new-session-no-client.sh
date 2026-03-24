@@ -17,12 +17,10 @@
 # session and not attach; has-session should find it afterwards.
 # Based on tmux/regress/new-session-no-client.sh (issue #869).
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX="$TEST_ZMUX -Ltest"
-$ZMUX kill-server 2>/dev/null || true
+smoke_init new-session-no-client
 
 TMP=$(mktemp)
 trap 'rm -f $TMP' 0 1 15
@@ -31,9 +29,8 @@ cat <<EOF >"$TMP"
 new -stest
 EOF
 
-$ZMUX -f"$TMP" start || exit 1
+smoke_bin -f"$TMP" start || exit 1
 sleep 1
-$ZMUX has -t=test: || exit 1
-$ZMUX kill-server 2>/dev/null || true
+smoke_cmd has -t=test: || exit 1
 
 exit 0

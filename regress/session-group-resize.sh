@@ -17,12 +17,10 @@
 # Tests both switch-client and select-window code paths.
 # Based on tmux/regress/session-group-resize.sh.
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX="$TEST_ZMUX -Ltest"
-$ZMUX kill-server 2>/dev/null || true
+smoke_init session-group-resize
 
 TMP1=$(mktemp)
 TMP2=$(mktemp)
@@ -30,18 +28,18 @@ TMP3=$(mktemp)
 trap 'rm -f $TMP1 $TMP2 $TMP3' 0 1 15
 
 # Create a session with two windows, staying on window 0
-$ZMUX -f/dev/null new-session -d -s test -x 20 -y 6 || exit 1
-$ZMUX new-window -t test || exit 1
-$ZMUX select-window -t test:0 || exit 1
+smoke_cmd new-session -d -s test -x 20 -y 6 || exit 1
+smoke_cmd new-window -t test || exit 1
+smoke_cmd select-window -t test:0 || exit 1
 
 # Attach small 20x6 control client; move it to window 1
 (echo "refresh-client -C 20,6"; echo "select-window -t :1"; sleep 5) |
-    $ZMUX -f/dev/null -C attach -t test >"$TMP1" 2>&1 &
+    smoke_bin -f/dev/null -C attach -t test >"$TMP1" 2>&1 &
 
 # Wait for client to land on window 1
 n=0
 while [ $n -lt 20 ]; do
-    $ZMUX list-clients -F '#{client_name} #{window_index}' 2>/dev/null \
+    smoke_cmd list-clients -F '#{client_name} #{window_index}' 2>/dev/null \
         | grep -q " 1$" && break
     sleep 0.1
     n=$((n + 1))
@@ -49,12 +47,12 @@ done
 
 # Attach a larger 30x10 grouped session; switch-client to window 1
 (echo "refresh-client -C 30,10"; echo "switch-client -t :=1"; sleep 5) |
-    $ZMUX -f/dev/null -C new-session -t test -x 30 -y 10 >"$TMP2" 2>&1 &
+    smoke_bin -f/dev/null -C new-session -t test -x 30 -y 10 >"$TMP2" 2>&1 &
 
 # Poll for resize instead of fixed sleep
 n=0
 while [ $n -lt 20 ]; do
-    OUT1=$($ZMUX display-message -t test:1 -p '#{window_width}x#{window_height}' 2>/dev/null)
+    OUT1=$(smoke_cmd display-message -t test:1 -p '#{window_width}x#{window_height}' 2>/dev/null)
     [ "$OUT1" = "30x10" ] && break
     sleep 0.1
     n=$((n + 1))
@@ -62,18 +60,16 @@ done
 
 # Attach a 25x8 grouped session; use select-window instead
 (echo "refresh-client -C 25,8"; echo "select-window -t :1"; sleep 5) |
-    $ZMUX -f/dev/null -C new-session -t test -x 25 -y 8 >"$TMP3" 2>&1 &
+    smoke_bin -f/dev/null -C new-session -t test -x 25 -y 8 >"$TMP3" 2>&1 &
 
 # Wait for resize – poll with backoff instead of a blind sleep
 n=0
 while [ $n -lt 20 ]; do
-    OUT2=$($ZMUX display-message -t test:1 -p '#{window_width}x#{window_height}' 2>/dev/null)
+    OUT2=$(smoke_cmd display-message -t test:1 -p '#{window_width}x#{window_height}' 2>/dev/null)
     [ "$OUT2" = "25x8" ] && break
     sleep 0.1
     n=$((n + 1))
 done
-
-$ZMUX kill-server 2>/dev/null || true
 
 [ "$OUT1" = "30x10" ] || { echo "switch-client resize failed: $OUT1"; exit 1; }
 [ "$OUT2" = "25x8" ]  || { echo "select-window resize failed: $OUT2"; exit 1; }

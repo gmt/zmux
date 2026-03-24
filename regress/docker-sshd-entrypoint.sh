@@ -13,22 +13,27 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# has-session-return.sh – has-session exit codes and no-server behavior.
-# Based on tmux/regress/has-session-return.sh.
+set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-. "$SCRIPT_DIR/common.sh"
+mkdir -p /run/sshd /root/.ssh
+chmod 700 /root/.ssh
 
-smoke_init has-session-return
+if [ -n "${AUTHORIZED_KEY:-}" ]; then
+    printf '%s\n' "$AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+fi
 
-# has-session with no server running should return non-zero
-smoke_cmd has-session 2>/dev/null && exit 1
+ssh-keygen -A
 
-# start a session; has-session should now succeed
-smoke_cmd start-server
-smoke_cmd new-session -d -s smoke || exit 1
-smoke_cmd has-session -t smoke || exit 1
+cat >>/etc/ssh/sshd_config <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication no
+PubkeyAuthentication yes
+UsePAM no
+PrintMotd no
+PermitUserEnvironment yes
+ClientAliveInterval 30
+ClientAliveCountMax 3
+EOF
 
-# nonexistent session should fail
-smoke_cmd has-session -t nosuchsession 2>/dev/null && exit 1
-exit 0
+exec /usr/bin/sshd -D -e

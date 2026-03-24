@@ -13,22 +13,39 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# has-session-return.sh – has-session exit codes and no-server behavior.
-# Based on tmux/regress/has-session-return.sh.
+# attach-detach-client.sh – attach and detach a control client without hanging.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-smoke_init has-session-return
+smoke_init attach-detach-client
 
-# has-session with no server running should return non-zero
-smoke_cmd has-session 2>/dev/null && exit 1
+OUT="$TEST_TMPDIR/control.out"
+ERR="$TEST_TMPDIR/control.err"
 
-# start a session; has-session should now succeed
-smoke_cmd start-server
-smoke_cmd new-session -d -s smoke || exit 1
-smoke_cmd has-session -t smoke || exit 1
+smoke_cmd new-session -d -s main || exit 1
 
-# nonexistent session should fail
-smoke_cmd has-session -t nosuchsession 2>/dev/null && exit 1
+(
+    printf 'refresh-client -C 90,30\n'
+    sleep 5
+    printf 'detach-client\n'
+) | smoke_bin -f/dev/null -C attach-session -t main >"$OUT" 2>"$ERR" &
+CLIENT_PID=$!
+
+n=0
+while [ "$n" -lt 20 ]; do
+    if smoke_cmd list-clients 2>/dev/null | grep -q .; then
+        break
+    fi
+    sleep 0.2
+    n=$((n + 1))
+done
+
+smoke_cmd list-clients 2>/dev/null | grep -q . || {
+    echo "client never attached"
+    exit 1
+}
+
+wait "$CLIENT_PID" || exit 1
+
 exit 0

@@ -10,6 +10,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const server_client_mod = @import("server-client.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -25,15 +26,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cl.tty.sx = sx;
             cl.tty.sy = sy;
             if (cl.session) |s| {
-                if (s.curw) |wl| {
-                    const w = wl.window;
-                    w.sx = sx;
-                    w.sy = sy;
-                    for (w.panes.items) |wp| {
-                        wp.sx = sx;
-                        wp.sy = sy;
-                    }
-                }
+                server_client_mod.server_client_apply_session_size(cl, s);
             }
         }
     }

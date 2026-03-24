@@ -1,0 +1,15 @@
+.{
+    .name = .zmux,
+    .version = "3.6.0-dev",
+    .fingerprint = 0x695fb32a80f0bc3c,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "regress",
+        "fuzz",
+        "COPYING",
+        "LICENSE",
+    },
+}

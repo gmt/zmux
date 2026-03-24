@@ -38,11 +38,11 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_sixel", opt_sixel);
     build_options.addOption(bool, "have_utf8proc", opt_utf8proc);
     build_options.addOption([]const u8, "version", "3.6a-dev");
-    build_options.addOption([]const u8, "tmux_conf",
-        "/etc/tmux.conf:~/.tmux.conf:$XDG_CONFIG_HOME/tmux/tmux.conf:~/.config/tmux/tmux.conf");
-    build_options.addOption([]const u8, "tmux_sock", "$TMUX_TMPDIR:/tmp");
-    build_options.addOption([]const u8, "tmux_term", "tmux-256color");
-    build_options.addOption([]const u8, "tmux_lock_cmd", "vlock");
+    build_options.addOption([]const u8, "zmux_conf",
+        "/etc/zmux.conf:~/.zmux.conf:$XDG_CONFIG_HOME/zmux/zmux.conf:~/.config/zmux/zmux.conf");
+    build_options.addOption([]const u8, "zmux_sock", "$ZMUX_TMPDIR:/tmp");
+    build_options.addOption([]const u8, "zmux_term", "tmux-256color");
+    build_options.addOption([]const u8, "zmux_lock_cmd", "vlock");
 
     // --------------------------------------------------
     // Shared C compile flags
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zmux",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tmux.zig"),
+            .root_source_file = b.path("src/zmux.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -102,28 +102,52 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run zmux").dependOn(&run_cmd.step);
 
     // --------------------------------------------------
-    // `zig build smoke` – harness against zmux
+    // `zig build smoke` – fast harness against zmux
     // --------------------------------------------------
-    const smoke_step = b.step("smoke", "Run smoke harness against zig-out/bin/zmux");
+    const smoke_step = b.step("smoke", "Run the fast smoke harness against zig-out/bin/zmux");
     smoke_step.dependOn(b.getInstallStep());
-    const smoke_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh" });
+    const smoke_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "fast" });
     smoke_cmd.step.dependOn(b.getInstallStep());
     smoke_step.dependOn(&smoke_cmd.step);
 
     // --------------------------------------------------
-    // `zig build smoke-oracle` – harness against installed tmux
+    // `zig build smoke-oracle` – oracle harness against installed tmux
     // --------------------------------------------------
-    const oracle_step = b.step("smoke-oracle", "Run smoke harness against installed tmux (oracle)");
-    const oracle_cmd = b.addSystemCommand(&.{ "sh", "-c",
-        "TEST_ZMUX=$(command -v tmux) sh regress/run-all.sh" });
+    const oracle_step = b.step("smoke-oracle", "Run the oracle smoke harness against installed tmux");
+    const oracle_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "oracle" });
     oracle_step.dependOn(&oracle_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build smoke-soak` – heavy soak harness against zmux
+    // --------------------------------------------------
+    const soak_step = b.step("smoke-soak", "Run the heavy soak harness against zig-out/bin/zmux");
+    soak_step.dependOn(b.getInstallStep());
+    const soak_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "soak" });
+    soak_cmd.step.dependOn(b.getInstallStep());
+    soak_step.dependOn(&soak_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build smoke-docker` – Docker + SSH harness against system tmux
+    // --------------------------------------------------
+    const docker_step = b.step("smoke-docker", "Run the Docker + SSH smoke harness");
+    const docker_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "docker" });
+    docker_step.dependOn(&docker_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build smoke-all` – fast local + oracle + docker suites
+    // --------------------------------------------------
+    const smoke_all_step = b.step("smoke-all", "Run fast local, oracle, and Docker smoke suites");
+    smoke_all_step.dependOn(b.getInstallStep());
+    const smoke_all_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "all" });
+    smoke_all_cmd.step.dependOn(b.getInstallStep());
+    smoke_all_step.dependOn(&smoke_all_cmd.step);
 
     // --------------------------------------------------
     // `zig build test`
     // --------------------------------------------------
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tmux.zig"),
+            .root_source_file = b.path("src/zmux.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -146,7 +170,7 @@ pub fn build(b: *std.Build) void {
     if (opt_fuzzing) {
         // The fuzz target imports from the zmux source tree
         const zmux_mod = b.createModule(.{
-            .root_source_file = b.path("src/tmux.zig"),
+            .root_source_file = b.path("src/zmux.zig"),
             .target = target,
             .optimize = optimize,
         });

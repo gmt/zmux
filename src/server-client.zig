@@ -24,12 +24,13 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
+const win_mod = @import("window.zig");
 const c = @import("c.zig");
 
 var next_client_id: u32 = 0;
@@ -198,9 +199,31 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 
 pub fn server_client_loop() void {}
 
+pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
+    const wl = s.curw orelse return;
+    const sx = if (cl.tty.sx == 0) @as(u32, 80) else cl.tty.sx;
+    const sy = if (cl.tty.sy == 0) @as(u32, 24) else cl.tty.sy;
+    const w = wl.window;
+
+    win_mod.window_resize(w, sx, sy, @intCast(w.xpixel), @intCast(w.ypixel));
+    for (w.panes.items) |wp| {
+        wp.sx = sx;
+        wp.sy = sy;
+    }
+}
+
 pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
+    if (cl.session) |old| {
+        if (old == s) {
+            server_client_apply_session_size(cl, s);
+            return;
+        }
+        if (old != s and old.attached > 0) old.attached -= 1;
+        cl.last_session = old;
+    }
     cl.session = s;
     s.attached += 1;
+    server_client_apply_session_size(cl, s);
 }
 
 pub fn server_client_set_key_table(_cl: *T.Client, _name: ?[]const u8) void {
@@ -217,7 +240,7 @@ pub fn server_client_get_cwd(cl: ?*T.Client, _s: ?*T.Session) []const u8 {
 }
 
 pub fn server_client_check_nested(cl: *T.Client) bool {
-    if (cl.environ.entries.get("TMUX")) |entry| {
+    if (cl.environ.entries.get("ZMUX")) |entry| {
         if (entry.value != null) return true;
     }
     return false;

@@ -45,6 +45,6 @@ pub fn server_acl_join(uid: std.posix.uid_t) bool {
     return true; // default allow
 }
 
-pub fn server_acl_get_uid(peer: *T.TmuxPeer) std.posix.uid_t {
+pub fn server_acl_get_uid(peer: *T.ZmuxPeer) std.posix.uid_t {
     return peer.uid;
 }

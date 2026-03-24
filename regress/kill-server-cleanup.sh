@@ -13,22 +13,22 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# has-session-return.sh – has-session exit codes and no-server behavior.
-# Based on tmux/regress/has-session-return.sh.
+# kill-server-cleanup.sh – kill-server should return promptly and stop serving.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-smoke_init has-session-return
+smoke_init kill-server-cleanup
 
-# has-session with no server running should return non-zero
-smoke_cmd has-session 2>/dev/null && exit 1
+smoke_cmd new-session -d -s cleanup || exit 1
+timeout 4 "$TEST_ZMUX" -S "$TEST_SOCKET" -f/dev/null kill-server >/dev/null 2>&1 || {
+    echo "kill-server timed out"
+    exit 1
+}
 
-# start a session; has-session should now succeed
-smoke_cmd start-server
-smoke_cmd new-session -d -s smoke || exit 1
-smoke_cmd has-session -t smoke || exit 1
+smoke_cmd has-session -t cleanup 2>/dev/null && {
+    echo "server still answered after kill-server"
+    exit 1
+}
 
-# nonexistent session should fail
-smoke_cmd has-session -t nosuchsession 2>/dev/null && exit 1
 exit 0

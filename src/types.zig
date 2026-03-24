@@ -25,16 +25,16 @@
 
 const std = @import("std");
 const c = @import("c.zig");
-pub const protocol = @import("tmux-protocol.zig");
+pub const protocol = @import("zmux-protocol.zig");
 
 // ── Build constants ────────────────────────────────────────────────────────
 const build_options = @import("build_options");
 
-pub const TMUX_VERSION: []const u8 = build_options.version;
-pub const TMUX_CONF: []const u8 = build_options.tmux_conf;
-pub const TMUX_SOCK: []const u8 = build_options.tmux_sock;
-pub const TMUX_TERM: []const u8 = build_options.tmux_term;
-pub const TMUX_LOCK_CMD: []const u8 = build_options.tmux_lock_cmd;
+pub const ZMUX_VERSION: []const u8 = build_options.version;
+pub const ZMUX_CONF: []const u8 = build_options.zmux_conf;
+pub const ZMUX_SOCK: []const u8 = build_options.zmux_sock;
+pub const ZMUX_TERM: []const u8 = build_options.zmux_term;
+pub const ZMUX_LOCK_CMD: []const u8 = build_options.zmux_lock_cmd;
 
 pub const PANE_MINIMUM: u32 = 1;
 pub const WINDOW_MINIMUM: u32 = PANE_MINIMUM;
@@ -555,7 +555,7 @@ pub const StatusLine = struct {
 
 pub const Client = struct {
     name: ?[]const u8 = null,
-    peer: ?*TmuxPeer = null,
+    peer: ?*ZmuxPeer = null,
 
     pid: std.posix.pid_t = 0,
     fd: i32 = -1,
@@ -591,8 +591,8 @@ pub const Client = struct {
 
 pub const PEER_BAD: u32 = 0x1;
 
-pub const TmuxPeer = struct {
-    parent: *TmuxProc,
+pub const ZmuxPeer = struct {
+    parent: *ZmuxProc,
     ibuf: c.imsg.imsgbuf,
     event: ?*c.libevent.event = null,
     uid: std.posix.uid_t = 0,
@@ -601,11 +601,11 @@ pub const TmuxPeer = struct {
     arg: ?*anyopaque = null,
 };
 
-pub const TmuxProc = struct {
+pub const ZmuxProc = struct {
     name: []const u8,
     exit: bool = false,
     signalcb: ?*const fn (i32) callconv(.c) void = null,
-    peers: std.ArrayList(*TmuxPeer) = .{},
+    peers: std.ArrayList(*ZmuxPeer) = .{},
     sig_events: std.ArrayList(*c.libevent.event) = .{},
 };
 

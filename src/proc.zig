@@ -23,13 +23,13 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
 
 pub var libevent: ?*c.libevent.event_base = null;
 
 // Peers marked for deferred cleanup (freed between event loop iterations)
-var dead_peers: std.ArrayList(*T.TmuxPeer) = .{};
+var dead_peers: std.ArrayList(*T.ZmuxPeer) = .{};
 
 extern fn getsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: ?*anyopaque, optlen: *c_uint) c_int;
 const SOL_SOCKET: c_int = 1;
@@ -44,7 +44,7 @@ pub const DispatchCb = *const fn (?*c.imsg.imsg, ?*anyopaque) callconv(.c) void;
 
 export fn proc_event_cb(_fd: c_int, events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
-    const peer: *T.TmuxPeer = @ptrCast(@alignCast(arg orelse return));
+    const peer: *T.ZmuxPeer = @ptrCast(@alignCast(arg orelse return));
 
     if (peer.flags & T.PEER_BAD == 0 and events & @as(c_short, c.libevent.EV_READ) != 0) {
         if (c.imsg.imsgbuf_read(&peer.ibuf) != 1) {
@@ -82,13 +82,13 @@ export fn proc_event_cb(_fd: c_int, events: c_short, arg: ?*anyopaque) void {
 }
 
 export fn proc_signal_cb(signo: c_int, _: c_short, arg: ?*anyopaque) void {
-    const tp: *T.TmuxProc = @ptrCast(@alignCast(arg orelse return));
+    const tp: *T.ZmuxProc = @ptrCast(@alignCast(arg orelse return));
     if (tp.signalcb) |cb| cb(signo);
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-fn peer_check_version(peer: *T.TmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
+fn peer_check_version(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
     const version: u32 = imsg_msg.hdr.peerid & 0xff;
     if (imsg_msg.hdr.type != @as(u32, @intCast(@intFromEnum(protocol.MsgType.version))) and
         version != protocol.PROTOCOL_VERSION)
@@ -100,7 +100,7 @@ fn peer_check_version(peer: *T.TmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
     return 0;
 }
 
-fn proc_update_event(peer: *T.TmuxPeer) void {
+fn proc_update_event(peer: *T.ZmuxPeer) void {
     if (peer.event != null) return;
     const base = libevent orelse return;
     peer.event = c.libevent.event_new(
@@ -112,7 +112,7 @@ fn proc_update_event(peer: *T.TmuxPeer) void {
 
 // ── Public API ────────────────────────────────────────────────────────────
 
-pub fn proc_send(peer: *T.TmuxPeer, msg_type: protocol.MsgType, fd: i32, buf: ?[*]const u8, len: usize) i32 {
+pub fn proc_send(peer: *T.ZmuxPeer, msg_type: protocol.MsgType, fd: i32, buf: ?[*]const u8, len: usize) i32 {
     if (peer.flags & T.PEER_BAD != 0) return -1;
     const retval = c.imsg.imsg_compose(
         &peer.ibuf,
@@ -128,24 +128,24 @@ pub fn proc_send(peer: *T.TmuxPeer, msg_type: protocol.MsgType, fd: i32, buf: ?[
     return 0;
 }
 
-pub fn proc_start(name: []const u8) *T.TmuxProc {
+pub fn proc_start(name: []const u8) *T.ZmuxProc {
     log.log_open(name);
 
     const u = std.posix.uname();
     log.log_debug("{s} started ({d}): version {s}, protocol {d}", .{
-        name, std.os.linux.getpid(), T.TMUX_VERSION, protocol.PROTOCOL_VERSION,
+        name, std.os.linux.getpid(), T.ZMUX_VERSION, protocol.PROTOCOL_VERSION,
     });
     log.log_debug("on {s}", .{std.mem.sliceTo(&u.sysname, 0)});
 
-    const tp = xm.allocator.create(T.TmuxProc) catch unreachable;
-    tp.* = T.TmuxProc{
+    const tp = xm.allocator.create(T.ZmuxProc) catch unreachable;
+    tp.* = T.ZmuxProc{
         .name = xm.xstrdup(name),
         .peers = .{},
     };
     return tp;
 }
 
-pub fn proc_loop(tp: *T.TmuxProc, loopcb: ?*const fn () bool) void {
+pub fn proc_loop(tp: *T.ZmuxProc, loopcb: ?*const fn () bool) void {
     log.log_debug("{s} loop enter", .{tp.name});
     while (!tp.exit) {
         // Reap dead peers from the PREVIOUS iteration (not from this one)
@@ -159,14 +159,14 @@ pub fn proc_loop(tp: *T.TmuxProc, loopcb: ?*const fn () bool) void {
     log.log_debug("{s} loop exit", .{tp.name});
 }
 
-pub fn proc_exit(tp: *T.TmuxProc) void {
+pub fn proc_exit(tp: *T.ZmuxProc) void {
     for (tp.peers.items) |peer| {
         _ = c.imsg.imsgbuf_flush(&peer.ibuf);
     }
     tp.exit = true;
 }
 
-pub fn proc_set_signals(tp: *T.TmuxProc, signalcb: *const fn (i32) callconv(.c) void) void {
+pub fn proc_set_signals(tp: *T.ZmuxProc, signalcb: *const fn (i32) callconv(.c) void) void {
     tp.signalcb = signalcb;
 
     const sa_ign = std.posix.Sigaction{
@@ -200,7 +200,7 @@ pub fn proc_set_signals(tp: *T.TmuxProc, signalcb: *const fn (i32) callconv(.c) 
     }
 }
 
-pub fn proc_clear_signals(tp: *T.TmuxProc, defaults: bool) void {
+pub fn proc_clear_signals(tp: *T.ZmuxProc, defaults: bool) void {
     for (tp.sig_events.items) |sig_ev| {
         _ = c.libevent.event_del(sig_ev);
         c.libevent.event_free(sig_ev);
@@ -223,12 +223,12 @@ pub fn proc_clear_signals(tp: *T.TmuxProc, defaults: bool) void {
 }
 
 pub fn proc_add_peer(
-    tp: *T.TmuxProc,
+    tp: *T.ZmuxProc,
     fd: i32,
     dispatchcb: DispatchCb,
     arg: ?*anyopaque,
-) *T.TmuxPeer {
-    const peer = xm.allocator.create(T.TmuxPeer) catch unreachable;
+) *T.ZmuxPeer {
+    const peer = xm.allocator.create(T.ZmuxPeer) catch unreachable;
     peer.* = .{
         .parent = tp,
         .ibuf = undefined,
@@ -256,7 +256,7 @@ pub fn proc_add_peer(
 }
 
 /// Mark a peer for deferred cleanup. Safe to call from inside event callbacks.
-pub fn proc_remove_peer(peer: *T.TmuxPeer) void {
+pub fn proc_remove_peer(peer: *T.ZmuxPeer) void {
     // Remove from parent's live list
     const peers = &peer.parent.peers;
     for (peers.items, 0..) |p, i| {
@@ -284,19 +284,19 @@ fn reap_dead_peers() void {
     dead_peers.clearRetainingCapacity();
 }
 
-pub fn proc_kill_peer(peer: *T.TmuxPeer) void {
+pub fn proc_kill_peer(peer: *T.ZmuxPeer) void {
     peer.flags |= T.PEER_BAD;
 }
 
-pub fn proc_flush_peer(peer: *T.TmuxPeer) void {
+pub fn proc_flush_peer(peer: *T.ZmuxPeer) void {
     _ = c.imsg.imsgbuf_flush(&peer.ibuf);
 }
 
-pub fn proc_toggle_log(tp: *T.TmuxProc) void {
+pub fn proc_toggle_log(tp: *T.ZmuxProc) void {
     log.log_toggle(tp.name);
 }
 
-pub fn proc_get_peer_uid(peer: *const T.TmuxPeer) std.posix.uid_t {
+pub fn proc_get_peer_uid(peer: *const T.ZmuxPeer) std.posix.uid_t {
     return peer.uid;
 }
 

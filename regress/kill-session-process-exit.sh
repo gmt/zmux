@@ -16,29 +16,26 @@
 # kill-session-process-exit.sh – killing a session must kill its pane processes.
 # Based on tmux/regress/kill-session-process-exit.sh.
 
-PATH=/bin:/usr/bin
-TERM=screen
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/common.sh"
 
-[ -z "$TEST_ZMUX" ] && TEST_ZMUX=$(readlink -f ../zig-out/bin/zmux)
-ZMUX="$TEST_ZMUX -Ltest"
-$ZMUX kill-server 2>/dev/null || true
+smoke_init kill-session-process-exit
 sleep 1
 
 # Create session with a long-running pane
-$ZMUX -f/dev/null new-session -d 'sleep 1000' || exit 1
-P=$($ZMUX display-message -p -t 0:0.0 '#{pane_pid}' 2>/dev/null)
+smoke_cmd new-session -d 'sleep 1000' || exit 1
+P=$(smoke_cmd display-message -p -t 0:0.0 '#{pane_pid}' 2>/dev/null)
 [ -z "$P" ] && exit 1
 
 # Create a second session so the server survives kill-session
-$ZMUX -f/dev/null new-session -d || exit 1
+smoke_cmd new-session -d || exit 1
 sleep 1
 
 # Kill the first session
-$ZMUX kill-session -t 0:
+smoke_cmd kill-session -t 0:
 sleep 3
 
 # The pane process should be gone
 kill -0 "$P" 2>/dev/null && { echo "pane process $P still alive"; exit 1; }
 
-$ZMUX kill-server 2>/dev/null || true
 exit 0

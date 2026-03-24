@@ -27,11 +27,7 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // Update client if one is attached
     if (cl) |c| {
         if (c.session == s) {
-            // Trigger a resize check
-            if (wl.window.sx != c.tty.sx or wl.window.sy != c.tty.sy) {
-                wl.window.sx = c.tty.sx;
-                wl.window.sy = c.tty.sy;
-            }
+            server_client_mod.server_client_apply_session_size(c, s);
         }
     }
     return .normal;

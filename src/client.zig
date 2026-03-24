@@ -25,7 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
-const protocol = @import("tmux-protocol.zig");
+const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
@@ -33,13 +33,16 @@ const cmd_mod = @import("cmd.zig");
 
 // ── Client globals ────────────────────────────────────────────────────────
 
-var client_proc: ?*T.TmuxProc = null;
-var client_peer: ?*T.TmuxPeer = null;
+var client_proc: ?*T.ZmuxProc = null;
+var client_peer: ?*T.ZmuxPeer = null;
 var client_flags: u64 = 0;
 var client_exitreason: T.ClientExitReason = .none;
 var client_exitsession: ?[]u8 = null;
 var client_exitmessage: ?[]u8 = null;
 var client_retval: i32 = 0;
+var client_stdin_event: ?*c.libevent.event = null;
+var client_control_input: std.ArrayList(u8) = .{};
+var client_control_stdin_closed = false;
 
 // ── Socket connection ─────────────────────────────────────────────────────
 
@@ -227,6 +230,89 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
     }
 }
 
+fn client_send_command(argv: anytype) void {
+    const peer = client_peer orelse return;
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(xm.allocator);
+
+    const msg_cmd = protocol.MsgCommand{ .argc = @intCast(argv.len) };
+    buf.appendSlice(xm.allocator, std.mem.asBytes(&msg_cmd)) catch unreachable;
+    for (argv) |arg| {
+        buf.appendSlice(xm.allocator, arg) catch unreachable;
+        buf.append(xm.allocator, 0) catch unreachable;
+    }
+    _ = proc_mod.proc_send(peer, .command, -1, buf.items.ptr, buf.items.len);
+}
+
+fn client_send_control_line(line: []const u8) void {
+    var argv = cmd_mod.split_command_words(xm.allocator, line) catch {
+        log.log_warn("control command parse failed: {s}", .{line});
+        return;
+    };
+    defer cmd_mod.free_split_command_words(&argv);
+
+    if (argv.items.len == 0) return;
+    client_send_command(argv.items);
+}
+
+fn client_control_flush_lines(eof: bool) void {
+    var consumed: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, client_control_input.items, consumed, '\n')) |nl| {
+        const raw = client_control_input.items[consumed..nl];
+        const line = std.mem.trimRight(u8, raw, "\r");
+        if (line.len != 0) client_send_control_line(line);
+        consumed = nl + 1;
+    }
+
+    if (eof and consumed < client_control_input.items.len) {
+        const line = std.mem.trim(u8, client_control_input.items[consumed..], " \t\r\n");
+        if (line.len != 0) client_send_control_line(line);
+        consumed = client_control_input.items.len;
+    }
+
+    if (consumed != 0) {
+        const remaining = client_control_input.items.len - consumed;
+        std.mem.copyForwards(u8, client_control_input.items[0..remaining], client_control_input.items[consumed..]);
+        client_control_input.shrinkRetainingCapacity(remaining);
+    }
+}
+
+fn client_disable_stdin_event() void {
+    if (client_stdin_event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        client_stdin_event = null;
+    }
+}
+
+export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _events;
+    _ = _arg;
+
+    var buf: [4096]u8 = undefined;
+    const n = std.posix.read(fd, buf[0..]) catch |err| switch (err) {
+        error.WouldBlock => return,
+        else => {
+            proc_mod.proc_exit(client_proc.?);
+            return;
+        },
+    };
+
+    if (n == 0) {
+        client_control_flush_lines(true);
+        client_disable_stdin_event();
+        if (!client_control_stdin_closed) {
+            client_control_stdin_closed = true;
+            client_send_command([_][]const u8{"detach-client"});
+        }
+        return;
+    }
+
+    client_control_input.appendSlice(xm.allocator, buf[0..n]) catch unreachable;
+    client_control_flush_lines(false);
+}
+
 // ── Main client entry ─────────────────────────────────────────────────────
 
 pub fn client_main(
@@ -284,32 +370,39 @@ pub fn client_main(
 
     // Send the command
     if (argc > 0) {
-        // Pack argc + argv into MSG_COMMAND
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(xm.allocator);
-        const msg_cmd = protocol.MsgCommand{ .argc = argc };
-        buf.appendSlice(xm.allocator, std.mem.asBytes(&msg_cmd)) catch unreachable;
+        var argv_slice: std.ArrayList([]const u8) = .{};
+        defer argv_slice.deinit(xm.allocator);
+
         var i: usize = 0;
         while (i < @as(usize, @intCast(argc))) : (i += 1) {
-            const s = std.mem.span(argv[i]);
-            buf.appendSlice(xm.allocator, s) catch unreachable;
-            buf.append(xm.allocator, 0) catch unreachable;
+            argv_slice.append(xm.allocator, std.mem.span(argv[i])) catch unreachable;
         }
-        _ = proc_mod.proc_send(client_peer.?, .command, -1, buf.items.ptr, buf.items.len);
+        client_send_command(argv_slice.items);
     } else {
         // Default command: new-session or attach
-        const cmd_str = "new-session";
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(xm.allocator);
-        const msg_cmd = protocol.MsgCommand{ .argc = 1 };
-        buf.appendSlice(xm.allocator, std.mem.asBytes(&msg_cmd)) catch unreachable;
-        buf.appendSlice(xm.allocator, cmd_str) catch unreachable;
-        buf.append(xm.allocator, 0) catch unreachable;
-        _ = proc_mod.proc_send(client_peer.?, .command, -1, buf.items.ptr, buf.items.len);
+        client_send_command([_][]const u8{"new-session"});
+    }
+
+    if (client_flags & T.CLIENT_CONTROL != 0) {
+        client_control_input = .{};
+        client_control_stdin_closed = false;
+        client_stdin_event = c.libevent.event_new(
+            base,
+            0,
+            @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
+            client_stdin_cb,
+            null,
+        );
+        if (client_stdin_event) |ev| {
+            _ = c.libevent.event_add(ev, null);
+        }
     }
 
     // Run the event loop until done
     proc_mod.proc_loop(client_proc.?, null);
+    client_disable_stdin_event();
+    client_control_input.deinit(xm.allocator);
+    client_control_input = .{};
     proc_mod.proc_clear_signals(client_proc.?, true);
 
     return client_retval;

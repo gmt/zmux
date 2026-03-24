@@ -112,6 +112,12 @@ pub const ColourPalette = struct {
     default_palette: ?[]i32 = null,
 };
 
+pub const ClientTheme = enum {
+    unknown,
+    light,
+    dark,
+};
+
 pub const GRID_ATTR_BRIGHT: u16 = 0x0001;
 pub const GRID_ATTR_DIM: u16 = 0x0002;
 pub const GRID_ATTR_UNDERSCORE: u16 = 0x0004;

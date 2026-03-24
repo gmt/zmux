@@ -1,6 +1,8 @@
 THIS IS FOR INFORMATION ONLY, CODE IS UNDER THE LICENCE AT THE TOP OF ITS FILE.
 
-All textfiles 
+All textfiles and documentation not generated from code is BSD-3 clause
+as described in LICENSE
+
 
 All code and build related files in this project should have a license and
 copyright notice at its start, typically:

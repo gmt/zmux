@@ -15,7 +15,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-clients",
     .alias = "lsc",
-    .template = "F:t:",
+    .template = "F:O:rt:",
     .lower = 0,
     .upper = 0,
     .flags = 0,

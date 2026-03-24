@@ -67,6 +67,22 @@ pub const KEYC_MASK_KEY: key_code = 0x000fffffffffff;
 pub const MODEKEY_EMACS: u32 = 0;
 pub const MODEKEY_VI: u32 = 1;
 
+pub const SortOrder = enum {
+    activity,
+    creation,
+    index,
+    modifier,
+    name,
+    order,
+    size,
+    end,
+};
+
+pub const SortCriteria = struct {
+    order: SortOrder = .end,
+    reversed: bool = false,
+};
+
 // ── UTF-8 ─────────────────────────────────────────────────────────────────
 
 pub const utf8_char = u32;
@@ -565,6 +581,7 @@ pub const StatusLine = struct {
 };
 
 pub const Client = struct {
+    id: u32 = 0,
     name: ?[]const u8 = null,
     peer: ?*ZmuxPeer = null,
 

@@ -25,6 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
+const sort_mod = @import("sort.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -194,27 +195,28 @@ pub fn session_get_by_name(name: []const u8) ?*T.Session {
 
 pub fn session_next_session(
     s: *T.Session,
-    _sort: anytype,
+    sort_crit: ?*const T.SortCriteria,
 ) ?*T.Session {
-    _ = _sort;
-    var it = sessions.valueIterator();
-    var found = false;
-    while (it.next()) |v| {
-        if (found) return v.*;
-        if (v.* == s) found = true;
+    const sorted = sort_mod.sorted_sessions(sort_crit orelse &.{});
+    defer xm.allocator.free(sorted);
+
+    for (sorted, 0..) |entry, idx| {
+        if (entry != s) continue;
+        return sorted[(idx + 1) % sorted.len];
     }
-    // wrap around
-    var it2 = sessions.valueIterator();
-    return if (it2.next()) |v| v.* else null;
+    return null;
 }
 
 pub fn session_previous_session(
     s: *T.Session,
-    _sort: anytype,
+    sort_crit: ?*const T.SortCriteria,
 ) ?*T.Session {
-    _ = _sort;
-    _ = s;
-    // Simplified: return first session
-    var it = sessions.valueIterator();
-    return if (it.next()) |v| v.* else null;
+    const sorted = sort_mod.sorted_sessions(sort_crit orelse &.{});
+    defer xm.allocator.free(sorted);
+
+    for (sorted, 0..) |entry, idx| {
+        if (entry != s) continue;
+        return sorted[(idx + sorted.len - 1) % sorted.len];
+    }
+    return null;
 }

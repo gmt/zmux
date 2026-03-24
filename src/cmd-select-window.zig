@@ -45,6 +45,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .item = @ptrCast(item),
         .s = s,
         .idx = -1,
+        .name = args.get('n'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
     };
     const wl = spawn_mod.spawn_window(&sc, &cause) orelse {

@@ -110,6 +110,12 @@ pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
 }
 
 fn window_pane_destroy(wp: *T.WindowPane) void {
+    if (wp.argv) |argv| {
+        for (argv) |arg| xm.allocator.free(arg);
+        xm.allocator.free(argv);
+    }
+    if (wp.shell) |shell| xm.allocator.free(shell);
+    if (wp.cwd) |cwd| xm.allocator.free(cwd);
     xm.allocator.destroy(wp.screen);
     xm.allocator.destroy(wp);
 }

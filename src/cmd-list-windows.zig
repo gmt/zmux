@@ -12,36 +12,41 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
+const sort_mod = @import("sort.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const fmt = args.get('F') orelse "#{window_index}: #{window_name}#{?window_flags,#{window_flags}, }#{?window_active, (active),}";
     const all_sessions = args.has('a');
+    const sort_crit = T.SortCriteria{
+        .order = sort_mod.sort_order_from_string(args.get('O')),
+        .reversed = args.has('r'),
+    };
+    if (sort_crit.order == .end and args.has('O')) {
+        cmdq.cmdq_error(item, "invalid sort order", .{});
+        return .@"error";
+    }
 
     if (all_sessions) {
-        var sit = sess.sessions.valueIterator();
-        while (sit.next()) |sv| {
-            list_windows_session(sv.*, fmt, item);
+        const winlinks = sort_mod.sorted_winlinks(sort_crit);
+        defer xm.allocator.free(winlinks);
+        for (winlinks) |wl| {
+            cmdq.cmdq_print(item, "{d}: {s}", .{ wl.idx, wl.window.name });
         }
     } else {
         var target: T.CmdFindState = .{};
         if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, 0) != 0)
             return .@"error";
-        if (target.s) |s| list_windows_session(s, fmt, item);
+        if (target.s) |s| list_windows_session(s, fmt, item, sort_crit);
     }
     return .normal;
 }
 
-fn list_windows_session(s: *T.Session, fmt: []const u8, item: *cmdq.CmdqItem) void {
+fn list_windows_session(s: *T.Session, fmt: []const u8, item: *cmdq.CmdqItem, sort_crit: T.SortCriteria) void {
     _ = fmt;
-    // List by sorted window index
-    var keys: std.ArrayList(i32) = .{};
-    defer keys.deinit(xm.allocator);
-    var it = s.windows.keyIterator();
-    while (it.next()) |k| keys.append(xm.allocator, k.*) catch unreachable;
-    std.sort.block(i32, keys.items, {}, std.sort.asc(i32));
-    for (keys.items) |idx| {
-        const wl = s.windows.get(idx) orelse continue;
+    const winlinks = sort_mod.sorted_winlinks_session(s, sort_crit);
+    defer xm.allocator.free(winlinks);
+    for (winlinks) |wl| {
         cmdq.cmdq_print(item, "{d}: {s}", .{ wl.idx, wl.window.name });
     }
 }
@@ -49,7 +54,7 @@ fn list_windows_session(s: *T.Session, fmt: []const u8, item: *cmdq.CmdqItem) vo
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-windows",
     .alias = "lsw",
-    .template = "aF:t:",
+    .template = "aF:O:rt:",
     .lower = 0,
     .upper = 0,
     .flags = 0,

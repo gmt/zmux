@@ -40,6 +40,7 @@ pub fn server_client_create(fd: i32) *T.Client {
     const env = env_mod.environ_create();
 
     cl.* = T.Client{
+        .id = next_client_id,
         .pid = std.os.linux.getpid(),
         .fd = fd,
         .environ = env,

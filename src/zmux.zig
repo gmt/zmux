@@ -265,4 +265,5 @@ pub fn getversion() []const u8 {
 test {
     _ = @import("attributes.zig");
     _ = @import("names.zig");
+    _ = @import("sort.zig");
 }

@@ -11,22 +11,24 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const sess = @import("session.zig");
+const sort_mod = @import("sort.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const fmt = args.get('F') orelse "#{session_name}: #{session_windows} windows (created #{t:session_created}) #{?session_grouped, (group #{session_group}: #{session_group_list}),}#{?session_attached,(attached),}";
 
-    var sorted: std.ArrayList(*T.Session) = .{};
-    defer sorted.deinit(xm.allocator);
-    var it = sess.sessions.valueIterator();
-    while (it.next()) |v| sorted.append(xm.allocator, v.*) catch unreachable;
-    std.sort.block(*T.Session, sorted.items, {}, struct {
-        fn lessThan(_: void, a: *T.Session, b: *T.Session) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lessThan);
+    const sort_crit = T.SortCriteria{
+        .order = sort_mod.sort_order_from_string(args.get('O')),
+        .reversed = args.has('r'),
+    };
+    if (sort_crit.order == .end and args.has('O')) {
+        cmdq.cmdq_error(item, "invalid sort order", .{});
+        return .@"error";
+    }
+    const sorted = sort_mod.sorted_sessions(sort_crit);
+    defer xm.allocator.free(sorted);
 
-    for (sorted.items) |s| {
+    for (sorted) |s| {
         var output = xm.xasprintf("{s}", .{fmt});
         defer xm.allocator.free(output);
         output = replace_placeholder(output, "#{session_name}", s.name);
@@ -55,7 +57,7 @@ fn replace_placeholder(src: []u8, key: []const u8, val: []const u8) []u8 {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-sessions",
     .alias = "ls",
-    .template = "F:",
+    .template = "F:O:r",
     .lower = 0,
     .upper = 0,
     .flags = 0,

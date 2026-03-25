@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
+const cmd_mod = @import("cmd.zig");
 
 var key_tables: std.StringHashMap(*T.KeyTable) = undefined;
 var key_table_order: std.ArrayList(*T.KeyTable) = .{};
@@ -34,6 +35,7 @@ pub fn key_bindings_init() void {
 
     _ = key_bindings_get_table("root", true);
     _ = key_bindings_get_table("prefix", true);
+    seed_default_bindings();
     log.log_debug("key_bindings_init", .{});
 }
 
@@ -65,8 +67,17 @@ pub fn key_bindings_next_table(table: *T.KeyTable) ?*T.KeyTable {
     return null;
 }
 
-pub fn key_bindings_unref_table(_table: ?*T.KeyTable) void {
-    _ = _table;
+pub fn key_bindings_unref_table(table: ?*T.KeyTable) void {
+    const actual = table orelse return;
+    if (actual.references == 0) return;
+    actual.references -= 1;
+    if (actual.references != 0) return;
+
+    clear_explicit_table(actual);
+    clear_default_table(actual);
+    actual.deinit();
+    xm.allocator.free(actual.name);
+    xm.allocator.destroy(actual);
 }
 
 pub fn key_bindings_get(table: *T.KeyTable, key: T.key_code) ?*T.KeyBinding {
@@ -108,39 +119,41 @@ pub fn key_bindings_add(name: []const u8, key: T.key_code, note: ?[]const u8, re
         remove_binding_from_table(table, existing);
     }
 
-    const binding = xm.allocator.create(T.KeyBinding) catch unreachable;
-    binding.* = .{
-        .key = masked,
-        .tablename = table.name,
-        .note = if (note) |n| xm.xstrdup(n) else null,
-        .flags = if (repeat) T.KEY_BINDING_REPEAT else 0,
-        .cmdlist = cmdlist,
-    };
-
-    table.key_bindings.put(masked, binding) catch unreachable;
-    table.order.append(xm.allocator, binding) catch unreachable;
+    const binding = alloc_binding(table, masked, note, if (repeat) T.KEY_BINDING_REPEAT else 0, cmdlist, false);
+    add_explicit_binding(table, binding);
 }
 
 pub fn key_bindings_remove(name: []const u8, key: T.key_code) void {
     const table = key_bindings_get_table(name, false) orelse return;
     const binding = key_bindings_get(table, key) orelse return;
     remove_binding_from_table(table, binding);
+    maybe_remove_empty_table(table);
 }
 
 pub fn key_bindings_reset(name: []const u8, key: T.key_code) void {
     const table = key_bindings_get_table(name, false) orelse return;
     const binding = key_bindings_get(table, key) orelse return;
-    remove_binding_from_table(table, binding);
+    const default_binding = key_bindings_get_default(table, key) orelse {
+        remove_binding_from_table(table, binding);
+        maybe_remove_empty_table(table);
+        return;
+    };
+    restore_binding_from_default(binding, default_binding);
 }
 
 pub fn key_bindings_remove_table(name: []const u8) void {
     const table = key_bindings_get_table(name, false) orelse return;
-    clear_explicit_table(table);
+    remove_table_from_registry(table);
 }
 
 pub fn key_bindings_reset_table(name: []const u8) void {
     const table = key_bindings_get_table(name, false) orelse return;
+    if (table.default_order.items.len == 0) {
+        remove_table_from_registry(table);
+        return;
+    }
     clear_explicit_table(table);
+    restore_all_defaults(table);
 }
 
 pub fn key_bindings_has_repeat(bindings: []const *T.KeyBinding) i32 {
@@ -175,11 +188,8 @@ fn maskedKey(key: T.key_code) T.key_code {
 fn clear_all() void {
     if (!ready) return;
     for (key_table_order.items) |table| {
-        clear_explicit_table(table);
-        clear_default_table(table);
-        table.deinit();
-        xm.allocator.free(table.name);
-        xm.allocator.destroy(table);
+        table.references = 1;
+        key_bindings_unref_table(table);
     }
     key_table_order.deinit(xm.allocator);
     key_tables.deinit();
@@ -212,9 +222,150 @@ fn remove_binding_from_table(table: *T.KeyTable, binding: *T.KeyBinding) void {
     free_binding(binding);
 }
 
+fn add_explicit_binding(table: *T.KeyTable, binding: *T.KeyBinding) void {
+    table.key_bindings.put(binding.key, binding) catch unreachable;
+    table.order.append(xm.allocator, binding) catch unreachable;
+}
+
+fn add_default_binding(table: *T.KeyTable, binding: *T.KeyBinding) void {
+    table.default_key_bindings.put(binding.key, binding) catch unreachable;
+    table.default_order.append(xm.allocator, binding) catch unreachable;
+}
+
+fn alloc_binding(
+    table: *T.KeyTable,
+    key: T.key_code,
+    note: ?[]const u8,
+    flags: u32,
+    cmdlist: ?*T.CmdList,
+    retain_cmdlist: bool,
+) *T.KeyBinding {
+    const binding = xm.allocator.create(T.KeyBinding) catch unreachable;
+    binding.* = .{
+        .key = key,
+        .tablename = table.name,
+        .note = if (note) |n| xm.xstrdup(n) else null,
+        .flags = flags,
+        .cmdlist = if (cmdlist) |list|
+            if (retain_cmdlist) cmd_mod.cmd_list_ref(list) else list
+        else
+            null,
+    };
+    return binding;
+}
+
+fn clone_default_from_explicit(table: *T.KeyTable, binding: *T.KeyBinding) void {
+    const clone = alloc_binding(table, binding.key, binding.note, binding.flags, binding.cmdlist, true);
+    add_default_binding(table, clone);
+}
+
+fn restore_binding_from_default(binding: *T.KeyBinding, default_binding: *T.KeyBinding) void {
+    if (binding.cmdlist) |list| cmd_mod.cmd_list_unref(list);
+    binding.cmdlist = if (default_binding.cmdlist) |list| cmd_mod.cmd_list_ref(list) else null;
+
+    if (binding.note) |note| xm.allocator.free(note);
+    binding.note = if (default_binding.note) |note| xm.xstrdup(note) else null;
+    binding.flags = default_binding.flags;
+}
+
+fn restore_all_defaults(table: *T.KeyTable) void {
+    for (table.default_order.items) |default_binding| {
+        const restored = alloc_binding(table, default_binding.key, default_binding.note, default_binding.flags, default_binding.cmdlist, true);
+        add_explicit_binding(table, restored);
+    }
+}
+
+fn maybe_remove_empty_table(table: *T.KeyTable) void {
+    if (table.order.items.len != 0) return;
+    if (table.default_order.items.len != 0) return;
+    remove_table_from_registry(table);
+}
+
+fn remove_table_from_registry(table: *T.KeyTable) void {
+    _ = key_tables.remove(table.name);
+    for (key_table_order.items, 0..) |current, idx| {
+        if (current != table) continue;
+        _ = key_table_order.orderedRemove(idx);
+        break;
+    }
+    key_bindings_unref_table(table);
+}
+
 fn free_binding(binding: *T.KeyBinding) void {
+    if (binding.cmdlist) |list| cmd_mod.cmd_list_unref(list);
     if (binding.note) |note| xm.allocator.free(note);
     xm.allocator.destroy(binding);
+}
+
+const DefaultBindingSpec = struct {
+    table: []const u8,
+    key: T.key_code,
+    note: []const u8,
+    repeat: bool = false,
+    argv: []const []const u8,
+};
+
+const default_list_keys_argv = [_][]const u8{ "list-keys", "-N" };
+const default_new_window_argv = [_][]const u8{ "new-window" };
+const default_display_message_argv = [_][]const u8{ "display-message" };
+const default_refresh_client_argv = [_][]const u8{ "refresh-client" };
+
+const default_binding_specs = [_]DefaultBindingSpec{
+    .{
+        .table = "prefix",
+        .key = '?',
+        .note = "List key bindings",
+        .argv = default_list_keys_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = 'c',
+        .note = "Create a new window",
+        .argv = default_new_window_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = 'i',
+        .note = "Display window information",
+        .argv = default_display_message_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = 'r',
+        .note = "Redraw the current client",
+        .argv = default_refresh_client_argv[0..],
+    },
+};
+
+fn seed_default_bindings() void {
+    for (default_binding_specs) |spec| install_default_binding(spec);
+    var idx: u8 = 0;
+    while (idx <= 9) : (idx += 1) {
+        install_select_window_default(idx);
+    }
+}
+
+fn install_default_binding(spec: DefaultBindingSpec) void {
+    const table = key_bindings_get_table(spec.table, true).?;
+    const parsed = cmd_mod.cmd_parse_from_argv(spec.argv, null) catch unreachable;
+    const explicit = alloc_binding(table, maskedKey(spec.key), spec.note, if (spec.repeat) T.KEY_BINDING_REPEAT else 0, @ptrCast(parsed), false);
+    add_explicit_binding(table, explicit);
+    clone_default_from_explicit(table, explicit);
+}
+
+fn install_select_window_default(idx: u8) void {
+    const key_buf: [1]u8 = .{idx + '0'};
+    const target_buf: [3]u8 = .{ ':', '=', idx + '0' };
+    const note = xm.xasprintf("Select window {d}", .{idx});
+    defer xm.allocator.free(note);
+    const argv = [_][]const u8{ "select-window", target_buf[0..] };
+    const spec = DefaultBindingSpec{
+        .table = "prefix",
+        .key = key_buf[0],
+        .note = note,
+        .argv = argv[0..],
+    };
+    install_default_binding(spec);
 }
 
 test "key_bindings_init creates root and prefix tables" {
@@ -245,21 +396,66 @@ test "key bindings add remove reset and iteration" {
     try std.testing.expect(key_bindings_get(root, 'a') == null);
 
     key_bindings_reset("root", 'b');
-    try std.testing.expect(key_bindings_get(root, 'b') == null);
+    try std.testing.expect(key_bindings_get_table("root", false) == null);
 }
 
-test "key bindings remove and reset table leave shell intact" {
+test "key bindings init seeds prefix defaults and keeps root empty" {
     key_bindings_init();
 
-    key_bindings_add("prefix", 'x', null, false, null);
-    key_bindings_add("prefix", 'y', null, false, null);
-    key_bindings_remove_table("prefix");
+    const prefix = key_bindings_get_table("prefix", false).?;
+    const root = key_bindings_get_table("root", false).?;
+    try std.testing.expect(root.order.items.len == 0);
+    try std.testing.expect(prefix.order.items.len >= 14);
+    try std.testing.expect(key_bindings_get_default(prefix, '?') != null);
+    try std.testing.expect(key_bindings_get(prefix, '?') != null);
+}
+
+test "key bindings reset restores built in defaults" {
+    key_bindings_init();
 
     const prefix = key_bindings_get_table("prefix", false).?;
-    try std.testing.expect(prefix.order.items.len == 0);
+    const question = key_bindings_get(prefix, '?').?;
+    const original_cmdlist = question.cmdlist.?;
 
-    key_bindings_add("prefix", 'z', null, false, null);
+    key_bindings_add("prefix", '?', "override", false, null);
+    key_bindings_reset("prefix", '?');
+
+    const reset_question = key_bindings_get(prefix, '?').?;
+    try std.testing.expectEqualStrings("List key bindings", reset_question.note.?);
+    try std.testing.expect(reset_question.cmdlist == original_cmdlist);
+}
+
+test "key bindings reset table restores default prefix set" {
+    key_bindings_init();
+
+    const prefix = key_bindings_get_table("prefix", false).?;
+    const original_count = prefix.order.items.len;
+    key_bindings_remove("prefix", '?');
+    key_bindings_add("prefix", 'x', "temporary", false, null);
     key_bindings_reset_table("prefix");
-    try std.testing.expect(prefix.order.items.len == 0);
-    try std.testing.expectEqualStrings("prefix", prefix.name);
+    const restored = key_bindings_get_table("prefix", false).?;
+    try std.testing.expectEqual(original_count, restored.order.items.len);
+    try std.testing.expect(key_bindings_get(restored, '?') != null);
+    try std.testing.expect(key_bindings_get(restored, 'x') == null);
+}
+
+test "key bindings remove table removes prefix entirely" {
+    key_bindings_init();
+    key_bindings_remove_table("prefix");
+    try std.testing.expect(key_bindings_get_table("prefix", false) == null);
+}
+
+test "key bindings retain shared cmdlists across default restores" {
+    key_bindings_init();
+
+    const prefix = key_bindings_get_table("prefix", false).?;
+    const question = key_bindings_get(prefix, '?').?;
+    const list: *cmd_mod.CmdList = @ptrCast(@alignCast(question.cmdlist.?));
+    try std.testing.expectEqual(@as(u32, 2), list.references);
+
+    key_bindings_remove("prefix", '?');
+    try std.testing.expectEqual(@as(u32, 1), list.references);
+
+    key_bindings_reset_table("prefix");
+    try std.testing.expectEqual(@as(u32, 2), list.references);
 }

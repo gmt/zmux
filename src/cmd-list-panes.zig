@@ -7,6 +7,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const srv = @import("server.zig");
@@ -79,16 +80,10 @@ fn print_window_panes(item: *cmdq.CmdqItem, w: *T.Window, sort_crit: T.SortCrite
             .pane = wp,
         };
         if (filter) |expr| {
-            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
-                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                return .@"error";
-            };
+            const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";
             if (!matched) continue;
         }
-        const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
@@ -99,7 +94,7 @@ pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-panes",
     .alias = "lsp",
     .usage = "[-asr] [-F format] [-f filter] [-O order] [-s] [-t target-pane]",
-    .template = "aF:O:rs:t:",
+    .template = "aF:O:f:rs:t:",
     .lower = 0,
     .upper = 0,
     .flags = 0,
@@ -141,16 +136,10 @@ fn exec_lsc(_cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .pane = if (cl.session) |s| if (s.curw) |wl| wl.window.active else null else null,
         };
         if (filter) |expr| {
-            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
-                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                return .@"error";
-            };
+            const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";
             if (!matched) continue;
         }
-        const line = format_mod.format_require(xm.allocator, args.get('F') orelse DEFAULT_CLIENT_TEMPLATE, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = cmd_format.require(item, args.get('F') orelse DEFAULT_CLIENT_TEMPLATE, &ctx) orelse return .@"error";
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
@@ -161,7 +150,7 @@ pub const entry_lsc: cmd_mod.CmdEntry = .{
     .name = "list-clients",
     .alias = "lsc",
     .usage = "[-F format] [-f filter] [-O order] [-t target-session]",
-    .template = "F:O:rt:",
+    .template = "F:O:f:rt:",
     .lower = 0,
     .upper = 0,
     .flags = 0,

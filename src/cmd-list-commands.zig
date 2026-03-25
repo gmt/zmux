@@ -20,6 +20,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
 
@@ -34,24 +35,27 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cmdq.cmdq_error(item, "unknown command: {s}", .{command_name});
             return .@"error";
         };
-        const line = render_entry(found_entry, template) orelse {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = require_entry(item, found_entry, template) orelse return .@"error";
         defer std.heap.c_allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
         return .normal;
     }
 
     for (cmd_mod.cmd_entries()) |cmd_entry| {
-        const line = render_entry(cmd_entry, template) orelse {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = require_entry(item, cmd_entry, template) orelse return .@"error";
         defer std.heap.c_allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
     return .normal;
+}
+
+fn require_entry(item: *cmdq.CmdqItem, cmd_entry: *const cmd_mod.CmdEntry, template: []const u8) ?[]u8 {
+    const ctx = format_mod.FormatContext{
+        .command_name = cmd_entry.name,
+        .command_alias = cmd_entry.alias,
+        .command_usage = cmd_entry.usage,
+    };
+    return cmd_format.require(item, template, &ctx);
 }
 
 fn render_entry(cmd_entry: *const cmd_mod.CmdEntry, template: []const u8) ?[]u8 {

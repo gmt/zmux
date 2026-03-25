@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
@@ -73,10 +74,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .window = target.window,
             .pane = target.pane,
         };
-        break :blk format_mod.format_require(xm.allocator, raw_value.?, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        break :blk cmd_format.require(item, raw_value.?, &ctx) orelse return .@"error";
     } else null;
     defer if (expanded) |value| xm.allocator.free(value);
     const value = expanded orelse raw_value;

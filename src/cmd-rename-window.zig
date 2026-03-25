@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const format_mod = @import("format.zig");
@@ -48,10 +49,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .window = target.w,
         .pane = target.wp,
     };
-    const new_name = format_mod.format_require(xm.allocator, raw_name, &ctx) catch {
-        cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-        return .@"error";
-    };
+    const new_name = cmd_format.require(item, raw_name, &ctx) orelse return .@"error";
     defer xm.allocator.free(new_name);
 
     win.window_set_name(wl.window, new_name);

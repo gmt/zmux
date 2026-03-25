@@ -113,3 +113,24 @@ test "bind-key metadata-only path updates note and repeat" {
     try std.testing.expectEqualStrings("note", binding.note.?);
     try std.testing.expect(binding.flags & T.KEY_BINDING_REPEAT != 0);
 }
+
+test "bind-key overrides built in default without touching stored default" {
+    key_bindings.key_bindings_init();
+
+    const prefix = key_bindings.key_bindings_get_table("prefix", false).?;
+    const default_binding = key_bindings.key_bindings_get_default(prefix, '?').?;
+    const default_list = default_binding.cmdlist;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "bind-key", "?", "display-message", "override" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const explicit = key_bindings.key_bindings_get(prefix, '?').?;
+    try std.testing.expect(explicit.cmdlist != null);
+    try std.testing.expect(explicit.cmdlist != default_list);
+    try std.testing.expect(key_bindings.key_bindings_get_default(prefix, '?').?.cmdlist == default_list);
+}

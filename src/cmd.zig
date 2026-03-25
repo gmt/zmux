@@ -305,6 +305,19 @@ pub fn cmd_free(cmd: *Cmd) void {
     xm.allocator.destroy(cmd);
 }
 
+pub fn cmd_list_ref(list_ptr: *T.CmdList) *T.CmdList {
+    const list: *CmdList = @ptrCast(@alignCast(list_ptr));
+    list.references += 1;
+    return list_ptr;
+}
+
+pub fn cmd_list_unref(list_ptr: *T.CmdList) void {
+    const list: *CmdList = @ptrCast(@alignCast(list_ptr));
+    if (list.references == 0) return;
+    list.references -= 1;
+    if (list.references == 0) cmd_list_free(list);
+}
+
 pub fn cmd_list_free(list: *CmdList) void {
     var cmd = list.head;
     while (cmd) |c| {

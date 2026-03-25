@@ -179,7 +179,7 @@ fn render_notes_line(binding: *T.KeyBinding, prefix: []const u8, key_width: u32)
 
 fn render_binding_command(binding: *T.KeyBinding) []u8 {
     const list_ptr = binding.cmdlist orelse return xm.xstrdup("");
-    const list: *cmd_mod.CmdList = @ptrCast(list_ptr);
+    const list: *cmd_mod.CmdList = @ptrCast(@alignCast(list_ptr));
 
     var out: std.ArrayList(u8) = .{};
     var first = true;
@@ -322,13 +322,27 @@ test "list-keys renders binding command and notes views" {
     defer xm.allocator.free(normal_bindings);
     const normal_lines = render_bindings(normal_bindings, .normal, "C-b", false);
     defer free_lines(normal_lines);
-    try std.testing.expectEqualStrings("bind-key -T root F1 display-message \"hello world\"", normal_lines[1]);
+    var found_root_f1 = false;
+    for (normal_lines) |line| {
+        if (std.mem.eql(u8, line, "bind-key -T root F1 display-message \"hello world\"")) {
+            found_root_f1 = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_root_f1);
 
     const notes_bindings = collect_bindings(null, true, false, null, .{});
     defer xm.allocator.free(notes_bindings);
     const notes_lines = render_bindings(notes_bindings, .notes_only, "C-b", false);
     defer free_lines(notes_lines);
-    try std.testing.expect(std.mem.indexOf(u8, notes_lines[0], "repeat me") != null);
+    var found_note = false;
+    for (notes_lines) |line| {
+        if (std.mem.indexOf(u8, line, "repeat me") != null) {
+            found_note = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_note);
 }
 
 test "list-keys command rejects unsupported format and sort order" {

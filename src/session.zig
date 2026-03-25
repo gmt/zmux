@@ -197,7 +197,7 @@ pub fn session_next_session(
     s: *T.Session,
     sort_crit: ?*const T.SortCriteria,
 ) ?*T.Session {
-    const sorted = sort_mod.sorted_sessions(sort_crit orelse &.{});
+    const sorted = sort_mod.sorted_sessions(if (sort_crit) |crit| crit.* else .{});
     defer xm.allocator.free(sorted);
 
     for (sorted, 0..) |entry, idx| {
@@ -211,7 +211,7 @@ pub fn session_previous_session(
     s: *T.Session,
     sort_crit: ?*const T.SortCriteria,
 ) ?*T.Session {
-    const sorted = sort_mod.sorted_sessions(sort_crit orelse &.{});
+    const sorted = sort_mod.sorted_sessions(if (sort_crit) |crit| crit.* else .{});
     defer xm.allocator.free(sorted);
 
     for (sorted, 0..) |entry, idx| {

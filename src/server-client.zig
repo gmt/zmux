@@ -254,6 +254,10 @@ pub fn server_client_loop() void {
         }
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) continue;
+        if (cl.flags & T.CLIENT_CONTROL != 0) {
+            cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
+            continue;
+        }
         server_client_draw(cl);
         cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
     }

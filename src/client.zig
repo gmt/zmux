@@ -231,8 +231,10 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             proc_mod.proc_exit(client_proc.?);
         },
         .ready => {
-            client_enter_attached_mode();
-            client_send_resize();
+            if (client_flags & T.CLIENT_CONTROL == 0) {
+                client_enter_attached_mode();
+                client_send_resize();
+            }
         },
         else => {},
     }
@@ -293,6 +295,10 @@ fn client_send_resize() void {
         .ypixel = ws.ws_ypixel,
     };
     _ = proc_mod.proc_send(peer, .resize, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgResize));
+}
+
+fn client_has_terminal() bool {
+    return c.posix_sys.isatty(0) != 0 and c.posix_sys.isatty(1) != 0;
 }
 
 fn client_send_command(argv: anytype) void {
@@ -399,6 +405,7 @@ pub fn client_main(
     flags: u64,
     feat: i32,
 ) i32 {
+    var client_mode_flags = flags;
     // Determine what message to send
     var msg_type: protocol.MsgType = .command;
     var start_server = false;
@@ -422,7 +429,8 @@ pub fn client_main(
         if (cause) |c_err| xm.allocator.free(c_err);
     }
 
-    client_flags = flags | if (start_server) T.CLIENT_STARTSERVER else 0;
+    if (client_has_terminal()) client_mode_flags |= T.CLIENT_TERMINAL;
+    client_flags = client_mode_flags | if (start_server) T.CLIENT_STARTSERVER else 0;
 
     // Start client proc
     client_proc = proc_mod.proc_start("client");

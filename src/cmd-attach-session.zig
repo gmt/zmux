@@ -32,6 +32,10 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     _ = read_only;
 
     if (cl) |c| {
+        if ((c.flags & T.CLIENT_CONTROL) == 0 and (c.flags & T.CLIENT_TERMINAL) == 0) {
+            cmdq.cmdq_error(item, "not a terminal", .{});
+            return .@"error";
+        }
         server_client_mod.server_client_attach(c, s);
     }
     return .normal;

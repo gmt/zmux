@@ -147,10 +147,10 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
     return count;
 }
 
-pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval {
+pub fn cmdq_run_immediate_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, state_flags: u32) T.CmdRetval {
     defer cmd_mod.cmd_list_free(cmdlist);
 
-    var item = CmdqItem{ .client = cl, .cmdlist = cmdlist, .retval = 0 };
+    var item = CmdqItem{ .client = cl, .cmdlist = cmdlist, .state_flags = state_flags, .retval = 0 };
     var cmd_node = cmdlist.head;
     while (cmd_node) |cmd| {
         cmd_node = cmd.next;
@@ -166,6 +166,10 @@ pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval
         }
     }
     return .normal;
+}
+
+pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval {
+    return cmdq_run_immediate_flags(cl, cmdlist, 0);
 }
 
 pub fn cmdq_get_name(item: *CmdqItem) []const u8 {

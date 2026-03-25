@@ -138,7 +138,7 @@ fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags:
                     const list: *cmd_mod.CmdList = @ptrCast(@alignCast(cl_ptr));
                     if (flags.parse_only)
                         cmd_mod.cmd_list_free(list)
-                    else if (cmdq.cmdq_run_immediate(cl, list) == .@"error")
+                    else if (cmdq.cmdq_run_immediate_flags(cl, list, T.CMDQ_STATE_NOATTACH) == .@"error")
                         ok = false;
                 }
             },

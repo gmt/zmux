@@ -53,5 +53,6 @@ pub const posix_sys = @cImport({
     @cInclude("signal.h");
     @cInclude("pwd.h");
     @cInclude("fnmatch.h");
+    @cInclude("time.h");
     @cInclude("wchar.h");
 });

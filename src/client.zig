@@ -194,6 +194,7 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
 
     switch (msg_type) {
         .version => {
+            _ = std.fs.File.stderr().writeAll("server protocol version mismatch; restart zmux server\n") catch {};
             log.log_warn("server version mismatch", .{});
             client_exitreason = .lost_server;
             proc_mod.proc_exit(client_proc.?);
@@ -212,8 +213,10 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
             if (data_len > @sizeOf(i32) and imsg_msg.data != null) {
                 const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+                const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
                 const text = raw[@sizeOf(i32)..data_len];
-                _ = std.fs.File.stdout().writeAll(text) catch {};
+                const file = if (stream.* == 2) std.fs.File.stderr() else std.fs.File.stdout();
+                _ = file.writeAll(text) catch {};
             }
         },
         .exited => {

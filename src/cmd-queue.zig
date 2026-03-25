@@ -173,19 +173,22 @@ pub fn cmdq_get_target_client(_item: *anyopaque) ?*T.Client {
 }
 
 pub fn cmdq_error(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void {
-    _ = item;
     log.log_warn(fmt, args);
+    cmdq_write_client(item.client, 2, fmt, args);
 }
 
 pub fn cmdq_print(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void {
+    cmdq_write_client(item.client, 1, fmt, args);
+}
+
+pub fn cmdq_write_client(cl: ?*T.Client, stream: i32, comptime fmt: []const u8, args: anytype) void {
     const msg = xm.xasprintf(fmt, args);
     defer xm.allocator.free(msg);
 
-    if (item.client) |c_ptr| {
+    if (cl) |c_ptr| {
         if (c_ptr.peer) |peer| {
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(xm.allocator);
-            const stream: i32 = 1;
             buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
             buf.appendSlice(xm.allocator, msg) catch unreachable;
             buf.append(xm.allocator, '\n') catch unreachable;
@@ -193,8 +196,9 @@ pub fn cmdq_print(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void
             return;
         }
     }
-    _ = std.fs.File.stdout().writeAll(msg) catch {};
-    _ = std.fs.File.stdout().writeAll("\n") catch {};
+    const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
+    _ = file.writeAll(msg) catch {};
+    _ = file.writeAll("\n") catch {};
 }
 
 pub fn cmd_wait_for_flush() void {}

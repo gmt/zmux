@@ -108,10 +108,122 @@ pub fn erase_to_eol(ctx: *T.ScreenWriteCtx) void {
     line.cellused = @min(line.cellused, ctx.s.cx);
 }
 
+pub fn erase_to_bol(ctx: *T.ScreenWriteCtx) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0 or ctx.s.cy >= gd.sy) return;
+    var col: u32 = 0;
+    while (col <= ctx.s.cx and col < gd.sx) : (col += 1) {
+        grid.set_ascii(gd, ctx.s.cy, col, ' ');
+    }
+}
+
+pub fn erase_line(ctx: *T.ScreenWriteCtx) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0 or ctx.s.cy >= gd.sy) return;
+    grid.ensure_line_capacity(gd, ctx.s.cy);
+    grid.clear_line(&gd.linedata[ctx.s.cy]);
+}
+
 pub fn erase_screen(ctx: *T.ScreenWriteCtx) void {
     grid.grid_reset(ctx.s.grid);
     ctx.s.cx = 0;
     ctx.s.cy = 0;
+}
+
+pub fn erase_to_screen_end(ctx: *T.ScreenWriteCtx) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0) return;
+    erase_to_eol(ctx);
+    var row = ctx.s.cy + 1;
+    while (row < gd.sy) : (row += 1) {
+        grid.ensure_line_capacity(gd, row);
+        grid.clear_line(&gd.linedata[row]);
+    }
+}
+
+pub fn erase_to_screen_beginning(ctx: *T.ScreenWriteCtx) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0) return;
+    var row: u32 = 0;
+    while (row < ctx.s.cy and row < gd.sy) : (row += 1) {
+        grid.ensure_line_capacity(gd, row);
+        grid.clear_line(&gd.linedata[row]);
+    }
+    erase_to_bol(ctx);
+}
+
+pub fn insert_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0 or gd.sx == 0 or ctx.s.cy >= gd.sy or ctx.s.cx >= gd.sx) return;
+    const n = @min(count, gd.sx - ctx.s.cx);
+    var dest = gd.sx;
+    while (dest > ctx.s.cx + n) {
+        dest -= 1;
+        const from = grid.ascii_at(gd, ctx.s.cy, dest - n);
+        grid.set_ascii(gd, ctx.s.cy, dest, from);
+    }
+    var col: u32 = 0;
+    while (col < n) : (col += 1) grid.set_ascii(gd, ctx.s.cy, ctx.s.cx + col, ' ');
+}
+
+pub fn delete_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0 or gd.sx == 0 or ctx.s.cy >= gd.sy or ctx.s.cx >= gd.sx) return;
+    const n = @min(count, gd.sx - ctx.s.cx);
+    var col = ctx.s.cx;
+    while (col + n < gd.sx) : (col += 1) {
+        const from = grid.ascii_at(gd, ctx.s.cy, col + n);
+        grid.set_ascii(gd, ctx.s.cy, col, from);
+    }
+    while (col < gd.sx) : (col += 1) grid.set_ascii(gd, ctx.s.cy, col, ' ');
+}
+
+pub fn erase_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0 or gd.sx == 0 or ctx.s.cy >= gd.sy or ctx.s.cx >= gd.sx) return;
+    const n = @min(count, gd.sx - ctx.s.cx);
+    var col: u32 = 0;
+    while (col < n) : (col += 1) grid.set_ascii(gd, ctx.s.cy, ctx.s.cx + col, ' ');
+}
+
+pub fn insert_lines(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0) return;
+    const top = @min(@max(ctx.s.cy, ctx.s.rupper), gd.sy - 1);
+    const bottom = @min(ctx.s.rlower, gd.sy - 1);
+    grid.insert_lines(gd, top, bottom, count);
+}
+
+pub fn delete_lines(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0) return;
+    const top = @min(@max(ctx.s.cy, ctx.s.rupper), gd.sy - 1);
+    const bottom = @min(ctx.s.rlower, gd.sy - 1);
+    grid.delete_lines(gd, top, bottom, count);
+}
+
+pub fn set_scroll_region(ctx: *T.ScreenWriteCtx, top: u32, bottom: u32) void {
+    const gd = ctx.s.grid;
+    if (gd.sy == 0) return;
+    const clamped_top = @min(top, gd.sy - 1);
+    const clamped_bottom = @min(bottom, gd.sy - 1);
+    if (clamped_top >= clamped_bottom) {
+        ctx.s.rupper = 0;
+        ctx.s.rlower = gd.sy - 1;
+    } else {
+        ctx.s.rupper = clamped_top;
+        ctx.s.rlower = clamped_bottom;
+    }
+}
+
+pub fn save_cursor(ctx: *T.ScreenWriteCtx) void {
+    ctx.s.saved_cx = ctx.s.cx;
+    ctx.s.saved_cy = ctx.s.cy;
+}
+
+pub fn restore_cursor(ctx: *T.ScreenWriteCtx) void {
+    if (ctx.s.grid.sx != 0) ctx.s.cx = @min(ctx.s.saved_cx, ctx.s.grid.sx - 1) else ctx.s.cx = 0;
+    if (ctx.s.grid.sy != 0) ctx.s.cy = @min(ctx.s.saved_cy, ctx.s.grid.sy - 1) else ctx.s.cy = 0;
 }
 
 test "screen-write handles cursor movement and erase" {
@@ -134,4 +246,31 @@ test "screen-write handles cursor movement and erase" {
     erase_to_eol(&ctx);
     try std.testing.expectEqual(@as(u8, 'x'), grid.ascii_at(s.grid, 1, 1));
     try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(s.grid, 1, 2));
+}
+
+test "screen-write supports insert delete and save restore cursor" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(5, 3, 100);
+    defer {
+        grid.grid_free(s.grid);
+        @import("xmalloc.zig").allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    putn(&ctx, "abc");
+    cursor_to(&ctx, 0, 1);
+    insert_characters(&ctx, 1);
+    try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(s.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(s.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(s.grid, 0, 2));
+
+    delete_characters(&ctx, 1);
+    try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(s.grid, 0, 1));
+
+    cursor_to(&ctx, 1, 2);
+    save_cursor(&ctx);
+    cursor_to(&ctx, 2, 4);
+    restore_cursor(&ctx);
+    try std.testing.expectEqual(@as(u32, 1), s.cy);
+    try std.testing.expectEqual(@as(u32, 2), s.cx);
 }

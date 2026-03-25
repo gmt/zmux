@@ -20,6 +20,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const screen_mod = @import("screen.zig");
 
 pub fn tty_draw_invalidate(cache: *T.ClientPaneCache) void {
     free_rows(cache);
@@ -44,6 +45,7 @@ pub fn tty_draw_pane(
 ) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
+    const screen = screen_mod.screen_current(wp);
 
     const full_redraw =
         !cache.valid or
@@ -73,7 +75,7 @@ pub fn tty_draw_pane(
     }
 
     for (0..row_count) |row_idx| {
-        const rendered = try render_row(wp.base.grid, @intCast(row_idx), sx);
+        const rendered = try render_row(screen.grid, @intCast(row_idx), sx);
         defer xm.allocator.free(rendered);
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
@@ -89,8 +91,8 @@ pub fn tty_draw_pane(
         }
     }
 
-    const cursor_y = @min(wp.base.cy, sy - 1);
-    const cursor_x = @min(wp.base.cx, sx - 1);
+    const cursor_y = @min(screen.cy, sy - 1);
+    const cursor_x = @min(screen.cx, sx - 1);
     if (full_redraw or cache.cursor_x != cursor_x or cache.cursor_y != cursor_y) {
         if (!full_redraw and out.items.len == 0) try out.appendSlice(xm.allocator, "\x1b[?25l");
         const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ cursor_y + 1, cursor_x + 1 });

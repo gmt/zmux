@@ -370,9 +370,6 @@ pub fn window_pane_reset_contents(wp: *T.WindowPane) void {
     if (wp.screen.grid != wp.base.grid) {
         grid_mod.grid_reset(wp.screen.grid);
         screen_mod.screen_reset(wp.screen);
-    } else {
-        wp.screen.cx = wp.base.cx;
-        wp.screen.cy = wp.base.cy;
     }
     wp.input_pending.clearRetainingCapacity();
 }

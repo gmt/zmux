@@ -22,13 +22,14 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len == 0) return;
     wp.input_pending.appendSlice(@import("xmalloc.zig").allocator, bytes) catch unreachable;
 
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = &wp.base };
+    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
     var i: usize = 0;
     while (i < wp.input_pending.items.len) {
         const ch = wp.input_pending.items[i];
@@ -50,6 +51,16 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
             i += consumed;
             continue;
         }
+        if (next == '7') {
+            screen_write.save_cursor(&ctx);
+            i += 2;
+            continue;
+        }
+        if (next == '8') {
+            screen_write.restore_cursor(&ctx);
+            i += 2;
+            continue;
+        }
 
         // Reduced default: swallow other ESC sequences for now.
         i += 2;
@@ -60,7 +71,6 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
         std.mem.copyForwards(u8, wp.input_pending.items[0..remaining], wp.input_pending.items[i..]);
         wp.input_pending.shrinkRetainingCapacity(remaining);
     }
-    sync_pane_screen(wp);
 }
 
 fn handle_plain(ctx: *T.ScreenWriteCtx, ch: u8) void {
@@ -114,9 +124,21 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8) void {
 }
 
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
+    var private = false;
+    var params_raw = raw_params;
+    if (params_raw.len != 0 and params_raw[0] == '?') {
+        private = true;
+        params_raw = params_raw[1..];
+    }
+
     var params_buf: [8]u32 = [_]u32{0} ** 8;
-    const parsed = parse_csi_params(raw_params, &params_buf);
+    const parsed = parse_csi_params(params_raw, &params_buf);
     const params = params_buf[0..parsed.count];
+
+    if (private and (final == 'h' or final == 'l')) {
+        apply_private_modes(ctx, params, final == 'h');
+        return;
+    }
 
     switch (final) {
         'A' => screen_write.cursor_up(ctx, first_param(params, 1)),
@@ -137,16 +159,53 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             const col = second_param(params, 1) -| 1;
             screen_write.cursor_to(ctx, row, col);
         },
-        'J' => {
-            const mode = first_param(params, 0);
-            if (mode == 0 or mode == 2) screen_write.erase_screen(ctx);
+        'J' => switch (first_param(params, 0)) {
+            0 => screen_write.erase_to_screen_end(ctx),
+            1 => screen_write.erase_to_screen_beginning(ctx),
+            2 => screen_write.erase_screen(ctx),
+            else => {},
         },
-        'K' => {
-            const mode = first_param(params, 0);
-            if (mode == 0 or mode == 2) screen_write.erase_to_eol(ctx);
+        'K' => switch (first_param(params, 0)) {
+            0 => screen_write.erase_to_eol(ctx),
+            1 => screen_write.erase_to_bol(ctx),
+            2 => screen_write.erase_line(ctx),
+            else => {},
         },
+        'L' => screen_write.insert_lines(ctx, first_param(params, 1)),
+        'M' => screen_write.delete_lines(ctx, first_param(params, 1)),
+        '@' => screen_write.insert_characters(ctx, first_param(params, 1)),
+        'P' => screen_write.delete_characters(ctx, first_param(params, 1)),
+        'X' => screen_write.erase_characters(ctx, first_param(params, 1)),
+        'r' => {
+            const top = first_param(params, 1) -| 1;
+            const bottom = second_param(params, ctx.s.grid.sy) -| 1;
+            screen_write.set_scroll_region(ctx, top, bottom);
+        },
+        's' => screen_write.save_cursor(ctx),
+        'u' => screen_write.restore_cursor(ctx),
         'm', 'h', 'l' => {}, // reduced: ignore SGR and private modes for now
         else => {},
+    }
+}
+
+fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) void {
+    const wp = ctx.wp orelse return;
+    const current = screen_mod.screen_current(wp);
+    for (params) |mode| {
+        switch (mode) {
+            25 => current.cursor_visible = set,
+            47, 1047 => if (set)
+                screen_mod.screen_enter_alternate(wp, false)
+            else
+                screen_mod.screen_leave_alternate(wp, false),
+            1049 => if (set)
+                screen_mod.screen_enter_alternate(wp, true)
+            else
+                screen_mod.screen_leave_alternate(wp, true),
+            2004 => current.bracketed_paste = set,
+            else => {},
+        }
+        ctx.s = screen_mod.screen_current(wp);
     }
 }
 
@@ -194,11 +253,6 @@ fn second_param(params: []const u32, fallback: u32) u32 {
     return params[1];
 }
 
-fn sync_pane_screen(wp: *T.WindowPane) void {
-    wp.screen.cx = wp.base.cx;
-    wp.screen.cy = wp.base.cy;
-}
-
 test "input parses printable text and simple cursor movement" {
     const opts = @import("options.zig");
     const win = @import("window.zig");
@@ -228,6 +282,44 @@ test "input parses printable text and simple cursor movement" {
     try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(wp.base.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(wp.base.grid, 0, 1));
     try std.testing.expectEqual(@as(u8, 'Z'), grid.ascii_at(wp.base.grid, 1, 2));
+}
+
+test "input supports cursor save restore and private alternate screen" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    input_parse_screen(wp, "abc\x1b[s\x1b[2;2HZ\x1b[uQ");
+    try std.testing.expectEqual(@as(u8, 'Q'), grid.ascii_at(wp.base.grid, 0, 3));
+
+    input_parse_screen(wp, "\x1b[?1049hALT");
+    try std.testing.expect(screen_mod.screen_alternate_active(wp));
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.screen.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(wp.base.grid, 0, 0));
+
+    input_parse_screen(wp, "\x1b[?1049l");
+    try std.testing.expect(!screen_mod.screen_alternate_active(wp));
+    try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(wp.base.grid, 0, 0));
 }
 
 test "input keeps incomplete CSI pending across calls" {

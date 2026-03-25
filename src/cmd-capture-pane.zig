@@ -25,6 +25,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const paste_mod = @import("paste.zig");
 const grid_mod = @import("grid.zig");
+const screen_mod = @import("screen.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -99,7 +100,7 @@ fn capture_grid(
     escape_sequences: bool,
     item: *cmdq.CmdqItem,
 ) ?[]u8 {
-    const gd = wp.base.grid;
+    const gd = screen_mod.screen_current(wp).grid;
     if (gd.sy == 0) return xm.xstrdup("");
 
     var top = parse_bound(start_raw, gd.sy, true, item) orelse return null;

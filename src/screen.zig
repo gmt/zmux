@@ -22,6 +22,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const grid = @import("grid.zig");
+const xm = @import("xmalloc.zig");
 
 pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
     const g = grid.grid_create(sx, sy, hlimit);
@@ -37,10 +38,13 @@ pub fn screen_reset(s: *T.Screen) void {
     grid.grid_reset(s.grid);
     s.cx = 0;
     s.cy = 0;
-    s.saved_cx = 0;
-    s.saved_cy = 0;
     s.rupper = 0;
     s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+    s.cursor_visible = true;
+    s.bracketed_paste = false;
+    s.saved_cx = 0;
+    s.saved_cy = 0;
+    s.saved_grid = null;
 }
 
 pub fn screen_resize(s: *T.Screen, sx: u32, sy: u32) void {
@@ -50,6 +54,60 @@ pub fn screen_resize(s: *T.Screen, sx: u32, sy: u32) void {
     if (s.cx >= s.grid.sx) s.cx = if (s.grid.sx == 0) 0 else s.grid.sx - 1;
     if (s.cy >= s.grid.sy) s.cy = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
     s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+}
+
+pub fn screen_reset_active(s: *T.Screen) void {
+    grid.grid_reset(s.grid);
+    s.cx = 0;
+    s.cy = 0;
+    s.rupper = 0;
+    s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+    s.cursor_visible = true;
+    s.bracketed_paste = false;
+}
+
+pub fn screen_current(wp: *T.WindowPane) *T.Screen {
+    return if (screen_alternate_active(wp)) wp.screen else &wp.base;
+}
+
+pub fn screen_alternate_active(wp: *T.WindowPane) bool {
+    return wp.screen.saved_grid != null;
+}
+
+pub fn screen_save_cursor(s: *T.Screen) void {
+    s.saved_cx = s.cx;
+    s.saved_cy = s.cy;
+}
+
+pub fn screen_restore_cursor(s: *T.Screen) void {
+    if (s.grid.sx != 0) s.cx = @min(s.saved_cx, s.grid.sx - 1) else s.cx = 0;
+    if (s.grid.sy != 0) s.cy = @min(s.saved_cy, s.grid.sy - 1) else s.cy = 0;
+}
+
+pub fn screen_enter_alternate(wp: *T.WindowPane, save_cursor: bool) void {
+    if (screen_alternate_active(wp)) return;
+
+    if (save_cursor) {
+        wp.screen.saved_cx = wp.base.cx;
+        wp.screen.saved_cy = wp.base.cy;
+    } else {
+        wp.screen.saved_cx = 0;
+        wp.screen.saved_cy = 0;
+    }
+    wp.screen.saved_grid = wp.base.grid;
+    screen_reset_active(wp.screen);
+}
+
+pub fn screen_leave_alternate(wp: *T.WindowPane, restore_cursor: bool) void {
+    if (!screen_alternate_active(wp)) return;
+
+    if (restore_cursor) {
+        if (wp.base.grid.sx != 0) wp.base.cx = @min(wp.screen.saved_cx, wp.base.grid.sx - 1) else wp.base.cx = 0;
+        if (wp.base.grid.sy != 0) wp.base.cy = @min(wp.screen.saved_cy, wp.base.grid.sy - 1) else wp.base.cy = 0;
+    }
+
+    wp.screen.saved_grid = null;
+    screen_reset_active(wp.screen);
 }
 
 test "screen_reset clears cursor and region state" {
@@ -69,4 +127,41 @@ test "screen_reset clears cursor and region state" {
     try std.testing.expectEqual(@as(u32, 0), s.cy);
     try std.testing.expectEqual(@as(u32, 0), s.rupper);
     try std.testing.expectEqual(@as(u32, 1), s.rlower);
+}
+
+test "screen alternate helpers switch current screen and restore cursor" {
+    const base_grid = grid.grid_create(4, 2, 100);
+    defer grid.grid_free(base_grid);
+    const alt = screen_init(4, 2, 100);
+    defer {
+        grid.grid_free(alt.grid);
+        xm.allocator.destroy(alt);
+    }
+
+    var dummy_window: T.Window = undefined;
+    var wp = T.WindowPane{
+        .id = 1,
+        .window = &dummy_window,
+        .options = undefined,
+        .sx = 4,
+        .sy = 2,
+        .screen = alt,
+        .base = .{ .grid = base_grid, .rlower = 1 },
+    };
+
+    wp.base.cx = 2;
+    wp.base.cy = 1;
+    try std.testing.expectEqual(&wp.base, screen_current(&wp));
+
+    screen_enter_alternate(&wp, true);
+    try std.testing.expect(screen_alternate_active(&wp));
+    try std.testing.expectEqual(alt, screen_current(&wp));
+
+    alt.cx = 1;
+    alt.cy = 0;
+    screen_leave_alternate(&wp, true);
+    try std.testing.expect(!screen_alternate_active(&wp));
+    try std.testing.expectEqual(&wp.base, screen_current(&wp));
+    try std.testing.expectEqual(@as(u32, 2), wp.base.cx);
+    try std.testing.expectEqual(@as(u32, 1), wp.base.cy);
 }

@@ -77,6 +77,30 @@ pub fn scroll_up(gd: *T.Grid, top: u32, bottom: u32) void {
     clear_line(&gd.linedata[bottom]);
 }
 
+pub fn scroll_down(gd: *T.Grid, top: u32, bottom: u32) void {
+    if (gd.linedata.len == 0 or bottom >= gd.linedata.len or top >= bottom) return;
+    clear_line(&gd.linedata[bottom]);
+    const last = gd.linedata[bottom];
+    var row = bottom;
+    while (row > top) : (row -= 1) {
+        gd.linedata[row] = gd.linedata[row - 1];
+    }
+    gd.linedata[top] = last;
+    clear_line(&gd.linedata[top]);
+}
+
+pub fn insert_lines(gd: *T.Grid, row: u32, bottom: u32, count: u32) void {
+    if (gd.linedata.len == 0 or row >= gd.linedata.len or bottom >= gd.linedata.len or row > bottom) return;
+    var n = @min(count, bottom - row + 1);
+    while (n > 0) : (n -= 1) scroll_down(gd, row, bottom);
+}
+
+pub fn delete_lines(gd: *T.Grid, row: u32, bottom: u32, count: u32) void {
+    if (gd.linedata.len == 0 or row >= gd.linedata.len or bottom >= gd.linedata.len or row > bottom) return;
+    var n = @min(count, bottom - row + 1);
+    while (n > 0) : (n -= 1) scroll_up(gd, row, bottom);
+}
+
 pub fn set_ascii(gd: *T.Grid, row: u32, col: u32, ch: u8) void {
     if (row >= gd.linedata.len or col >= gd.sx) return;
     ensure_line_capacity(gd, row);

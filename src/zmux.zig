@@ -270,6 +270,7 @@ test {
     _ = @import("hyperlinks.zig");
     _ = @import("key-string.zig");
     _ = @import("names.zig");
+    _ = @import("pane-io.zig");
     _ = @import("paste.zig");
     _ = @import("sort.zig");
     _ = @import("style.zig");

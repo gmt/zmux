@@ -77,6 +77,8 @@ const cmd_display_message = @import("cmd-display-message.zig");
 const cmd_start_server = @import("cmd-start-server.zig");
 const cmd_select_window = @import("cmd-select-window.zig");
 const cmd_new_window = @import("cmd-new-window.zig");
+const cmd_bind_key = @import("cmd-bind-key.zig");
+const cmd_unbind_key = @import("cmd-unbind-key.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -96,6 +98,8 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_start_server.entry,
     &cmd_select_window.entry,
     &cmd_new_window.entry,
+    &cmd_bind_key.entry,
+    &cmd_unbind_key.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

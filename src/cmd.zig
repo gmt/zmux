@@ -87,6 +87,8 @@ const cmd_set_environment = @import("cmd-set-environment.zig");
 const cmd_show_environment = @import("cmd-show-environment.zig");
 const cmd_set_option = @import("cmd-set-option.zig");
 const cmd_show_options = @import("cmd-show-options.zig");
+const cmd_rename_window = @import("cmd-rename-window.zig");
+const cmd_rename_session = @import("cmd-rename-session.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -117,6 +119,8 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_set_option.entry_window,
     &cmd_show_options.entry,
     &cmd_show_options.entry_window,
+    &cmd_rename_window.entry,
+    &cmd_rename_session.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

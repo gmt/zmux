@@ -28,6 +28,7 @@ const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const sort_mod = @import("sort.zig");
 const srv = @import("server.zig");
+const regsub_mod = @import("regsub.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const key_string = @import("key-string.zig");
@@ -62,6 +63,8 @@ pub const FormatExpandResult = struct {
     text: []u8,
     complete: bool,
 };
+
+pub const FormatError = error{Incomplete};
 
 const Resolver = struct {
     name: []const u8,
@@ -168,16 +171,25 @@ pub fn format_expand(alloc: std.mem.Allocator, template: []const u8, ctx: *const
 }
 
 pub fn format_require_complete(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext) ?[]u8 {
+    return format_require(alloc, template, ctx) catch null;
+}
+
+pub fn format_require(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext) FormatError![]u8 {
     const expanded = format_expand(alloc, template, ctx);
     if (!expanded.complete) {
         alloc.free(expanded.text);
-        return null;
+        return error.Incomplete;
     }
     return expanded.text;
 }
 
 pub fn format_filter_match(alloc: std.mem.Allocator, filter: []const u8, ctx: *const FormatContext) ?bool {
-    const expanded = format_require_complete(alloc, filter, ctx) orelse return null;
+    const expanded = format_filter_require(alloc, filter, ctx) catch return null;
+    return expanded;
+}
+
+pub fn format_filter_require(alloc: std.mem.Allocator, filter: []const u8, ctx: *const FormatContext) FormatError!bool {
+    const expanded = try format_require(alloc, filter, ctx);
     defer alloc.free(expanded);
     return format_truthy(expanded);
 }
@@ -295,6 +307,20 @@ const NameCheckKind = enum {
     session,
 };
 
+const ArithmeticOp = enum {
+    add,
+    subtract,
+    multiply,
+    divide,
+    modulus,
+    eq,
+    ne,
+    gt,
+    ge,
+    lt,
+    le,
+};
+
 const Modifier = struct {
     name: []const u8,
     args: [][]const u8,
@@ -343,12 +369,14 @@ fn eval_modified_expr(
     depth: u32,
 ) FormatExpandResult {
     var compare: CompareKind = .none;
+    var match_flags: ?[]const u8 = null;
     var bool_and: ?bool = null;
     var negate = false;
     var truthy_only = false;
     var loop_kind: LoopKind = .none;
     var loop_sort: T.SortCriteria = .{ .order = .end, .reversed = false };
     var name_check: NameCheckKind = .none;
+    var arithmetic_index: ?usize = null;
 
     var limit_spec: ?[]const u8 = null;
     var limit_marker_spec: ?[]const u8 = null;
@@ -370,7 +398,7 @@ fn eval_modified_expr(
     var time_format_spec: ?[]const u8 = null;
     var time_pretty = false;
 
-    for (modifiers) |modifier| {
+    for (modifiers, 0..) |modifier, idx| {
         if (std.mem.eql(u8, modifier.name, "==")) {
             compare = .eq;
         } else if (std.mem.eql(u8, modifier.name, "!=")) {
@@ -389,10 +417,14 @@ fn eval_modified_expr(
             bool_and = false;
         } else if (std.mem.eql(u8, modifier.name, "!")) {
             negate = true;
+        } else if (std.mem.eql(u8, modifier.name, "m")) {
+            match_flags = if (modifier.args.len != 0) modifier.args[0] else "";
         } else if (std.mem.eql(u8, modifier.name, "!!")) {
             truthy_only = true;
         } else if (std.mem.eql(u8, modifier.name, "R")) {
             repeat_output = true;
+        } else if (std.mem.eql(u8, modifier.name, "e")) {
+            arithmetic_index = idx;
         } else if (std.mem.eql(u8, modifier.name, "l")) {
             literal = true;
         } else if (std.mem.eql(u8, modifier.name, "a")) {
@@ -454,40 +486,37 @@ fn eval_modified_expr(
 
     if (time_pretty) return unresolved_expr(alloc, original_expr);
 
-    if (loop_kind != .none) {
-        return eval_loop_expr(alloc, original_expr, copy, loop_kind, loop_sort, ctx, depth + 1);
-    }
+    const value = blk: {
+        if (loop_kind != .none) break :blk eval_loop_expr(alloc, original_expr, copy, loop_kind, loop_sort, ctx, depth + 1);
+        if (name_check != .none) break :blk eval_name_check_expr(alloc, original_expr, copy, name_check, ctx, depth + 1);
 
-    if (name_check != .none) {
-        return eval_name_check_expr(alloc, original_expr, copy, name_check, ctx, depth + 1);
-    }
+        if (repeat_output) {
+            const parts = split_top_level_2(copy, ',') orelse break :blk unresolved_expr(alloc, original_expr);
+            const body = expand_template(alloc, parts.a, ctx, depth + 1);
+            defer alloc.free(body.text);
+            const count_text = expand_value_expr(alloc, parts.b, ctx, depth + 1);
+            defer alloc.free(count_text.text);
+            if (!body.complete or !count_text.complete) break :blk unresolved_expr(alloc, original_expr);
+            const count = std.fmt.parseInt(u32, count_text.text, 10) catch break :blk unresolved_expr(alloc, original_expr);
 
-    if (repeat_output) {
-        const parts = split_top_level_2(copy, ',') orelse return unresolved_expr(alloc, original_expr);
-        const body = expand_template(alloc, parts.a, ctx, depth + 1);
-        defer alloc.free(body.text);
-        const count_text = expand_value_expr(alloc, parts.b, ctx, depth + 1);
-        defer alloc.free(count_text.text);
-        if (!body.complete or !count_text.complete) return unresolved_expr(alloc, original_expr);
-        const count = std.fmt.parseInt(u32, count_text.text, 10) catch return unresolved_expr(alloc, original_expr);
+            var out: std.ArrayList(u8) = .{};
+            for (0..count) |_| out.appendSlice(alloc, body.text) catch unreachable;
+            break :blk FormatExpandResult{ .text = out.toOwnedSlice(alloc) catch unreachable, .complete = true };
+        }
 
-        var out: std.ArrayList(u8) = .{};
-        for (0..count) |_| out.appendSlice(alloc, body.text) catch unreachable;
-        return .{ .text = out.toOwnedSlice(alloc) catch unreachable, .complete = true };
-    }
+        if (negate or truthy_only or bool_and != null or compare != .none or match_flags != null) {
+            break :blk eval_boolean_expr(alloc, original_expr, copy, compare, match_flags, negate, truthy_only, bool_and, ctx, depth + 1);
+        }
 
-    if (negate or truthy_only or bool_and != null or compare != .none) {
-        return eval_boolean_expr(alloc, original_expr, copy, compare, negate, truthy_only, bool_and, ctx, depth + 1);
-    }
+        if (arithmetic_index) |idx| {
+            break :blk eval_arithmetic_expr(alloc, copy, modifiers[idx], ctx, depth + 1);
+        }
 
-    const value = if (literal)
-        FormatExpandResult{ .text = format_unescape(copy), .complete = true }
-    else if (char_output)
-        eval_character_expr(alloc, original_expr, copy, ctx, depth + 1)
-    else if (colour_output)
-        eval_colour_expr(alloc, original_expr, copy, ctx, depth + 1)
-    else
-        resolve_base_value(alloc, original_expr, copy, ctx, depth + 1, expand_nested or expand_time);
+        if (literal) break :blk FormatExpandResult{ .text = format_unescape(copy), .complete = true };
+        if (char_output) break :blk eval_character_expr(alloc, original_expr, copy, ctx, depth + 1);
+        if (colour_output) break :blk eval_colour_expr(alloc, original_expr, copy, ctx, depth + 1);
+        break :blk resolve_base_value(alloc, original_expr, copy, ctx, depth + 1, expand_nested or expand_time);
+    };
     if (!value.complete) return unresolved_expr(alloc, original_expr);
     defer alloc.free(value.text);
 
@@ -546,6 +575,24 @@ fn eval_modified_expr(
             alloc.free(working);
             working = rendered;
         }
+    }
+
+    for (modifiers) |modifier| {
+        if (!std.mem.eql(u8, modifier.name, "s") or modifier.args.len < 2) continue;
+
+        const pattern = expand_template(alloc, modifier.args[0], ctx, depth + 1);
+        defer alloc.free(pattern.text);
+        const replacement = expand_template(alloc, modifier.args[1], ctx, depth + 1);
+        defer alloc.free(replacement.text);
+        if (!pattern.complete or !replacement.complete) {
+            alloc.free(working);
+            return unresolved_expr(alloc, original_expr);
+        }
+
+        const flags = if (modifier.args.len >= 3) modifier.args[2] else "";
+        const substituted = format_substitute(alloc, working, pattern.text, replacement.text, flags);
+        alloc.free(working);
+        working = substituted;
     }
 
     if (limit_spec) |spec| {
@@ -632,6 +679,7 @@ fn eval_boolean_expr(
     original_expr: []const u8,
     copy: []const u8,
     compare: CompareKind,
+    match_flags: ?[]const u8,
     negate: bool,
     truthy_only: bool,
     bool_and: ?bool,
@@ -655,7 +703,7 @@ fn eval_boolean_expr(
         return .{ .text = alloc.dupe(u8, if (result) "1" else "0") catch unreachable, .complete = true };
     }
 
-    if (compare != .none) {
+    if (compare != .none or match_flags != null) {
         const parts = split_top_level_2(copy, ',') orelse return unresolved_expr(alloc, original_expr);
         const left = expand_value_expr(alloc, parts.a, ctx, depth + 1);
         defer alloc.free(left.text);
@@ -663,7 +711,9 @@ fn eval_boolean_expr(
         defer alloc.free(right.text);
         if (!left.complete or !right.complete) return unresolved_expr(alloc, original_expr);
 
-        const truth = switch (compare) {
+        const truth = if (match_flags) |flags|
+            format_match(left.text, right.text, flags)
+        else switch (compare) {
             .eq => std.mem.eql(u8, left.text, right.text),
             .ne => !std.mem.eql(u8, left.text, right.text),
             .lt => std.mem.lessThan(u8, left.text, right.text),
@@ -686,6 +736,139 @@ fn eval_boolean_expr(
     else
         false;
     return .{ .text = alloc.dupe(u8, if (truth) "1" else "0") catch unreachable, .complete = true };
+}
+
+fn eval_arithmetic_expr(
+    alloc: std.mem.Allocator,
+    copy: []const u8,
+    modifier: Modifier,
+    ctx: *const FormatContext,
+    depth: u32,
+) FormatExpandResult {
+    if (modifier.args.len == 0 or modifier.args.len > 3) return empty_result(alloc);
+
+    const op = parse_arithmetic_op(modifier.args[0]) orelse return empty_result(alloc);
+    const parts = split_top_level_2(copy, ',') orelse return empty_result(alloc);
+
+    const left = expand_value_expr(alloc, parts.a, ctx, depth + 1);
+    defer alloc.free(left.text);
+    const right = expand_value_expr(alloc, parts.b, ctx, depth + 1);
+    defer alloc.free(right.text);
+    if (!left.complete or !right.complete) return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = false };
+
+    var use_fp = false;
+    var precision: usize = 0;
+    if (modifier.args.len >= 2 and std.mem.indexOfScalar(u8, modifier.args[1], 'f') != null) {
+        use_fp = true;
+        precision = 2;
+    }
+    if (modifier.args.len >= 3) {
+        precision = std.fmt.parseInt(usize, modifier.args[2], 10) catch return empty_result(alloc);
+    }
+
+    var lhs = std.fmt.parseFloat(f64, left.text) catch return empty_result(alloc);
+    var rhs = std.fmt.parseFloat(f64, right.text) catch return empty_result(alloc);
+    if (!use_fp) {
+        const int_lhs = truncate_to_i64(lhs) orelse return empty_result(alloc);
+        const int_rhs = truncate_to_i64(rhs) orelse return empty_result(alloc);
+        lhs = @floatFromInt(int_lhs);
+        rhs = @floatFromInt(int_rhs);
+    }
+
+    const result = switch (op) {
+        .add => lhs + rhs,
+        .subtract => lhs - rhs,
+        .multiply => lhs * rhs,
+        .divide => lhs / rhs,
+        .modulus => std.math.mod(f64, lhs, rhs) catch return empty_result(alloc),
+        .eq => if (@abs(lhs - rhs) < 1e-9) @as(f64, 1.0) else @as(f64, 0.0),
+        .ne => if (@abs(lhs - rhs) > 1e-9) @as(f64, 1.0) else @as(f64, 0.0),
+        .gt => if (lhs > rhs) @as(f64, 1.0) else @as(f64, 0.0),
+        .ge => if (lhs >= rhs) @as(f64, 1.0) else @as(f64, 0.0),
+        .lt => if (lhs < rhs) @as(f64, 1.0) else @as(f64, 0.0),
+        .le => if (lhs <= rhs) @as(f64, 1.0) else @as(f64, 0.0),
+    };
+
+    const rendered = if (use_fp)
+        std.fmt.allocPrint(alloc, "{d:.[1]}", .{ result, precision }) catch unreachable
+    else
+        std.fmt.allocPrint(alloc, "{d:.[1]}", .{ @as(f64, @floatFromInt(truncate_to_i64(result) orelse return empty_result(alloc))), precision }) catch unreachable;
+    return .{ .text = rendered, .complete = true };
+}
+
+fn empty_result(alloc: std.mem.Allocator) FormatExpandResult {
+    return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
+}
+
+fn parse_arithmetic_op(text: []const u8) ?ArithmeticOp {
+    if (std.mem.eql(u8, text, "+")) return .add;
+    if (std.mem.eql(u8, text, "-")) return .subtract;
+    if (std.mem.eql(u8, text, "*")) return .multiply;
+    if (std.mem.eql(u8, text, "/")) return .divide;
+    if (std.mem.eql(u8, text, "%") or std.mem.eql(u8, text, "%%") or std.mem.eql(u8, text, "m")) return .modulus;
+    if (std.mem.eql(u8, text, "==")) return .eq;
+    if (std.mem.eql(u8, text, "!=")) return .ne;
+    if (std.mem.eql(u8, text, ">")) return .gt;
+    if (std.mem.eql(u8, text, ">=")) return .ge;
+    if (std.mem.eql(u8, text, "<")) return .lt;
+    if (std.mem.eql(u8, text, "<=")) return .le;
+    return null;
+}
+
+fn truncate_to_i64(value: f64) ?i64 {
+    if (!std.math.isFinite(value)) return null;
+    const truncated = @trunc(value);
+    const min_value = @as(f64, @floatFromInt(std.math.minInt(i64)));
+    const max_value = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+    if (truncated < min_value or truncated > max_value) return null;
+    return @intFromFloat(truncated);
+}
+
+fn format_match(pattern: []const u8, text: []const u8, flags_text: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, flags_text, 'r') == null) {
+        const ignore_case = std.mem.indexOfScalar(u8, flags_text, 'i') != null;
+        const match_pattern = if (ignore_case)
+            std.ascii.allocLowerString(xm.allocator, pattern) catch unreachable
+        else
+            xm.xstrdup(pattern);
+        defer xm.allocator.free(match_pattern);
+        const match_text = if (ignore_case)
+            std.ascii.allocLowerString(xm.allocator, text) catch unreachable
+        else
+            xm.xstrdup(text);
+        defer xm.allocator.free(match_text);
+        const pattern_z = xm.xm_dupeZ(match_pattern);
+        defer xm.allocator.free(pattern_z);
+        const text_z = xm.xm_dupeZ(match_text);
+        defer xm.allocator.free(text_z);
+        return c.posix_sys.fnmatch(pattern_z.ptr, text_z.ptr, 0) == 0;
+    }
+
+    var flags: c_int = c.posix_sys.REG_EXTENDED | c.posix_sys.REG_NOSUB;
+    if (std.mem.indexOfScalar(u8, flags_text, 'i') != null) flags |= c.posix_sys.REG_ICASE;
+
+    const pattern_z = xm.xm_dupeZ(pattern);
+    defer xm.allocator.free(pattern_z);
+    const text_z = xm.xm_dupeZ(text);
+    defer xm.allocator.free(text_z);
+
+    const regex = c.posix_sys.zmux_regex_new() orelse return false;
+    defer c.posix_sys.zmux_regex_free(regex);
+    if (c.posix_sys.zmux_regex_compile(regex, pattern_z.ptr, flags) != 0) return false;
+
+    return c.posix_sys.zmux_regex_exec(regex, text_z.ptr, 0, null) == 0;
+}
+
+fn format_substitute(
+    alloc: std.mem.Allocator,
+    text: []const u8,
+    pattern: []const u8,
+    replacement: []const u8,
+    flags_text: []const u8,
+) []u8 {
+    var flags: c_int = c.posix_sys.REG_EXTENDED;
+    if (std.mem.indexOfScalar(u8, flags_text, 'i') != null) flags |= c.posix_sys.REG_ICASE;
+    return regsub_mod.regsub(alloc, pattern, replacement, text, flags) orelse alloc.dupe(u8, text) catch unreachable;
 }
 
 fn eval_character_expr(
@@ -1035,7 +1218,7 @@ fn build_modifiers(alloc: std.mem.Allocator, expr: []const u8) ?ParsedModifiers 
         }
 
         if (pos + 1 < expr.len and modifier_is_end(expr[pos + 1])) {
-            if (std.mem.indexOfScalar(u8, "labcdnwETSWPL!<>Rq", expr[pos]) != null) {
+            if (std.mem.indexOfScalar(u8, "labcdnwETSWPL!<>Rqmes", expr[pos]) != null) {
                 list.append(alloc, .{ .name = expr[pos .. pos + 1], .args = alloc.alloc([]const u8, 0) catch unreachable }) catch unreachable;
                 pos += 1;
                 continue;
@@ -1058,7 +1241,7 @@ fn build_modifiers(alloc: std.mem.Allocator, expr: []const u8) ?ParsedModifiers 
             }
         }
 
-        if (std.mem.indexOfScalar(u8, "Ntp=q", expr[pos]) == null) return null;
+        if (std.mem.indexOfScalar(u8, "Ntp=qmes", expr[pos]) == null) return null;
         const name = expr[pos .. pos + 1];
 
         if (pos + 1 >= expr.len) return null;
@@ -1082,7 +1265,18 @@ fn build_modifiers(alloc: std.mem.Allocator, expr: []const u8) ?ParsedModifiers 
         const wrapper = next;
         pos += 2;
         while (true) {
-            const end_rel = index_of_top_level(expr[pos..], wrapper) orelse return null;
+            const next_wrapper = index_of_top_level(expr[pos..], wrapper);
+            const next_end = index_of_top_level_any(expr[pos..], ":;");
+            if (next_end) |end_rel| {
+                if (next_wrapper == null or end_rel < next_wrapper.?) {
+                    const end_abs = pos + end_rel;
+                    args.append(alloc, expr[pos..end_abs]) catch unreachable;
+                    pos = end_abs;
+                    break;
+                }
+            }
+
+            const end_rel = next_wrapper orelse return null;
             const end_abs = pos + end_rel;
             args.append(alloc, expr[pos..end_abs]) catch unreachable;
             pos = end_abs + 1;
@@ -2016,6 +2210,57 @@ test "format_expand handles width, pad, repeat, and comparisons" {
     defer xm.allocator.free(rendered.text);
     try std.testing.expect(rendered.complete);
     try std.testing.expectEqualStrings("abcd|abcdef|demo|/tmp|a\\ b|xyxyxy|1|1", rendered.text);
+}
+
+test "format_expand handles match and arithmetic modifiers" {
+    var s = T.Session{
+        .id = 11,
+        .name = xm.xstrdup("fmtbox"),
+        .cwd = "",
+        .created = 1,
+        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = undefined,
+    };
+    defer {
+        s.windows.deinit();
+        xm.allocator.free(s.name);
+    }
+
+    const ctx = FormatContext{ .session = &s };
+    const out = format_expand(
+        xm.allocator,
+        "#{m:*fmt*,#{session_name}} #{m/ri:^FMT,fmtbox} #{e|+:1,2} #{e|*|f|4:5.5,3} #{e|%%:7,3}",
+        &ctx,
+    );
+    defer xm.allocator.free(out.text);
+    try std.testing.expect(out.complete);
+    try std.testing.expectEqualStrings("1 1 3 16.5000 1", out.text);
+}
+
+test "format_expand handles substitution modifiers" {
+    const ctx = FormatContext{ .message_text = "foobar" };
+    const out = format_expand(
+        xm.allocator,
+        "#{s/foo/bar/:#{message_text}} #{s/a(.)/\\1x/i:#{message_text}} #{s/foo/bar/;=5:#{message_text}}",
+        &ctx,
+    );
+    defer xm.allocator.free(out.text);
+    try std.testing.expect(out.complete);
+    try std.testing.expectEqualStrings("barbar foobrx barba", out.text);
+}
+
+test "format_expand uses tmux runtime fallback for bad arithmetic and substitution regex" {
+    const ctx = FormatContext{ .message_text = "keepme" };
+    const arithmetic = format_expand(xm.allocator, "x#{e|nope:1,2}y", &ctx);
+    defer xm.allocator.free(arithmetic.text);
+    try std.testing.expect(arithmetic.complete);
+    try std.testing.expectEqualStrings("xy", arithmetic.text);
+
+    const substitution = format_expand(xm.allocator, "#{s/[/x/:#{message_text}}", &ctx);
+    defer xm.allocator.free(substitution.text);
+    try std.testing.expect(substitution.complete);
+    try std.testing.expectEqualStrings("keepme", substitution.text);
 }
 
 test "format_expand supports option indirection and loops" {

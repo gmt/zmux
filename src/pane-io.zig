@@ -76,6 +76,7 @@ export fn pane_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
 }
 
 pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
+    pipe_bytes(wp, bytes);
     for (bytes) |ch| {
         switch (ch) {
             '\r' => {
@@ -98,6 +99,35 @@ pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
                 write_byte(wp, ch);
             },
         }
+    }
+}
+
+fn pipe_bytes(wp: *T.WindowPane, bytes: []const u8) void {
+    if (wp.pipe_fd < 0 or bytes.len == 0) return;
+
+    var rest = bytes;
+    while (rest.len > 0) {
+        const written = std.posix.write(wp.pipe_fd, rest) catch {
+            close_pipe(wp);
+            return;
+        };
+        if (written == 0) {
+            close_pipe(wp);
+            return;
+        }
+        rest = rest[written..];
+    }
+}
+
+fn close_pipe(wp: *T.WindowPane) void {
+    if (wp.pipe_fd >= 0) {
+        std.posix.close(wp.pipe_fd);
+        wp.pipe_fd = -1;
+    }
+    if (wp.pipe_pid > 0) {
+        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.HUP);
+        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.TERM);
+        wp.pipe_pid = -1;
     }
 }
 
@@ -246,4 +276,40 @@ test "pane_io_feed handles newline and scrolls when reaching the bottom" {
     try std.testing.expectEqual(@as(u8, 't'), wp.base.grid.linedata[0].celldata[0].offset_or_data.data.data);
     try std.testing.expectEqual(@as(u8, 't'), wp.base.grid.linedata[1].celldata[0].offset_or_data.data.data);
     try std.testing.expectEqual(@as(u8, 'r'), wp.base.grid.linedata[1].celldata[1].offset_or_data.data.data);
+}
+
+test "pane_io_feed mirrors raw bytes into pane pipe fd" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.pipe_fd = pipe_fds[1];
+    pane_io_feed(wp, "abc\r\n");
+
+    var buf: [16]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("abc\r\n", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    wp.pipe_fd = -1;
 }

@@ -98,6 +98,7 @@ const cmd_select_pane = @import("cmd-select-pane.zig");
 const cmd_split_window = @import("cmd-split-window.zig");
 const cmd_join_pane = @import("cmd-join-pane.zig");
 const cmd_resize_pane = @import("cmd-resize-pane.zig");
+const cmd_swap_pane = @import("cmd-swap-pane.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -142,6 +143,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_join_pane.entry_join,
     &cmd_join_pane.entry_move,
     &cmd_resize_pane.entry,
+    &cmd_swap_pane.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

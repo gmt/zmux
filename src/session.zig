@@ -27,6 +27,7 @@ const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const sort_mod = @import("sort.zig");
 const win = @import("window.zig");
+const notify = @import("notify.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ pub fn session_create(
 
     sessions.put(s.name, s) catch unreachable;
     log.log_debug("new session $%{d} {s}", .{ s.id, s.name });
+    notify.notify_session("session-created", s);
     return s;
 }
 
@@ -123,6 +125,7 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
     _ = _from;
     log.log_debug("destroy session $%{d} {s}", .{ s.id, s.name });
     _ = sessions.remove(s.name);
+    notify.notify_session("session-closed", s);
 
     var window_counts = std.AutoHashMap(*T.Window, u32).init(xm.allocator);
     defer window_counts.deinit();
@@ -191,6 +194,7 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
     const wl = T.Winlink{ .idx = actual_idx, .session = s, .window = w };
     s.windows.put(actual_idx, wl) catch unreachable;
     w.references += 1;
+    notify.notify_session_window("window-linked", s, w);
     return s.windows.getPtr(actual_idx);
 }
 
@@ -203,6 +207,7 @@ pub fn session_detach(_s: *T.Session, _wl: ?*T.Winlink) void {
 pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) ?T.Winlink {
     if (s.windows.fetchRemove(idx)) |kv| {
         if (s.curw != null and s.curw.?.idx == idx) s.curw = null;
+        notify.notify_session_window("window-unlinked", s, kv.value.window);
         win.window_remove_ref(kv.value.window, from);
         return kv.value;
     }

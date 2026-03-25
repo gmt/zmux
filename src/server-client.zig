@@ -36,6 +36,8 @@ const tty_draw = @import("tty-draw.zig");
 const input_keys = @import("input-keys.zig");
 const server_fn = @import("server-fn.zig");
 const c = @import("c.zig");
+const notify = @import("notify.zig");
+const client_registry = @import("client-registry.zig");
 
 var next_client_id: u32 = 0;
 
@@ -243,8 +245,7 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 }
 
 pub fn server_client_loop() void {
-    const srv = @import("server.zig");
-    for (srv.clients.items) |cl| {
+    for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_EXIT != 0) {
             if (cl.peer) |peer| {
                 const retval: i32 = 0;
@@ -277,18 +278,20 @@ pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
 }
 
 pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
-    if (cl.session) |old| {
-        if (old == s) {
+    const old_session = cl.session;
+    if (cl.session) |current| {
+        if (current == s) {
             server_client_apply_session_size(cl, s);
             return;
         }
-        if (old != s and old.attached > 0) old.attached -= 1;
-        cl.last_session = old;
+        if (current != s and current.attached > 0) current.attached -= 1;
+        cl.last_session = current;
     }
     cl.session = s;
     s.attached += 1;
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);
+    if (old_session != s) notify.notify_client("client-session-changed", cl);
 }
 
 pub fn server_client_force_redraw(cl: *T.Client) void {

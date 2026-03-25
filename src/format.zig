@@ -47,7 +47,6 @@ pub const FormatContext = struct {
     key_binding: ?*const T.KeyBinding = null,
     key_note: ?[]const u8 = null,
     key_command: ?[]const u8 = null,
-    key_padding: ?[]const u8 = null,
     key_prefix: ?[]const u8 = null,
     key_string_width: ?u32 = null,
     key_table_width: ?u32 = null,
@@ -92,7 +91,6 @@ const resolver_table = [_]Resolver{
     .{ .name = "key_command", .func = resolve_key_command },
     .{ .name = "key_has_repeat", .func = resolve_key_has_repeat },
     .{ .name = "key_note", .func = resolve_key_note },
-    .{ .name = "key_padding", .func = resolve_key_padding },
     .{ .name = "key_prefix", .func = resolve_key_prefix },
     .{ .name = "key_repeat", .func = resolve_key_repeat },
     .{ .name = "key_string", .func = resolve_key_string },
@@ -1458,12 +1456,6 @@ fn resolve_key_prefix(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
     return alloc.dupe(u8, ctx.key_prefix orelse "") catch unreachable;
 }
 
-fn resolve_key_padding(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    const binding = resolve_key_binding(ctx) orelse return null;
-    _ = binding;
-    return alloc.dupe(u8, ctx.key_padding orelse "") catch unreachable;
-}
-
 fn resolve_key_string_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const binding = resolve_key_binding(ctx) orelse return null;
@@ -2098,4 +2090,77 @@ test "format_expand supports option indirection and loops" {
     const sessions_loop = format_require_complete(xm.allocator, "#{S:#{session_name}#{?loop_last_flag,,|},[#{session_name}]#{?loop_last_flag,,|}}", &ctx).?;
     defer xm.allocator.free(sessions_loop);
     try std.testing.expectEqualStrings("[alpha]|beta", sessions_loop);
+}
+
+test "format_expand covers key option-table defaults" {
+    const env_mod = @import("environ.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "defaults", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(w.name);
+    w.name = xm.xstrdup("editor");
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    wp.shell = xm.xstrdup("sh");
+    wp.screen.title = xm.xstrdup("pane-title");
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const automatic = format_require_complete(xm.allocator, "#{E:automatic-rename-format}", &ctx).?;
+    defer xm.allocator.free(automatic);
+    try std.testing.expectEqualStrings("sh", automatic);
+
+    wp.flags |= T.PANE_EXITED;
+    wp.status = 7;
+    const remain = format_require_complete(xm.allocator, "#{E:remain-on-exit-format}", &ctx).?;
+    defer xm.allocator.free(remain);
+    try std.testing.expectEqualStrings("Pane is dead (7)", remain);
+    wp.flags &= ~T.PANE_EXITED;
+
+    const border = format_require_complete(xm.allocator, "#{E:pane-border-format}", &ctx).?;
+    defer xm.allocator.free(border);
+    try std.testing.expectEqualStrings("#[reverse]0#[default] \"pane-title\"", border);
+
+    const window_status = format_require_complete(xm.allocator, "#{E:window-status-format}", &ctx).?;
+    defer xm.allocator.free(window_status);
+    try std.testing.expectEqualStrings("0:editor*", window_status);
+
+    const titles = format_require_complete(xm.allocator, "#{T:set-titles-string}", &ctx).?;
+    defer xm.allocator.free(titles);
+    try std.testing.expect(std.mem.indexOf(u8, titles, "#{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, titles, "defaults") != null);
+
+    const status_right = format_require_complete(xm.allocator, "#{T:status-right}", &ctx).?;
+    defer xm.allocator.free(status_right);
+    try std.testing.expect(std.mem.indexOf(u8, status_right, "#{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_right, "pane-title") != null);
 }

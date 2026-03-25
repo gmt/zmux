@@ -14,6 +14,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
 const server_client_mod = @import("server-client.zig");
+const server_fn = @import("server-fn.zig");
 const win_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -29,7 +30,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         const cur_s = if (cl) |c| c.session else null;
         if (cur_s) |cs| {
             if (sess.session_next_session(cs, null)) |next| {
-                if (cl) |c| server_client_mod.server_client_set_session(c, next);
+                if (cl) |c| {
+                    server_client_mod.server_client_set_session(c, next);
+                    server_client_mod.server_client_set_key_table(c, null);
+                    server_client_mod.server_client_force_redraw(c);
+                }
+                server_fn.server_redraw_session(next);
                 return .normal;
             }
         }
@@ -42,7 +48,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         const cur_s = if (cl) |c| c.session else null;
         if (cur_s) |cs| {
             if (sess.session_previous_session(cs, null)) |prev| {
-                if (cl) |c| server_client_mod.server_client_set_session(c, prev);
+                if (cl) |c| {
+                    server_client_mod.server_client_set_session(c, prev);
+                    server_client_mod.server_client_set_key_table(c, null);
+                    server_client_mod.server_client_force_redraw(c);
+                }
+                server_fn.server_redraw_session(prev);
                 return .normal;
             }
         }
@@ -56,6 +67,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             if (c.last_session) |ls| {
                 if (sess.session_alive(ls)) {
                     server_client_mod.server_client_set_session(c, ls);
+                    server_client_mod.server_client_set_key_table(c, null);
+                    server_client_mod.server_client_force_redraw(c);
+                    server_fn.server_redraw_session(ls);
                     return .normal;
                 }
             }
@@ -90,15 +104,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         if (wp.? != w.active) {
             _ = win_mod.window_set_active_pane(w, wp.?, true);
         }
-        if (cl) |c| {
-            _ = c;
-            // TODO: select window
-        }
     }
 
     if (wl) |target_wl| s.curw = target_wl;
-    if (cl) |c| server_client_mod.server_client_set_session(c, s);
-    if (cl) |c| server_client_mod.server_client_set_key_table(c, null);
+    if (cl) |c| {
+        server_client_mod.server_client_set_session(c, s);
+        server_client_mod.server_client_set_key_table(c, null);
+        server_client_mod.server_client_force_redraw(c);
+    }
+    server_fn.server_redraw_session(s);
     return .normal;
 }
 

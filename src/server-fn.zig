@@ -26,22 +26,25 @@ const log = @import("log.zig");
 const srv = @import("server.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
+const opts = @import("options.zig");
+const key_bindings = @import("key-bindings.zig");
+const key_string = @import("key-string.zig");
+const server_client_mod = @import("server-client.zig");
 
 pub fn server_redraw_session(s: *T.Session) void {
-    _ = s;
-    // TODO: mark all clients attached to this session for redraw
+    srv.server_redraw_session(s);
 }
 
 pub fn server_redraw_session_group(s: *T.Session) void {
-    _ = s;
+    srv.server_redraw_session(s);
 }
 
 pub fn server_status_session(s: *T.Session) void {
-    _ = s;
+    srv.server_redraw_session(s);
 }
 
 pub fn server_status_window(w: *T.Window) void {
-    _ = w;
+    srv.server_redraw_window(w);
 }
 
 pub fn server_lock_session(s: *T.Session) void {
@@ -156,8 +159,61 @@ pub fn server_destroy_pane(wp: *T.WindowPane, notify: bool) void {
 }
 
 pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) void {
-    _ = cl;
-    _ = event;
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
+
+    const current_table = if (cl.key_table_name) |name| name else blk: {
+        const configured = opts.options_get_string(s.options, "key-table");
+        break :blk if (configured.len != 0) configured else "root";
+    };
+
+    if (std.mem.eql(u8, current_table, "root") and is_prefix_key(s, event.key)) {
+        server_client_mod.server_client_set_key_table(cl, "prefix");
+        return;
+    }
+
+    if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
+        if (key_bindings.key_bindings_get(table, event.key)) |binding| {
+            _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, null);
+            if (!std.mem.eql(u8, current_table, "root"))
+                server_client_mod.server_client_set_key_table(cl, null);
+            return;
+        }
+    }
+
+    if (!std.mem.eql(u8, current_table, "root")) {
+        server_client_mod.server_client_set_key_table(cl, null);
+        return;
+    }
+
+    if (wp.fd < 0 or event.len == 0) return;
+    write_pane_bytes(wp.fd, event.data[0..event.len]);
+}
+
+fn is_prefix_key(s: *T.Session, key: T.key_code) bool {
+    return prefix_option_matches(s, "prefix", key) or prefix_option_matches(s, "prefix2", key);
+}
+
+fn prefix_option_matches(s: *T.Session, name: []const u8, key: T.key_code) bool {
+    const text = opts.options_get_string(s.options, name);
+    if (text.len == 0) return false;
+    const parsed = key_string.key_string_lookup_string(text);
+    if (parsed == T.KEYC_UNKNOWN or parsed == T.KEYC_NONE) return false;
+    return normalize_key(parsed) == normalize_key(key);
+}
+
+fn normalize_key(key: T.key_code) T.key_code {
+    return key & ~(T.KEYC_MASK_FLAGS);
+}
+
+fn write_pane_bytes(fd: i32, bytes: []const u8) void {
+    var rest = bytes;
+    while (rest.len > 0) {
+        const written = std.posix.write(fd, rest) catch return;
+        if (written == 0) return;
+        rest = rest[written..];
+    }
 }
 
 // Placeholder for format_tree.zig integration
@@ -170,12 +226,12 @@ pub fn server_format_session(
 }
 
 test "server_destroy_pane removes non-last pane and reassigns active pane" {
-    const opts = @import("options.zig");
+    const opts_mod = @import("options.zig");
 
     win.window_init_globals(xm.allocator);
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     defer win.window_remove_ref(w, "test");
@@ -192,30 +248,142 @@ test "server_destroy_pane removes non-last pane and reassigns active pane" {
     try std.testing.expectEqual(first, w.panes.items[0]);
 }
 
+test "server_client_handle_key uses prefix table and queues bound commands" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+    const cmdq = @import("cmd-queue.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-dispatch", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-dispatch") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&sc, &cause).?;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    var prefix_event = T.key_event{ .key = @as(T.key_code, 'b') | T.KEYC_CTRL, .data = std.mem.zeroes([16]u8), .len = 1 };
+    prefix_event.data[0] = 0x02;
+    server_client_handle_key(&cl, &prefix_event);
+    try std.testing.expectEqualStrings("prefix", cl.key_table_name.?);
+
+    var create_event = T.key_event{ .key = 'c', .data = std.mem.zeroes([16]u8), .len = 1 };
+    create_event.data[0] = 'c';
+    server_client_handle_key(&cl, &create_event);
+    try std.testing.expect(cl.key_table_name == null);
+    _ = cmdq.cmdq_next(&cl);
+    try std.testing.expectEqual(@as(usize, 2), s.windows.count());
+}
+
+test "server_client_handle_key forwards unbound keys to pane" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-forward", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-forward") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    defer {
+        if (wp.fd >= 0) std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    var event = T.key_event{ .key = 'x', .data = std.mem.zeroes([16]u8), .len = 1 };
+    event.data[0] = 'x';
+    server_client_handle_key(&cl, &event);
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
 test "server_link_window replaces occupied destination with -k and server_unlink_window drops one link" {
-    const opts = @import("options.zig");
+    const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 
-    opts.global_options = opts.options_create(null);
-    defer opts.options_free(opts.global_options);
-    opts.global_s_options = opts.options_create(null);
-    defer opts.options_free(opts.global_s_options);
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
-    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     env_mod.global_environ = env_mod.environ_create();
     defer env_mod.environ_free(env_mod.global_environ);
 
-    const src = sess.session_create(null, "src", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const src = sess.session_create(null, "src", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
     defer if (sess.session_find("src") != null) sess.session_destroy(src, false, "test");
-    const dst = sess.session_create(null, "dst", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const dst = sess.session_create(null, "dst", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
     defer if (sess.session_find("dst") != null) sess.session_destroy(dst, false, "test");
 
     var cause: ?[]u8 = null;

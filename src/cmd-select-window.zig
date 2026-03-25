@@ -12,6 +12,7 @@ const sess = @import("session.zig");
 const win_mod = @import("window.zig");
 const spawn_mod = @import("spawn.zig");
 const server_client_mod = @import("server-client.zig");
+const server_fn = @import("server-fn.zig");
 
 fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -28,8 +29,10 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cl) |c| {
         if (c.session == s) {
             server_client_mod.server_client_apply_session_size(c, s);
+            server_client_mod.server_client_force_redraw(c);
         }
     }
+    server_fn.server_redraw_session(s);
     return .normal;
 }
 
@@ -53,6 +56,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     };
     if (!args.has('d')) s.curw = wl;
+    server_fn.server_redraw_session(s);
     return .normal;
 }
 

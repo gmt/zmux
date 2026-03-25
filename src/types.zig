@@ -824,6 +824,12 @@ pub const ClientPaneCache = struct {
     valid: bool = false,
 };
 
+pub const key_event = struct {
+    key: key_code = KEYC_UNKNOWN,
+    data: [16]u8 = std.mem.zeroes([16]u8),
+    len: usize = 0,
+};
+
 pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
@@ -848,6 +854,8 @@ pub const Client = struct {
     tty: Tty,
     status: StatusLine,
     pane_cache: ClientPaneCache = .{},
+    stdin_pending: std.ArrayList(u8) = .{},
+    key_table_name: ?[]u8 = null,
 
     flags: u64 = 0,
     session: ?*Session = null,

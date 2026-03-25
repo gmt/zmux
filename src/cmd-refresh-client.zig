@@ -28,7 +28,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             if (cl.session) |s| {
                 server_client_mod.server_client_apply_session_size(cl, s);
             }
+            server_client_mod.server_client_force_redraw(cl);
         }
+    } else if (cmdq.cmdq_get_client(item)) |cl| {
+        server_client_mod.server_client_force_redraw(cl);
     }
 
     return .normal;

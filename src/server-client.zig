@@ -33,6 +33,8 @@ const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
 const sess_mod = @import("session.zig");
 const tty_draw = @import("tty-draw.zig");
+const input_keys = @import("input-keys.zig");
+const server_fn = @import("server-fn.zig");
 const c = @import("c.zig");
 
 var next_client_id: u32 = 0;
@@ -74,6 +76,9 @@ pub fn server_client_lost(cl: *T.Client) void {
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
     cl.peer = null;
+    if (cl.title) |title| xm.allocator.free(title);
+    if (cl.key_table_name) |name| xm.allocator.free(name);
+    cl.stdin_pending.deinit(xm.allocator);
     tty_draw.tty_draw_free(&cl.pane_cache);
     env_mod.environ_free(cl.environ);
     xm.allocator.destroy(cl);
@@ -126,25 +131,29 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 
     if (cl.session) |s| {
         server_client_apply_session_size(cl, s);
-        tty_draw.tty_draw_invalidate(&cl.pane_cache);
-        cl.flags |= T.CLIENT_REDRAWWINDOW;
+        server_client_force_redraw(cl);
     }
 }
 
 fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
-    const s = cl.session orelse return;
-    const wl = s.curw orelse return;
-    const wp = wl.window.active orelse return;
-    if (wp.fd < 0 or imsg_msg.data == null) return;
-
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len == 0) return;
     const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
-    var rest = bytes[0..data_len];
-    while (rest.len > 0) {
-        const written = std.posix.write(wp.fd, rest) catch break;
-        if (written == 0) break;
-        rest = rest[written..];
+    cl.stdin_pending.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
+
+    var consumed: usize = 0;
+    while (consumed < cl.stdin_pending.items.len) {
+        var event: T.key_event = .{};
+        const used = input_keys.input_key_get(cl.stdin_pending.items[consumed..], &event) orelse break;
+        if (used == 0) break;
+        consumed += used;
+        server_fn.server_client_handle_key(cl, &event);
+    }
+
+    if (consumed != 0) {
+        const remaining = cl.stdin_pending.items.len - consumed;
+        std.mem.copyForwards(u8, cl.stdin_pending.items[0..remaining], cl.stdin_pending.items[consumed..]);
+        cl.stdin_pending.shrinkRetainingCapacity(remaining);
     }
 }
 
@@ -287,17 +296,26 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     server_client_apply_session_size(cl, s);
 }
 
+pub fn server_client_force_redraw(cl: *T.Client) void {
+    tty_draw.tty_draw_invalidate(&cl.pane_cache);
+    cl.flags |= T.CLIENT_REDRAWWINDOW;
+}
+
 pub fn server_client_attach(cl: *T.Client, s: *T.Session) void {
     server_client_set_session(cl, s);
+    server_client_set_key_table(cl, null);
     cl.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAWWINDOW;
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
     }
 }
 
-pub fn server_client_set_key_table(_cl: *T.Client, _name: ?[]const u8) void {
-    _ = _cl;
-    _ = _name;
+pub fn server_client_set_key_table(cl: *T.Client, name: ?[]const u8) void {
+    if (cl.key_table_name) |old| {
+        xm.allocator.free(old);
+        cl.key_table_name = null;
+    }
+    if (name) |new_name| cl.key_table_name = xm.xstrdup(new_name);
 }
 
 pub fn server_client_get_cwd(cl: ?*T.Client, _s: ?*T.Session) []const u8 {
@@ -328,11 +346,6 @@ fn server_client_draw(cl: *T.Client) void {
     const sx = if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx);
     const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
     if (sx == 0 or sy == 0) return;
-    const full_redraw =
-        !cl.pane_cache.valid or
-        cl.pane_cache.pane_id != wp.id or
-        cl.pane_cache.sx != sx or
-        cl.pane_cache.sy != sy;
     const payload = tty_draw.tty_draw_pane(&cl.pane_cache, wp, sx, sy) catch return;
     defer xm.allocator.free(payload);
 
@@ -347,7 +360,16 @@ fn server_client_draw(cl: *T.Client) void {
         }
     }
     const title = if (wp.screen.title) |pane_title| pane_title else wl_name(wp.window);
-    if (full_redraw and title.len != 0) {
+    const title_changed = blk: {
+        if (title.len == 0) break :blk cl.title != null;
+        if (cl.title) |old| break :blk !std.mem.eql(u8, old, title);
+        break :blk true;
+    };
+    if (title_changed) {
+        if (cl.title) |old| xm.allocator.free(old);
+        cl.title = if (title.len != 0) xm.xstrdup(title) else null;
+    }
+    if (title_changed and title.len != 0) {
         const title_seq = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
         defer xm.allocator.free(title_seq);
         if (cl.peer) |peer| {

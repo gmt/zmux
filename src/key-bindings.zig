@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
+const cmdq_mod = @import("cmd-queue.zig");
 
 var key_tables: std.StringHashMap(*T.KeyTable) = undefined;
 var key_table_order: std.ArrayList(*T.KeyTable) = .{};
@@ -164,16 +165,17 @@ pub fn key_bindings_has_repeat(bindings: []const *T.KeyBinding) i32 {
 }
 
 pub fn key_bindings_dispatch(
-    _binding: *T.KeyBinding,
+    binding: *T.KeyBinding,
     item: ?*T.CmdqItem,
-    _client: ?*T.Client,
-    _event: ?*anyopaque,
-    _fs: ?*T.CmdFindState,
+    client: ?*T.Client,
+    event: ?*anyopaque,
+    fs: ?*T.CmdFindState,
 ) ?*T.CmdqItem {
-    _ = _binding;
-    _ = _client;
-    _ = _event;
-    _ = _fs;
+    _ = event;
+    _ = fs;
+    if (binding.cmdlist) |list| {
+        cmdq_mod.cmdq_append(client, @ptrCast(@alignCast(cmd_mod.cmd_list_ref(list))));
+    }
     return item;
 }
 

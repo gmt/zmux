@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const xm = @import("xmalloc.zig");
 const screen_write = @import("screen-write.zig");
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
@@ -45,7 +46,7 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
             continue;
         }
         if (next == ']') {
-            const consumed = parse_osc(wp.input_pending.items[i..]) orelse break;
+            const consumed = parse_osc(wp, wp.input_pending.items[i..]) orelse break;
             i += consumed;
             continue;
         }
@@ -87,13 +88,29 @@ fn parse_csi(ctx: *T.ScreenWriteCtx, bytes: []const u8) ?usize {
     return null;
 }
 
-fn parse_osc(bytes: []const u8) ?usize {
+fn parse_osc(wp: *T.WindowPane, bytes: []const u8) ?usize {
     var idx: usize = 2; // ESC ]
     while (idx < bytes.len) : (idx += 1) {
-        if (bytes[idx] == 0x07) return idx + 1;
-        if (idx + 1 < bytes.len and bytes[idx] == 0x1b and bytes[idx + 1] == '\\') return idx + 2;
+        if (bytes[idx] == 0x07) {
+            apply_osc(wp, bytes[2..idx]);
+            return idx + 1;
+        }
+        if (idx + 1 < bytes.len and bytes[idx] == 0x1b and bytes[idx + 1] == '\\') {
+            apply_osc(wp, bytes[2..idx]);
+            return idx + 2;
+        }
     }
     return null;
+}
+
+fn apply_osc(wp: *T.WindowPane, payload: []const u8) void {
+    const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return;
+    const kind = payload[0..semi];
+    const value = payload[semi + 1 ..];
+    if (!(std.mem.eql(u8, kind, "0") or std.mem.eql(u8, kind, "1") or std.mem.eql(u8, kind, "2"))) return;
+
+    if (wp.screen.title) |old| xm.allocator.free(old);
+    wp.screen.title = if (value.len != 0) xm.xstrdup(value) else null;
 }
 
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
@@ -243,4 +260,32 @@ test "input keeps incomplete CSI pending across calls" {
     input_parse_screen(wp, ";2HZ");
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
     try std.testing.expectEqual(@as(u8, 'Z'), grid.ascii_at(wp.base.grid, 1, 1));
+}
+
+test "input parses OSC pane title updates" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+    input_parse_screen(wp, "\x1b]2;logs\x07");
+    try std.testing.expectEqualStrings("logs", wp.screen.title.?);
 }

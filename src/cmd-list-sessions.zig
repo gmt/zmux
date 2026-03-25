@@ -71,3 +71,35 @@ pub const entry: cmd_mod.CmdEntry = .{
     .flags = 0,
     .exec = exec,
 };
+
+test "list-sessions default template expands through shared formatter" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "list-sessions-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("list-sessions-test") != null) sess.session_destroy(s, false, "test");
+    s.attached = 1;
+
+    const ctx = session_context(s);
+    const line = format_mod.format_require_complete(xm.allocator, DEFAULT_TEMPLATE, &ctx).?;
+    defer xm.allocator.free(line);
+    try std.testing.expect(std.mem.indexOf(u8, line, "list-sessions-test: 0 windows") != null);
+
+    const matched = format_mod.format_filter_match(xm.allocator, "#{session_attached}", &ctx).?;
+    try std.testing.expect(matched);
+}

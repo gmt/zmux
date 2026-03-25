@@ -34,6 +34,8 @@ const c = @import("c.zig");
 const key_bindings = @import("key-bindings.zig");
 const cfg_mod = @import("cfg.zig");
 const build_options = @import("build_options");
+const client_registry = @import("client-registry.zig");
+const notify = @import("notify.zig");
 
 // ── Global server state ───────────────────────────────────────────────────
 
@@ -41,7 +43,6 @@ pub var server_proc: ?*T.ZmuxProc = null;
 pub var server_fd: i32 = -1;
 pub var server_client_flags: u64 = 0;
 pub var server_exit: bool = false;
-pub var clients: std.ArrayList(*T.Client) = .{};
 pub var message_log: std.ArrayList(T.MessageEntry) = .{};
 var server_accept_ev: ?*c.libevent.event = null;
 
@@ -143,7 +144,7 @@ fn server_loop() bool {
     var items: u32 = 1;
     while (items != 0) {
         items = cmdq.cmdq_next(null);
-        for (clients.items) |cl| {
+        for (client_registry.clients.items) |cl| {
             if (cl.flags & T.CLIENT_IDENTIFIED != 0)
                 items += cmdq.cmdq_next(cl);
         }
@@ -154,7 +155,7 @@ fn server_loop() bool {
     const exit_empty = opts.options_get_number(opts.global_options, "exit-empty");
     const exit_unattached = opts.options_get_number(opts.global_options, "exit-unattached");
     const nsess = sess.sessions.count();
-    const ncli = clients.items.len;
+    const ncli = client_registry.clients.items.len;
 
     log.log_debug("server_loop: exit_empty={d} exit_unattached={d} nsess={d} ncli={d} server_exit={}", .{
         exit_empty, exit_unattached, nsess, ncli, server_exit,
@@ -305,24 +306,20 @@ fn server_child_signal() void {
 // ── Utility ───────────────────────────────────────────────────────────────
 
 pub fn server_add_client(cl: *T.Client) void {
-    clients.append(xm.allocator, cl) catch unreachable;
+    client_registry.add(cl);
 }
 
 pub fn server_remove_client(cl: *T.Client) void {
-    for (clients.items, 0..) |c_ptr, i| {
-        if (c_ptr == cl) {
-            _ = clients.swapRemove(i);
-            return;
-        }
-    }
+    client_registry.remove(cl);
 }
 
 pub fn server_destroy_session(s: *T.Session) void {
-    for (clients.items) |cl| {
+    for (client_registry.clients.items) |cl| {
         if (cl.session == s) {
             if (s.attached > 0) s.attached -= 1;
             cl.session = null;
             if (cl.last_session == s) cl.last_session = null;
+            notify.notify_client("client-detached", cl);
             cl.flags |= T.CLIENT_EXIT;
             if (cl.peer) |peer| {
                 const retval: i32 = 0;
@@ -333,7 +330,7 @@ pub fn server_destroy_session(s: *T.Session) void {
 }
 
 pub fn server_redraw_session(s: *T.Session) void {
-    for (clients.items) |cl| {
+    for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.session != s) continue;
         cl.flags |= T.CLIENT_REDRAWWINDOW;
@@ -341,7 +338,7 @@ pub fn server_redraw_session(s: *T.Session) void {
 }
 
 pub fn server_redraw_window(w: *T.Window) void {
-    for (clients.items) |cl| {
+    for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         const s = cl.session orelse continue;
         if (!sess.session_has_window(s, w)) continue;

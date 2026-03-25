@@ -29,6 +29,7 @@ const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
 const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
+const pane_io = @import("pane-io.zig");
 const c = @import("c.zig");
 
 extern fn openpty(
@@ -169,7 +170,17 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     // ── parent ─────────────────────────────────────────────────────────
     std.posix.close(slave);
     wp.pid = pid;
+    set_blocking(wp.fd, false);
+    pane_io.pane_io_start(wp);
     log.log_debug("new pane %%%{d} pid={d}", .{ wp.id, pid });
+}
+
+fn set_blocking(fd: i32, state: bool) void {
+    const flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const O_NONBLOCK: c_int = 0x800;
+    const new_flags: c_int = if (state) flags & ~O_NONBLOCK else flags | O_NONBLOCK;
+    _ = std.c.fcntl(fd, std.posix.F.SETFL, new_flags);
 }
 
 fn duplicate_argv(argv: []const []const u8) [][]u8 {

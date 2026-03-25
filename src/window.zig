@@ -25,6 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const colour_mod = @import("colour.zig");
+const pane_io = @import("pane-io.zig");
 const style_mod = @import("style.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
@@ -162,6 +163,7 @@ pub fn window_forget_pane_history(w: *T.Window, wp: *T.WindowPane) void {
 }
 
 fn window_pane_destroy(wp: *T.WindowPane) void {
+    pane_io.pane_io_stop(wp);
     if (wp.pid > 0) {
         _ = std.c.kill(wp.pid, std.posix.SIG.HUP);
         _ = std.c.kill(wp.pid, std.posix.SIG.TERM);

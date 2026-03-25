@@ -585,6 +585,7 @@ pub const WindowPane = struct {
     tty_name: [TTY_NAME_MAX]u8 = std.mem.zeroes([TTY_NAME_MAX]u8),
     status: i32 = 0,
     fd: i32 = -1,
+    event: ?*c.libevent.event = null,
 
     // Screen
     screen: *Screen,

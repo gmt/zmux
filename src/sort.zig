@@ -22,7 +22,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const key_bindings = @import("key-bindings.zig");
 const sess = @import("session.zig");
-const srv = @import("server.zig");
+const registry = @import("client-registry.zig");
 
 pub fn sort_order_from_string(order: ?[]const u8) T.SortOrder {
     if (order) |value| {
@@ -91,8 +91,8 @@ pub fn sorted_panes_window(w: *T.Window, sort_crit: T.SortCriteria) []*T.WindowP
 }
 
 pub fn sorted_clients(sort_crit: T.SortCriteria) []*T.Client {
-    const items = xm.allocator.alloc(*T.Client, srv.clients.items.len) catch unreachable;
-    @memcpy(items, srv.clients.items);
+    const items = xm.allocator.alloc(*T.Client, registry.clients.items.len) catch unreachable;
+    @memcpy(items, registry.clients.items);
     sort_clients_in_place(items, sort_crit);
     return items;
 }

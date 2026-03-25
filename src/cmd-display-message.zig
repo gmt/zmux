@@ -38,7 +38,7 @@ pub fn require_format(
 ) ?[]u8 {
     var ctx = target_context(target);
     ctx.message_text = message_text;
-    return format_mod.format_require_complete(alloc, fmt, &ctx);
+    return format_mod.format_require(alloc, fmt, &ctx) catch null;
 }
 
 pub fn target_context(target: *const T.CmdFindState) format_mod.FormatContext {

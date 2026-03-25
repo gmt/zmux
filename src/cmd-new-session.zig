@@ -200,7 +200,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .window = if (wl) |created_wl| created_wl.window else null,
             .pane = print_wp,
         };
-        const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+        const expanded = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

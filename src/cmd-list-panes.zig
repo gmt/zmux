@@ -79,13 +79,13 @@ fn print_window_panes(item: *cmdq.CmdqItem, w: *T.Window, sort_crit: T.SortCrite
             .pane = wp,
         };
         if (filter) |expr| {
-            const matched = format_mod.format_filter_match(xm.allocator, expr, &ctx) orelse {
+            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };
             if (!matched) continue;
         }
-        const line = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+        const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };
@@ -141,13 +141,13 @@ fn exec_lsc(_cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .pane = if (cl.session) |s| if (s.curw) |wl| wl.window.active else null else null,
         };
         if (filter) |expr| {
-            const matched = format_mod.format_filter_match(xm.allocator, expr, &ctx) orelse {
+            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };
             if (!matched) continue;
         }
-        const line = format_mod.format_require_complete(xm.allocator, args.get('F') orelse DEFAULT_CLIENT_TEMPLATE, &ctx) orelse {
+        const line = format_mod.format_require(xm.allocator, args.get('F') orelse DEFAULT_CLIENT_TEMPLATE, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

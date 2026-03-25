@@ -38,13 +38,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         for (winlinks) |wl| {
             const ctx = window_context(wl.session, wl);
             if (filter) |expr| {
-                const matched = format_mod.format_filter_match(xm.allocator, expr, &ctx) orelse {
+                const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
                     cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                     return .@"error";
                 };
                 if (!matched) continue;
             }
-            const line = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+            const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };
@@ -69,13 +69,13 @@ fn list_windows_session(s: *T.Session, fmt: []const u8, filter: ?[]const u8, ite
     for (winlinks) |wl| {
         const ctx = window_context(s, wl);
         if (filter) |expr| {
-            const matched = format_mod.format_filter_match(xm.allocator, expr, &ctx) orelse {
+            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };
             if (!matched) continue;
         }
-        const line = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+        const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

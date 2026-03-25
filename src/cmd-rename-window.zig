@@ -48,7 +48,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .window = target.w,
         .pane = target.wp,
     };
-    const new_name = format_mod.format_require_complete(xm.allocator, raw_name, &ctx) orelse {
+    const new_name = format_mod.format_require(xm.allocator, raw_name, &ctx) catch {
         cmdq.cmdq_error(item, "format expansion not supported yet", .{});
         return .@"error";
     };

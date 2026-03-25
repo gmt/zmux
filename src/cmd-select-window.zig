@@ -69,7 +69,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .window = wl.window,
             .pane = wl.window.active,
         };
-        const rendered = format_mod.format_require_complete(xm.allocator, args.get('F') orelse NEW_WINDOW_TEMPLATE, &ctx) orelse {
+        const rendered = format_mod.format_require(xm.allocator, args.get('F') orelse NEW_WINDOW_TEMPLATE, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

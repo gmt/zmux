@@ -35,14 +35,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     for (sorted) |s| {
         const ctx = session_context(s);
         if (filter) |expr| {
-            const matched = format_mod.format_filter_match(xm.allocator, expr, &ctx) orelse {
+            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };
             if (!matched) continue;
         }
 
-        const output = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+        const output = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

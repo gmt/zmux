@@ -169,6 +169,11 @@ pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) vo
     w.active = wp;
 }
 
+pub fn window_set_name(w: *T.Window, name: []const u8) void {
+    xm.allocator.free(w.name);
+    w.name = xm.xstrdup(name);
+}
+
 pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32) void {
     _ = _xpixel;
     _ = _ypixel;

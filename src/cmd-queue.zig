@@ -130,7 +130,10 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
         }
 
         if (item.client) |c_ptr| {
-            if (c_ptr.flags & T.CLIENT_CONTROL == 0 or c_ptr.flags & T.CLIENT_EXIT != 0) {
+            const should_exit =
+                (c_ptr.flags & T.CLIENT_CONTROL == 0 and c_ptr.flags & T.CLIENT_ATTACHED == 0) or
+                (c_ptr.flags & T.CLIENT_EXIT != 0);
+            if (should_exit) {
                 if (c_ptr.peer) |peer| {
                     const retval: i32 = if (overall_retval == .@"error") 1 else 0;
                     _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));

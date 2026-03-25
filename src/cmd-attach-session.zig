@@ -32,12 +32,7 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     _ = read_only;
 
     if (cl) |c| {
-        server_client_mod.server_client_set_session(c, s);
-        // Send MSG_READY to tell the client it is now attached
-        if (c.peer) |peer| {
-            _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
-        }
-        c.flags |= T.CLIENT_ATTACHED;
+        server_client_mod.server_client_attach(c, s);
     }
     return .normal;
 }

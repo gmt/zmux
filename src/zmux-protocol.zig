@@ -23,7 +23,7 @@
 //! must stay in sync with the C header; bump PROTOCOL_VERSION when any wire
 //! struct changes.
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// IPC message types exchanged between client and server.
 pub const MsgType = enum(c_int) {
@@ -71,6 +71,8 @@ pub const MsgType = enum(c_int) {
     write_ready,
     write_close,
     read_cancel,
+
+    stdin_data = 400,
 };
 
 // ── Wire payload structs (keep in sync with tmux-protocol.h) ──────────────
@@ -118,4 +120,11 @@ pub const MsgWriteReady = extern struct {
 
 pub const MsgWriteClose = extern struct {
     stream: c_int,
+};
+
+pub const MsgResize = extern struct {
+    sx: u32,
+    sy: u32,
+    xpixel: u32,
+    ypixel: u32,
 };

@@ -267,11 +267,15 @@ pub fn getversion() []const u8 {
 test {
     _ = @import("attributes.zig");
     _ = @import("colour.zig");
+    _ = @import("grid.zig");
     _ = @import("hyperlinks.zig");
+    _ = @import("input.zig");
     _ = @import("key-string.zig");
     _ = @import("names.zig");
     _ = @import("pane-io.zig");
     _ = @import("paste.zig");
+    _ = @import("screen-write.zig");
+    _ = @import("screen.zig");
     _ = @import("sort.zig");
     _ = @import("style.zig");
     _ = @import("utf8.zig");

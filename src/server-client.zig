@@ -32,6 +32,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
 const sess_mod = @import("session.zig");
+const grid_mod = @import("grid.zig");
 const c = @import("c.zig");
 
 var next_client_id: u32 = 0;
@@ -342,13 +343,8 @@ fn render_attached_client(cl: *T.Client, wp: *T.WindowPane) ![]u8 {
     try out.appendSlice(xm.allocator, "\x1b[H\x1b[2J");
 
     for (0..sy) |row| {
-        const line = wp.base.grid.linedata[row];
         for (0..sx) |col| {
-            const ch: u8 = if (col < line.celldata.len and col < line.cellused)
-                line.celldata[col].offset_or_data.data.data
-            else
-                ' ';
-            try out.append(xm.allocator, if (ch == 0) ' ' else ch);
+            try out.append(xm.allocator, grid_mod.ascii_at(wp.base.grid, @intCast(row), @intCast(col)));
         }
         if (row + 1 < sy) try out.append(xm.allocator, '\n');
     }

@@ -269,4 +269,6 @@ test {
     _ = @import("names.zig");
     _ = @import("paste.zig");
     _ = @import("sort.zig");
+    _ = @import("style.zig");
+    _ = @import("utf8.zig");
 }

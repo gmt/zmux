@@ -25,6 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const colour_mod = @import("colour.zig");
+const style_mod = @import("style.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -95,6 +96,7 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
         .base = T.Screen{ .grid = grid },
     };
     colour_mod.colour_palette_init(&wp.palette);
+    style_mod.style_set_scrollbar_style_from_option(&wp.scrollbar_style, wp.options);
     next_window_pane_id += 1;
     all_window_panes.put(wp.id, wp) catch unreachable;
     return wp;

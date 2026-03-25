@@ -59,6 +59,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "select-window",
     .alias = "selectw",
+    .usage = "[-lnpT] [-t target-window]",
     .template = "lnpTt:",
     .lower = 0,
     .upper = 0,
@@ -69,6 +70,7 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub const entry_neww: cmd_mod.CmdEntry = .{
     .name = "new-window",
     .alias = "neww",
+    .usage = "[-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-session] [shell-command]",
     .template = "abc:dF:kn:St:P",
     .lower = 0,
     .upper = -1,

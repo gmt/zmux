@@ -15,6 +15,7 @@ fn exec(_cmd: *cmd_mod.Cmd, _item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "start-server",
     .alias = "start",
+    .usage = "",
     .template = "",
     .lower = 0,
     .upper = 0,

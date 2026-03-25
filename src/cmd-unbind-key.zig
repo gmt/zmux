@@ -78,6 +78,7 @@ fn exec_unbind_key(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "unbind-key",
     .alias = "unbind",
+    .usage = "[-anq] [-T key-table] key",
     .template = "anqT:",
     .lower = 0,
     .upper = 1,

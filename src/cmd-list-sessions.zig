@@ -57,6 +57,7 @@ fn replace_placeholder(src: []u8, key: []const u8, val: []const u8) []u8 {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-sessions",
     .alias = "ls",
+    .usage = "[-r] [-F format] [-f filter] [-O order]",
     .template = "F:O:r",
     .lower = 0,
     .upper = 0,

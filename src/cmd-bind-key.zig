@@ -74,6 +74,7 @@ fn argv_tail(args: *const @import("arguments.zig").Arguments, start: usize) []co
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "bind-key",
     .alias = "bind",
+    .usage = "[-nr] [-T key-table] [-N note] key [command [arguments]]",
     .template = "nrN:T:",
     .lower = 1,
     .upper = -1,

@@ -85,6 +85,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "display-message",
     .alias = "display",
+    .usage = "[-aCIlNpv] [-c target-client] [-d delay] [-F format] [-t target-pane] [message]",
     .template = "ac:d:F:INpPRt:v",
     .lower = 0,
     .upper = 1,

@@ -54,6 +54,7 @@ fn list_windows_session(s: *T.Session, fmt: []const u8, item: *cmdq.CmdqItem, so
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-windows",
     .alias = "lsw",
+    .usage = "[-ar] [-F format] [-f filter] [-O order] [-t target-session]",
     .template = "aF:O:rt:",
     .lower = 0,
     .upper = 0,

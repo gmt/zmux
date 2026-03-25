@@ -58,6 +58,7 @@ fn exec_detach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "attach-session",
     .alias = "attach",
+    .usage = "[-dErx] [-c working-directory] [-f flags] [-t target-session]",
     .template = "c:dEf:rt:",
     .lower = 0,
     .upper = 0,
@@ -68,6 +69,7 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub const entry_detach: cmd_mod.CmdEntry = .{
     .name = "detach-client",
     .alias = "detach",
+    .usage = "[-aP] [-E shell-command] [-s target-session] [-t target-client]",
     .template = "aE:Ps:t:",
     .lower = 0,
     .upper = 0,

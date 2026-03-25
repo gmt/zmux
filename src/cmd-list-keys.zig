@@ -300,6 +300,7 @@ fn less_than_u8(_: void, a: u8, b: u8) bool {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-keys",
     .alias = "lsk",
+    .usage = "[-1aNr] [-F format] [-O order] [-P prefix-string] [-T key-table] [key]",
     .template = "1aF:NO:P:rT:",
     .lower = 0,
     .upper = 1,

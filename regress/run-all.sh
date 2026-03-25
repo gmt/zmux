@@ -140,6 +140,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/command-order.sh" \
         "$SCRIPT_DIR/attach-detach-client.sh" \
         "$SCRIPT_DIR/list-and-display.sh" \
+        "$SCRIPT_DIR/formatter-smoke.sh" \
         "$SCRIPT_DIR/kill-server-cleanup.sh" \
     ; do
         [ -f "$f" ] && run_sh_test "$(basename "$f" .sh)" "$bin" "$f"

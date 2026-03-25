@@ -185,9 +185,7 @@ pub fn winlink_find_by_window(wwl: *std.AutoHashMap(i32, T.Winlink), w: *T.Windo
 pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.Winlink {
     _ = cause;
     const actual_idx = if (idx == -1) blk: {
-        var i: i32 = 0;
-        while (s.windows.contains(i)) i += 1;
-        break :blk i;
+        break :blk session_next_index(s);
     } else idx;
 
     const wl = T.Winlink{ .idx = actual_idx, .session = s, .window = w };
@@ -214,6 +212,66 @@ pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) ?T.Winlin
 pub fn session_has_window(s: *T.Session, w: *T.Window) bool {
     return winlink_find_by_window(&s.windows, w) != null;
 }
+
+pub fn session_window_link_count(w: *T.Window) u32 {
+    var count: u32 = 0;
+    var sit = sessions.valueIterator();
+    while (sit.next()) |s| {
+        var wit = s.*.windows.valueIterator();
+        while (wit.next()) |wl| {
+            if (wl.window == w) count += 1;
+        }
+    }
+    return count;
+}
+
+pub fn session_next_index(s: *T.Session) i32 {
+    var idx: i32 = @intCast(opts.options_get_number(s.options, "base-index"));
+    while (s.windows.contains(idx)) idx += 1;
+    return idx;
+}
+
+pub fn session_renumber_windows(s: *T.Session) void {
+    const RenumberEntry = struct {
+        old_idx: i32,
+        current: bool,
+        wl: T.Winlink,
+    };
+
+    const old_current_idx = if (s.curw) |wl| wl.idx else -1;
+    var entries: std.ArrayList(RenumberEntry) = .{};
+    defer entries.deinit(xm.allocator);
+
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        entries.append(xm.allocator, .{
+            .old_idx = wl.idx,
+            .current = wl.idx == old_current_idx,
+            .wl = wl.*,
+        }) catch unreachable;
+    }
+    std.sort.block(RenumberEntry, entries.items, {}, struct {
+        fn less(_: void, a: RenumberEntry, b: RenumberEntry) bool {
+            return a.old_idx < b.old_idx;
+        }
+    }.less);
+
+    var new_windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator);
+    var next_idx: i32 = @intCast(opts.options_get_number(s.options, "base-index"));
+    var new_current_idx: ?i32 = null;
+    for (entries.items) |entry| {
+        var wl = entry.wl;
+        wl.idx = next_idx;
+        new_windows.put(next_idx, wl) catch unreachable;
+        if (entry.current) new_current_idx = next_idx;
+        next_idx += 1;
+    }
+
+    s.windows.deinit();
+    s.windows = new_windows;
+    s.curw = if (new_current_idx) |idx| s.windows.getPtr(idx) else session_first_winlink(s);
+}
+
 
 pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {
     var best: ?*T.Winlink = null;

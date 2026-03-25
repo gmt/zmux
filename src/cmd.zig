@@ -91,6 +91,8 @@ const cmd_rename_window = @import("cmd-rename-window.zig");
 const cmd_rename_session = @import("cmd-rename-session.zig");
 const cmd_kill_window = @import("cmd-kill-window.zig");
 const cmd_kill_pane = @import("cmd-kill-pane.zig");
+const cmd_unlink_window = @import("cmd-unlink-window.zig");
+const cmd_move_window = @import("cmd-move-window.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -125,6 +127,9 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_rename_session.entry,
     &cmd_kill_window.entry,
     &cmd_kill_pane.entry,
+    &cmd_unlink_window.entry,
+    &cmd_move_window.entry_link,
+    &cmd_move_window.entry_move,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

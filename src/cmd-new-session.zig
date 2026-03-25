@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
@@ -200,10 +201,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .window = if (wl) |created_wl| created_wl.window else null,
             .pane = print_wp,
         };
-        const expanded = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const expanded = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
         defer xm.allocator.free(expanded);
         cmdq.cmdq_print(item, "{s}", .{expanded});
     }

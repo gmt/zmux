@@ -9,6 +9,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
@@ -38,16 +39,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         for (winlinks) |wl| {
             const ctx = window_context(wl.session, wl);
             if (filter) |expr| {
-                const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
-                    cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                    return .@"error";
-                };
+                const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";
                 if (!matched) continue;
             }
-            const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
-                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                return .@"error";
-            };
+            const line = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
             defer xm.allocator.free(line);
             cmdq.cmdq_print(item, "{s}", .{line});
         }
@@ -69,16 +64,10 @@ fn list_windows_session(s: *T.Session, fmt: []const u8, filter: ?[]const u8, ite
     for (winlinks) |wl| {
         const ctx = window_context(s, wl);
         if (filter) |expr| {
-            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
-                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                return .@"error";
-            };
+            const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";
             if (!matched) continue;
         }
-        const line = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
@@ -98,7 +87,7 @@ pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-windows",
     .alias = "lsw",
     .usage = "[-ar] [-F format] [-f filter] [-O order] [-t target-session]",
-    .template = "aF:O:rt:",
+    .template = "aF:O:f:rt:",
     .lower = 0,
     .upper = 0,
     .flags = 0,

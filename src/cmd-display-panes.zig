@@ -21,12 +21,12 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
-const cmd_display = @import("cmd-display-message.zig");
 const win = @import("window.zig");
 
-const DEFAULT_TEMPLATE = "#{pane_index}: #{pane_width}x#{pane_height} pid=#{pane_pid}#{pane_title}";
+const DEFAULT_TEMPLATE = "#{pane_index}: #{pane_width}x#{pane_height} pid=#{pane_pid}#{?pane_active, [active],}#{?pane_title, #{pane_title},}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -52,52 +52,47 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const template = args.value_at(0) orelse DEFAULT_TEMPLATE;
 
     for (w.panes.items, 0..) |wp, idx| {
-        const line = render_pane_line(template, args.value_at(0) != null, s, wl, wp, idx) orelse {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = require_pane_line(item, template, s, wl, wp, idx) orelse return .@"error";
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
     return .normal;
 }
 
+fn require_pane_line(item: *cmdq.CmdqItem, template: []const u8, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane, pane_index: usize) ?[]u8 {
+    _ = pane_index;
+    const state = T.CmdFindState{
+        .s = s,
+        .wl = wl,
+        .w = wl.window,
+        .wp = wp,
+        .idx = wl.idx,
+    };
+    const ctx = cmd_format.target_context(&state, null);
+    return cmd_format.require(item, template, &ctx);
+}
+
 fn render_pane_line(
     template: []const u8,
-    custom_template: bool,
     s: *T.Session,
     wl: *T.Winlink,
     wp: *T.WindowPane,
     pane_index: usize,
 ) ?[]u8 {
-    if (custom_template) {
-        var state = T.CmdFindState{
-            .s = s,
-            .wl = wl,
-            .w = wl.window,
-            .wp = wp,
-            .idx = wl.idx,
-        };
-        return cmd_display.require_format(xm.allocator, template, &state, null);
-    }
+    _ = pane_index;
+    const state = T.CmdFindState{
+        .s = s,
+        .wl = wl,
+        .w = wl.window,
+        .wp = wp,
+        .idx = wl.idx,
+    };
+    const ctx = cmd_format.target_context(&state, null);
+    return formatRequireForTests(template, &ctx);
+}
 
-    if (wp.screen.title) |title| {
-        return xm.xasprintf("{d}: {d}x{d} pid={d} {s}{s}", .{
-            pane_index,
-            wp.sx,
-            wp.sy,
-            wp.pid,
-            if (wl.window.active == wp) "[active] " else "",
-            title,
-        });
-    }
-    return xm.xasprintf("{d}: {d}x{d} pid={d}{s}", .{
-        pane_index,
-        wp.sx,
-        wp.sy,
-        wp.pid,
-        if (wl.window.active == wp) " [active]" else "",
-    });
+fn formatRequireForTests(template: []const u8, ctx: *const @import("format.zig").FormatContext) ?[]u8 {
+    return @import("format.zig").format_require(xm.allocator, template, ctx) catch null;
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -146,7 +141,7 @@ test "display-panes default rendering summarizes pane state" {
 
     wl.window.active.?.screen.title = xm.xstrdup("shell");
 
-    const line = render_pane_line(DEFAULT_TEMPLATE, false, s, wl, wl.window.active.?, 0).?;
+    const line = render_pane_line(DEFAULT_TEMPLATE, s, wl, wl.window.active.?, 0).?;
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("0: 80x24 pid=-1 [active] shell", line);
 }
@@ -182,7 +177,7 @@ test "display-panes template rendering uses pane placeholders" {
     s.curw = wl;
     wl.window.active.?.screen.title = xm.xstrdup("logs");
 
-    const rendered = render_pane_line("#{pane_index}:#{pane_width}x#{pane_height}:#{pane_title}", true, s, wl, wl.window.active.?, 0).?;
+    const rendered = render_pane_line("#{pane_index}:#{pane_width}x#{pane_height}:#{pane_title}", s, wl, wl.window.active.?, 0).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("0:80x24:logs", rendered);
 }

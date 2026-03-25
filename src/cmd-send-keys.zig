@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const input_keys = @import("input-keys.zig");
@@ -117,10 +118,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 fn expand_values(args: *const @import("arguments.zig").Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
     const values = xm.allocator.alloc([]u8, args.count()) catch unreachable;
     for (0..args.count()) |idx| {
-        values[idx] = format_mod.format_require(xm.allocator, args.value_at(idx).?, ctx) catch {
+        values[idx] = cmd_format.require(item, args.value_at(idx).?, ctx) orelse {
             for (values[0..idx]) |expanded| xm.allocator.free(expanded);
             xm.allocator.free(values);
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return null;
         };
     }

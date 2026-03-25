@@ -29,6 +29,7 @@ pub fn tty_draw_invalidate(cache: *T.ClientPaneCache) void {
     cache.sy = 0;
     cache.cursor_x = 0;
     cache.cursor_y = 0;
+    cache.cursor_visible = true;
     cache.valid = false;
 }
 
@@ -46,6 +47,7 @@ pub fn tty_draw_pane(
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
     const screen = screen_mod.screen_current(wp);
+    var update_started = false;
 
     const full_redraw =
         !cache.valid or
@@ -54,7 +56,7 @@ pub fn tty_draw_pane(
         cache.sy != sy;
 
     if (full_redraw) {
-        try out.appendSlice(xm.allocator, "\x1b[?25l");
+        try begin_update(&out, &update_started);
         try out.appendSlice(xm.allocator, "\x1b[H\x1b[2J");
         free_rows(cache);
         cache.pane_id = wp.id;
@@ -79,7 +81,7 @@ pub fn tty_draw_pane(
         defer xm.allocator.free(rendered);
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
-            if (!full_redraw and out.items.len == 0) try out.appendSlice(xm.allocator, "\x1b[?25l");
+            try begin_update(&out, &update_started);
             const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};1H", .{row_idx + 1});
             defer xm.allocator.free(move);
             try out.appendSlice(xm.allocator, move);
@@ -93,17 +95,30 @@ pub fn tty_draw_pane(
 
     const cursor_y = @min(screen.cy, sy - 1);
     const cursor_x = @min(screen.cx, sx - 1);
-    if (full_redraw or cache.cursor_x != cursor_x or cache.cursor_y != cursor_y) {
-        if (!full_redraw and out.items.len == 0) try out.appendSlice(xm.allocator, "\x1b[?25l");
+    const cursor_changed = full_redraw or
+        cache.cursor_x != cursor_x or
+        cache.cursor_y != cursor_y or
+        cache.cursor_visible != screen.cursor_visible;
+    if (cursor_changed) {
+        try begin_update(&out, &update_started);
+    }
+    if (screen.cursor_visible and (full_redraw or cache.cursor_x != cursor_x or cache.cursor_y != cursor_y or !cache.cursor_visible)) {
         const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ cursor_y + 1, cursor_x + 1 });
         defer xm.allocator.free(cursor);
         try out.appendSlice(xm.allocator, cursor);
-        cache.cursor_x = cursor_x;
-        cache.cursor_y = cursor_y;
     }
+    cache.cursor_x = cursor_x;
+    cache.cursor_y = cursor_y;
+    cache.cursor_visible = screen.cursor_visible;
 
-    if (out.items.len != 0) try out.appendSlice(xm.allocator, "\x1b[?25h");
+    if (update_started and screen.cursor_visible) try out.appendSlice(xm.allocator, "\x1b[?25h");
     return out.toOwnedSlice(xm.allocator);
+}
+
+fn begin_update(out: *std.ArrayList(u8), started: *bool) !void {
+    if (started.*) return;
+    try out.appendSlice(xm.allocator, "\x1b[?25l");
+    started.* = true;
 }
 
 fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
@@ -260,6 +275,43 @@ test "tty_draw_pane performs full redraw then row diff" {
     try std.testing.expect(std.mem.indexOf(u8, third, "\x1b[2;1H") != null);
     try std.testing.expect(std.mem.indexOf(u8, third, "Z") != null);
     try std.testing.expect(std.mem.indexOf(u8, third, "\x1b[1;1H") == null);
+}
+
+test "tty_draw_pane respects hidden cursor state" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+    pane_io.pane_io_feed(wp, "ab");
+    wp.base.cursor_visible = false;
+
+    var cache = T.ClientPaneCache{};
+    defer tty_draw_free(&cache);
+
+    const draw = try tty_draw_pane(&cache, wp, 4, 2);
+    defer xm.allocator.free(draw);
+    try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[?25l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[?25h") == null);
 }
 
 test "tty_draw_invalidate forces full redraw again" {

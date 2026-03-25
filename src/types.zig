@@ -823,6 +823,7 @@ pub const ClientPaneCache = struct {
     rows: std.ArrayList([]u8) = .{},
     cursor_x: u32 = 0,
     cursor_y: u32 = 0,
+    cursor_visible: bool = true,
     valid: bool = false,
 };
 

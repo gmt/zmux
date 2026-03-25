@@ -28,6 +28,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
+const colour_mod = @import("colour.zig");
 
 /// Global option tables (see options-table.zig for entries).
 /// Set at startup before any session is created.
@@ -63,6 +64,24 @@ fn free_value(v: *T.OptionsValue) void {
         },
         else => {},
     }
+}
+
+fn entry_name_owned(oo: *T.Options, name: []const u8) ?[]u8 {
+    var it = oo.entries.keyIterator();
+    while (it.next()) |key| {
+        if (std.mem.eql(u8, key.*, name)) return key.*;
+    }
+    return null;
+}
+
+fn put_value(oo: *T.Options, name: []const u8, value: T.OptionsValue) void {
+    if (oo.entries.getPtr(name)) |existing| {
+        free_value(existing);
+        existing.* = value;
+        return;
+    }
+    const owned_name = xm.xstrdup(name);
+    oo.entries.put(owned_name, value) catch unreachable;
 }
 
 // ── Lookup ────────────────────────────────────────────────────────────────
@@ -115,31 +134,237 @@ pub fn options_get_style_string(oo: *T.Options, name: []const u8) ?[]const u8 {
 
 /// Set a numeric option.
 pub fn options_set_number(oo: *T.Options, name: []const u8, value: i64) void {
-    const owned_name = xm.xstrdup(name);
-    oo.entries.put(owned_name, .{ .number = value }) catch unreachable;
+    put_value(oo, name, .{ .number = value });
 }
 
 /// Set a boolean option.
 pub fn options_set_bool(oo: *T.Options, name: []const u8, value: bool) void {
-    const owned_name = xm.xstrdup(name);
-    oo.entries.put(owned_name, .{ .@"bool" = value }) catch unreachable;
+    put_value(oo, name, .{ .@"bool" = value });
 }
 
 /// Set a string option (takes ownership of a copy of value).
 pub fn options_set_string(oo: *T.Options, comptime _: bool, name: []const u8, value: []const u8) void {
-    if (oo.entries.getPtr(name)) |existing| {
-        free_value(existing);
-        existing.* = .{ .string = xm.xstrdup(value) };
-    } else {
-        const owned_name = xm.xstrdup(name);
-        oo.entries.put(owned_name, .{ .string = xm.xstrdup(value) }) catch unreachable;
-    }
+    put_value(oo, name, .{ .string = xm.xstrdup(value) });
 }
 
 /// Set a colour option.
 pub fn options_set_colour(oo: *T.Options, name: []const u8, value: i32) void {
-    const owned_name = xm.xstrdup(name);
-    oo.entries.put(owned_name, .{ .colour = value }) catch unreachable;
+    put_value(oo, name, .{ .colour = value });
+}
+
+pub fn options_remove(oo: *T.Options, name: []const u8) void {
+    if (oo.entries.fetchRemove(name)) |kv| {
+        xm.allocator.free(kv.key);
+        var value = kv.value;
+        free_value(&value);
+    }
+}
+
+pub fn options_table_entry(name: []const u8) ?*const T.OptionsTableEntry {
+    for (table.options_table) |*oe| {
+        if (std.mem.eql(u8, oe.name, name)) return oe;
+    }
+    return null;
+}
+
+pub fn options_scope_has(scope: T.OptionsScope, oe: *const T.OptionsTableEntry) bool {
+    return (scope.server and oe.scope.server) or
+        (scope.session and oe.scope.session) or
+        (scope.window and oe.scope.window) or
+        (scope.pane and oe.scope.pane);
+}
+
+pub fn options_clone_array(value: []const []const u8) T.OptionsValue {
+    var arr: std.ArrayList([]u8) = .{};
+    for (value) |item| arr.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
+    return .{ .array = arr };
+}
+
+pub fn options_set_array(oo: *T.Options, name: []const u8, items: []const []const u8) void {
+    put_value(oo, name, options_clone_array(items));
+}
+
+pub fn options_append_array(oo: *T.Options, name: []const u8, item: []const u8) void {
+    if (oo.entries.getPtr(name)) |existing| {
+        switch (existing.*) {
+            .array => |*arr| {
+                arr.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
+                return;
+            },
+            else => {},
+        }
+    }
+
+    if (options_get(oo, name)) |effective| {
+        switch (effective.*) {
+            .array => |arr| {
+                var copy: std.ArrayList([]u8) = .{};
+                for (arr.items) |existing_item| copy.append(xm.allocator, xm.xstrdup(existing_item)) catch unreachable;
+                copy.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
+                put_value(oo, name, .{ .array = copy });
+                return;
+            },
+            else => {},
+        }
+    }
+
+    options_set_array(oo, name, &.{item});
+}
+
+pub fn options_parse_number(value: []const u8) ?i64 {
+    return std.fmt.parseInt(i64, value, 10) catch null;
+}
+
+pub fn options_parse_boolish(value: ?[]const u8) ?bool {
+    const raw = value orelse return true;
+    if (std.ascii.eqlIgnoreCase(raw, "on") or
+        std.ascii.eqlIgnoreCase(raw, "yes") or
+        std.ascii.eqlIgnoreCase(raw, "true") or
+        std.mem.eql(u8, raw, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "off") or
+        std.ascii.eqlIgnoreCase(raw, "no") or
+        std.ascii.eqlIgnoreCase(raw, "false") or
+        std.mem.eql(u8, raw, "0")) return false;
+    return null;
+}
+
+pub fn options_choice_index(oe: *const T.OptionsTableEntry, value: []const u8) ?u32 {
+    if (oe.choices) |choices| {
+        for (choices, 0..) |choice, idx| {
+            if (std.ascii.eqlIgnoreCase(choice, value)) return @intCast(idx);
+        }
+    }
+    return if (options_parse_number(value)) |parsed|
+        if (parsed >= 0) @intCast(parsed) else null
+    else
+        null;
+}
+
+pub fn options_set_from_string(
+    oo: *T.Options,
+    oe: ?*const T.OptionsTableEntry,
+    name: []const u8,
+    value: ?[]const u8,
+    append: bool,
+    cause: *?[]u8,
+) bool {
+    if (oe == null) {
+        if (value == null) {
+            cause.* = xm.xstrdup("empty value");
+            return false;
+        }
+        if (append) {
+            const current = options_get_string(oo, name);
+            const combined = xm.xasprintf("{s}{s}", .{ current, value.? });
+            defer xm.allocator.free(combined);
+            options_set_string(oo, false, name, combined);
+        } else {
+            options_set_string(oo, false, name, value.?);
+        }
+        return true;
+    }
+
+    switch (oe.?.@"type") {
+        .string, .style => {
+            if (value == null) {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            }
+            if (append) {
+                const current = options_get_string(oo, name);
+                const combined = xm.xasprintf("{s}{s}", .{ current, value.? });
+                defer xm.allocator.free(combined);
+                options_set_string(oo, false, name, combined);
+            } else {
+                options_set_string(oo, false, name, value.?);
+            }
+        },
+        .number => {
+            const parsed = options_parse_number(value orelse "") orelse {
+                cause.* = xm.xasprintf("invalid number: {s}", .{value orelse ""});
+                return false;
+            };
+            options_set_number(oo, name, parsed);
+        },
+        .flag, .@"bool" => {
+            const parsed = options_parse_boolish(value) orelse {
+                cause.* = xm.xasprintf("invalid flag value: {s}", .{value orelse ""});
+                return false;
+            };
+            options_set_number(oo, name, if (parsed) 1 else 0);
+        },
+        .choice => {
+            const idx = options_choice_index(oe.?, value orelse "") orelse {
+                cause.* = xm.xasprintf("invalid choice: {s}", .{value orelse ""});
+                return false;
+            };
+            if (oe.?.choices) |choices| {
+                if (idx >= choices.len) {
+                    cause.* = xm.xasprintf("invalid choice: {s}", .{value orelse ""});
+                    return false;
+                }
+            }
+            options_set_number(oo, name, idx);
+        },
+        .colour => {
+            const parsed = colour_mod.colour_fromstring(value orelse "");
+            if (parsed == -1) {
+                cause.* = xm.xasprintf("invalid colour: {s}", .{value orelse ""});
+                return false;
+            }
+            options_set_colour(oo, name, parsed);
+        },
+        .array => {
+            if (value == null) {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            }
+            if (append) {
+                options_append_array(oo, name, value.?);
+            } else {
+                options_set_array(oo, name, &.{value.?});
+            }
+        },
+        .command => {
+            cause.* = xm.xstrdup("command options not supported yet");
+            return false;
+        },
+    }
+    return true;
+}
+
+pub fn options_value_to_string(_: []const u8, value: *const T.OptionsValue, oe: ?*const T.OptionsTableEntry) []u8 {
+    return switch (value.*) {
+        .string => |s| xm.xstrdup(s),
+        .number => |n| if (oe) |entry|
+            switch (entry.@"type") {
+                .choice => if (entry.choices) |choices|
+                    if (n >= 0 and @as(usize, @intCast(n)) < choices.len) xm.xstrdup(choices[@intCast(n)]) else xm.xasprintf("{d}", .{n})
+                else
+                    xm.xasprintf("{d}", .{n}),
+                .flag, .@"bool" => xm.xstrdup(if (n != 0) "on" else "off"),
+                else => xm.xasprintf("{d}", .{n}),
+            }
+        else
+            xm.xasprintf("{d}", .{n}),
+        .@"bool" => |b| xm.xstrdup(if (b) "on" else "off"),
+        .choice => |idx| if (oe) |entry|
+            if (entry.choices) |choices|
+                if (idx < choices.len) xm.xstrdup(choices[idx]) else xm.xasprintf("{d}", .{idx})
+            else
+                xm.xasprintf("{d}", .{idx})
+        else
+            xm.xasprintf("{d}", .{idx}),
+        .colour => |colour| xm.xstrdup(colour_mod.colour_tostring(colour)),
+        .style => |_| xm.xstrdup("default"),
+        .flag => |b| xm.xstrdup(if (b) "on" else "off"),
+        .array => |arr| blk: {
+            if (arr.items.len == 0) break :blk xm.xstrdup("");
+            const joined = std.mem.join(xm.allocator, ",", arr.items) catch unreachable;
+            break :blk joined;
+        },
+        .command => xm.xstrdup(""),
+    };
 }
 
 // ── Default initialisation (from options table) ───────────────────────────

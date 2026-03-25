@@ -255,11 +255,12 @@ pub fn server_start(
     }
 
     // Create the initial client connection (fd from the fork socketpair)
-    if (flags & T.CLIENT_NOFORK == 0) {
-        _ = server_client_mod.server_client_create(fd);
-    } else {
+    const startup_client = if (flags & T.CLIENT_NOFORK == 0)
+        server_client_mod.server_client_create(fd)
+    else blk: {
         opts.options_set_number(opts.global_options, "exit-empty", 0);
-    }
+        break :blk null;
+    };
 
     if (lockfd >= 0) {
         if (lockfile) |lf| {
@@ -272,7 +273,7 @@ pub fn server_start(
     server_add_accept(0);
 
     // Load config files (queued via cmdq, will run in the first loop iteration)
-    cfg_mod.cfg_load();
+    cfg_mod.cfg_load(startup_client);
 
     proc_mod.proc_loop(server_proc.?, server_loop);
 

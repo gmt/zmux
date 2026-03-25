@@ -49,6 +49,14 @@ pub fn expand_format(alloc: std.mem.Allocator, fmt: []const u8, target: *const T
         if (target.wp) |wp| break :blk std.fmt.allocPrint(alloc, "{d}", .{wp.pid}) catch unreachable;
         break :blk alloc.dupe(u8, "0") catch unreachable;
     });
+    result = subst(alloc, result, "#{pane_width}", blk: {
+        if (target.wp) |wp| break :blk std.fmt.allocPrint(alloc, "{d}", .{wp.sx}) catch unreachable;
+        break :blk alloc.dupe(u8, "0") catch unreachable;
+    });
+    result = subst(alloc, result, "#{pane_height}", blk: {
+        if (target.wp) |wp| break :blk std.fmt.allocPrint(alloc, "{d}", .{wp.sy}) catch unreachable;
+        break :blk alloc.dupe(u8, "0") catch unreachable;
+    });
     result = subst(alloc, result, "#{pane_index}", blk: {
         if (target.w) |w| {
             if (target.wp) |wp| {
@@ -58,6 +66,12 @@ pub fn expand_format(alloc: std.mem.Allocator, fmt: []const u8, target: *const T
             }
         }
         break :blk alloc.dupe(u8, "0") catch unreachable;
+    });
+    result = subst(alloc, result, "#{pane_title}", blk: {
+        if (target.wp) |wp| {
+            if (wp.screen.title) |title| break :blk alloc.dupe(u8, title) catch unreachable;
+        }
+        break :blk alloc.dupe(u8, "") catch unreachable;
     });
     result = subst(alloc, result, "#{window_name}", blk: {
         if (target.w) |w| break :blk alloc.dupe(u8, w.name) catch unreachable;

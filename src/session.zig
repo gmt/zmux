@@ -77,9 +77,8 @@ pub fn session_group_find(name: []const u8) ?*T.SessionGroup {
 pub fn session_group_contains(s: *T.Session) ?*T.SessionGroup {
     var it = session_groups.valueIterator();
     while (it.next()) |sg| {
-        var sit = sg.*.sessions.first;
-        while (sit) |node| : (sit = node.next) {
-            if (node.data == s) return sg.*;
+        for (sg.*.sessions.items) |member| {
+            if (member == s) return sg.*;
         }
     }
     return null;
@@ -108,6 +107,7 @@ pub fn session_create(
         .id = sid,
         .name = actual_name,
         .cwd = xm.xstrdup(cwd),
+        .created = std.time.timestamp(),
         .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
         .options = oo,
         .environ = environment,

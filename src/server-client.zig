@@ -32,7 +32,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
 const sess_mod = @import("session.zig");
-const grid_mod = @import("grid.zig");
+const tty_draw = @import("tty-draw.zig");
 const c = @import("c.zig");
 
 var next_client_id: u32 = 0;
@@ -48,6 +48,7 @@ pub fn server_client_create(fd: i32) *T.Client {
         .environ = env,
         .tty = .{ .client = cl },
         .status = .{ .screen = undefined },
+        .pane_cache = .{},
         .flags = 0,
     };
     next_client_id += 1;
@@ -73,6 +74,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
     cl.peer = null;
+    tty_draw.tty_draw_free(&cl.pane_cache);
     env_mod.environ_free(cl.environ);
     xm.allocator.destroy(cl);
 }
@@ -124,6 +126,7 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 
     if (cl.session) |s| {
         server_client_apply_session_size(cl, s);
+        tty_draw.tty_draw_invalidate(&cl.pane_cache);
         cl.flags |= T.CLIENT_REDRAWWINDOW;
     }
 }
@@ -280,6 +283,7 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     }
     cl.session = s;
     s.attached += 1;
+    tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);
 }
 
@@ -321,92 +325,42 @@ fn server_client_draw(cl: *T.Client) void {
     const s = cl.session orelse return;
     const wl = s.curw orelse return;
     const wp = wl.window.active orelse return;
-    const payload = render_attached_client(cl, wp) catch return;
+    const sx = if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx);
+    const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
+    if (sx == 0 or sy == 0) return;
+    const full_redraw =
+        !cl.pane_cache.valid or
+        cl.pane_cache.pane_id != wp.id or
+        cl.pane_cache.sx != sx or
+        cl.pane_cache.sy != sy;
+    const payload = tty_draw.tty_draw_pane(&cl.pane_cache, wp, sx, sy) catch return;
     defer xm.allocator.free(payload);
 
-    if (cl.peer) |peer| {
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(xm.allocator);
-        const stream: i32 = 1;
-        buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-        buf.appendSlice(xm.allocator, payload) catch unreachable;
-        _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
-    }
-}
-
-fn render_attached_client(cl: *T.Client, wp: *T.WindowPane) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(xm.allocator);
-
-    const sx: usize = @intCast(if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx));
-    const sy: usize = @intCast(if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy));
-    try out.appendSlice(xm.allocator, "\x1b[H\x1b[2J");
-
-    for (0..sy) |row| {
-        for (0..sx) |col| {
-            try out.append(xm.allocator, grid_mod.ascii_at(wp.base.grid, @intCast(row), @intCast(col)));
+    if (payload.len != 0) {
+        if (cl.peer) |peer| {
+            var buf: std.ArrayList(u8) = .{};
+            defer buf.deinit(xm.allocator);
+            const stream: i32 = 1;
+            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+            buf.appendSlice(xm.allocator, payload) catch unreachable;
+            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
         }
-        if (row + 1 < sy) try out.append(xm.allocator, '\n');
     }
-
-    const cursor_y = @min(wp.base.cy, @as(u32, @intCast(@max(sy, 1))) - 1) + 1;
-    const cursor_x = @min(wp.base.cx, @as(u32, @intCast(@max(sx, 1))) - 1) + 1;
-    const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ cursor_y, cursor_x });
-    defer xm.allocator.free(cursor);
-    try out.appendSlice(xm.allocator, cursor);
-
     const title = if (wp.screen.title) |pane_title| pane_title else wl_name(wp.window);
-    if (title.len != 0) {
-        const title_seq = try std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title});
+    if (full_redraw and title.len != 0) {
+        const title_seq = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
         defer xm.allocator.free(title_seq);
-        try out.appendSlice(xm.allocator, title_seq);
+        if (cl.peer) |peer| {
+            var title_buf: std.ArrayList(u8) = .{};
+            defer title_buf.deinit(xm.allocator);
+            const stream: i32 = 1;
+            title_buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+            title_buf.appendSlice(xm.allocator, title_seq) catch unreachable;
+            _ = proc_mod.proc_send(peer, .write, -1, title_buf.items.ptr, title_buf.items.len);
+        }
     }
-
-    return out.toOwnedSlice(xm.allocator);
 }
 
 fn wl_name(w: *T.Window) []const u8 {
     return w.name;
-}
-
-test "render_attached_client paints the grid and cursor position" {
-    const opts_mod = @import("options.zig");
-    const pane_io = @import("pane-io.zig");
-
-    opts_mod.global_w_options = opts_mod.options_create(null);
-    defer opts_mod.options_free(opts_mod.global_w_options);
-    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win_mod.window_init_globals(xm.allocator);
-
-    const w = win_mod.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win_mod.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(xm.allocator);
-        w.last_panes.deinit(xm.allocator);
-        opts_mod.options_free(w.options);
-        xm.allocator.free(w.name);
-        _ = win_mod.windows.remove(w.id);
-        xm.allocator.destroy(w);
-    }
-    const wp = win_mod.window_add_pane(w, null, 4, 2);
-    pane_io.pane_io_feed(wp, "ab");
-    wp.base.cx = 1;
-    wp.base.cy = 0;
-
-    const env = env_mod.environ_create();
-    defer env_mod.environ_free(env);
-    var cl = T.Client{
-        .environ = env,
-        .tty = undefined,
-        .status = .{ .screen = undefined },
-    };
-    cl.tty = .{ .client = &cl, .sx = 4, .sy = 2 };
-
-    const rendered = try render_attached_client(&cl, wp);
-    defer xm.allocator.free(rendered);
-    try std.testing.expect(std.mem.startsWith(u8, rendered, "\x1b[H\x1b[2Jab  \n    "));
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[1;2H") != null);
 }

@@ -814,6 +814,16 @@ pub const StatusLine = struct {
     style: GridCell = std.mem.zeroes(GridCell),
 };
 
+pub const ClientPaneCache = struct {
+    pane_id: ?u32 = null,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    rows: std.ArrayList([]u8) = .{},
+    cursor_x: u32 = 0,
+    cursor_y: u32 = 0,
+    valid: bool = false,
+};
+
 pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
@@ -837,6 +847,7 @@ pub const Client = struct {
 
     tty: Tty,
     status: StatusLine,
+    pane_cache: ClientPaneCache = .{},
 
     flags: u64 = 0,
     session: ?*Session = null,

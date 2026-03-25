@@ -37,9 +37,6 @@ const cfg_mod = @import("cfg.zig");
 const os_mod = @import("os/linux.zig");
 const c = @import("c.zig");
 
-// ── Global environ (set before options, needed by client.c) ───────────────
-pub var global_environ: *T.Environ = undefined;
-
 // ── Usage ────────────────────────────────────────────────────────────────
 
 fn usage(to_stderr: bool) void {
@@ -60,13 +57,13 @@ pub fn main() !void {
     _ = std.c.setlocale(std.c.LC.CTYPE, "en_US.UTF-8");
 
     // Build the global environment from the process environment
-    global_environ = env_mod.environ_create();
+    env_mod.global_environ = env_mod.environ_create();
     {
         const env_map = try std.process.getEnvMap(xm.allocator);
         defer @constCast(&env_map).deinit();
         var env_it = env_map.iterator();
         while (env_it.next()) |kv| {
-            env_mod.environ_set(global_environ, kv.key_ptr.*, 0, kv.value_ptr.*);
+            env_mod.environ_set(env_mod.global_environ, kv.key_ptr.*, 0, kv.value_ptr.*);
         }
     }
 
@@ -150,7 +147,7 @@ pub fn main() !void {
                         'c' => {}, // shell-command – TODO
                         'f' => {
                             if (!cfg_file_override) {
-                                cfg_mod.cfg_nfiles = 0;
+                                cfg_mod.cfg_reset_files();
                                 cfg_file_override = true;
                             }
                             cfg_mod.cfg_quiet = false;
@@ -201,6 +198,11 @@ pub fn main() !void {
     }
     server_mod.socket_path = path.?;
     if (label) |l| xm.allocator.free(l);
+
+    if (!cfg_file_override) {
+        cfg_mod.cfg_quiet = true;
+        cfg_mod.cfg_add_defaults();
+    }
 
     // UTF-8 detection
     if (std.posix.getenv("ZMUX")) |_| {

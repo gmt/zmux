@@ -122,6 +122,7 @@ test "list-commands rejects format for now" {
 test "cmd entries include list-commands metadata" {
     const entries = cmd_mod.cmd_entries();
     try std.testing.expect(entries.len > 0);
-    try std.testing.expectEqualStrings("list-commands", entries[entries.len - 1].name);
-    try std.testing.expectEqualStrings("[-F format] [command]", entries[entries.len - 1].usage);
+    const entry_ptr = cmd_mod.cmd_find_entry("list-commands").?;
+    try std.testing.expectEqualStrings("list-commands", entry_ptr.name);
+    try std.testing.expectEqualStrings("[-F format] [command]", entry_ptr.usage);
 }

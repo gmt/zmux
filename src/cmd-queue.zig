@@ -144,6 +144,27 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
     return count;
 }
 
+pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval {
+    defer cmd_mod.cmd_list_free(cmdlist);
+
+    var item = CmdqItem{ .client = cl, .cmdlist = cmdlist, .retval = 0 };
+    var cmd_node = cmdlist.head;
+    while (cmd_node) |cmd| {
+        cmd_node = cmd.next;
+        const result = cmd_mod.cmd_execute(cmd, &item);
+        switch (result) {
+            .normal => {},
+            .@"error" => return .@"error",
+            .wait => {
+                cmdq_write_client(cl, 2, "config command can't wait yet: {s}", .{cmd.entry.name});
+                return .@"error";
+            },
+            .stop => return .stop,
+        }
+    }
+    return .normal;
+}
+
 pub fn cmdq_get_name(item: *CmdqItem) []const u8 {
     if (item.cmd) |cmd| return cmd.entry.name;
     return "(cmdq)";

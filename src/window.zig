@@ -263,6 +263,26 @@ pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32)
     w.sy = sy;
 }
 
+pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {
+    const w = wp.window;
+    if (sx) |new_sx| {
+        const clamped = @max(@as(u32, 1), @min(new_sx, w.sx));
+        wp.sx = clamped;
+        if (w.panes.items.len == 1) {
+            w.sx = clamped;
+            w.manual_sx = clamped;
+        }
+    }
+    if (sy) |new_sy| {
+        const clamped = @max(@as(u32, 1), @min(new_sy, w.sy));
+        wp.sy = clamped;
+        if (w.panes.items.len == 1) {
+            w.sy = clamped;
+            w.manual_sy = clamped;
+        }
+    }
+}
+
 /// Push current zoom state.
 pub fn window_push_zoom(_w: *T.Window, _ignore: bool, _zoom: bool) bool {
     _ = _w;
@@ -388,4 +408,32 @@ test "window_set_active_pane tracks last pane history and detach prunes it" {
 
     try std.testing.expect(window_detach_pane(w, second));
     try std.testing.expect(window_get_last_pane(w) == null);
+}
+
+test "window_pane_resize clamps to window bounds and updates sole pane window size" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = window_add_pane(w, null, 80, 24);
+    window_pane_resize(wp, 120, 12);
+    try std.testing.expectEqual(@as(u32, 80), wp.sx);
+    try std.testing.expectEqual(@as(u32, 12), wp.sy);
+    try std.testing.expectEqual(@as(u32, 80), w.sx);
+    try std.testing.expectEqual(@as(u32, 12), w.sy);
 }

@@ -27,6 +27,7 @@ const cmd_find = @import("cmd-find.zig");
 const env_mod = @import("environ.zig");
 const spawn_mod = @import("spawn.zig");
 const server_fn = @import("server-fn.zig");
+const grid_mod = @import("grid.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -108,12 +109,11 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub fn pane_line_text(wp: *T.WindowPane, row: usize) []u8 {
     const gd = wp.base.grid;
     if (row >= gd.linedata.len) return xm.xstrdup("");
-    const line = gd.linedata[row];
-    var used = @min(line.cellused, @as(u32, @intCast(line.celldata.len)));
-    while (used > 0 and line.celldata[used - 1].offset_or_data.data.data == ' ') used -= 1;
+    var used = grid_mod.line_used(gd, @intCast(row));
+    while (used > 0 and grid_mod.ascii_at(gd, @intCast(row), used - 1) == ' ') used -= 1;
     const out = xm.allocator.alloc(u8, used) catch unreachable;
     for (0..used) |idx| {
-        out[idx] = line.celldata[idx].offset_or_data.data.data;
+        out[idx] = grid_mod.ascii_at(gd, @intCast(row), @intCast(idx));
     }
     return out;
 }

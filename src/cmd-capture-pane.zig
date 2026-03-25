@@ -24,6 +24,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const paste_mod = @import("paste.zig");
+const grid_mod = @import("grid.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -132,17 +133,11 @@ fn parse_bound(raw: ?[]const u8, sy: u32, is_start: bool, item: *cmdq.CmdqItem) 
 
 fn render_grid_line(gd: *T.Grid, row: u32, keep_spaces: bool, escape_sequences: bool) []u8 {
     if (row >= gd.linedata.len) return xm.xstrdup("");
-    const line = gd.linedata[row];
     const raw = xm.allocator.alloc(u8, gd.sx) catch unreachable;
     defer xm.allocator.free(raw);
 
     for (0..gd.sx) |idx| {
-        if (idx < line.cellused and idx < line.celldata.len) {
-            const ch = line.celldata[idx].offset_or_data.data.data;
-            raw[idx] = if (ch == 0) ' ' else ch;
-        } else {
-            raw[idx] = ' ';
-        }
+        raw[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
     }
 
     var used: usize = raw.len;

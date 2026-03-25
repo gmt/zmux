@@ -590,6 +590,7 @@ pub const WindowPane = struct {
     // Screen
     screen: *Screen,
     base: Screen,
+    input_pending: std.ArrayList(u8) = .{},
 
     // Colour palette
     palette: ColourPalette = .{},

@@ -27,6 +27,8 @@ const opts = @import("options.zig");
 const colour_mod = @import("colour.zig");
 const pane_io = @import("pane-io.zig");
 const style_mod = @import("style.zig");
+const grid_mod = @import("grid.zig");
+const screen_mod = @import("screen.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -80,9 +82,8 @@ pub fn window_add_pane(w: *T.Window, before: ?*T.WindowPane, sx: u32, sy: u32) *
 }
 
 fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
-    const grid = grid_create(sx, sy, 2000);
-    const screen_ptr = xm.allocator.create(T.Screen) catch unreachable;
-    screen_ptr.* = T.Screen{ .grid = grid };
+    const base_grid = grid_mod.grid_create(sx, sy, 2000);
+    const screen_ptr = screen_mod.screen_init(sx, sy, 2000);
 
     const wp = xm.allocator.create(T.WindowPane) catch unreachable;
     wp.* = T.WindowPane{
@@ -92,7 +93,8 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
         .sx = sx,
         .sy = sy,
         .screen = screen_ptr,
-        .base = T.Screen{ .grid = grid },
+        .base = T.Screen{ .grid = base_grid, .rlower = if (sy == 0) 0 else sy - 1 },
+        .input_pending = .{},
     };
     window_pane_options_changed(wp, null);
     next_window_pane_id += 1;
@@ -188,19 +190,15 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     }
     if (wp.shell) |shell| xm.allocator.free(shell);
     if (wp.cwd) |cwd| xm.allocator.free(cwd);
+    wp.input_pending.deinit(xm.allocator);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
-    const grid = wp.screen.grid;
-    for (grid.linedata) |line| {
-        if (line.celldata.len > 0) xm.allocator.free(line.celldata);
-        if (line.extddata.len > 0) xm.allocator.free(line.extddata);
-    }
     if (wp.screen.title) |title| xm.allocator.free(title);
     if (wp.screen.path) |path| xm.allocator.free(path);
     if (wp.screen.tabs) |tabs| xm.allocator.free(tabs);
-    xm.allocator.free(grid.linedata);
-    xm.allocator.destroy(grid);
+    if (wp.screen.grid != wp.base.grid) grid_mod.grid_free(wp.screen.grid);
     xm.allocator.destroy(wp.screen);
+    grid_mod.grid_free(wp.base.grid);
     xm.allocator.destroy(wp);
 }
 
@@ -367,8 +365,16 @@ pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {
 }
 
 pub fn window_pane_reset_contents(wp: *T.WindowPane) void {
-    reset_screen(wp.base.grid, &wp.base);
-    if (wp.screen.grid != wp.base.grid) reset_screen(wp.screen.grid, wp.screen);
+    grid_mod.grid_reset(wp.base.grid);
+    screen_mod.screen_reset(&wp.base);
+    if (wp.screen.grid != wp.base.grid) {
+        grid_mod.grid_reset(wp.screen.grid);
+        screen_mod.screen_reset(wp.screen);
+    } else {
+        wp.screen.cx = wp.base.cx;
+        wp.screen.cy = wp.base.cy;
+    }
+    wp.input_pending.clearRetainingCapacity();
 }
 
 /// Push current zoom state.
@@ -388,45 +394,6 @@ pub fn window_pop_zoom(_w: *T.Window) bool {
 pub fn window_redraw_active_switch(_w: *T.Window, _wp: *T.WindowPane) void {
     _ = _w;
     _ = _wp;
-}
-
-// ── Grid helpers (minimal – full grid.zig will be a separate port) ────────
-
-fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
-    const g = xm.allocator.create(T.Grid) catch unreachable;
-    const lines = xm.allocator.alloc(T.GridLine, sy) catch unreachable;
-    for (lines) |*l| l.* = .{};
-    g.* = .{
-        .sx = sx,
-        .sy = sy,
-        .hlimit = hlimit,
-        .linedata = lines,
-    };
-    return g;
-}
-
-fn reset_screen(grid: *T.Grid, screen: *T.Screen) void {
-    for (grid.linedata) |*line| {
-        if (line.celldata.len > 0) {
-            for (line.celldata) |*cell| {
-                cell.* = .{
-                    .offset_or_data = .{
-                        .data = .{
-                            .attr = 0,
-                            .fg = 0,
-                            .bg = 0,
-                            .data = ' ',
-                        },
-                    },
-                    .flags = 0,
-                };
-            }
-        }
-        line.cellused = 0;
-    }
-    grid.hsize = 0;
-    screen.cx = 0;
-    screen.cy = 0;
 }
 
 fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {

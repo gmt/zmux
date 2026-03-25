@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const c = @import("c.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
+const input_mod = @import("input.zig");
 
 pub fn pane_io_start(wp: *T.WindowPane) void {
     if (wp.fd < 0 or wp.event != null) return;
@@ -77,29 +78,7 @@ export fn pane_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
 
 pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
     pipe_bytes(wp, bytes);
-    for (bytes) |ch| {
-        switch (ch) {
-            '\r' => {
-                wp.base.cx = 0;
-                wp.screen.cx = 0;
-            },
-            '\n' => newline(wp),
-            0x08 => {
-                if (wp.base.cx > 0) {
-                    wp.base.cx -= 1;
-                    wp.screen.cx = wp.base.cx;
-                }
-            },
-            '\t' => {
-                const next_tab = (((wp.base.cx / 8) + 1) * 8);
-                while (wp.base.cx < next_tab and wp.base.cx < wp.base.grid.sx) write_byte(wp, ' ');
-            },
-            else => {
-                if (ch < ' ' and ch != 0x1b) continue;
-                write_byte(wp, ch);
-            },
-        }
-    }
+    input_mod.input_parse_screen(wp, bytes);
 }
 
 fn pipe_bytes(wp: *T.WindowPane, bytes: []const u8) void {
@@ -131,96 +110,10 @@ fn close_pipe(wp: *T.WindowPane) void {
     }
 }
 
-fn write_byte(wp: *T.WindowPane, ch: u8) void {
-    const gd = wp.base.grid;
-    if (gd.sx == 0 or gd.sy == 0) return;
-    if (wp.base.cx >= gd.sx) newline(wp);
-    ensure_line_capacity(gd, wp.base.cy);
-    const line = &gd.linedata[wp.base.cy];
-    line.celldata[wp.base.cx] = .{
-        .offset_or_data = .{
-            .data = .{
-                .attr = 0,
-                .fg = 0,
-                .bg = 0,
-                .data = ch,
-            },
-        },
-        .flags = 0,
-    };
-    if (line.cellused < wp.base.cx + 1) line.cellused = wp.base.cx + 1;
-    if (wp.base.cx + 1 < gd.sx) {
-        wp.base.cx += 1;
-        wp.screen.cx = wp.base.cx;
-    } else {
-        newline(wp);
-    }
-}
-
-fn newline(wp: *T.WindowPane) void {
-    const gd = wp.base.grid;
-    wp.base.cx = 0;
-    wp.screen.cx = 0;
-    if (wp.base.cy + 1 < gd.sy) {
-        wp.base.cy += 1;
-        wp.screen.cy = wp.base.cy;
-        return;
-    }
-
-    if (gd.linedata.len == 0) return;
-    clear_grid_line(&gd.linedata[0]);
-    const first = gd.linedata[0];
-    std.mem.copyForwards(T.GridLine, gd.linedata[0 .. gd.linedata.len - 1], gd.linedata[1..]);
-    gd.linedata[gd.linedata.len - 1] = first;
-    clear_grid_line(&gd.linedata[gd.linedata.len - 1]);
-    wp.base.cy = gd.sy - 1;
-    wp.screen.cy = wp.base.cy;
-}
-
-fn ensure_line_capacity(gd: *T.Grid, row: u32) void {
-    if (row >= gd.linedata.len) return;
-    const line = &gd.linedata[row];
-    if (line.celldata.len == gd.sx) return;
-    if (line.celldata.len > 0) xm.allocator.free(line.celldata);
-    line.celldata = xm.allocator.alloc(T.GridCellEntry, gd.sx) catch unreachable;
-    for (line.celldata) |*cell| {
-        cell.* = .{
-            .offset_or_data = .{
-                .data = .{
-                    .attr = 0,
-                    .fg = 0,
-                    .bg = 0,
-                    .data = ' ',
-                },
-            },
-            .flags = 0,
-        };
-    }
-    line.cellused = 0;
-}
-
-fn clear_grid_line(line: *T.GridLine) void {
-    if (line.celldata.len > 0) {
-        for (line.celldata) |*cell| {
-            cell.* = .{
-                .offset_or_data = .{
-                    .data = .{
-                        .attr = 0,
-                        .fg = 0,
-                        .bg = 0,
-                        .data = ' ',
-                    },
-                },
-                .flags = 0,
-            };
-        }
-    }
-    line.cellused = 0;
-}
-
 test "pane_io_feed writes printable bytes into the grid and advances cursor" {
     const opts = @import("options.zig");
     const win = @import("window.zig");
+    const grid = @import("grid.zig");
 
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
@@ -243,14 +136,15 @@ test "pane_io_feed writes printable bytes into the grid and advances cursor" {
 
     const wp = win.window_add_pane(w, null, 8, 3);
     pane_io_feed(wp, "abc");
-    try std.testing.expectEqual(@as(u8, 'a'), wp.base.grid.linedata[0].celldata[0].offset_or_data.data.data);
-    try std.testing.expectEqual(@as(u8, 'c'), wp.base.grid.linedata[0].celldata[2].offset_or_data.data.data);
+    try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'c'), grid.ascii_at(wp.base.grid, 0, 2));
     try std.testing.expectEqual(@as(u32, 3), wp.base.cx);
 }
 
 test "pane_io_feed handles newline and scrolls when reaching the bottom" {
     const opts = @import("options.zig");
     const win = @import("window.zig");
+    const grid = @import("grid.zig");
 
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
@@ -273,9 +167,9 @@ test "pane_io_feed handles newline and scrolls when reaching the bottom" {
 
     const wp = win.window_add_pane(w, null, 4, 2);
     pane_io_feed(wp, "one\ntwo\ntri");
-    try std.testing.expectEqual(@as(u8, 't'), wp.base.grid.linedata[0].celldata[0].offset_or_data.data.data);
-    try std.testing.expectEqual(@as(u8, 't'), wp.base.grid.linedata[1].celldata[0].offset_or_data.data.data);
-    try std.testing.expectEqual(@as(u8, 'r'), wp.base.grid.linedata[1].celldata[1].offset_or_data.data.data);
+    try std.testing.expectEqual(@as(u8, 't'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 't'), grid.ascii_at(wp.base.grid, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'r'), grid.ascii_at(wp.base.grid, 1, 1));
 }
 
 test "pane_io_feed mirrors raw bytes into pane pipe fd" {

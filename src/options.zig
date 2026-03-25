@@ -102,6 +102,15 @@ pub fn options_get_string(oo: *T.Options, name: []const u8) []const u8 {
     };
 }
 
+/// Get a raw style option string; returns null if absent or non-string.
+pub fn options_get_style_string(oo: *T.Options, name: []const u8) ?[]const u8 {
+    const v = options_get(oo, name) orelse return null;
+    return switch (v.*) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
 // ── Typed setters ─────────────────────────────────────────────────────────
 
 /// Set a numeric option.

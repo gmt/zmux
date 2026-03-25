@@ -57,8 +57,13 @@ pub fn attributes_tostring(attr: u16) []const u8 {
         writer.writeAll(entry.name) catch unreachable;
         first = false;
     }
+    if (attr & T.GRID_ATTR_NOATTR != 0) {
+        if (!first) writer.writeByte(',') catch unreachable;
+        writer.writeAll("noattr") catch unreachable;
+        first = false;
+    }
 
-    return stream.getWritten();
+    return if (first) "none" else stream.getWritten();
 }
 
 pub fn attributes_fromstring(str: []const u8) i32 {
@@ -104,6 +109,10 @@ test "attributes_tostring renders a comma-separated list" {
         "bright,italics,overline",
         attributes_tostring(T.GRID_ATTR_BRIGHT | T.GRID_ATTR_ITALICS | T.GRID_ATTR_OVERLINE),
     );
+}
+
+test "attributes_tostring includes noattr" {
+    try std.testing.expectEqualStrings("bright,noattr", attributes_tostring(T.GRID_ATTR_BRIGHT | T.GRID_ATTR_NOATTR));
 }
 
 test "attributes_fromstring parses aliases and delimiters" {

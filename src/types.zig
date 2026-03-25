@@ -45,6 +45,9 @@ pub const DEFAULT_YPIXEL: u32 = 32;
 pub const UTF8_SIZE: usize = 32;
 pub const TTY_NAME_MAX: usize = 64;
 pub const STATUS_LINES_LIMIT: u32 = 5;
+pub const PANE_SCROLLBARS_DEFAULT_PADDING: i32 = 0;
+pub const PANE_SCROLLBARS_DEFAULT_WIDTH: i32 = 1;
+pub const PANE_SCROLLBARS_CHARACTER: u8 = ' ';
 
 // ── Key codes ─────────────────────────────────────────────────────────────
 
@@ -161,6 +164,21 @@ pub const GridCell = extern struct {
     link: u32,
 };
 
+pub const grid_default_cell = GridCell{
+    .data = .{
+        .data = [_]u8{' '} ++ [_]u8{0} ** (UTF8_SIZE - 1),
+        .have = 0,
+        .size = 1,
+        .width = 1,
+    },
+    .attr = 0,
+    .flags = 0,
+    .fg = 8,
+    .bg = 8,
+    .us = 8,
+    .link = 0,
+};
+
 pub const GridExtdEntry = extern struct {
     data: utf8_char,
     attr: u16,
@@ -238,8 +256,15 @@ pub const StyleRangeType = enum {
     user,
 };
 
+pub const StyleDefaultType = enum {
+    base,
+    push,
+    pop,
+    set,
+};
+
 pub const Style = struct {
-    gc: GridCell = std.mem.zeroes(GridCell),
+    gc: GridCell = grid_default_cell,
     ignore: bool = false,
     fill: i32 = 8,
     @"align": StyleAlign = .default,
@@ -250,6 +275,7 @@ pub const Style = struct {
     width: i32 = -1,
     width_percentage: i32 = 0,
     pad: i32 = -1,
+    default_type: StyleDefaultType = .base,
 };
 
 // ── Screen ────────────────────────────────────────────────────────────────
@@ -367,6 +393,7 @@ pub const WindowPane = struct {
 
     // Colour palette
     palette: ColourPalette = .{},
+    scrollbar_style: Style = .{},
 
     // Pipe (pipe-pane)
     pipe_fd: i32 = -1,

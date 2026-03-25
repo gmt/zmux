@@ -1,6 +1,18 @@
 // Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
-// ISC licence – see COPYING.
-// Ported from tmux/cmd-display-message.c
+//
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+// IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+// OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//
+// Ported in part from tmux/cmd-display-message.c.
 // Original copyright:
 //   Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
@@ -38,7 +50,13 @@ pub fn expand_format(alloc: std.mem.Allocator, fmt: []const u8, target: *const T
         break :blk alloc.dupe(u8, "0") catch unreachable;
     });
     result = subst(alloc, result, "#{pane_index}", blk: {
-        if (target.wp) |wp| break :blk std.fmt.allocPrint(alloc, "{d}", .{wp.id}) catch unreachable;
+        if (target.w) |w| {
+            if (target.wp) |wp| {
+                for (w.panes.items, 0..) |pane, idx| {
+                    if (pane == wp) break :blk std.fmt.allocPrint(alloc, "{d}", .{idx}) catch unreachable;
+                }
+            }
+        }
         break :blk alloc.dupe(u8, "0") catch unreachable;
     });
     result = subst(alloc, result, "#{window_name}", blk: {

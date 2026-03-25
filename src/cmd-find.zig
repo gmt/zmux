@@ -146,8 +146,11 @@ pub fn cmd_find_target(
                     const sess_part = tp[0..colon];
                     const rest = tp[colon + 1 ..];
                     var win_part = rest;
-                    if (std.mem.indexOfScalar(u8, rest, '.')) |dot|
+                    var pane_part: ?[]const u8 = null;
+                    if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
                         win_part = rest[0..dot];
+                        pane_part = rest[dot + 1 ..];
+                    }
                     const target_session = if (sess_part.len == 0)
                         if (cl) |c| c.session else null
                     else
@@ -158,7 +161,7 @@ pub fn cmd_find_target(
                             fs.s = s_val;
                             fs.wl = wl;
                             fs.w = wl.window;
-                            fs.wp = wl.window.active;
+                            fs.wp = resolve_window_pane(wl.window, pane_part);
                             return 0;
                         }
                     }
@@ -169,7 +172,7 @@ pub fn cmd_find_target(
                             fs.s = s_val;
                             fs.wl = wl;
                             fs.w = wl.window;
-                            fs.wp = wl.window.active;
+                            fs.wp = resolve_window_pane(wl.window, pane_part);
                             return 0;
                         }
                     }
@@ -258,4 +261,50 @@ fn is_integer(s: []const u8) bool {
         if (ch < '0' or ch > '9') return false;
     }
     return true;
+}
+
+fn resolve_window_pane(w: *T.Window, pane_part: ?[]const u8) ?*T.WindowPane {
+    const pane_spec = pane_part orelse return w.active;
+    const pane_idx = std.fmt.parseInt(usize, pane_spec, 10) catch return null;
+    if (pane_idx >= w.panes.items.len) return null;
+    return w.panes.items[pane_idx];
+}
+
+test "cmd_find_target resolves explicit pane indexes within a window" {
+    const cmd_mod = @import("cmd.zig");
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "find-pane", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("find-pane") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_pane(&second_ctx, &cause).?;
+    s.curw = wl;
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = null, .cmdlist = &list };
+    var target: T.CmdFindState = .{};
+    try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, "find-pane:0.1", .pane, 0));
+    try std.testing.expectEqual(wl.window.panes.items[1], target.wp.?);
 }

@@ -31,6 +31,7 @@ const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
+const sess_mod = @import("session.zig");
 const c = @import("c.zig");
 
 var next_client_id: u32 = 0;
@@ -97,7 +98,8 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
 
     switch (msg_type) {
         .command => server_client_dispatch_command(cl, imsg_msg),
-        .resize => {},
+        .resize => server_client_dispatch_resize(cl, imsg_msg),
+        .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);
             server_client_lost(cl);
@@ -105,6 +107,40 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         else => {
             log.log_debug("client {*} unexpected message {}", .{ cl, msg_type });
         },
+    }
+}
+
+fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    if (imsg_msg.data == null) return;
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    if (data_len < @sizeOf(protocol.MsgResize)) return;
+    const msg: *const protocol.MsgResize = @ptrCast(@alignCast(imsg_msg.data.?));
+
+    cl.tty.sx = @max(msg.sx, 1);
+    cl.tty.sy = @max(msg.sy, 1);
+    cl.tty.xpixel = if (msg.xpixel == 0) T.DEFAULT_XPIXEL else msg.xpixel;
+    cl.tty.ypixel = if (msg.ypixel == 0) T.DEFAULT_YPIXEL else msg.ypixel;
+
+    if (cl.session) |s| {
+        server_client_apply_session_size(cl, s);
+        cl.flags |= T.CLIENT_REDRAWWINDOW;
+    }
+}
+
+fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
+    if (wp.fd < 0 or imsg_msg.data == null) return;
+
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    if (data_len == 0) return;
+    const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
+    var rest = bytes[0..data_len];
+    while (rest.len > 0) {
+        const written = std.posix.write(wp.fd, rest) catch break;
+        if (written == 0) break;
+        rest = rest[written..];
     }
 }
 
@@ -202,7 +238,22 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     cmdq_mod.cmdq_append(cl, cmd_list);
 }
 
-pub fn server_client_loop() void {}
+pub fn server_client_loop() void {
+    const srv = @import("server.zig");
+    for (srv.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_EXIT != 0) {
+            if (cl.peer) |peer| {
+                const retval: i32 = 0;
+                _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+            }
+            cl.flags &= ~@as(u64, T.CLIENT_EXIT);
+        }
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) continue;
+        server_client_draw(cl);
+        cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
+    }
+}
 
 pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
     const wl = s.curw orelse return;
@@ -231,6 +282,14 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     server_client_apply_session_size(cl, s);
 }
 
+pub fn server_client_attach(cl: *T.Client, s: *T.Session) void {
+    server_client_set_session(cl, s);
+    cl.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAWWINDOW;
+    if (cl.peer) |peer| {
+        _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
+    }
+}
+
 pub fn server_client_set_key_table(_cl: *T.Client, _name: ?[]const u8) void {
     _ = _cl;
     _ = _name;
@@ -255,4 +314,103 @@ pub fn server_client_open(_cl: *T.Client, _cause: *?[]u8) i32 {
     _ = _cl;
     _ = _cause;
     return 0;
+}
+
+fn server_client_draw(cl: *T.Client) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
+    const payload = render_attached_client(cl, wp) catch return;
+    defer xm.allocator.free(payload);
+
+    if (cl.peer) |peer| {
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(xm.allocator);
+        const stream: i32 = 1;
+        buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+        buf.appendSlice(xm.allocator, payload) catch unreachable;
+        _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn render_attached_client(cl: *T.Client, wp: *T.WindowPane) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    const sx: usize = @intCast(if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx));
+    const sy: usize = @intCast(if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy));
+    try out.appendSlice(xm.allocator, "\x1b[H\x1b[2J");
+
+    for (0..sy) |row| {
+        const line = wp.base.grid.linedata[row];
+        for (0..sx) |col| {
+            const ch: u8 = if (col < line.celldata.len and col < line.cellused)
+                line.celldata[col].offset_or_data.data.data
+            else
+                ' ';
+            try out.append(xm.allocator, if (ch == 0) ' ' else ch);
+        }
+        if (row + 1 < sy) try out.append(xm.allocator, '\n');
+    }
+
+    const cursor_y = @min(wp.base.cy, @as(u32, @intCast(@max(sy, 1))) - 1) + 1;
+    const cursor_x = @min(wp.base.cx, @as(u32, @intCast(@max(sx, 1))) - 1) + 1;
+    const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ cursor_y, cursor_x });
+    defer xm.allocator.free(cursor);
+    try out.appendSlice(xm.allocator, cursor);
+
+    const title = if (wp.screen.title) |pane_title| pane_title else wl_name(wp.window);
+    if (title.len != 0) {
+        const title_seq = try std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title});
+        defer xm.allocator.free(title_seq);
+        try out.appendSlice(xm.allocator, title_seq);
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
+fn wl_name(w: *T.Window) []const u8 {
+    return w.name;
+}
+
+test "render_attached_client paints the grid and cursor position" {
+    const opts_mod = @import("options.zig");
+    const pane_io = @import("pane-io.zig");
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win_mod.window_init_globals(xm.allocator);
+
+    const w = win_mod.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win_mod.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts_mod.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win_mod.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+    const wp = win_mod.window_add_pane(w, null, 4, 2);
+    pane_io.pane_io_feed(wp, "ab");
+    wp.base.cx = 1;
+    wp.base.cy = 0;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    cl.tty = .{ .client = &cl, .sx = 4, .sy = 2 };
+
+    const rendered = try render_attached_client(&cl, wp);
+    defer xm.allocator.free(rendered);
+    try std.testing.expect(std.mem.startsWith(u8, rendered, "\x1b[H\x1b[2Jab  \n    "));
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[1;2H") != null);
 }

@@ -183,7 +183,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
                 c.tty.sx = sx;
                 c.tty.sy = sy;
             }
-            server_client_mod.server_client_set_session(c, s);
+            server_client_mod.server_client_attach(c, s);
         }
     }
 

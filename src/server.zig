@@ -324,16 +324,27 @@ pub fn server_destroy_session(s: *T.Session) void {
             cl.session = null;
             if (cl.last_session == s) cl.last_session = null;
             cl.flags |= T.CLIENT_EXIT;
+            if (cl.peer) |peer| {
+                const retval: i32 = 0;
+                _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+            }
         }
     }
 }
 
-pub fn server_redraw_session(_s: *T.Session) void {
-    _ = _s;
-    // TODO: mark session for redraw
+pub fn server_redraw_session(s: *T.Session) void {
+    for (clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        if (cl.session != s) continue;
+        cl.flags |= T.CLIENT_REDRAWWINDOW;
+    }
 }
 
-pub fn server_redraw_window(_w: *T.Window) void {
-    _ = _w;
-    // TODO
+pub fn server_redraw_window(w: *T.Window) void {
+    for (clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        const s = cl.session orelse continue;
+        if (!sess.session_has_window(s, w)) continue;
+        cl.flags |= T.CLIENT_REDRAWWINDOW;
+    }
 }

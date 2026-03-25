@@ -37,7 +37,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
                 .item = @ptrCast(item),
                 .client = cl,
             };
-            break :blk format_mod.format_require_complete(xm.allocator, raw_path, &ctx) orelse {
+            break :blk format_mod.format_require(xm.allocator, raw_path, &ctx) catch {
                 cmdq.cmdq_error(item, "format expansion not supported yet", .{});
                 return .@"error";
             };

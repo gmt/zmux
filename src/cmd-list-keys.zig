@@ -149,7 +149,7 @@ fn render_binding_line(binding: *T.KeyBinding, template: []const u8, mode: Print
         .key_table_width = @intCast(binding.tablename.len),
         .notes_only = mode == .notes_only,
     };
-    return format_mod.format_require_complete(xm.allocator, template, &ctx);
+    return format_mod.format_require(xm.allocator, template, &ctx) catch null;
 }
 
 fn render_binding_command(binding: *T.KeyBinding) []u8 {

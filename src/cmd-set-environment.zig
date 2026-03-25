@@ -54,7 +54,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .window = target.w,
             .pane = target.wp,
         };
-        break :blk format_mod.format_require_complete(xm.allocator, raw_value.?, &ctx) orelse {
+        break :blk format_mod.format_require(xm.allocator, raw_value.?, &ctx) catch {
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});
             return .@"error";
         };

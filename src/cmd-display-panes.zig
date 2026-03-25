@@ -52,7 +52,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const template = args.value_at(0) orelse DEFAULT_TEMPLATE;
 
     for (w.panes.items, 0..) |wp, idx| {
-        const line = render_pane_line(template, args.value_at(0) != null, s, wl, wp, idx);
+        const line = render_pane_line(template, args.value_at(0) != null, s, wl, wp, idx) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
@@ -66,7 +69,7 @@ fn render_pane_line(
     wl: *T.Winlink,
     wp: *T.WindowPane,
     pane_index: usize,
-) []u8 {
+) ?[]u8 {
     if (custom_template) {
         var state = T.CmdFindState{
             .s = s,
@@ -75,7 +78,7 @@ fn render_pane_line(
             .wp = wp,
             .idx = wl.idx,
         };
-        return cmd_display.expand_format(xm.allocator, template, &state);
+        return cmd_display.require_format(xm.allocator, template, &state, null);
     }
 
     if (wp.screen.title) |title| {
@@ -143,7 +146,7 @@ test "display-panes default rendering summarizes pane state" {
 
     wl.window.active.?.screen.title = xm.xstrdup("shell");
 
-    const line = render_pane_line(DEFAULT_TEMPLATE, false, s, wl, wl.window.active.?, 0);
+    const line = render_pane_line(DEFAULT_TEMPLATE, false, s, wl, wl.window.active.?, 0).?;
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("0: 80x24 pid=-1 [active] shell", line);
 }
@@ -179,7 +182,7 @@ test "display-panes template rendering uses pane placeholders" {
     s.curw = wl;
     wl.window.active.?.screen.title = xm.xstrdup("logs");
 
-    const rendered = render_pane_line("#{pane_index}:#{pane_width}x#{pane_height}:#{pane_title}", true, s, wl, wl.window.active.?, 0);
+    const rendered = render_pane_line("#{pane_index}:#{pane_width}x#{pane_height}:#{pane_title}", true, s, wl, wl.window.active.?, 0).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("0:80x24:logs", rendered);
 }

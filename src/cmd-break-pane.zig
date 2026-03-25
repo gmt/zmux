@@ -123,7 +123,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.has('P')) {
         const template = args.get('F') orelse BREAK_PANE_TEMPLATE;
-        const rendered = render_break_pane_location(template, dst_s, result_wl.?, result_wp);
+        const rendered = render_break_pane_location(template, dst_s, result_wl.?, result_wp) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
         defer xm.allocator.free(rendered);
         cmdq.cmdq_print(item, "{s}", .{rendered});
     }
@@ -131,7 +134,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
-fn render_break_pane_location(template: []const u8, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane) []u8 {
+fn render_break_pane_location(template: []const u8, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane) ?[]u8 {
     var state = T.CmdFindState{
         .s = s,
         .wl = wl,
@@ -139,7 +142,7 @@ fn render_break_pane_location(template: []const u8, s: *T.Session, wl: *T.Winlin
         .wp = wp,
         .idx = wl.idx,
     };
-    return cmd_display.expand_format(xm.allocator, template, &state);
+    return cmd_display.require_format(xm.allocator, template, &state, null);
 }
 
 fn find_result_winlink(dst_s: *T.Session, w: *T.Window, explicit_idx: i32, exclude_idx: i32) ?*T.Winlink {
@@ -295,7 +298,7 @@ test "break-pane location rendering uses session window and pane indexes" {
     var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const second = spawn.spawn_pane(&second_ctx, &cause).?;
 
-    const rendered = render_break_pane_location(BREAK_PANE_TEMPLATE, s, wl, second);
+    const rendered = render_break_pane_location(BREAK_PANE_TEMPLATE, s, wl, second).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("break-print:0.1", rendered);
 }

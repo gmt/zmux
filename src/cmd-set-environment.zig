@@ -43,17 +43,24 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const env = resolve_env(item, args) orelse return .@"error";
     const raw_value = args.value_at(1);
-    const value = if (args.has('F') and raw_value != null)
-        format_mod.format_single(@ptrCast(item), raw_value.?, cmdq.cmdq_get_client(item), null, null, null)
-    else
-        null;
+    const value = if (args.has('F') and raw_value != null) blk: {
+        var target: T.CmdFindState = .{};
+        _ = cmd_find.cmd_find_target(&target, item, args.get('t'), .session, T.CMD_FIND_QUIET | T.CMD_FIND_CANFAIL);
+        const ctx = format_mod.FormatContext{
+            .item = @ptrCast(item),
+            .client = cmdq.cmdq_get_client(item),
+            .session = target.s,
+            .winlink = target.wl,
+            .window = target.w,
+            .pane = target.wp,
+        };
+        break :blk format_mod.format_require_complete(xm.allocator, raw_value.?, &ctx) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
+    } else null;
     defer if (value) |expanded| xm.allocator.free(expanded);
     const actual_value = value orelse raw_value;
-
-    if (args.has('F') and actual_value != null and std.mem.indexOf(u8, actual_value.?, "#{") != null) {
-        cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-        return .@"error";
-    }
 
     if (args.has('u')) {
         if (actual_value != null) {

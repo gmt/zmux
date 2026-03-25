@@ -94,7 +94,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.has('P')) {
         const template = args.get('F') orelse SPLIT_WINDOW_TEMPLATE;
-        const rendered = render_split_location(template, s, wl, new_wp);
+        const rendered = render_split_location(template, s, wl, new_wp) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
         defer xm.allocator.free(rendered);
         cmdq.cmdq_print(item, "{s}", .{rendered});
     }
@@ -123,7 +126,7 @@ fn free_argv(argv: [][]u8) void {
     xm.allocator.free(argv);
 }
 
-fn render_split_location(template: []const u8, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane) []u8 {
+fn render_split_location(template: []const u8, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane) ?[]u8 {
     var state = T.CmdFindState{
         .s = s,
         .wl = wl,
@@ -131,7 +134,7 @@ fn render_split_location(template: []const u8, s: *T.Session, wl: *T.Winlink, wp
         .wp = wp,
         .idx = wl.idx,
     };
-    return cmd_display.expand_format(xm.allocator, template, &state);
+    return cmd_display.require_format(xm.allocator, template, &state, null);
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -273,7 +276,7 @@ test "split-window location rendering uses pane ordinals" {
     var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const second = spawn.spawn_pane(&second_ctx, &cause).?;
 
-    const rendered = render_split_location(SPLIT_WINDOW_TEMPLATE, s, wl, second);
+    const rendered = render_split_location(SPLIT_WINDOW_TEMPLATE, s, wl, second).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("split-print:0.1", rendered);
 }

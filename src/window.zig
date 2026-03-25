@@ -72,10 +72,9 @@ pub fn window_create(sx: u32, sy: u32, _xpixel: u32, _ypixel: u32) *T.Window {
     return w;
 }
 
-pub fn window_add_pane(w: *T.Window, _before: ?*T.WindowPane, sx: u32, sy: u32) *T.WindowPane {
-    _ = _before;
+pub fn window_add_pane(w: *T.Window, before: ?*T.WindowPane, sx: u32, sy: u32) *T.WindowPane {
     const wp = window_pane_create(w, sx, sy);
-    window_adopt_pane(w, wp);
+    window_adopt_pane_before(w, wp, before);
     return wp;
 }
 
@@ -110,7 +109,7 @@ pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
     remove_last_pane_reference(w, wp);
     for (w.panes.items, 0..) |p, i| {
         if (p == wp) {
-            _ = w.panes.swapRemove(i);
+            _ = w.panes.orderedRemove(i);
             if (w.active == wp) {
                 w.active = if (w.panes.items.len > 0) w.panes.items[0] else null;
             }
@@ -121,8 +120,22 @@ pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
 }
 
 pub fn window_adopt_pane(w: *T.Window, wp: *T.WindowPane) void {
+    window_adopt_pane_before(w, wp, null);
+}
+
+pub fn window_adopt_pane_before(w: *T.Window, wp: *T.WindowPane, before: ?*T.WindowPane) void {
     wp.window = w;
     wp.options.parent = w.options;
+    if (before) |target| {
+        for (w.panes.items, 0..) |pane, idx| {
+            if (pane == target) {
+                w.panes.insert(xm.allocator, idx, wp) catch unreachable;
+                if (w.active == null) w.active = wp;
+                window_pane_options_changed(wp, null);
+                return;
+            }
+        }
+    }
     w.panes.append(xm.allocator, wp) catch unreachable;
     if (w.active == null) w.active = wp;
     window_pane_options_changed(wp, null);

@@ -26,15 +26,12 @@ const cmd_find = @import("cmd-find.zig");
 const input_keys = @import("input-keys.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const format_mod = @import("format.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     if (args.has('c')) {
         cmdq.cmdq_error(item, "target client selection not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('F')) {
-        cmdq.cmdq_error(item, "format-expanded send-keys not supported yet", .{});
         return .@"error";
     }
     if (args.has('K')) {
@@ -58,11 +55,26 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
         return .@"error";
     const s = target.s orelse return .@"error";
+    const wl = target.wl orelse return .@"error";
     const wp = target.wp orelse return .@"error";
     if (wp.fd < 0) {
         cmdq.cmdq_error(item, "pane is not accepting input", .{});
         return .@"error";
     }
+
+    const ctx = format_mod.FormatContext{
+        .item = @ptrCast(item),
+        .client = cmdq.cmdq_get_client(item),
+        .session = s,
+        .winlink = wl,
+        .window = wl.window,
+        .pane = wp,
+    };
+    const expanded_values = if (args.has('F'))
+        expand_values(args, &ctx, item) orelse return .@"error"
+    else
+        null;
+    defer if (expanded_values) |values| free_expanded_values(values);
 
     const repeat = parse_repeat_count(args.get('N'), item) orelse return .@"error";
 
@@ -91,7 +103,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     while (n > 0) : (n -= 1) {
         var idx: usize = 0;
         while (idx < args.count()) : (idx += 1) {
-            const value = args.value_at(idx).?;
+            const value = if (expanded_values) |values| values[idx] else args.value_at(idx).?;
             if (args.has('H')) {
                 if (send_hex_byte(wp, value, item) != .normal) return .@"error";
                 continue;
@@ -100,6 +112,24 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
     return .normal;
+}
+
+fn expand_values(args: *const @import("arguments.zig").Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
+    const values = xm.allocator.alloc([]u8, args.count()) catch unreachable;
+    for (0..args.count()) |idx| {
+        values[idx] = format_mod.format_require_complete(xm.allocator, args.value_at(idx).?, ctx) orelse {
+            for (values[0..idx]) |expanded| xm.allocator.free(expanded);
+            xm.allocator.free(values);
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return null;
+        };
+    }
+    return values;
+}
+
+fn free_expanded_values(values: [][]u8) void {
+    for (values) |value| xm.allocator.free(value);
+    xm.allocator.free(values);
 }
 
 fn parse_repeat_count(raw: ?[]const u8, item: *cmdq.CmdqItem) ?u32 {
@@ -296,6 +326,28 @@ test "send-keys supports hex mode and repeat counts" {
     var buf: [16]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("A\rA\r", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys expands formats before writing" {
+    const setup = try test_session_with_empty_pane("send-format-test");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-format-test", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    setup.wp.screen.title = xm.xstrdup("logs");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-F", "-t", "send-format-test:0.0", "#{session_name}:#{pane_title}", "Enter" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [64]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("send-format-test:logs\r", buf[0..n]);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
 }

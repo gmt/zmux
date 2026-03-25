@@ -104,3 +104,43 @@ pub const entry: cmd_mod.CmdEntry = .{
     .flags = 0,
     .exec = exec,
 };
+
+test "list-windows templates and filters use shared formatter" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const win = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "list-windows-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("list-windows-test") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    win.window_set_name(w, "editor");
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 3, &cause).?;
+    s.curw = wl;
+
+    const ctx = window_context(s, wl);
+    const line = format_mod.format_require_complete(xm.allocator, DEFAULT_TEMPLATE, &ctx).?;
+    defer xm.allocator.free(line);
+    try std.testing.expect(std.mem.indexOf(u8, line, "3: editor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "(active)") != null);
+
+    const matched = format_mod.format_filter_match(xm.allocator, "#{window_active}", &ctx).?;
+    try std.testing.expect(matched);
+}

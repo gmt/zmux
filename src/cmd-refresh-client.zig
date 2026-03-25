@@ -37,6 +37,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "refresh-client",
     .alias = "refresh",
+    .usage = "[-cDlLRSU] [-A pane:state] [-B name:what:format] [-C size] [-f flags] [-t target-client]",
     .template = "A:B:cC:Df:F:Hl:LN:pPrRst:U",
     .lower = 0,
     .upper = 0,

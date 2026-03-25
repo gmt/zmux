@@ -31,6 +31,7 @@ const cmdq_mod = @import("cmd-queue.zig");
 pub const CmdEntry = struct {
     name: []const u8,
     alias: ?[]const u8 = null,
+    usage: []const u8 = "",
     template: []const u8 = "",
     lower: i32 = 0,
     upper: i32 = -1,
@@ -80,6 +81,7 @@ const cmd_new_window = @import("cmd-new-window.zig");
 const cmd_bind_key = @import("cmd-bind-key.zig");
 const cmd_unbind_key = @import("cmd-unbind-key.zig");
 const cmd_list_keys = @import("cmd-list-keys.zig");
+const cmd_list_commands = @import("cmd-list-commands.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -102,6 +104,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_bind_key.entry,
     &cmd_unbind_key.entry,
     &cmd_list_keys.entry,
+    &cmd_list_commands.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────
@@ -114,6 +117,10 @@ pub fn cmd_find_entry(name: []const u8) ?*const CmdEntry {
         }
     }
     return null;
+}
+
+pub fn cmd_entries() []const *const CmdEntry {
+    return cmd_table;
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────
@@ -348,4 +355,11 @@ pub fn cmd_get_args(cmd: *Cmd) *args_mod.Arguments {
 
 pub fn cmd_get_entry(cmd: *Cmd) *const CmdEntry {
     return cmd.entry;
+}
+
+test "cmd_entries exposes stable registered table order" {
+    const entries = cmd_entries();
+    try std.testing.expect(entries.len >= 1);
+    try std.testing.expectEqualStrings("new-session", entries[0].name);
+    try std.testing.expectEqualStrings("list-commands", entries[entries.len - 1].name);
 }

@@ -25,6 +25,7 @@ fn exec(_cmd: *cmd_mod.Cmd, _item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "kill-server",
     .alias = null,
+    .usage = "",
     .template = "",
     .lower = 0,
     .upper = 0,

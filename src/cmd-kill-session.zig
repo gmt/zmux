@@ -46,6 +46,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "kill-session",
     .alias = null,
+    .usage = "[-aC] [-t target-session]",
     .template = "aCt:",
     .lower = 0,
     .upper = 0,

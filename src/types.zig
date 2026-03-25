@@ -958,6 +958,7 @@ pub const CmdParseInput = struct {
 pub const CMDQ_STATE_REPEAT: u32 = 0x1;
 pub const CMDQ_STATE_CONTROL: u32 = 0x2;
 pub const CMDQ_STATE_NOHOOKS: u32 = 0x4;
+pub const CMDQ_STATE_NOATTACH: u32 = 0x8;
 
 pub const KEY_BINDING_REPEAT: u32 = 0x1;
 

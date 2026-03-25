@@ -39,6 +39,7 @@ const format_mod = @import("format.zig");
 fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const cl = cmdq.cmdq_get_client(item);
+    const no_attach = (cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_NOATTACH) != 0;
     var target: T.CmdFindState = .{};
 
     // has-session: just validate the -t target (cmd_find_target already did it)
@@ -179,7 +180,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     // Attach client if not detached
-    if (!args.has('d')) {
+    if (!args.has('d') and !no_attach) {
         if (cl) |c| {
             if (args.has('x') or args.has('y')) {
                 c.tty.sx = sx;

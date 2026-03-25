@@ -69,6 +69,7 @@ fn print_window_panes(item: *cmdq.CmdqItem, w: *T.Window, sort_crit: T.SortCrite
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-panes",
     .alias = "lsp",
+    .usage = "[-asr] [-F format] [-f filter] [-O order] [-s] [-t target-pane]",
     .template = "aF:O:rs:t:",
     .lower = 0,
     .upper = 0,
@@ -101,6 +102,7 @@ fn exec_lsc(_cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry_lsc: cmd_mod.CmdEntry = .{
     .name = "list-clients",
     .alias = "lsc",
+    .usage = "[-F format] [-f filter] [-O order] [-t target-session]",
     .template = "F:O:rt:",
     .lower = 0,
     .upper = 0,

@@ -105,6 +105,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "switch-client",
     .alias = "switchc",
+    .usage = "[-ElnprZ] [-c target-client] [-t target-session] [-T key-table]",
     .template = "c:EFlnO:pt:rT:Z",
     .lower = 0,
     .upper = 0,

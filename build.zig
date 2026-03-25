@@ -77,6 +77,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
 
     // System libraries  (link_libc + system libs must go on the exe's root_module or the exe directly)
     exe.linkLibC();
@@ -158,6 +159,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
     unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
     unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+    unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
     unit_tests.linkLibC();
     unit_tests.linkSystemLibrary("event_core");
     unit_tests.linkSystemLibrary("ncursesw");
@@ -180,6 +182,7 @@ pub fn build(b: *std.Build) void {
         zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
         zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
         zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+        zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
 
         const fuzz_exe = b.addExecutable(.{
             .name = "zmux-input-fuzzer",

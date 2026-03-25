@@ -166,17 +166,25 @@ pub fn cmd_parse_one(
 }
 
 /// Parse a full semicolon/newline-separated command string into a CmdList.
-pub fn cmd_parse_from_argv(
+pub fn cmd_parse_from_argv_with_cause(
     argv: []const []const u8,
     cl: ?*T.Client,
+    cause: *?[]u8,
 ) !*CmdList {
     const list = xm.allocator.create(CmdList) catch unreachable;
     list.* = .{};
 
-    var cause: ?[]u8 = null;
-    const cmd = try cmd_parse_one(argv, cl, &cause);
+    const cmd = try cmd_parse_one(argv, cl, cause);
     list.append(cmd);
     return list;
+}
+
+pub fn cmd_parse_from_argv(
+    argv: []const []const u8,
+    cl: ?*T.Client,
+) !*CmdList {
+    var cause: ?[]u8 = null;
+    return cmd_parse_from_argv_with_cause(argv, cl, &cause);
 }
 
 /// Parse commands from a string (semicolon-separated).
@@ -362,4 +370,15 @@ test "cmd_entries exposes stable registered table order" {
     try std.testing.expect(entries.len >= 1);
     try std.testing.expectEqualStrings("new-session", entries[0].name);
     try std.testing.expectEqualStrings("list-commands", entries[entries.len - 1].name);
+}
+
+test "cmd_parse_from_argv_with_cause preserves parse cause" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    try std.testing.expectError(
+        ParseError.UnknownCommand,
+        cmd_parse_from_argv_with_cause(&.{ "definitely-not-real" }, null, &cause),
+    );
+    try std.testing.expectEqualStrings("unknown command: definitely-not-real", cause.?);
 }

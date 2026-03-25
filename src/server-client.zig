@@ -188,10 +188,14 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     }
 
     log.log_debug("client {*} command argc={d}", .{ cl, argc });
-    const cmd_list = cmd_mod.cmd_parse_from_argv(argv.items, cl) catch {
-        log.log_warn("client {*} parse error", .{cl});
+    var cause: ?[]u8 = null;
+    const cmd_list = cmd_mod.cmd_parse_from_argv_with_cause(argv.items, cl, &cause) catch {
+        defer if (cause) |msg| xm.allocator.free(msg);
+        log.log_warn("client {*} parse error: {s}", .{ cl, cause orelse "parse error" });
+        cmdq_mod.cmdq_write_client(cl, 2, "{s}", .{cause orelse "parse error"});
         if (cl.peer) |peer| {
-            _ = proc_mod.proc_send(peer, .exit, -1, null, 0);
+            const retval: i32 = 1;
+            _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
         }
         return;
     };

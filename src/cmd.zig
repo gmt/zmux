@@ -94,6 +94,7 @@ const cmd_kill_pane = @import("cmd-kill-pane.zig");
 const cmd_unlink_window = @import("cmd-unlink-window.zig");
 const cmd_move_window = @import("cmd-move-window.zig");
 const cmd_break_pane = @import("cmd-break-pane.zig");
+const cmd_select_pane = @import("cmd-select-pane.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -132,6 +133,8 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_move_window.entry_link,
     &cmd_move_window.entry_move,
     &cmd_break_pane.entry,
+    &cmd_select_pane.entry,
+    &cmd_select_pane.entry_last,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

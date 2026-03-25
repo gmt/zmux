@@ -88,7 +88,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (wl != null and wp != null) {
         const w = wl.?.window;
         if (wp.? != w.active) {
-            win_mod.window_set_active_pane(w, wp.?, true);
+            _ = win_mod.window_set_active_pane(w, wp.?, true);
         }
         if (cl) |c| {
             _ = c;

@@ -933,6 +933,40 @@ pub const CMDQ_STATE_REPEAT: u32 = 0x1;
 pub const CMDQ_STATE_CONTROL: u32 = 0x2;
 pub const CMDQ_STATE_NOHOOKS: u32 = 0x4;
 
+pub const KEY_BINDING_REPEAT: u32 = 0x1;
+
+pub const KeyBinding = struct {
+    key: key_code,
+    tablename: []const u8,
+    note: ?[]u8 = null,
+    flags: u32 = 0,
+    cmdlist: ?*CmdList = null,
+};
+
+pub const KeyTable = struct {
+    name: []u8,
+    references: u32 = 1,
+    key_bindings: std.AutoHashMap(key_code, *KeyBinding),
+    default_key_bindings: std.AutoHashMap(key_code, *KeyBinding),
+    order: std.ArrayList(*KeyBinding) = .{},
+    default_order: std.ArrayList(*KeyBinding) = .{},
+
+    pub fn init(alloc: std.mem.Allocator, name: []u8) KeyTable {
+        return .{
+            .name = name,
+            .key_bindings = std.AutoHashMap(key_code, *KeyBinding).init(alloc),
+            .default_key_bindings = std.AutoHashMap(key_code, *KeyBinding).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *KeyTable) void {
+        self.key_bindings.deinit();
+        self.default_key_bindings.deinit();
+        self.order.deinit(std.heap.c_allocator);
+        self.default_order.deinit(std.heap.c_allocator);
+    }
+};
+
 // Opaque forward references – filled in by cmd.zig and cmd-queue.zig
 pub const CmdList = opaque {};
 pub const CmdqItem = opaque {};

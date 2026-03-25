@@ -327,25 +327,25 @@ test "sort_order_from_string parses aliases" {
     try std.testing.expectEqual(T.SortOrder.end, sort_order_from_string("mystery"));
 }
 
-test "sorted_key_bindings supports index modifier and order views" {
+test "sorted_key_bindings_table supports index modifier and order views" {
     key_bindings.key_bindings_init();
-    key_bindings.key_bindings_add("root", T.KEYC_CTRL | 'b', null, false, null);
-    key_bindings.key_bindings_add("root", T.KEYC_SHIFT | T.KEYC_LEFT, null, false, null);
-    key_bindings.key_bindings_add("prefix", 'z', null, false, null);
+    key_bindings.key_bindings_add("scratch", T.KEYC_CTRL | 'b', null, false, null);
+    key_bindings.key_bindings_add("scratch", T.KEYC_SHIFT | T.KEYC_LEFT, null, false, null);
+    key_bindings.key_bindings_add("scratch", 'z', null, false, null);
+    const scratch = key_bindings.key_bindings_get_table("scratch", false).?;
 
-    const index_sorted = sorted_key_bindings(.{ .order = .index });
+    const index_sorted = sorted_key_bindings_table(scratch, .{ .order = .index });
     defer xm.allocator.free(index_sorted);
-    try std.testing.expectEqualStrings("prefix", index_sorted[0].tablename);
     try std.testing.expectEqual(@as(T.key_code, 'z'), index_sorted[0].key);
 
-    const modifier_sorted = sorted_key_bindings(.{ .order = .modifier });
+    const modifier_sorted = sorted_key_bindings_table(scratch, .{ .order = .modifier });
     defer xm.allocator.free(modifier_sorted);
     try std.testing.expectEqual(@as(T.key_code, 'z'), modifier_sorted[0].key);
     try std.testing.expect(modifier_sorted[2].key & T.KEYC_SHIFT != 0);
 
-    const ordered = sorted_key_bindings(.{ .order = .order });
+    const ordered = sorted_key_bindings_table(scratch, .{ .order = .order });
     defer xm.allocator.free(ordered);
-    try std.testing.expectEqualStrings("root", ordered[0].tablename);
-    try std.testing.expectEqual(T.KEYC_CTRL | 'b', ordered[0].key);
-    try std.testing.expectEqualStrings("prefix", ordered[2].tablename);
+    try std.testing.expectEqual(@as(T.key_code, T.KEYC_CTRL | 'b'), ordered[0].key);
+    try std.testing.expectEqual(@as(T.key_code, T.KEYC_SHIFT | T.KEYC_LEFT), ordered[1].key);
+    try std.testing.expectEqual(@as(T.key_code, 'z'), ordered[2].key);
 }

@@ -95,6 +95,9 @@ pub fn cmd_find_target(
             .window => {
                 var tw = t;
                 if (tw.len > 0 and tw[0] == '=') tw = tw[1..];
+                if (flags & T.CMD_FIND_WINDOW_INDEX != 0) {
+                    if (find_window_with_index(fs, cl, tw)) return 0;
+                }
                 if (std.mem.indexOfScalar(u8, tw, ':')) |colon| {
                     const sess_part = tw[0..colon];
                     var win_part = tw[colon + 1 ..];
@@ -195,4 +198,64 @@ pub fn cmd_find_target(
 
     cmdq_mod.cmdq_error(item, "no sessions", .{});
     return -1;
+}
+
+fn find_window_with_index(fs: *T.CmdFindState, cl: ?*T.Client, target: []const u8) bool {
+    var session_part: ?[]const u8 = null;
+    var index_part: ?[]const u8 = null;
+
+    if (std.mem.indexOfScalar(u8, target, ':')) |colon| {
+        session_part = target[0..colon];
+        const rest = target[colon + 1 ..];
+        index_part = if (rest.len == 0) null else rest;
+    } else if (target.len > 0 and is_integer(target)) {
+        session_part = null;
+        index_part = target;
+    } else {
+        session_part = target;
+        index_part = null;
+    }
+
+    const s = resolve_window_target_session(cl, session_part orelse "") orelse return false;
+    fs.s = s;
+    fs.idx = -1;
+
+    if (index_part) |idx_str| {
+        fs.idx = std.fmt.parseInt(i32, idx_str, 10) catch return false;
+        if (sess.winlink_find_by_index(&s.windows, fs.idx)) |wl| {
+            fs.wl = wl;
+            fs.w = wl.window;
+            fs.wp = wl.window.active;
+        } else {
+            fs.wl = null;
+            fs.w = null;
+            fs.wp = null;
+        }
+        return true;
+    }
+
+    fs.wl = s.curw;
+    fs.w = if (s.curw) |wl| wl.window else null;
+    fs.wp = if (fs.w) |w| w.active else null;
+    return true;
+}
+
+fn resolve_window_target_session(cl: ?*T.Client, session_name: []const u8) ?*T.Session {
+    if (session_name.len == 0) {
+        if (cl) |c| {
+            if (c.session) |s| return s;
+        }
+        var sit = sess.sessions.valueIterator();
+        return if (sit.next()) |s| s.* else null;
+    }
+    if (session_name[0] == '$') return sess.session_find_by_id_str(session_name);
+    return sess.session_find(session_name);
+}
+
+fn is_integer(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    return true;
 }

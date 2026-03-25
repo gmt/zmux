@@ -28,18 +28,24 @@ const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const sort_mod = @import("sort.zig");
 const utf8 = @import("utf8.zig");
+const format_mod = @import("format.zig");
+const cmd_render = @import("cmd-render.zig");
 
 const PrintMode = enum {
     normal,
     notes_only,
 };
 
+const DEFAULT_TEMPLATE = "bind-key#{?key_has_repeat, -r,} -T #{key_table} #{key_string}#{?key_command, #{key_command},}";
+const DEFAULT_NOTES_TEMPLATE = "#{?key_prefix,#{key_prefix} ,}#{key_string}#{key_padding} #{?key_note,#{key_note},#{key_command}}";
+
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('F')) {
-        cmdq.cmdq_error(item, "format not supported yet", .{});
-        return .@"error";
-    }
+    const mode: PrintMode = if (args.has('N')) .notes_only else .normal;
+    const template = args.get('F') orelse switch (mode) {
+        .normal => DEFAULT_TEMPLATE,
+        .notes_only => DEFAULT_NOTES_TEMPLATE,
+    };
 
     var only: ?T.key_code = null;
     if (args.value_at(0)) |key_name| {
@@ -81,15 +87,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const prefix = get_prefix_string(args);
     defer xm.allocator.free(prefix);
 
-    const lines = render_bindings(
-        bindings,
-        if (args.has('N')) .notes_only else .normal,
-        prefix,
-        args.has('1'),
-    );
-    defer free_lines(lines);
-
-    for (lines) |line| cmdq.cmdq_print(item, "{s}", .{line});
+    const count = if (args.has('1') and bindings.len > 1) @as(usize, 1) else bindings.len;
+    const key_width = max_key_width(bindings[0..count]);
+    for (bindings[0..count]) |binding| {
+        const line = render_binding_line(binding, template, mode, prefix, key_width) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
+        defer xm.allocator.free(line);
+        cmdq.cmdq_print(item, "{s}", .{line});
+    }
     return .normal;
 }
 
@@ -130,51 +137,27 @@ fn collect_root_prefix_bindings(sort_crit: T.SortCriteria) []*T.KeyBinding {
     return list.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
-fn render_bindings(bindings: []const *T.KeyBinding, mode: PrintMode, prefix: []const u8, single: bool) [][]u8 {
-    var lines: std.ArrayList([]u8) = .{};
-    const count = if (single and bindings.len > 1) @as(usize, 1) else bindings.len;
-    const key_width = max_key_width(bindings[0..count]);
-
-    for (bindings[0..count]) |binding| {
-        const line = switch (mode) {
-            .normal => render_normal_line(binding),
-            .notes_only => render_notes_line(binding, prefix, key_width),
-        };
-        lines.append(xm.allocator, line) catch unreachable;
-    }
-    return lines.toOwnedSlice(xm.allocator) catch unreachable;
-}
-
-fn render_normal_line(binding: *T.KeyBinding) []u8 {
+fn render_binding_line(binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, key_width: u32) ?[]u8 {
     const key_name = key_string.key_string_lookup_key(binding.key, 0);
+    const width = utf8.utf8_cstrwidth(key_name);
+    const pad = if (key_width > width) key_width - width else 0;
+    const padding = xm.allocator.alloc(u8, pad) catch unreachable;
+    defer xm.allocator.free(padding);
+    @memset(padding, ' ');
+
     const command = render_binding_command(binding);
     defer xm.allocator.free(command);
 
-    if (command.len == 0) {
-        return if (binding.flags & T.KEY_BINDING_REPEAT != 0)
-            xm.xasprintf("bind-key -r -T {s} {s}", .{ binding.tablename, key_name })
-        else
-            xm.xasprintf("bind-key -T {s} {s}", .{ binding.tablename, key_name });
-    }
-    return if (binding.flags & T.KEY_BINDING_REPEAT != 0)
-        xm.xasprintf("bind-key -r -T {s} {s} {s}", .{ binding.tablename, key_name, command })
-    else
-        xm.xasprintf("bind-key -T {s} {s} {s}", .{ binding.tablename, key_name, command });
-}
-
-fn render_notes_line(binding: *T.KeyBinding, prefix: []const u8, key_width: u32) []u8 {
-    const key_name = key_string.key_string_lookup_key(binding.key, 0);
-    const text = if (binding.note) |note| xm.xstrdup(note) else render_binding_command(binding);
-    defer xm.allocator.free(text);
-
-    const width = utf8.utf8_cstrwidth(key_name);
-    const pad = if (key_width > width) key_width - width else 0;
-    const spaces = xm.allocator.alloc(u8, pad) catch unreachable;
-    defer xm.allocator.free(spaces);
-    @memset(spaces, ' ');
-
-    if (prefix.len == 0) return xm.xasprintf("{s}{s} {s}", .{ key_name, spaces, text });
-    return xm.xasprintf("{s} {s}{s} {s}", .{ prefix, key_name, spaces, text });
+    const ctx = format_mod.FormatContext{
+        .key_binding = binding,
+        .key_command = command,
+        .key_padding = padding,
+        .key_prefix = prefix,
+        .key_string_width = key_width,
+        .key_table_width = @intCast(binding.tablename.len),
+        .notes_only = mode == .notes_only,
+    };
+    return format_mod.format_require_complete(xm.allocator, template, &ctx);
 }
 
 fn render_binding_command(binding: *T.KeyBinding) []u8 {
@@ -194,60 +177,7 @@ fn render_binding_command(binding: *T.KeyBinding) []u8 {
 
 fn append_rendered_cmd(out: *std.ArrayList(u8), cmd: *cmd_mod.Cmd) void {
     out.appendSlice(xm.allocator, cmd.entry.name) catch unreachable;
-
-    var flags: std.ArrayList(u8) = .{};
-    defer flags.deinit(xm.allocator);
-
-    var it = cmd.args.flags.iterator();
-    while (it.next()) |flag_entry| flags.append(xm.allocator, flag_entry.key_ptr.*) catch unreachable;
-    std.sort.block(u8, flags.items, {}, less_than_u8);
-
-    for (flags.items) |flag| {
-        const values = cmd.args.flags.get(flag).?;
-        for (values.items) |value| {
-            out.appendSlice(xm.allocator, " -") catch unreachable;
-            out.append(xm.allocator, flag) catch unreachable;
-            if (value.len != 0) {
-                out.append(xm.allocator, ' ') catch unreachable;
-                append_shell_word(out, value);
-            }
-        }
-    }
-
-    for (cmd.args.values.items) |value| {
-        out.append(xm.allocator, ' ') catch unreachable;
-        append_shell_word(out, value);
-    }
-}
-
-fn append_shell_word(out: *std.ArrayList(u8), word: []const u8) void {
-    if (!needs_quotes(word)) {
-        out.appendSlice(xm.allocator, word) catch unreachable;
-        return;
-    }
-
-    out.append(xm.allocator, '"') catch unreachable;
-    for (word) |ch| {
-        switch (ch) {
-            '\\', '"' => {
-                out.append(xm.allocator, '\\') catch unreachable;
-                out.append(xm.allocator, ch) catch unreachable;
-            },
-            '\n' => out.appendSlice(xm.allocator, "\\n") catch unreachable,
-            '\t' => out.appendSlice(xm.allocator, "\\t") catch unreachable,
-            else => out.append(xm.allocator, ch) catch unreachable,
-        }
-    }
-    out.append(xm.allocator, '"') catch unreachable;
-}
-
-fn needs_quotes(word: []const u8) bool {
-    if (word.len == 0) return true;
-    for (word) |ch| {
-        if (std.ascii.isWhitespace(ch) or ch == '"' or ch == '\\' or ch == ';')
-            return true;
-    }
-    return false;
+    cmd_render.append_arguments(out, &cmd.args);
 }
 
 fn get_prefix_string(args: *const args_mod.Arguments) []u8 {
@@ -288,15 +218,6 @@ fn max_key_width(bindings: []const *T.KeyBinding) u32 {
     return width;
 }
 
-fn free_lines(lines: [][]u8) void {
-    for (lines) |line| xm.allocator.free(line);
-    xm.allocator.free(lines);
-}
-
-fn less_than_u8(_: void, a: u8, b: u8) bool {
-    return a < b;
-}
-
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-keys",
     .alias = "lsk",
@@ -319,46 +240,34 @@ test "list-keys renders binding command and notes views" {
     var bind_item = cmdq.CmdqItem{ .client = null, .cmdlist = &bind_list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(bind_cmd, &bind_item));
 
-    const normal_bindings = collect_bindings(null, false, false, null, .{});
-    defer xm.allocator.free(normal_bindings);
-    const normal_lines = render_bindings(normal_bindings, .normal, "C-b", false);
-    defer free_lines(normal_lines);
-    var found_root_f1 = false;
-    for (normal_lines) |line| {
-        if (std.mem.eql(u8, line, "bind-key -T root F1 display-message \"hello world\"")) {
-            found_root_f1 = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_root_f1);
+    const binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("root", false).?, T.KEYC_F1).?;
+    const normal = render_binding_line(binding, DEFAULT_TEMPLATE, .normal, "C-b", 0).?;
+    defer xm.allocator.free(normal);
+    try std.testing.expectEqualStrings("bind-key -T root F1 display-message \"hello world\"", normal);
 
-    const notes_bindings = collect_bindings(null, true, false, null, .{});
-    defer xm.allocator.free(notes_bindings);
-    const notes_lines = render_bindings(notes_bindings, .notes_only, "C-b", false);
-    defer free_lines(notes_lines);
-    var found_note = false;
-    for (notes_lines) |line| {
-        if (std.mem.indexOf(u8, line, "repeat me") != null) {
-            found_note = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_note);
+    const note_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("prefix", false).?, T.KEYC_CTRL | 'b').?;
+    const notes = render_binding_line(note_binding, DEFAULT_NOTES_TEMPLATE, .notes_only, "C-b", utf8.utf8_cstrwidth("C-b")).?;
+    defer xm.allocator.free(notes);
+    try std.testing.expectEqualStrings("C-b C-b repeat me", notes);
 }
 
-test "list-keys command rejects unsupported format and sort order" {
+test "list-keys command supports format and rejects unsupported sort order" {
     key_bindings.key_bindings_init();
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    key_bindings.key_bindings_add("root", T.KEYC_F1, "Display help", false, null);
+
+    const binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("root", false).?, T.KEYC_F1).?;
+    const rendered = render_binding_line(binding, "#{key_string}", .normal, "", 0).?;
+    defer xm.allocator.free(rendered);
+    try std.testing.expectEqualStrings("F1", rendered);
 
     var cause: ?[]u8 = null;
-    const fmt_cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-F", "#{key}" }, null, &cause);
-    defer cmd_mod.cmd_free(fmt_cmd);
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(fmt_cmd, &item));
-
-    cause = null;
     const order_cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-O", "size" }, null, &cause);
     defer cmd_mod.cmd_free(order_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(order_cmd, &item));
 }
 
@@ -375,8 +284,8 @@ test "list-keys command honors table selection single key and prefix override" {
         .{ .order = .index },
     );
     defer xm.allocator.free(prefix_bindings);
-    const lines = render_bindings(prefix_bindings, .notes_only, "ZZ", true);
-    defer free_lines(lines);
-    try std.testing.expectEqual(@as(usize, 1), lines.len);
-    try std.testing.expectEqualStrings("ZZ C-b prefix-note", lines[0]);
+    try std.testing.expectEqual(@as(usize, 1), prefix_bindings.len);
+    const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", utf8.utf8_cstrwidth("C-b")).?;
+    defer xm.allocator.free(line);
+    try std.testing.expectEqualStrings("ZZ C-b prefix-note", line);
 }

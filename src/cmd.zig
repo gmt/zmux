@@ -105,6 +105,7 @@ const cmd_send_keys = @import("cmd-send-keys.zig");
 const cmd_pipe_pane = @import("cmd-pipe-pane.zig");
 const cmd_respawn_pane = @import("cmd-respawn-pane.zig");
 const cmd_respawn_window = @import("cmd-respawn-window.zig");
+const cmd_rotate_window = @import("cmd-rotate-window.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -158,6 +159,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_pipe_pane.entry,
     &cmd_respawn_pane.entry,
     &cmd_respawn_window.entry,
+    &cmd_rotate_window.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

@@ -268,6 +268,72 @@ pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) bo
     return true;
 }
 
+pub fn window_rotate_panes(w: *T.Window, reverse: bool) ?*T.WindowPane {
+    if (w.panes.items.len <= 1) return w.active;
+
+    const PaneSlot = struct {
+        pane: *T.WindowPane,
+        sx: u32,
+        sy: u32,
+        xoff: u32,
+        yoff: u32,
+        layout_cell: ?*T.LayoutCell,
+    };
+
+    const count = w.panes.items.len;
+    const slots = xm.allocator.alloc(PaneSlot, count) catch unreachable;
+    defer xm.allocator.free(slots);
+    const reordered = xm.allocator.alloc(*T.WindowPane, count) catch unreachable;
+    defer xm.allocator.free(reordered);
+
+    const old_active = w.active;
+    var next_active: ?*T.WindowPane = null;
+
+    for (w.panes.items, 0..) |pane, idx| {
+        slots[idx] = .{
+            .pane = pane,
+            .sx = pane.sx,
+            .sy = pane.sy,
+            .xoff = pane.xoff,
+            .yoff = pane.yoff,
+            .layout_cell = pane.layout_cell,
+        };
+    }
+
+    if (reverse) {
+        reordered[0] = slots[count - 1].pane;
+        for (1..count) |idx| reordered[idx] = slots[idx - 1].pane;
+        if (old_active) |active| {
+            const active_idx = window_pane_index(w, active) orelse 0;
+            next_active = if (active_idx == 0) slots[count - 1].pane else slots[active_idx - 1].pane;
+        }
+    } else {
+        for (0..count - 1) |idx| reordered[idx] = slots[idx + 1].pane;
+        reordered[count - 1] = slots[0].pane;
+        if (old_active) |active| {
+            const active_idx = window_pane_index(w, active) orelse 0;
+            next_active = if (active_idx + 1 < count) slots[active_idx + 1].pane else slots[0].pane;
+        }
+    }
+
+    for (0..count) |idx| {
+        const pane = reordered[idx];
+        const slot = slots[idx];
+        w.panes.items[idx] = pane;
+        pane.sx = slot.sx;
+        pane.sy = slot.sy;
+        pane.xoff = slot.xoff;
+        pane.yoff = slot.yoff;
+        pane.layout_cell = slot.layout_cell;
+        if (pane.layout_cell) |lc| lc.wp = pane;
+    }
+
+    if (next_active) |active| {
+        _ = window_set_active_pane(w, active, true);
+    }
+    return w.active;
+}
+
 pub fn window_set_name(w: *T.Window, name: []const u8) void {
     xm.allocator.free(w.name);
     w.name = xm.xstrdup(name);
@@ -482,4 +548,42 @@ test "window_pane_resize clamps to window bounds and updates sole pane window si
     try std.testing.expectEqual(@as(u32, 12), wp.sy);
     try std.testing.expectEqual(@as(u32, 80), w.sx);
     try std.testing.expectEqual(@as(u32, 12), w.sy);
+}
+
+test "window_rotate_panes rotates order and active pane" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 40, 12);
+    const third = window_add_pane(w, null, 20, 10);
+    _ = window_set_active_pane(w, second, true);
+
+    _ = window_rotate_panes(w, false);
+    try std.testing.expectEqual(second, w.panes.items[0]);
+    try std.testing.expectEqual(third, w.panes.items[1]);
+    try std.testing.expectEqual(first, w.panes.items[2]);
+    try std.testing.expectEqual(third, w.active.?);
+
+    _ = window_rotate_panes(w, true);
+    try std.testing.expectEqual(first, w.panes.items[0]);
+    try std.testing.expectEqual(second, w.panes.items[1]);
+    try std.testing.expectEqual(third, w.panes.items[2]);
+    try std.testing.expectEqual(second, w.active.?);
 }

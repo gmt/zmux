@@ -82,6 +82,11 @@ const cmd_bind_key = @import("cmd-bind-key.zig");
 const cmd_unbind_key = @import("cmd-unbind-key.zig");
 const cmd_list_keys = @import("cmd-list-keys.zig");
 const cmd_list_commands = @import("cmd-list-commands.zig");
+const cmd_source_file = @import("cmd-source-file.zig");
+const cmd_set_environment = @import("cmd-set-environment.zig");
+const cmd_show_environment = @import("cmd-show-environment.zig");
+const cmd_set_option = @import("cmd-set-option.zig");
+const cmd_show_options = @import("cmd-show-options.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -105,6 +110,13 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_unbind_key.entry,
     &cmd_list_keys.entry,
     &cmd_list_commands.entry,
+    &cmd_source_file.entry,
+    &cmd_set_environment.entry,
+    &cmd_show_environment.entry,
+    &cmd_set_option.entry,
+    &cmd_set_option.entry_window,
+    &cmd_show_options.entry,
+    &cmd_show_options.entry_window,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────
@@ -369,7 +381,8 @@ test "cmd_entries exposes stable registered table order" {
     const entries = cmd_entries();
     try std.testing.expect(entries.len >= 1);
     try std.testing.expectEqualStrings("new-session", entries[0].name);
-    try std.testing.expectEqualStrings("list-commands", entries[entries.len - 1].name);
+    try std.testing.expect(cmd_find_entry("list-commands") != null);
+    try std.testing.expect(cmd_find_entry("show-window-options") != null);
 }
 
 test "cmd_parse_from_argv_with_cause preserves parse cause" {

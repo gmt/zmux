@@ -30,6 +30,8 @@ const log = @import("log.zig");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
+pub var global_environ: *T.Environ = undefined;
+
 /// Allocate and initialise a new empty environment.
 pub fn environ_create() *T.Environ {
     const env = xm.allocator.create(T.Environ) catch unreachable;
@@ -144,4 +146,29 @@ pub fn environ_log(env: *T.Environ, comptime prefix_fmt: []const u8, prefix_args
             log.log_debug(prefix_fmt ++ "{s}={s}", prefix_args ++ .{ entry.name, entry.value.? });
         }
     }
+}
+
+pub fn environ_sorted_entries(env: *T.Environ) []*T.EnvironEntry {
+    var list: std.ArrayList(*T.EnvironEntry) = .{};
+    var it = env.entries.valueIterator();
+    while (it.next()) |entry| list.append(xm.allocator, entry) catch unreachable;
+    std.sort.block(*T.EnvironEntry, list.items, {}, less_than_entry);
+    return list.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn less_than_entry(_: void, a: *T.EnvironEntry, b: *T.EnvironEntry) bool {
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
+test "environ_sorted_entries returns alphabetical order" {
+    const env = environ_create();
+    defer environ_free(env);
+
+    environ_set(env, "Z_LAST", 0, "1");
+    environ_set(env, "A_FIRST", 0, "2");
+    const entries = environ_sorted_entries(env);
+    defer xm.allocator.free(entries);
+
+    try std.testing.expectEqualStrings("A_FIRST", entries[0].name);
+    try std.testing.expectEqualStrings("Z_LAST", entries[1].name);
 }

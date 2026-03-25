@@ -64,17 +64,22 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     const raw_value = args.value_at(1);
-    const expanded = if (args.has('F') and raw_value != null)
-        format_mod.format_single(@ptrCast(item), raw_value.?, cmdq.cmdq_get_client(item), null, null, null)
-    else
-        null;
+    const expanded = if (args.has('F') and raw_value != null) blk: {
+        const ctx = format_mod.FormatContext{
+            .item = @ptrCast(item),
+            .client = cmdq.cmdq_get_client(item),
+            .session = target.session,
+            .winlink = target.winlink,
+            .window = target.window,
+            .pane = target.pane,
+        };
+        break :blk format_mod.format_require_complete(xm.allocator, raw_value.?, &ctx) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
+    } else null;
     defer if (expanded) |value| xm.allocator.free(value);
     const value = expanded orelse raw_value;
-
-    if (args.has('F') and value != null and std.mem.indexOf(u8, value.?, "#{") != null) {
-        cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-        return .@"error";
-    }
 
     if (args.has('a') and oe != null and oe.?.@"type" != .string and oe.?.@"type" != .style and oe.?.@"type" != .array) {
         cmdq.cmdq_error(item, "-a only supported for string and array options", .{});

@@ -39,13 +39,19 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "new name required", .{});
         return .@"error";
     };
-    const expanded = format_mod.format_single(@ptrCast(item), raw_name, cmdq.cmdq_get_client(item), target.s, target.wl, target.wp);
-    defer xm.allocator.free(expanded);
-
-    if (std.mem.indexOf(u8, expanded, "#{") != null) {
+    const ctx = format_mod.FormatContext{
+        .item = @ptrCast(item),
+        .client = cmdq.cmdq_get_client(item),
+        .session = target.s,
+        .winlink = target.wl,
+        .window = target.w,
+        .pane = target.wp,
+    };
+    const expanded = format_mod.format_require_complete(xm.allocator, raw_name, &ctx) orelse {
         cmdq.cmdq_error(item, "format expansion not supported yet", .{});
         return .@"error";
-    }
+    };
+    defer xm.allocator.free(expanded);
 
     const new_name = sess.session_check_name(expanded) orelse {
         cmdq.cmdq_error(item, "invalid session: {s}", .{expanded});

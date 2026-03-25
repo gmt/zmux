@@ -35,6 +35,9 @@ pub const ResolvedTarget = struct {
     kind: ScopeKind,
     options: *T.Options,
     global: bool,
+    session: ?*T.Session = null,
+    winlink: ?*T.Winlink = null,
+    window: ?*T.Window = null,
     pane: ?*T.WindowPane = null,
 };
 
@@ -56,7 +59,15 @@ pub fn resolve_target(
                     cmdq.cmdq_error(item, "no current session", .{});
                 return null;
             }
-            return .{ .kind = .session, .options = target.s.?.options, .global = false };
+            return .{
+                .kind = .session,
+                .options = target.s.?.options,
+                .global = false,
+                .session = target.s,
+                .winlink = target.wl,
+                .window = target.w,
+                .pane = target.wp,
+            };
         },
         .window => {
             if (args.has('g')) return .{ .kind = .window, .options = opts.global_w_options, .global = true };
@@ -68,7 +79,15 @@ pub fn resolve_target(
                     cmdq.cmdq_error(item, "no current window", .{});
                 return null;
             }
-            return .{ .kind = .window, .options = target.w.?.options, .global = false };
+            return .{
+                .kind = .window,
+                .options = target.w.?.options,
+                .global = false,
+                .session = target.s,
+                .winlink = target.wl,
+                .window = target.w,
+                .pane = target.wp,
+            };
         },
         .pane => {
             if (args.has('g')) {
@@ -84,7 +103,15 @@ pub fn resolve_target(
                     cmdq.cmdq_error(item, "no current pane", .{});
                 return null;
             }
-            return .{ .kind = .pane, .options = target.wp.?.options, .global = false, .pane = target.wp.? };
+            return .{
+                .kind = .pane,
+                .options = target.wp.?.options,
+                .global = false,
+                .session = target.s,
+                .winlink = target.wl,
+                .window = target.w,
+                .pane = target.wp.?,
+            };
         },
     }
 }

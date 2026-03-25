@@ -278,5 +278,6 @@ test {
     _ = @import("screen.zig");
     _ = @import("sort.zig");
     _ = @import("style.zig");
+    _ = @import("tty-draw.zig");
     _ = @import("utf8.zig");
 }

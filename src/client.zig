@@ -254,7 +254,7 @@ fn client_leave_attached_mode() void {
     client_raw_tty = false;
     client_attached = false;
     const stdout = std.fs.File.stdout();
-    _ = stdout.writeAll("\x1b[?1049l\x1b[0m") catch {};
+    _ = stdout.writeAll("\x1b[?25h\x1b[?1049l\x1b[0m") catch {};
 }
 
 fn client_enable_raw_tty() void {

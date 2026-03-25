@@ -165,6 +165,102 @@ pub fn utf8_cstrwidth(s: []const u8) u32 {
     return width;
 }
 
+pub fn utf8_trim_left(s: []const u8, limit: u32) []u8 {
+    if (limit == 0 or s.len == 0) return xm.xstrdup("");
+
+    var out: std.ArrayList(u8) = .{};
+    var width: u32 = 0;
+    var pos: usize = 0;
+
+    while (pos < s.len and width < limit) {
+        const start = pos;
+        var ud: T.Utf8Data = undefined;
+        if (utf8_open(&ud, s[pos]) == .more) {
+            pos += 1;
+            var state: T.Utf8State = .more;
+            while (pos < s.len and state == .more) : (pos += 1) {
+                state = utf8_append(&ud, s[pos]);
+            }
+            if (state == .done) {
+                if (width + ud.width > limit) break;
+                out.appendSlice(xm.allocator, s[start..pos]) catch unreachable;
+                width += ud.width;
+                continue;
+            }
+            pos = start;
+        }
+
+        if (s[pos] > 0x1f and s[pos] != 0x7f) {
+            if (width + 1 > limit) break;
+            out.append(xm.allocator, s[pos]) catch unreachable;
+            width += 1;
+        }
+        pos += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+pub fn utf8_trim_right(s: []const u8, limit: u32) []u8 {
+    if (limit == 0 or s.len == 0) return xm.xstrdup("");
+
+    const total_width = utf8_cstrwidth(s);
+    if (total_width <= limit) return xm.xstrdup(s);
+
+    const skip = total_width - limit;
+    var out: std.ArrayList(u8) = .{};
+    var width: u32 = 0;
+    var pos: usize = 0;
+
+    while (pos < s.len) {
+        const start = pos;
+        var ud: T.Utf8Data = undefined;
+        if (utf8_open(&ud, s[pos]) == .more) {
+            pos += 1;
+            var state: T.Utf8State = .more;
+            while (pos < s.len and state == .more) : (pos += 1) {
+                state = utf8_append(&ud, s[pos]);
+            }
+            if (state == .done) {
+                if (width >= skip) out.appendSlice(xm.allocator, s[start..pos]) catch unreachable;
+                width += ud.width;
+                continue;
+            }
+            pos = start;
+        }
+
+        if (s[pos] > 0x1f and s[pos] != 0x7f) {
+            if (width >= skip) out.append(xm.allocator, s[pos]) catch unreachable;
+            width += 1;
+        }
+        pos += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+pub fn utf8_padcstr(s: []const u8, width: u32) []u8 {
+    const current = utf8_cstrwidth(s);
+    if (current >= width) return xm.xstrdup(s);
+
+    const extra = width - current;
+    const out = xm.allocator.alloc(u8, s.len + extra) catch unreachable;
+    @memcpy(out[0..s.len], s);
+    @memset(out[s.len..], ' ');
+    return out;
+}
+
+pub fn utf8_rpadcstr(s: []const u8, width: u32) []u8 {
+    const current = utf8_cstrwidth(s);
+    if (current >= width) return xm.xstrdup(s);
+
+    const extra = width - current;
+    const out = xm.allocator.alloc(u8, s.len + extra) catch unreachable;
+    @memset(out[0..extra], ' ');
+    @memcpy(out[extra .. extra + s.len], s);
+    return out;
+}
+
 pub fn utf8_tocstr(src: []const T.Utf8Data) []u8 {
     var size: usize = 0;
     for (src) |ud| {
@@ -267,8 +363,7 @@ fn ensureLocale() void {
 }
 
 fn isWide(cp: u21) bool {
-    return cp >= 0x1100 and (
-        cp <= 0x115f or
+    return cp >= 0x1100 and (cp <= 0x115f or
         cp == 0x2329 or
         cp == 0x232a or
         (cp >= 0x2e80 and cp <= 0xa4cf and cp != 0x303f) or
@@ -279,8 +374,7 @@ fn isWide(cp: u21) bool {
         (cp >= 0xff00 and cp <= 0xff60) or
         (cp >= 0xffe0 and cp <= 0xffe6) or
         (cp >= 0x1f300 and cp <= 0x1faff) or
-        (cp >= 0x20000 and cp <= 0x3fffd)
-    );
+        (cp >= 0x20000 and cp <= 0x3fffd));
 }
 
 test "utf8_set and utf8_copy handle single-byte data" {
@@ -340,4 +434,24 @@ test "utf8_fromcstr splits mixed strings and terminates with sentinel" {
 test "utf8_cstrwidth counts ASCII and wide characters" {
     try std.testing.expectEqual(@as(u32, 3), utf8_cstrwidth("abc"));
     try std.testing.expectEqual(@as(u32, 3), utf8_cstrwidth("a🙂"));
+}
+
+test "utf8 trim helpers keep left and right display widths" {
+    const left = utf8_trim_left("a🙂bc", 3);
+    defer xm.allocator.free(left);
+    try std.testing.expectEqualStrings("a🙂", left);
+
+    const right = utf8_trim_right("a🙂bc", 3);
+    defer xm.allocator.free(right);
+    try std.testing.expectEqualStrings("bc", right);
+}
+
+test "utf8 padding helpers pad by display width" {
+    const padded = utf8_padcstr("x🙂", 4);
+    defer xm.allocator.free(padded);
+    try std.testing.expectEqualStrings("x🙂 ", padded);
+
+    const rpad = utf8_rpadcstr("x🙂", 4);
+    defer xm.allocator.free(rpad);
+    try std.testing.expectEqualStrings(" x🙂", rpad);
 }

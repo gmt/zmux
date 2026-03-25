@@ -37,7 +37,7 @@ const PrintMode = enum {
 };
 
 const DEFAULT_TEMPLATE = "bind-key#{?key_has_repeat, -r,} -T #{key_table} #{key_string}#{?key_command, #{key_command},}";
-const DEFAULT_NOTES_TEMPLATE = "#{?key_prefix,#{key_prefix} ,}#{key_string}#{key_padding} #{?key_note,#{key_note},#{key_command}}";
+const DEFAULT_NOTES_TEMPLATE = "#{?key_prefix,#{key_prefix} ,}#{p|#{key_string_width}|:#{key_string}} #{?key_note,#{key_note},#{key_command}}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -138,20 +138,12 @@ fn collect_root_prefix_bindings(sort_crit: T.SortCriteria) []*T.KeyBinding {
 }
 
 fn render_binding_line(binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, key_width: u32) ?[]u8 {
-    const key_name = key_string.key_string_lookup_key(binding.key, 0);
-    const width = utf8.utf8_cstrwidth(key_name);
-    const pad = if (key_width > width) key_width - width else 0;
-    const padding = xm.allocator.alloc(u8, pad) catch unreachable;
-    defer xm.allocator.free(padding);
-    @memset(padding, ' ');
-
     const command = render_binding_command(binding);
     defer xm.allocator.free(command);
 
     const ctx = format_mod.FormatContext{
         .key_binding = binding,
         .key_command = command,
-        .key_padding = padding,
         .key_prefix = prefix,
         .key_string_width = key_width,
         .key_table_width = @intCast(binding.tablename.len),

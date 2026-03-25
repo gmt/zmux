@@ -20,6 +20,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const key_bindings = @import("key-bindings.zig");
 const sess = @import("session.zig");
 const srv = @import("server.zig");
 
@@ -96,6 +97,33 @@ pub fn sorted_clients(sort_crit: T.SortCriteria) []*T.Client {
     return items;
 }
 
+pub fn sorted_key_bindings(sort_crit: T.SortCriteria) []*T.KeyBinding {
+    var list: std.ArrayList(*T.KeyBinding) = .{};
+    var table = key_bindings.key_bindings_first_table();
+    while (table) |current| : (table = key_bindings.key_bindings_next_table(current)) {
+        var binding = key_bindings.key_bindings_first(current);
+        while (binding) |entry| : (binding = key_bindings.key_bindings_next(current, entry)) {
+            list.append(xm.allocator, entry) catch unreachable;
+        }
+    }
+
+    const items = list.toOwnedSlice(xm.allocator) catch unreachable;
+    sort_key_bindings_in_place(items, sort_crit);
+    return items;
+}
+
+pub fn sorted_key_bindings_table(table: *T.KeyTable, sort_crit: T.SortCriteria) []*T.KeyBinding {
+    var list: std.ArrayList(*T.KeyBinding) = .{};
+    var binding = key_bindings.key_bindings_first(table);
+    while (binding) |entry| : (binding = key_bindings.key_bindings_next(table, entry)) {
+        list.append(xm.allocator, entry) catch unreachable;
+    }
+
+    const items = list.toOwnedSlice(xm.allocator) catch unreachable;
+    sort_key_bindings_in_place(items, sort_crit);
+    return items;
+}
+
 fn sort_sessions_in_place(items: []*T.Session, sort_crit: T.SortCriteria) void {
     const effective = if (sort_crit.order == .end) T.SortOrder.name else sort_crit.order;
     if (effective == .order) {
@@ -132,6 +160,15 @@ fn sort_clients_in_place(items: []*T.Client, sort_crit: T.SortCriteria) void {
     std.sort.block(*T.Client, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, client_less_than);
 }
 
+fn sort_key_bindings_in_place(items: []*T.KeyBinding, sort_crit: T.SortCriteria) void {
+    const effective = if (sort_crit.order == .end) T.SortOrder.index else sort_crit.order;
+    if (effective == .order) {
+        if (sort_crit.reversed) reverse_slice(*T.KeyBinding, items);
+        return;
+    }
+    std.sort.block(*T.KeyBinding, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, key_binding_less_than);
+}
+
 const SortContext = struct {
     order: T.SortOrder,
     reversed: bool,
@@ -157,6 +194,10 @@ fn pane_less_than(ctx: PaneSortContext, a: *T.WindowPane, b: *T.WindowPane) bool
 
 fn client_less_than(ctx: SortContext, a: *T.Client, b: *T.Client) bool {
     return order_to_less(compare_client(a, b, ctx.order), ctx.reversed);
+}
+
+fn key_binding_less_than(ctx: SortContext, a: *T.KeyBinding, b: *T.KeyBinding) bool {
+    return order_to_less(compare_key_binding(a, b, ctx.order), ctx.reversed);
 }
 
 fn order_to_less(order: std.math.Order, reversed: bool) bool {
@@ -213,6 +254,26 @@ fn compare_client(a: *T.Client, b: *T.Client, order: T.SortOrder) std.math.Order
     return std.math.order(a.id, b.id);
 }
 
+fn compare_key_binding(a: *T.KeyBinding, b: *T.KeyBinding, order: T.SortOrder) std.math.Order {
+    const primary = switch (order) {
+        .index => std.math.order(a.key, b.key),
+        .modifier => blk: {
+            const a_mod = a.key & T.KEYC_MASK_MODIFIERS;
+            const b_mod = b.key & T.KEYC_MASK_MODIFIERS;
+            const mod_cmp = std.math.order(a_mod, b_mod);
+            if (mod_cmp != .eq) break :blk mod_cmp;
+            break :blk std.math.order(a.key, b.key);
+        },
+        .name => ascii_order_ignore_case(a.tablename, b.tablename),
+        else => std.math.Order.eq,
+    };
+    if (primary != .eq) return primary;
+
+    const table_cmp = ascii_order_ignore_case(a.tablename, b.tablename);
+    if (table_cmp != .eq) return table_cmp;
+    return std.math.order(a.key, b.key);
+}
+
 fn window_area(w: *T.Window) u64 {
     return @as(u64, w.sx) * @as(u64, w.sy);
 }
@@ -248,8 +309,43 @@ fn reverse_slice(comptime Item: type, items: []Item) void {
     }
 }
 
+fn ascii_order_ignore_case(a: []const u8, b: []const u8) std.math.Order {
+    const limit = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < limit) : (i += 1) {
+        const ac = std.ascii.toLower(a[i]);
+        const bc = std.ascii.toLower(b[i]);
+        if (ac < bc) return .lt;
+        if (ac > bc) return .gt;
+    }
+    return std.math.order(a.len, b.len);
+}
+
 test "sort_order_from_string parses aliases" {
     try std.testing.expectEqual(T.SortOrder.index, sort_order_from_string("key"));
     try std.testing.expectEqual(T.SortOrder.name, sort_order_from_string("title"));
     try std.testing.expectEqual(T.SortOrder.end, sort_order_from_string("mystery"));
+}
+
+test "sorted_key_bindings supports index modifier and order views" {
+    key_bindings.key_bindings_init();
+    key_bindings.key_bindings_add("root", T.KEYC_CTRL | 'b', null, false, null);
+    key_bindings.key_bindings_add("root", T.KEYC_SHIFT | T.KEYC_LEFT, null, false, null);
+    key_bindings.key_bindings_add("prefix", 'z', null, false, null);
+
+    const index_sorted = sorted_key_bindings(.{ .order = .index });
+    defer xm.allocator.free(index_sorted);
+    try std.testing.expectEqualStrings("prefix", index_sorted[0].tablename);
+    try std.testing.expectEqual(@as(T.key_code, 'z'), index_sorted[0].key);
+
+    const modifier_sorted = sorted_key_bindings(.{ .order = .modifier });
+    defer xm.allocator.free(modifier_sorted);
+    try std.testing.expectEqual(@as(T.key_code, 'z'), modifier_sorted[0].key);
+    try std.testing.expect(modifier_sorted[2].key & T.KEYC_SHIFT != 0);
+
+    const ordered = sorted_key_bindings(.{ .order = .order });
+    defer xm.allocator.free(ordered);
+    try std.testing.expectEqualStrings("root", ordered[0].tablename);
+    try std.testing.expectEqual(T.KEYC_CTRL | 'b', ordered[0].key);
+    try std.testing.expectEqualStrings("prefix", ordered[2].tablename);
 }

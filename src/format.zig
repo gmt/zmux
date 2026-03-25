@@ -39,6 +39,7 @@ pub const FormatContext = struct {
     key_binding: ?*const T.KeyBinding = null,
     key_note: ?[]const u8 = null,
     key_command: ?[]const u8 = null,
+    key_padding: ?[]const u8 = null,
     key_prefix: ?[]const u8 = null,
     key_string_width: ?u32 = null,
     key_table_width: ?u32 = null,
@@ -76,6 +77,7 @@ const resolver_table = [_]Resolver{
     .{ .name = "key_command", .func = resolve_key_command },
     .{ .name = "key_has_repeat", .func = resolve_key_has_repeat },
     .{ .name = "key_note", .func = resolve_key_note },
+    .{ .name = "key_padding", .func = resolve_key_padding },
     .{ .name = "key_prefix", .func = resolve_key_prefix },
     .{ .name = "key_repeat", .func = resolve_key_repeat },
     .{ .name = "key_string", .func = resolve_key_string },
@@ -523,6 +525,12 @@ fn resolve_key_prefix(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
     const binding = resolve_key_binding(ctx) orelse return null;
     _ = binding;
     return alloc.dupe(u8, ctx.key_prefix orelse "") catch unreachable;
+}
+
+fn resolve_key_padding(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const binding = resolve_key_binding(ctx) orelse return null;
+    _ = binding;
+    return alloc.dupe(u8, ctx.key_padding orelse "") catch unreachable;
 }
 
 fn resolve_key_string_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

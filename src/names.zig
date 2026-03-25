@@ -20,6 +20,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const cmd_render = @import("cmd-render.zig");
 
 pub fn check_window_name(_w: *T.Window) void {
     _ = _w;
@@ -29,10 +30,9 @@ pub fn check_window_name(_w: *T.Window) void {
 pub fn default_window_name(w: *T.Window) []u8 {
     const wp = w.active orelse return xm.xstrdup("");
     if (wp.argv) |argv| {
-        if (cmd_stringify_argv(argv)) |cmd| {
-            defer xm.allocator.free(cmd);
-            return parse_window_name(cmd);
-        }
+        const cmd = cmd_render.stringify_argv(xm.allocator, argv);
+        defer xm.allocator.free(cmd);
+        return parse_window_name(cmd);
     }
     return parse_window_name(wp.shell orelse "");
 }
@@ -62,28 +62,6 @@ pub fn parse_window_name(input: []const u8) []u8 {
         name = std.fs.path.basenamePosix(name);
 
     return xm.xstrdup(name);
-}
-
-fn cmd_stringify_argv(argv: []const []u8) ?[]u8 {
-    if (argv.len == 0) return null;
-
-    var len: usize = 0;
-    for (argv, 0..) |arg, i| {
-        len += arg.len;
-        if (i + 1 < argv.len) len += 1;
-    }
-
-    var buf = xm.allocator.alloc(u8, len) catch unreachable;
-    var pos: usize = 0;
-    for (argv, 0..) |arg, i| {
-        @memcpy(buf[pos .. pos + arg.len], arg);
-        pos += arg.len;
-        if (i + 1 < argv.len) {
-            buf[pos] = ' ';
-            pos += 1;
-        }
-    }
-    return buf;
 }
 
 fn is_name_char(ch: u8) bool {

@@ -130,6 +130,12 @@ pub fn format_require_complete(alloc: std.mem.Allocator, template: []const u8, c
     return expanded.text;
 }
 
+pub fn format_filter_match(alloc: std.mem.Allocator, filter: []const u8, ctx: *const FormatContext) ?bool {
+    const expanded = format_require_complete(alloc, filter, ctx) orelse return null;
+    defer alloc.free(expanded);
+    return format_truthy(expanded);
+}
+
 pub fn format_truthy(text: []const u8) bool {
     if (text.len == 0) return false;
     if (std.mem.eql(u8, text, "0")) return false;

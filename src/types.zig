@@ -57,15 +57,214 @@ pub const KEYC_NONE: key_code = 0x000ff000000000;
 pub const KEYC_UNKNOWN: key_code = 0x000fe000000000;
 pub const KEYC_BASE: key_code = 0x0000000010e000;
 pub const KEYC_USER: key_code = 0x0000000010f000;
+pub const KEYC_USER_END: key_code = KEYC_USER + KEYC_NUSER;
 pub const KEYC_NUSER: u32 = 1000;
 
 pub const KEYC_META: key_code = 0x00100000000000;
 pub const KEYC_CTRL: key_code = 0x00200000000000;
 pub const KEYC_SHIFT: key_code = 0x00400000000000;
 
+pub const KEYC_LITERAL: key_code = 0x01000000000000;
+pub const KEYC_KEYPAD: key_code = 0x02000000000000;
+pub const KEYC_CURSOR: key_code = 0x04000000000000;
+pub const KEYC_IMPLIED_META: key_code = 0x08000000000000;
+pub const KEYC_BUILD_MODIFIERS: key_code = 0x10000000000000;
+pub const KEYC_VI: key_code = 0x20000000000000;
+pub const KEYC_SENT: key_code = 0x40000000000000;
+
 pub const KEYC_MASK_MODIFIERS: key_code = 0x00f00000000000;
 pub const KEYC_MASK_FLAGS: key_code = 0xff000000000000;
 pub const KEYC_MASK_KEY: key_code = 0x000fffffffffff;
+
+pub const KEYC_CLICK_TIMEOUT: u32 = 300;
+
+pub const KeyMouseTarget = enum(key_code) {
+    pane = 0,
+    status = 1,
+    status_left = 2,
+    status_right = 3,
+    status_default = 4,
+    scrollbar_up = 5,
+    scrollbar_slider = 6,
+    scrollbar_down = 7,
+    border = 8,
+};
+
+pub const KEYC_MOUSE_TARGET_COUNT: key_code = 9;
+
+pub fn keycMouse(base: key_code, target: KeyMouseTarget) key_code {
+    return base + @intFromEnum(target);
+}
+
+pub const C0_NUL: key_code = 0;
+pub const C0_SOH: key_code = 1;
+pub const C0_STX: key_code = 2;
+pub const C0_ETX: key_code = 3;
+pub const C0_EOT: key_code = 4;
+pub const C0_ENQ: key_code = 5;
+pub const C0_ASC: key_code = 6;
+pub const C0_BEL: key_code = 7;
+pub const C0_BS: key_code = 8;
+pub const C0_HT: key_code = 9;
+pub const C0_LF: key_code = 10;
+pub const C0_VT: key_code = 11;
+pub const C0_FF: key_code = 12;
+pub const C0_CR: key_code = 13;
+pub const C0_SO: key_code = 14;
+pub const C0_SI: key_code = 15;
+pub const C0_DLE: key_code = 16;
+pub const C0_DC1: key_code = 17;
+pub const C0_DC2: key_code = 18;
+pub const C0_DC3: key_code = 19;
+pub const C0_DC4: key_code = 20;
+pub const C0_NAK: key_code = 21;
+pub const C0_SYN: key_code = 22;
+pub const C0_ETB: key_code = 23;
+pub const C0_CAN: key_code = 24;
+pub const C0_EM: key_code = 25;
+pub const C0_SUB: key_code = 26;
+pub const C0_ESC: key_code = 27;
+pub const C0_FS: key_code = 28;
+pub const C0_GS: key_code = 29;
+pub const C0_RS: key_code = 30;
+pub const C0_US: key_code = 31;
+
+pub const KEYC_FOCUS_IN: key_code = KEYC_BASE;
+pub const KEYC_FOCUS_OUT: key_code = KEYC_FOCUS_IN + 1;
+pub const KEYC_ANY: key_code = KEYC_FOCUS_OUT + 1;
+pub const KEYC_PASTE_START: key_code = KEYC_ANY + 1;
+pub const KEYC_PASTE_END: key_code = KEYC_PASTE_START + 1;
+pub const KEYC_MOUSE: key_code = KEYC_PASTE_END + 1;
+pub const KEYC_DRAGGING: key_code = KEYC_MOUSE + 1;
+pub const KEYC_DOUBLECLICK: key_code = KEYC_DRAGGING + 1;
+
+pub const KEYC_MOUSEMOVE: key_code = KEYC_DOUBLECLICK + 1;
+pub const KEYC_MOUSEDOWN1: key_code = KEYC_MOUSEMOVE + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN2: key_code = KEYC_MOUSEDOWN1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN3: key_code = KEYC_MOUSEDOWN2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN6: key_code = KEYC_MOUSEDOWN3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN7: key_code = KEYC_MOUSEDOWN6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN8: key_code = KEYC_MOUSEDOWN7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN9: key_code = KEYC_MOUSEDOWN8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN10: key_code = KEYC_MOUSEDOWN9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDOWN11: key_code = KEYC_MOUSEDOWN10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP1: key_code = KEYC_MOUSEDOWN11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP2: key_code = KEYC_MOUSEUP1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP3: key_code = KEYC_MOUSEUP2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP6: key_code = KEYC_MOUSEUP3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP7: key_code = KEYC_MOUSEUP6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP8: key_code = KEYC_MOUSEUP7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP9: key_code = KEYC_MOUSEUP8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP10: key_code = KEYC_MOUSEUP9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEUP11: key_code = KEYC_MOUSEUP10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG1: key_code = KEYC_MOUSEUP11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG2: key_code = KEYC_MOUSEDRAG1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG3: key_code = KEYC_MOUSEDRAG2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG6: key_code = KEYC_MOUSEDRAG3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG7: key_code = KEYC_MOUSEDRAG6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG8: key_code = KEYC_MOUSEDRAG7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG9: key_code = KEYC_MOUSEDRAG8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG10: key_code = KEYC_MOUSEDRAG9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAG11: key_code = KEYC_MOUSEDRAG10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND1: key_code = KEYC_MOUSEDRAG11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND2: key_code = KEYC_MOUSEDRAGEND1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND3: key_code = KEYC_MOUSEDRAGEND2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND6: key_code = KEYC_MOUSEDRAGEND3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND7: key_code = KEYC_MOUSEDRAGEND6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND8: key_code = KEYC_MOUSEDRAGEND7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND9: key_code = KEYC_MOUSEDRAGEND8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND10: key_code = KEYC_MOUSEDRAGEND9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_MOUSEDRAGEND11: key_code = KEYC_MOUSEDRAGEND10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_WHEELUP: key_code = KEYC_MOUSEDRAGEND11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_WHEELDOWN: key_code = KEYC_WHEELUP + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK1: key_code = KEYC_WHEELDOWN + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK2: key_code = KEYC_SECONDCLICK1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK3: key_code = KEYC_SECONDCLICK2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK6: key_code = KEYC_SECONDCLICK3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK7: key_code = KEYC_SECONDCLICK6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK8: key_code = KEYC_SECONDCLICK7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK9: key_code = KEYC_SECONDCLICK8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK10: key_code = KEYC_SECONDCLICK9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_SECONDCLICK11: key_code = KEYC_SECONDCLICK10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK1: key_code = KEYC_SECONDCLICK11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK2: key_code = KEYC_DOUBLECLICK1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK3: key_code = KEYC_DOUBLECLICK2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK6: key_code = KEYC_DOUBLECLICK3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK7: key_code = KEYC_DOUBLECLICK6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK8: key_code = KEYC_DOUBLECLICK7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK9: key_code = KEYC_DOUBLECLICK8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK10: key_code = KEYC_DOUBLECLICK9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_DOUBLECLICK11: key_code = KEYC_DOUBLECLICK10 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK1: key_code = KEYC_DOUBLECLICK11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK2: key_code = KEYC_TRIPLECLICK1 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK3: key_code = KEYC_TRIPLECLICK2 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK6: key_code = KEYC_TRIPLECLICK3 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK7: key_code = KEYC_TRIPLECLICK6 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK8: key_code = KEYC_TRIPLECLICK7 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK9: key_code = KEYC_TRIPLECLICK8 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK10: key_code = KEYC_TRIPLECLICK9 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_TRIPLECLICK11: key_code = KEYC_TRIPLECLICK10 + KEYC_MOUSE_TARGET_COUNT;
+
+pub const KEYC_BSPACE: key_code = KEYC_TRIPLECLICK11 + KEYC_MOUSE_TARGET_COUNT;
+pub const KEYC_F1: key_code = KEYC_BSPACE + 1;
+pub const KEYC_F2: key_code = KEYC_F1 + 1;
+pub const KEYC_F3: key_code = KEYC_F2 + 1;
+pub const KEYC_F4: key_code = KEYC_F3 + 1;
+pub const KEYC_F5: key_code = KEYC_F4 + 1;
+pub const KEYC_F6: key_code = KEYC_F5 + 1;
+pub const KEYC_F7: key_code = KEYC_F6 + 1;
+pub const KEYC_F8: key_code = KEYC_F7 + 1;
+pub const KEYC_F9: key_code = KEYC_F8 + 1;
+pub const KEYC_F10: key_code = KEYC_F9 + 1;
+pub const KEYC_F11: key_code = KEYC_F10 + 1;
+pub const KEYC_F12: key_code = KEYC_F11 + 1;
+pub const KEYC_IC: key_code = KEYC_F12 + 1;
+pub const KEYC_DC: key_code = KEYC_IC + 1;
+pub const KEYC_HOME: key_code = KEYC_DC + 1;
+pub const KEYC_END: key_code = KEYC_HOME + 1;
+pub const KEYC_NPAGE: key_code = KEYC_END + 1;
+pub const KEYC_PPAGE: key_code = KEYC_NPAGE + 1;
+pub const KEYC_BTAB: key_code = KEYC_PPAGE + 1;
+pub const KEYC_UP: key_code = KEYC_BTAB + 1;
+pub const KEYC_DOWN: key_code = KEYC_UP + 1;
+pub const KEYC_LEFT: key_code = KEYC_DOWN + 1;
+pub const KEYC_RIGHT: key_code = KEYC_LEFT + 1;
+pub const KEYC_KP_SLASH: key_code = KEYC_RIGHT + 1;
+pub const KEYC_KP_STAR: key_code = KEYC_KP_SLASH + 1;
+pub const KEYC_KP_MINUS: key_code = KEYC_KP_STAR + 1;
+pub const KEYC_KP_SEVEN: key_code = KEYC_KP_MINUS + 1;
+pub const KEYC_KP_EIGHT: key_code = KEYC_KP_SEVEN + 1;
+pub const KEYC_KP_NINE: key_code = KEYC_KP_EIGHT + 1;
+pub const KEYC_KP_PLUS: key_code = KEYC_KP_NINE + 1;
+pub const KEYC_KP_FOUR: key_code = KEYC_KP_PLUS + 1;
+pub const KEYC_KP_FIVE: key_code = KEYC_KP_FOUR + 1;
+pub const KEYC_KP_SIX: key_code = KEYC_KP_FIVE + 1;
+pub const KEYC_KP_ONE: key_code = KEYC_KP_SIX + 1;
+pub const KEYC_KP_TWO: key_code = KEYC_KP_ONE + 1;
+pub const KEYC_KP_THREE: key_code = KEYC_KP_TWO + 1;
+pub const KEYC_KP_ENTER: key_code = KEYC_KP_THREE + 1;
+pub const KEYC_KP_ZERO: key_code = KEYC_KP_ENTER + 1;
+pub const KEYC_KP_PERIOD: key_code = KEYC_KP_ZERO + 1;
+pub const KEYC_REPORT_DARK_THEME: key_code = KEYC_KP_PERIOD + 1;
+pub const KEYC_REPORT_LIGHT_THEME: key_code = KEYC_REPORT_DARK_THEME + 1;
+pub const KEYC_BASE_END: key_code = KEYC_REPORT_LIGHT_THEME + 1;
+
+pub fn keycIsMouse(key: key_code) bool {
+    const masked = key & KEYC_MASK_KEY;
+    return masked >= KEYC_MOUSE and masked < KEYC_BSPACE;
+}
+
+pub fn keycIsUnicode(key: key_code) bool {
+    const masked = key & KEYC_MASK_KEY;
+    return masked > 0x7f and
+        (masked < KEYC_BASE or masked >= KEYC_BASE_END) and
+        (masked < KEYC_USER or masked >= KEYC_USER_END);
+}
+
+pub fn keycIsPaste(key: key_code) bool {
+    const masked = key & KEYC_MASK_KEY;
+    return masked == KEYC_PASTE_START or masked == KEYC_PASTE_END;
+}
 
 pub const MODEKEY_EMACS: u32 = 0;
 pub const MODEKEY_VI: u32 = 1;

@@ -113,6 +113,24 @@ pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
 }
 
 fn window_pane_destroy(wp: *T.WindowPane) void {
+    if (wp.pid > 0) {
+        _ = std.c.kill(wp.pid, std.posix.SIG.HUP);
+        _ = std.c.kill(wp.pid, std.posix.SIG.TERM);
+        wp.pid = -1;
+    }
+    if (wp.pipe_pid > 0) {
+        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.HUP);
+        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.TERM);
+        wp.pipe_pid = -1;
+    }
+    if (wp.fd >= 0) {
+        std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+    if (wp.pipe_fd >= 0) {
+        std.posix.close(wp.pipe_fd);
+        wp.pipe_fd = -1;
+    }
     if (wp.argv) |argv| {
         for (argv) |arg| xm.allocator.free(arg);
         xm.allocator.free(argv);
@@ -121,6 +139,9 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     if (wp.cwd) |cwd| xm.allocator.free(cwd);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
+    const grid = wp.screen.grid;
+    xm.allocator.free(grid.linedata);
+    xm.allocator.destroy(grid);
     xm.allocator.destroy(wp.screen);
     xm.allocator.destroy(wp);
 }
@@ -158,10 +179,25 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
     w.references -= 1;
     if (w.references == 0) {
         _ = windows.remove(w.id);
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        w.winlinks.deinit(xm.allocator);
         opts.options_free(w.options);
         xm.allocator.free(w.name);
         xm.allocator.destroy(w);
     }
+}
+
+pub fn window_destroy_all_panes(w: *T.Window) void {
+    while (w.panes.items.len > 0) {
+        const wp = w.panes.items[w.panes.items.len - 1];
+        window_remove_pane(w, wp);
+    }
+    w.active = null;
 }
 
 pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) void {

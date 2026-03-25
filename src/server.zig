@@ -320,7 +320,9 @@ pub fn server_remove_client(cl: *T.Client) void {
 pub fn server_destroy_session(s: *T.Session) void {
     for (clients.items) |cl| {
         if (cl.session == s) {
+            if (s.attached > 0) s.attached -= 1;
             cl.session = null;
+            if (cl.last_session == s) cl.last_session = null;
             cl.flags |= T.CLIENT_EXIT;
         }
     }

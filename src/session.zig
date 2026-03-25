@@ -12,7 +12,7 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Ported from tmux/session.c
+// Ported in part from tmux/session.c.
 // Original copyright:
 //   Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
@@ -26,6 +26,7 @@ const log = @import("log.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const sort_mod = @import("sort.zig");
+const win = @import("window.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -123,19 +124,35 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
     log.log_debug("destroy session $%{d} {s}", .{ s.id, s.name });
     _ = sessions.remove(s.name);
 
-    // Kill all pane processes in all windows
+    var window_counts = std.AutoHashMap(*T.Window, u32).init(xm.allocator);
+    defer window_counts.deinit();
+
     var wit = s.windows.valueIterator();
     while (wit.next()) |wl| {
-        for (wl.window.panes.items) |wp| {
-            if (wp.pid > 0) {
-                log.log_debug("killing pane pid {d}", .{wp.pid});
-                _ = std.c.kill(wp.pid, std.posix.SIG.HUP);
-                _ = std.c.kill(wp.pid, std.posix.SIG.TERM);
-            }
-        }
+        const gop = window_counts.getOrPut(wl.window) catch unreachable;
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
     }
 
+    var wcit = window_counts.iterator();
+    while (wcit.next()) |entry| {
+        const w = entry.key_ptr.*;
+        const count = entry.value_ptr.*;
+        if (w.references == count) win.window_destroy_all_panes(w);
+    }
+
+    var indices: std.ArrayList(i32) = .{};
+    defer indices.deinit(xm.allocator);
+    var kit = s.windows.keyIterator();
+    while (kit.next()) |idx| indices.append(xm.allocator, idx.*) catch unreachable;
+    for (indices.items) |idx| {
+        _ = session_detach_index(s, idx, "session_destroy");
+    }
+
+    s.lastw.deinit(xm.allocator);
     s.windows.deinit();
+    opts.options_free(s.options);
+    env_mod.environ_free(s.environ);
     xm.allocator.free(s.name);
     xm.allocator.free(@constCast(s.cwd));
     xm.allocator.destroy(s);
@@ -180,13 +197,31 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
 }
 
 pub fn session_detach(_s: *T.Session, _wl: ?*T.Winlink) void {
-    _ = _s;
-    _ = _wl;
-    // TODO: implement full detach logic
+    const s = _s;
+    const wl = _wl orelse return;
+    _ = session_detach_index(s, wl.idx, "session_detach");
+}
+
+pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) ?T.Winlink {
+    if (s.windows.fetchRemove(idx)) |kv| {
+        if (s.curw != null and s.curw.?.idx == idx) s.curw = null;
+        win.window_remove_ref(kv.value.window, from);
+        return kv.value;
+    }
+    return null;
 }
 
 pub fn session_has_window(s: *T.Session, w: *T.Window) bool {
     return winlink_find_by_window(&s.windows, w) != null;
+}
+
+pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {
+    var best: ?*T.Winlink = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        if (best == null or wl.idx < best.?.idx) best = wl;
+    }
+    return best;
 }
 
 pub fn session_get_by_name(name: []const u8) ?*T.Session {

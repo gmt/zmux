@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const format_mod = @import("format.zig");
@@ -36,18 +37,12 @@ pub fn require_format(
     target: *const T.CmdFindState,
     message_text: ?[]const u8,
 ) ?[]u8 {
-    var ctx = target_context(target);
-    ctx.message_text = message_text;
+    var ctx = cmd_format.target_context(target, message_text);
     return format_mod.format_require(alloc, fmt, &ctx) catch null;
 }
 
 pub fn target_context(target: *const T.CmdFindState) format_mod.FormatContext {
-    return .{
-        .session = target.s,
-        .winlink = target.wl,
-        .window = target.w,
-        .pane = target.wp,
-    };
+    return cmd_format.target_context(target, null);
 }
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -56,10 +51,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     _ = cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, T.CMD_FIND_CANFAIL);
 
     const fmt = args.value_at(0) orelse "#{message_text}";
-    const expanded = require_format(xm.allocator, fmt, &target, args.value_at(0)) orelse {
-        cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-        return .@"error";
-    };
+    const ctx = cmd_format.target_context(&target, args.value_at(0));
+    const expanded = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
     defer xm.allocator.free(expanded);
 
     cmdq.cmdq_print(item, "{s}", .{expanded});

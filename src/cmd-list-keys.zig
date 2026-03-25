@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
@@ -90,14 +91,26 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const count = if (args.has('1') and bindings.len > 1) @as(usize, 1) else bindings.len;
     const key_width = max_key_width(bindings[0..count]);
     for (bindings[0..count]) |binding| {
-        const line = render_binding_line(binding, template, mode, prefix, key_width) orelse {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const line = require_binding_line(item, binding, template, mode, prefix, key_width) orelse return .@"error";
         defer xm.allocator.free(line);
         cmdq.cmdq_print(item, "{s}", .{line});
     }
     return .normal;
+}
+
+fn require_binding_line(item: *cmdq.CmdqItem, binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, key_width: u32) ?[]u8 {
+    const command = render_binding_command(binding);
+    defer xm.allocator.free(command);
+
+    const ctx = format_mod.FormatContext{
+        .key_binding = binding,
+        .key_command = command,
+        .key_prefix = prefix,
+        .key_string_width = key_width,
+        .key_table_width = @intCast(binding.tablename.len),
+        .notes_only = mode == .notes_only,
+    };
+    return cmd_format.require(item, template, &ctx);
 }
 
 fn collect_bindings(

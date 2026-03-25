@@ -6,6 +6,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
@@ -61,18 +62,15 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (!args.has('d')) s.curw = wl;
     server_fn.server_redraw_session(s);
     if (args.has('P')) {
-        const ctx = format_mod.FormatContext{
-            .item = @ptrCast(item),
-            .client = cmdq.cmdq_get_client(item),
-            .session = s,
-            .winlink = wl,
-            .window = wl.window,
-            .pane = wl.window.active,
+        const state = T.CmdFindState{
+            .s = s,
+            .wl = wl,
+            .w = wl.window,
+            .wp = wl.window.active,
+            .idx = wl.idx,
         };
-        const rendered = format_mod.format_require(xm.allocator, args.get('F') orelse NEW_WINDOW_TEMPLATE, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const ctx = cmd_format.target_context(&state, null);
+        const rendered = cmd_format.require(item, args.get('F') orelse NEW_WINDOW_TEMPLATE, &ctx) orelse return .@"error";
         defer xm.allocator.free(rendered);
         cmdq.cmdq_print(item, "{s}", .{rendered});
     }

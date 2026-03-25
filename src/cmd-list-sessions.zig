@@ -9,6 +9,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const sess = @import("session.zig");
 const sort_mod = @import("sort.zig");
@@ -35,17 +36,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     for (sorted) |s| {
         const ctx = session_context(s);
         if (filter) |expr| {
-            const matched = format_mod.format_filter_require(xm.allocator, expr, &ctx) catch {
-                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-                return .@"error";
-            };
+            const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";
             if (!matched) continue;
         }
 
-        const output = format_mod.format_require(xm.allocator, fmt, &ctx) catch {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        };
+        const output = cmd_format.require(item, fmt, &ctx) orelse return .@"error";
         defer xm.allocator.free(output);
         cmdq.cmdq_print(item, "{s}", .{output});
     }
@@ -65,7 +60,7 @@ pub const entry: cmd_mod.CmdEntry = .{
     .name = "list-sessions",
     .alias = "ls",
     .usage = "[-r] [-F format] [-f filter] [-O order]",
-    .template = "F:O:r",
+    .template = "F:O:f:r",
     .lower = 0,
     .upper = 0,
     .flags = 0,

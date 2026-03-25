@@ -150,6 +150,17 @@ pub fn window_get_last_pane(w: *T.Window) ?*T.WindowPane {
     return w.last_panes.items[w.last_panes.items.len - 1];
 }
 
+pub fn window_pane_index(w: *T.Window, wp: *T.WindowPane) ?usize {
+    for (w.panes.items, 0..) |pane, idx| {
+        if (pane == wp) return idx;
+    }
+    return null;
+}
+
+pub fn window_forget_pane_history(w: *T.Window, wp: *T.WindowPane) void {
+    remove_last_pane_reference(w, wp);
+}
+
 fn window_pane_destroy(wp: *T.WindowPane) void {
     if (wp.pid > 0) {
         _ = std.c.kill(wp.pid, std.posix.SIG.HUP);

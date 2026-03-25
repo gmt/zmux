@@ -33,6 +33,7 @@ const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const server_client_mod = @import("server-client.zig");
 const server_mod = @import("server.zig");
+const format_mod = @import("format.zig");
 
 fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -190,8 +191,21 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // Print new session name if -P flag
     if (args.has('P')) {
         const fmt = args.get('F') orelse "#{session_name}:";
-        _ = fmt; // TODO: format strings
-        cmdq.cmdq_print(item, "{s}:", .{s.name});
+        const print_wp = if (wl) |created_wl| created_wl.window.active else null;
+        const ctx = format_mod.FormatContext{
+            .item = @ptrCast(item),
+            .client = cl,
+            .session = s,
+            .winlink = wl,
+            .window = if (wl) |created_wl| created_wl.window else null,
+            .pane = print_wp,
+        };
+        const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
+        defer xm.allocator.free(expanded);
+        cmdq.cmdq_print(item, "{s}", .{expanded});
     }
 
     log.log_debug("new session ${d} {s}", .{ s.id, s.name });

@@ -32,18 +32,19 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     var idx: usize = 0;
     while (args.value_at(idx)) |raw_path| : (idx += 1) {
-        const path = if (args.has('F'))
-            format_mod.format_single(@ptrCast(item), raw_path, cl, null, null, null)
-        else
-            null;
+        const path = if (args.has('F')) blk: {
+            const ctx = format_mod.FormatContext{
+                .item = @ptrCast(item),
+                .client = cl,
+            };
+            break :blk format_mod.format_require_complete(xm.allocator, raw_path, &ctx) orelse {
+                cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+                return .@"error";
+            };
+        } else null;
         defer if (path) |expanded| xm.allocator.free(expanded);
 
         const resolved = path orelse raw_path;
-        if (args.has('F') and std.mem.indexOf(u8, resolved, "#{") != null) {
-            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
-            return .@"error";
-        }
-
         if (!cfg_mod.cfg_source_path(cl, resolved, .{
             .quiet = args.has('q'),
             .parse_only = args.has('n'),

@@ -13,6 +13,9 @@ const win_mod = @import("window.zig");
 const spawn_mod = @import("spawn.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
+const format_mod = @import("format.zig");
+
+const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
 fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -57,6 +60,22 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     };
     if (!args.has('d')) s.curw = wl;
     server_fn.server_redraw_session(s);
+    if (args.has('P')) {
+        const ctx = format_mod.FormatContext{
+            .item = @ptrCast(item),
+            .client = cmdq.cmdq_get_client(item),
+            .session = s,
+            .winlink = wl,
+            .window = wl.window,
+            .pane = wl.window.active,
+        };
+        const rendered = format_mod.format_require_complete(xm.allocator, args.get('F') orelse NEW_WINDOW_TEMPLATE, &ctx) orelse {
+            cmdq.cmdq_error(item, "format expansion not supported yet", .{});
+            return .@"error";
+        };
+        defer xm.allocator.free(rendered);
+        cmdq.cmdq_print(item, "{s}", .{rendered});
+    }
     return .normal;
 }
 

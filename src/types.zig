@@ -858,6 +858,7 @@ pub const Client = struct {
     pane_cache: ClientPaneCache = .{},
     stdin_pending: std.ArrayList(u8) = .{},
     key_table_name: ?[]u8 = null,
+    escape_timer: ?*c.libevent.event = null,
 
     flags: u64 = 0,
     session: ?*Session = null,

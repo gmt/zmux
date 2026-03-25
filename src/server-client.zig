@@ -76,6 +76,11 @@ pub fn server_client_lost(cl: *T.Client) void {
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
     cl.peer = null;
+    server_client_cancel_escape_timer(cl);
+    if (cl.escape_timer) |ev| {
+        c.libevent.event_free(ev);
+        cl.escape_timer = null;
+    }
     if (cl.title) |title| xm.allocator.free(title);
     if (cl.key_table_name) |name| xm.allocator.free(name);
     cl.stdin_pending.deinit(xm.allocator);
@@ -140,21 +145,7 @@ fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (data_len == 0) return;
     const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
     cl.stdin_pending.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
-
-    var consumed: usize = 0;
-    while (consumed < cl.stdin_pending.items.len) {
-        var event: T.key_event = .{};
-        const used = input_keys.input_key_get(cl.stdin_pending.items[consumed..], &event) orelse break;
-        if (used == 0) break;
-        consumed += used;
-        server_fn.server_client_handle_key(cl, &event);
-    }
-
-    if (consumed != 0) {
-        const remaining = cl.stdin_pending.items.len - consumed;
-        std.mem.copyForwards(u8, cl.stdin_pending.items[0..remaining], cl.stdin_pending.items[consumed..]);
-        cl.stdin_pending.shrinkRetainingCapacity(remaining);
-    }
+    server_client_process_stdin_pending(cl);
 }
 
 fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_type: protocol.MsgType) void {
@@ -308,6 +299,74 @@ pub fn server_client_attach(cl: *T.Client, s: *T.Session) void {
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
     }
+}
+
+fn server_client_process_stdin_pending(cl: *T.Client) void {
+    server_client_cancel_escape_timer(cl);
+
+    var consumed: usize = 0;
+    while (consumed < cl.stdin_pending.items.len) {
+        var event: T.key_event = .{};
+        const used = input_keys.input_key_get(cl.stdin_pending.items[consumed..], &event) orelse break;
+        if (used == 0) break;
+        consumed += used;
+        server_fn.server_client_handle_key(cl, &event);
+    }
+
+    if (consumed != 0) {
+        const remaining = cl.stdin_pending.items.len - consumed;
+        std.mem.copyForwards(u8, cl.stdin_pending.items[0..remaining], cl.stdin_pending.items[consumed..]);
+        cl.stdin_pending.shrinkRetainingCapacity(remaining);
+    }
+
+    if (cl.stdin_pending.items.len != 0 and cl.stdin_pending.items[0] == 0x1b) {
+        server_client_arm_escape_timer(cl);
+    }
+}
+
+fn server_client_arm_escape_timer(cl: *T.Client) void {
+    const timeout = opts.options_get_number(opts.global_options, "escape-time");
+    if (timeout <= 0) {
+        server_client_escape_timeout_cb(-1, 0, cl);
+        return;
+    }
+
+    if (cl.escape_timer == null) {
+        const base = proc_mod.libevent orelse return;
+        cl.escape_timer = c.libevent.event_new(base, -1, @intCast(c.libevent.EV_TIMEOUT), server_client_escape_timeout_cb, cl);
+    }
+    if (cl.escape_timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = @intCast(@divFloor(timeout, 1000)),
+            .usec = @intCast(@mod(timeout, 1000) * 1000),
+        };
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+fn server_client_cancel_escape_timer(cl: *T.Client) void {
+    if (cl.escape_timer) |ev| {
+        _ = c.libevent.event_del(ev);
+    }
+}
+
+export fn server_client_escape_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    server_client_cancel_escape_timer(cl);
+    if (cl.stdin_pending.items.len == 0 or cl.stdin_pending.items[0] != 0x1b) return;
+
+    var event = T.key_event{ .key = T.C0_ESC, .len = 1 };
+    event.data[0] = 0x1b;
+    server_fn.server_client_handle_key(cl, &event);
+
+    const remaining = cl.stdin_pending.items.len - 1;
+    if (remaining != 0) {
+        std.mem.copyForwards(u8, cl.stdin_pending.items[0..remaining], cl.stdin_pending.items[1..]);
+    }
+    cl.stdin_pending.shrinkRetainingCapacity(remaining);
+    server_client_process_stdin_pending(cl);
 }
 
 pub fn server_client_set_key_table(cl: *T.Client, name: ?[]const u8) void {

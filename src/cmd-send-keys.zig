@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const input_keys = @import("input-keys.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 
@@ -140,7 +141,7 @@ fn send_arg(wp: *T.WindowPane, value: []const u8, literal: bool, item: *cmdq.Cmd
 
 fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, item: *cmdq.CmdqItem) T.CmdRetval {
     var buf: [16]u8 = undefined;
-    const bytes = encode_key(key, &buf) catch |err| switch (err) {
+    const bytes = input_keys.input_key_encode(key, &buf) catch |err| switch (err) {
         error.UnsupportedKey => {
             if (allow_literal_fallback) {
                 const text = key_string.key_string_lookup_key(key, 0);
@@ -153,108 +154,6 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
     };
     write_all(wp.fd, bytes, item) catch return .@"error";
     return .normal;
-}
-
-fn encode_key(key_in: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
-    const key = key_in & ~T.KEYC_IMPLIED_META;
-    if (T.keycIsMouse(key) or T.keycIsPaste(key)) return error.UnsupportedKey;
-
-    if (key & T.KEYC_LITERAL != 0) {
-        buf[0] = @intCast(key & 0xff);
-        return buf[0..1];
-    }
-
-    const masked = key & T.KEYC_MASK_KEY;
-    const modifiers = key & T.KEYC_MASK_MODIFIERS;
-
-    if (masked == T.KEYC_NONE or masked == T.KEYC_UNKNOWN or masked == T.KEYC_ANY) {
-        return error.UnsupportedKey;
-    }
-
-    if (masked <= 0x7f) {
-        return encode_ascii_key(masked, modifiers, buf);
-    }
-    if (T.keycIsUnicode(masked)) {
-        return encode_unicode_key(masked, modifiers, buf);
-    }
-
-    return encode_special_key(masked, modifiers, buf);
-}
-
-fn encode_ascii_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
-    if (modifiers == 0) {
-        buf[0] = @intCast(masked);
-        return buf[0..1];
-    }
-    if (modifiers == T.KEYC_CTRL) {
-        if (masked == '?') {
-            buf[0] = 0x7f;
-            return buf[0..1];
-        }
-        if ((masked >= '@' and masked <= '_') or (masked >= 'a' and masked <= 'z') or (masked >= 'A' and masked <= 'Z')) {
-            buf[0] = @intCast(std.ascii.toUpper(@intCast(masked)) & 0x1f);
-            return buf[0..1];
-        }
-        return error.UnsupportedKey;
-    }
-    if (modifiers == T.KEYC_META) {
-        buf[0] = 0x1b;
-        buf[1] = @intCast(masked);
-        return buf[0..2];
-    }
-    if (modifiers == T.KEYC_SHIFT) {
-        if (masked >= 'a' and masked <= 'z') {
-            buf[0] = std.ascii.toUpper(@intCast(masked));
-            return buf[0..1];
-        }
-        buf[0] = @intCast(masked);
-        return buf[0..1];
-    }
-    if (modifiers == (T.KEYC_META | T.KEYC_CTRL)) {
-        var ctrl_buf: [16]u8 = undefined;
-        const ctrl = try encode_ascii_key(masked, T.KEYC_CTRL, &ctrl_buf);
-        buf[0] = 0x1b;
-        std.mem.copyForwards(u8, buf[1 .. 1 + ctrl.len], ctrl);
-        return buf[0 .. 1 + ctrl.len];
-    }
-    return error.UnsupportedKey;
-}
-
-fn encode_unicode_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
-    if (modifiers != 0 and modifiers != T.KEYC_META) return error.UnsupportedKey;
-    const codepoint: u21 = std.math.cast(u21, masked) orelse return error.UnsupportedKey;
-    const start: usize = if (modifiers == T.KEYC_META) 1 else 0;
-    if (start == 1) buf[0] = 0x1b;
-    const size = std.unicode.utf8Encode(codepoint, buf[start..]) catch return error.UnsupportedKey;
-    return buf[0 .. start + size];
-}
-
-fn encode_special_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
-    if (modifiers != 0 and modifiers != T.KEYC_META) return error.UnsupportedKey;
-    const seq = switch (masked) {
-        T.C0_HT => "\t",
-        T.C0_CR => "\r",
-        T.C0_ESC => "\x1b",
-        T.C0_BS, T.KEYC_BSPACE => "\x7f",
-        T.KEYC_UP => "\x1b[A",
-        T.KEYC_DOWN => "\x1b[B",
-        T.KEYC_RIGHT => "\x1b[C",
-        T.KEYC_LEFT => "\x1b[D",
-        T.KEYC_HOME => "\x1b[H",
-        T.KEYC_END => "\x1b[F",
-        T.KEYC_PPAGE => "\x1b[5~",
-        T.KEYC_NPAGE => "\x1b[6~",
-        T.KEYC_IC => "\x1b[2~",
-        T.KEYC_DC => "\x1b[3~",
-        else => return error.UnsupportedKey,
-    };
-    if (modifiers == T.KEYC_META) {
-        buf[0] = 0x1b;
-        std.mem.copyForwards(u8, buf[1 .. 1 + seq.len], seq);
-        return buf[0 .. 1 + seq.len];
-    }
-    std.mem.copyForwards(u8, buf[0..seq.len], seq);
-    return buf[0..seq.len];
 }
 
 fn write_all(fd: i32, bytes: []const u8, item: *cmdq.CmdqItem) !void {

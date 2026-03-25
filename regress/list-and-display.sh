@@ -45,7 +45,7 @@ smoke_cmd list-panes -t main:1 | grep -q 'pid=' || {
 }
 
 MSG=$(smoke_cmd display-message -p -t main:1.0 '#{session_name}:#{window_index}.#{pane_index} #{window_width}x#{window_height}')
-[ "$MSG" = 'main:1.1 80x24' ] || {
+[ "$MSG" = 'main:1.0 80x24' ] || {
     echo "display-message mismatch: $MSG"
     exit 1
 }

@@ -43,6 +43,10 @@ var client_retval: i32 = 0;
 var client_stdin_event: ?*c.libevent.event = null;
 var client_control_input: std.ArrayList(u8) = .{};
 var client_control_stdin_closed = false;
+var client_attached = false;
+var client_raw_tty = false;
+var client_saved_tio: c.posix_sys.termios = undefined;
+var client_have_saved_tio = false;
 
 // ── Socket connection ─────────────────────────────────────────────────────
 
@@ -227,10 +231,68 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             proc_mod.proc_exit(client_proc.?);
         },
         .ready => {
-            // Server is ready
+            client_enter_attached_mode();
+            client_send_resize();
         },
         else => {},
     }
+}
+
+fn client_enter_attached_mode() void {
+    client_attached = true;
+    client_enable_raw_tty();
+    client_enable_attached_input();
+    const stdout = std.fs.File.stdout();
+    _ = stdout.writeAll("\x1b[?1049h\x1b[H\x1b[2J") catch {};
+}
+
+fn client_leave_attached_mode() void {
+    client_disable_stdin_event();
+    if (client_raw_tty and client_have_saved_tio) {
+        _ = c.posix_sys.tcsetattr(0, c.posix_sys.TCSANOW, &client_saved_tio);
+    }
+    client_raw_tty = false;
+    client_attached = false;
+    const stdout = std.fs.File.stdout();
+    _ = stdout.writeAll("\x1b[?1049l\x1b[0m") catch {};
+}
+
+fn client_enable_raw_tty() void {
+    if (client_raw_tty) return;
+    if (c.posix_sys.tcgetattr(0, &client_saved_tio) != 0) return;
+    client_have_saved_tio = true;
+    var raw = client_saved_tio;
+    c.posix_sys.cfmakeraw(&raw);
+    if (c.posix_sys.tcsetattr(0, c.posix_sys.TCSANOW, &raw) != 0) return;
+    client_raw_tty = true;
+}
+
+fn client_enable_attached_input() void {
+    if (client_stdin_event != null) return;
+    const base = proc_mod.libevent orelse return;
+    client_stdin_event = c.libevent.event_new(
+        base,
+        0,
+        @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
+        client_stdin_cb,
+        null,
+    );
+    if (client_stdin_event) |ev| {
+        _ = c.libevent.event_add(ev, null);
+    }
+}
+
+fn client_send_resize() void {
+    const peer = client_peer orelse return;
+    var ws: c.posix_sys.struct_winsize = std.mem.zeroes(c.posix_sys.struct_winsize);
+    if (c.posix_sys.ioctl(0, c.posix_sys.TIOCGWINSZ, &ws) != 0) return;
+    const msg = protocol.MsgResize{
+        .sx = @max(@as(u32, ws.ws_col), 1),
+        .sy = @max(@as(u32, ws.ws_row), 1),
+        .xpixel = ws.ws_xpixel,
+        .ypixel = ws.ws_ypixel,
+    };
+    _ = proc_mod.proc_send(peer, .resize, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgResize));
 }
 
 fn client_send_command(argv: anytype) void {
@@ -302,18 +364,30 @@ export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
         },
     };
 
-    if (n == 0) {
-        client_control_flush_lines(true);
-        client_disable_stdin_event();
-        if (!client_control_stdin_closed) {
-            client_control_stdin_closed = true;
-            client_send_command([_][]const u8{"detach-client"});
+    if (client_flags & T.CLIENT_CONTROL != 0) {
+        if (n == 0) {
+            client_control_flush_lines(true);
+            client_disable_stdin_event();
+            if (!client_control_stdin_closed) {
+                client_control_stdin_closed = true;
+                client_send_command([_][]const u8{"detach-client"});
+            }
+            return;
         }
+
+        client_control_input.appendSlice(xm.allocator, buf[0..n]) catch unreachable;
+        client_control_flush_lines(false);
         return;
     }
 
-    client_control_input.appendSlice(xm.allocator, buf[0..n]) catch unreachable;
-    client_control_flush_lines(false);
+    if (n == 0) {
+        client_disable_stdin_event();
+        return;
+    }
+
+    if (client_peer) |peer| {
+        _ = proc_mod.proc_send(peer, .stdin_data, -1, buf[0..n].ptr, n);
+    }
 }
 
 // ── Main client entry ─────────────────────────────────────────────────────
@@ -389,20 +463,14 @@ pub fn client_main(
     if (client_flags & T.CLIENT_CONTROL != 0) {
         client_control_input = .{};
         client_control_stdin_closed = false;
-        client_stdin_event = c.libevent.event_new(
-            base,
-            0,
-            @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
-            client_stdin_cb,
-            null,
-        );
-        if (client_stdin_event) |ev| {
-            _ = c.libevent.event_add(ev, null);
-        }
+        client_enable_attached_input();
     }
 
     // Run the event loop until done
     proc_mod.proc_loop(client_proc.?, null);
+    if (client_attached or client_raw_tty) {
+        client_leave_attached_mode();
+    }
     client_disable_stdin_event();
     client_control_input.deinit(xm.allocator);
     client_control_input = .{};
@@ -416,6 +484,9 @@ export fn client_signal(signo: c_int) void {
         std.posix.SIG.TERM, std.posix.SIG.INT => {
             client_exitreason = .terminated;
             proc_mod.proc_exit(client_proc.?);
+        },
+        std.posix.SIG.WINCH => {
+            if (client_attached) client_send_resize();
         },
         else => {},
     }

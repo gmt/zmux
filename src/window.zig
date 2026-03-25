@@ -189,6 +189,10 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
     const grid = wp.screen.grid;
+    for (grid.linedata) |line| {
+        if (line.celldata.len > 0) xm.allocator.free(line.celldata);
+        if (line.extddata.len > 0) xm.allocator.free(line.extddata);
+    }
     if (wp.screen.title) |title| xm.allocator.free(title);
     if (wp.screen.path) |path| xm.allocator.free(path);
     if (wp.screen.tabs) |tabs| xm.allocator.free(tabs);

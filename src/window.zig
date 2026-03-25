@@ -12,7 +12,7 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Ported from tmux/window.c
+// Ported in part from tmux/window.c.
 // Original copyright:
 //   Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
@@ -64,7 +64,7 @@ pub fn window_create(sx: u32, sy: u32, _xpixel: u32, _ypixel: u32) *T.Window {
         .sy = sy,
         .xpixel = _xpixel,
         .ypixel = _ypixel,
-        .options = opts.global_w_options,
+        .options = opts.options_create(opts.global_w_options),
     };
     next_window_id += 1;
     windows.put(w.id, w) catch unreachable;
@@ -89,14 +89,13 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
     wp.* = T.WindowPane{
         .id = next_window_pane_id,
         .window = w,
-        .options = opts.global_w_options,
+        .options = opts.options_create(w.options),
         .sx = sx,
         .sy = sy,
         .screen = screen_ptr,
         .base = T.Screen{ .grid = grid },
     };
-    colour_mod.colour_palette_init(&wp.palette);
-    style_mod.style_set_scrollbar_style_from_option(&wp.scrollbar_style, wp.options);
+    window_pane_options_changed(wp, null);
     next_window_pane_id += 1;
     all_window_panes.put(wp.id, wp) catch unreachable;
     return wp;
@@ -120,9 +119,24 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     }
     if (wp.shell) |shell| xm.allocator.free(shell);
     if (wp.cwd) |cwd| xm.allocator.free(cwd);
+    opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
     xm.allocator.destroy(wp.screen);
     xm.allocator.destroy(wp);
+}
+
+pub fn window_pane_options_changed(wp: *T.WindowPane, changed: ?[]const u8) void {
+    if (changed == null) {
+        colour_mod.colour_palette_init(&wp.palette);
+        style_mod.style_set_scrollbar_style_from_option(&wp.scrollbar_style, wp.options);
+        colour_mod.colour_palette_from_option(&wp.palette, wp.options);
+        return;
+    }
+
+    if (std.mem.eql(u8, changed.?, "pane-scrollbars-style"))
+        style_mod.style_set_scrollbar_style_from_option(&wp.scrollbar_style, wp.options);
+    if (std.mem.eql(u8, changed.?, "pane-colours"))
+        colour_mod.colour_palette_from_option(&wp.palette, wp.options);
 }
 
 pub fn window_find_by_id(id: u32) ?*T.Window {
@@ -144,6 +158,7 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
     w.references -= 1;
     if (w.references == 0) {
         _ = windows.remove(w.id);
+        opts.options_free(w.options);
         xm.allocator.free(w.name);
         xm.allocator.destroy(w);
     }
@@ -193,4 +208,36 @@ fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
         .linedata = lines,
     };
     return g;
+}
+
+test "window panes inherit from their window options and refresh cached pane state" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+
+    const wp = window_add_pane(w, null, 80, 24);
+    defer {
+        _ = all_window_panes.remove(wp.id);
+        window_pane_destroy(wp);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    try std.testing.expect(wp.options != opts.global_w_options);
+    try std.testing.expectEqual(w.options, wp.options.parent.?);
+
+    opts.options_set_string(wp.options, false, "pane-scrollbars-style", "fg=blue,pad=4");
+    window_pane_options_changed(wp, "pane-scrollbars-style");
+    try std.testing.expectEqual(@as(i32, 4), wp.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 4), wp.scrollbar_style.gc.fg);
+
+    opts.options_set_array(wp.options, "pane-colours", &.{ "1=#010203", "2=brightred" });
+    window_pane_options_changed(wp, "pane-colours");
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0x01, 0x02, 0x03), colour_mod.colour_palette_get(&wp.palette, 1));
+    try std.testing.expectEqual(@as(i32, 91), colour_mod.colour_palette_get(&wp.palette, 2));
 }

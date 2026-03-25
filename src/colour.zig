@@ -12,7 +12,7 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Ported from tmux/colour.c
+// Ported in part from tmux/colour.c.
 // Original copyright:
 //   Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   Copyright (c) 2016 Avi Halachmi <avihpit@yahoo.com>
@@ -261,8 +261,28 @@ pub fn colour_palette_from_option(p: ?*T.ColourPalette, oo: *T.Options) void {
         return;
     }
 
-    // Current Zig options arrays do not preserve tmux's indexed array-item semantics yet.
-    // Leave this as an intentional placeholder rather than inventing fake indexes here.
+    if (palette.default_palette) |entries| xm.allocator.free(entries);
+    const entries = xm.allocator.alloc(i32, 256) catch unreachable;
+    @memset(entries, -1);
+
+    var have_entries = false;
+    for (value.?.array.items) |item| {
+        const eq = std.mem.indexOfScalar(u8, item, '=') orelse continue;
+        const raw_idx = std.mem.trim(u8, item[0..eq], " \t");
+        const raw_colour = std.mem.trim(u8, item[eq + 1 ..], " \t");
+        const idx = std.fmt.parseInt(u8, raw_idx, 10) catch continue;
+        const parsed = colour_fromstring(raw_colour);
+        if (parsed == -1) continue;
+        entries[idx] = parsed;
+        have_entries = true;
+    }
+
+    if (!have_entries) {
+        xm.allocator.free(entries);
+        palette.default_palette = null;
+        return;
+    }
+    palette.default_palette = entries;
 }
 
 fn colour_dist_sq(R: i32, G: i32, B: i32, r: u8, g: u8, b: u8) i32 {
@@ -469,6 +489,22 @@ test "colour_palette get set clear lifecycle" {
     colour_palette_clear(&palette);
     try std.testing.expectEqual(@as(i32, -1), colour_palette_get(&palette, 1));
     colour_palette_free(&palette);
+}
+
+test "colour_palette_from_option loads reduced pane-colours entries" {
+    const oo = opts.options_create(null);
+    defer opts.options_free(oo);
+
+    opts.options_set_array(oo, "pane-colours", &.{ "1=#010203", "2=brightred", "bad", "256=#ffffff" });
+
+    var palette: T.ColourPalette = .{};
+    colour_palette_init(&palette);
+    defer colour_palette_free(&palette);
+
+    colour_palette_from_option(&palette, oo);
+    try std.testing.expectEqual(colour_join_rgb(0x01, 0x02, 0x03), colour_palette_get(&palette, 1));
+    try std.testing.expectEqual(@as(i32, 91), colour_palette_get(&palette, 2));
+    try std.testing.expectEqual(@as(i32, -1), colour_palette_get(&palette, 3));
 }
 
 test "colour_totheme classifies light and dark" {

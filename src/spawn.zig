@@ -12,7 +12,7 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Ported from tmux/spawn.c
+// Ported in part from tmux/spawn.c.
 // Original copyright:
 //   Copyright (c) 2019 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
@@ -53,7 +53,6 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
 
     const sx, const sy = client_size(sc);
     const w = win.window_create(sx, sy, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    w.options = opts.options_create(opts.global_w_options);
 
     const wl = sess.session_attach(s, w, sc.idx, cause) orelse {
         win.window_remove_ref(w, "spawn_window");

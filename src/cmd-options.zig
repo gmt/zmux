@@ -1,30 +1,21 @@
 // Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met:
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
 //
-// 1. Redistributions of source code must retain the above copyright notice,
-//    this list of conditions and the following disclaimer.
-// 2. Redistributions in binary form must reproduce the above copyright notice,
-//    this list of conditions and the following disclaimer in the documentation
-//    and/or other materials provided with the distribution.
-// 3. Neither the name of the copyright holder nor the names of its
-//    contributors may be used to endorse or promote products derived from
-//    this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-// POSSIBILITY OF SUCH DAMAGE.
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+// IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+// OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
 // Ported in part from tmux/cmd-set-option.c and tmux/cmd-show-options.c.
+// Original copyright:
+//   Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
+//   ISC licence – same terms as above.
 
 const std = @import("std");
 const T = @import("types.zig");
@@ -44,6 +35,7 @@ pub const ResolvedTarget = struct {
     kind: ScopeKind,
     options: *T.Options,
     global: bool,
+    pane: ?*T.WindowPane = null,
 };
 
 pub fn resolve_target(
@@ -79,8 +71,20 @@ pub fn resolve_target(
             return .{ .kind = .window, .options = target.w.?.options, .global = false };
         },
         .pane => {
-            cmdq.cmdq_error(item, "pane options not supported yet", .{});
-            return null;
+            if (args.has('g')) {
+                cmdq.cmdq_error(item, "global pane options not supported yet", .{});
+                return null;
+            }
+
+            var target: T.CmdFindState = .{};
+            if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, T.CMD_FIND_QUIET) != 0 or target.wp == null) {
+                if (args.get('t')) |tflag|
+                    cmdq.cmdq_error(item, "can't find target: {s}", .{tflag})
+                else
+                    cmdq.cmdq_error(item, "no current pane", .{});
+                return null;
+            }
+            return .{ .kind = .pane, .options = target.wp.?.options, .global = false, .pane = target.wp.? };
         },
     }
 }
@@ -180,4 +184,60 @@ fn requested_scope(args: *const @import("arguments.zig").Arguments, window_defau
 
 fn less_than_string(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
+}
+
+test "resolve_target and collect_lines support pane scoped options" {
+    const cmd_mod = @import("cmd.zig");
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "pane-show", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &attach_cause).?;
+    const wp = win.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    s.curw = sess.winlink_find_by_window(&s.windows, w).?;
+
+    opts.options_set_string(wp.options, false, "@pane-note", "active");
+    const target = xm.xasprintf("%{d}", .{wp.id});
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "show-options", "-p", "-t", target, "@pane-note" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    const resolved = resolve_target(&item, cmd_mod.cmd_get_args(cmd), false).?;
+    try std.testing.expectEqual(wp, resolved.pane.?);
+
+    const lines = collect_lines(resolved, "@pane-note", false);
+    defer {
+        for (lines) |line| xm.allocator.free(line);
+        xm.allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+    try std.testing.expectEqualStrings("@pane-note active", lines[0]);
 }

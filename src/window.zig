@@ -107,6 +107,7 @@ pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
 }
 
 pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
+    remove_last_pane_reference(w, wp);
     for (w.panes.items, 0..) |p, i| {
         if (p == wp) {
             _ = w.panes.swapRemove(i);
@@ -129,6 +130,11 @@ pub fn window_adopt_pane(w: *T.Window, wp: *T.WindowPane) void {
 
 pub fn window_count_panes(w: *T.Window) usize {
     return w.panes.items.len;
+}
+
+pub fn window_get_last_pane(w: *T.Window) ?*T.WindowPane {
+    if (w.last_panes.items.len == 0) return null;
+    return w.last_panes.items[w.last_panes.items.len - 1];
 }
 
 fn window_pane_destroy(wp: *T.WindowPane) void {
@@ -159,6 +165,9 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
     const grid = wp.screen.grid;
+    if (wp.screen.title) |title| xm.allocator.free(title);
+    if (wp.screen.path) |path| xm.allocator.free(path);
+    if (wp.screen.tabs) |tabs| xm.allocator.free(tabs);
     xm.allocator.free(grid.linedata);
     xm.allocator.destroy(grid);
     xm.allocator.destroy(wp.screen);
@@ -219,9 +228,14 @@ pub fn window_destroy_all_panes(w: *T.Window) void {
     w.active = null;
 }
 
-pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) void {
+pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) bool {
     _ = _notify;
+    if (w.active == wp) return false;
+    if (!window_has_pane(w, wp)) return false;
+    if (w.active) |old| push_last_pane(w, old);
+    remove_last_pane_reference(w, wp);
     w.active = wp;
+    return true;
 }
 
 pub fn window_set_name(w: *T.Window, name: []const u8) void {
@@ -270,6 +284,29 @@ fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
     return g;
 }
 
+fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {
+    for (w.panes.items) |pane| {
+        if (pane == wp) return true;
+    }
+    return false;
+}
+
+fn push_last_pane(w: *T.Window, wp: *T.WindowPane) void {
+    remove_last_pane_reference(w, wp);
+    w.last_panes.append(xm.allocator, wp) catch unreachable;
+}
+
+fn remove_last_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
+    var i: usize = 0;
+    while (i < w.last_panes.items.len) {
+        if (w.last_panes.items[i] == wp) {
+            _ = w.last_panes.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 test "window panes inherit from their window options and refresh cached pane state" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
@@ -300,4 +337,42 @@ test "window panes inherit from their window options and refresh cached pane sta
     window_pane_options_changed(wp, "pane-colours");
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x01, 0x02, 0x03), colour_mod.colour_palette_get(&wp.palette, 1));
     try std.testing.expectEqual(@as(i32, 91), colour_mod.colour_palette_get(&wp.palette, 2));
+}
+
+test "window_set_active_pane tracks last pane history and detach prunes it" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+    const third = window_add_pane(w, null, 80, 24);
+    _ = third;
+
+    try std.testing.expectEqual(first, w.active.?);
+    try std.testing.expect(window_set_active_pane(w, second, true));
+    try std.testing.expectEqual(second, w.active.?);
+    try std.testing.expectEqual(first, window_get_last_pane(w).?);
+
+    try std.testing.expect(window_set_active_pane(w, first, true));
+    try std.testing.expectEqual(first, w.active.?);
+    try std.testing.expectEqual(second, window_get_last_pane(w).?);
+
+    try std.testing.expect(window_detach_pane(w, second));
+    try std.testing.expect(window_get_last_pane(w) == null);
 }

@@ -117,7 +117,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 fn expand_values(args: *const @import("arguments.zig").Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
     const values = xm.allocator.alloc([]u8, args.count()) catch unreachable;
     for (0..args.count()) |idx| {
-        values[idx] = format_mod.format_require_complete(xm.allocator, args.value_at(idx).?, ctx) orelse {
+        values[idx] = format_mod.format_require(xm.allocator, args.value_at(idx).?, ctx) catch {
             for (values[0..idx]) |expanded| xm.allocator.free(expanded);
             xm.allocator.free(values);
             cmdq.cmdq_error(item, "format expansion not supported yet", .{});

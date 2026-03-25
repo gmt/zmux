@@ -60,7 +60,7 @@ fn render_entry(cmd_entry: *const cmd_mod.CmdEntry, template: []const u8) ?[]u8 
         .command_alias = cmd_entry.alias,
         .command_usage = cmd_entry.usage,
     };
-    return format_mod.format_require_complete(std.heap.c_allocator, template, &ctx);
+    return format_mod.format_require(std.heap.c_allocator, template, &ctx) catch null;
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

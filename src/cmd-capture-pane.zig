@@ -43,10 +43,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (args.has('a')) {
-        cmdq.cmdq_error(item, "alternate screen capture not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('e')) {
         cmdq.cmdq_error(item, "escape-sequence capture not supported yet", .{});
         return .@"error";
@@ -64,8 +60,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
+    const target_grid = if (args.has('a')) blk: {
+        if (!screen_mod.screen_alternate_active(wp)) {
+            cmdq.cmdq_error(item, "no alternate screen", .{});
+            return .@"error";
+        }
+        break :blk wp.base.grid;
+    } else screen_mod.screen_current(wp).grid;
+
     const buf = capture_grid(
-        wp,
+        target_grid,
         args.get('S'),
         args.get('E'),
         args.has('J'),
@@ -92,7 +96,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 }
 
 fn capture_grid(
-    wp: *T.WindowPane,
+    gd: *T.Grid,
     start_raw: ?[]const u8,
     end_raw: ?[]const u8,
     join_lines: bool,
@@ -100,7 +104,6 @@ fn capture_grid(
     escape_sequences: bool,
     item: *cmdq.CmdqItem,
 ) ?[]u8 {
-    const gd = screen_mod.screen_current(wp).grid;
     if (gd.sy == 0) return xm.xstrdup("");
 
     var top = parse_bound(start_raw, gd.sy, true, item) orelse return null;
@@ -238,7 +241,7 @@ test "capture-pane helper captures current grid lines and trims spaces by defaul
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const captured = capture_grid(wp, null, null, false, false, false, &item).?;
+    const captured = capture_grid(wp.base.grid, null, null, false, false, false, &item).?;
     defer xm.allocator.free(captured);
     try std.testing.expectEqualStrings("hello\nworld\n", captured[0..12]);
 }
@@ -278,16 +281,52 @@ test "capture-pane helper supports line bounds and octal escapes" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const captured = capture_grid(wp, "1", "1", false, false, true, &item).?;
+    const captured = capture_grid(wp.base.grid, "1", "1", false, false, true, &item).?;
     defer xm.allocator.free(captured);
     try std.testing.expectEqualStrings("\\134x\n", captured);
 }
 
-test "capture-pane rejects unsupported alternate screen capture" {
-    var parse_cause: ?[]u8 = null;
-    const capture_cmd = try cmd_mod.cmd_parse_one(&.{ "capture-pane", "-a" }, null, &parse_cause);
-    defer cmd_mod.cmd_free(capture_cmd);
+test "capture-pane helper can target saved primary grid while alternate screen is active" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const input_mod = @import("input.zig");
+
+    sess.session_init_globals(xm.allocator);
+    @import("window.zig").window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "capture-pane-alt", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("capture-pane-alt") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const wp = wl.window.active.?;
+
+    set_grid_line_text(wp.base.grid, 0, "main");
+    input_mod.input_parse_screen(wp, "\x1b[?1049hALT");
+
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(capture_cmd, &item));
+    const visible = capture_grid(screen_mod.screen_current(wp).grid, "0", "2", false, false, false, &item).?;
+    defer xm.allocator.free(visible);
+    try std.testing.expectEqualStrings("ALT\n\n\n", visible);
+
+    const primary = capture_grid(wp.base.grid, "0", "2", false, false, false, &item).?;
+    defer xm.allocator.free(primary);
+    try std.testing.expectEqualStrings("main\n\n\n", primary);
 }

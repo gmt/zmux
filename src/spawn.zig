@@ -89,7 +89,7 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
 
 /// Create a new pane in an existing window.
 pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
-    _ = cause;
+    if (sc.flags & T.SPAWN_RESPAWN != 0) return respawn_pane(sc, cause);
     const wl = sc.wl orelse return null;
     const w = wl.window;
 
@@ -107,6 +107,41 @@ pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
     return wp;
 }
 
+pub fn respawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
+    const wl = sc.wl orelse {
+        cause.* = xm.xstrdup("no window");
+        return null;
+    };
+    const s = sc.s orelse wl.session;
+    const wp = sc.wp0 orelse wl.window.active orelse {
+        cause.* = xm.xstrdup("no pane");
+        return null;
+    };
+
+    if (wp.fd >= 0 and sc.flags & T.SPAWN_KILL == 0) {
+        cause.* = xm.xasprintf("pane {s}:{d}.{d} still active", .{
+            s.name,
+            wl.idx,
+            pane_index(wl.window, wp),
+        });
+        return null;
+    }
+
+    if (wp.fd >= 0 or wp.pid > 0) stop_pane_process(wp);
+    prepare_pane_for_respawn(wp);
+
+    if (sc.flags & T.SPAWN_EMPTY == 0) {
+        spawn_pane_exec(wp, sc) catch |err| {
+            cause.* = xm.xasprintf("respawn failed: {}", .{err});
+            return null;
+        };
+    } else {
+        wp.flags |= T.PANE_EMPTY;
+    }
+
+    return wp;
+}
+
 // ── Internal: fork/exec for a pane ────────────────────────────────────────
 
 fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
@@ -114,17 +149,30 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     const alloc = xm.allocator;
 
     const shell = blk: {
+        if (sc.flags & T.SPAWN_RESPAWN != 0 and sc.argv == null) {
+            if (wp.shell) |existing| break :blk existing;
+        }
         const default_shell = opts.options_get_string(opts.global_s_options, "default-shell");
         break :blk if (default_shell.len > 0) default_shell else "/bin/sh";
     };
 
-    const cwd: []const u8 = sc.cwd orelse (if (s) |ss| ss.cwd else "/");
+    const cwd: []const u8 = sc.cwd orelse blk: {
+        if (sc.flags & T.SPAWN_RESPAWN != 0) {
+            if (wp.cwd) |existing| break :blk existing;
+        }
+        break :blk if (s) |ss| ss.cwd else "/";
+    };
 
-    const argv = if (sc.argv) |argv_in|
+    const argv: ?[][]u8 = if (sc.argv) |argv_in|
         duplicate_argv(argv_in)
+    else if (sc.flags & T.SPAWN_RESPAWN != 0)
+        if (wp.argv) |argv_in| duplicate_argv_const(argv_in) else null
     else
-        duplicate_argv(&.{shell});
+        null;
 
+    if (wp.argv) |old_argv| free_argv(old_argv);
+    if (wp.shell) |old_shell| xm.allocator.free(old_shell);
+    if (wp.cwd) |old_cwd| xm.allocator.free(old_cwd);
     wp.argv = argv;
     wp.shell = xm.xstrdup(shell);
     wp.cwd = xm.xstrdup(cwd);
@@ -156,14 +204,31 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         // Change directory
         _ = std.c.chdir(alloc.dupeZ(u8, cwd) catch "/");
 
-        // Exec the shell
+        if (sc.environ) |env| env_mod.environ_push(env);
+
         const shell_z = alloc.dupeZ(u8, shell) catch "/bin/sh";
-        var nargv_buf: [16:null]?[*:0]const u8 = .{null} ** 16;
-        for (argv, 0..) |arg, idx| {
-            if (idx >= 15) break;
-            nargv_buf[idx] = (alloc.dupeZ(u8, arg) catch null);
+        _ = setenv("SHELL", shell_z, 1);
+
+        if (argv) |argv_items| {
+            if (argv_items.len > 1) {
+                const argv_buf = alloc.alloc(?[*:0]const u8, argv_items.len + 1) catch unreachable;
+                for (argv_items, 0..) |arg, idx| argv_buf[idx] = alloc.dupeZ(u8, arg) catch null;
+                argv_buf[argv_items.len] = null;
+                _ = c.posix_sys.execvp(argv_buf[0], @ptrCast(argv_buf.ptr));
+                std.c._exit(1);
+            }
+
+            const shell_name = shell_basename(shell);
+            const shell_name_z = alloc.dupeZ(u8, shell_name) catch shell_z;
+            const command_z = alloc.dupeZ(u8, argv_items[0]) catch null;
+            var shell_argv = [_:null]?[*:0]const u8{ shell_name_z.ptr, "-c", if (command_z) |cmd| cmd.ptr else null, null };
+            _ = std.c.execve(shell_z, @ptrCast(&shell_argv), std.c.environ);
+            std.c._exit(1);
         }
-        _ = std.c.execve(shell_z, @ptrCast(&nargv_buf), std.c.environ);
+
+        const login_name = alloc.dupeZ(u8, shell_login_name(shell)) catch shell_z;
+        var login_argv = [_:null]?[*:0]const u8{ login_name.ptr, null };
+        _ = std.c.execve(shell_z, @ptrCast(&login_argv), std.c.environ);
         std.c._exit(1);
     }
 
@@ -189,6 +254,52 @@ fn duplicate_argv(argv: []const []const u8) [][]u8 {
         out[idx] = xm.xstrdup(arg);
     }
     return out;
+}
+
+fn duplicate_argv_const(argv: [][]u8) [][]u8 {
+    var out = xm.allocator.alloc([]u8, argv.len) catch unreachable;
+    for (argv, 0..) |arg, idx| out[idx] = xm.xstrdup(arg);
+    return out;
+}
+
+fn free_argv(argv: [][]u8) void {
+    for (argv) |arg| xm.allocator.free(arg);
+    xm.allocator.free(argv);
+}
+
+fn stop_pane_process(wp: *T.WindowPane) void {
+    pane_io.pane_io_stop(wp);
+    if (wp.pid > 0) {
+        _ = std.c.kill(wp.pid, std.posix.SIG.HUP);
+        _ = std.c.kill(wp.pid, std.posix.SIG.TERM);
+        wp.pid = -1;
+    }
+    if (wp.fd >= 0) {
+        std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+}
+
+fn prepare_pane_for_respawn(wp: *T.WindowPane) void {
+    wp.flags &= ~(T.PANE_EXITED | T.PANE_EMPTY);
+    wp.status = 0;
+    win.window_pane_reset_contents(wp);
+}
+
+fn pane_index(w: *T.Window, wp: *T.WindowPane) usize {
+    return win.window_pane_index(w, wp) orelse 0;
+}
+
+fn shell_basename(shell: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, shell, '/')) |idx| {
+        if (idx + 1 < shell.len) return shell[idx + 1 ..];
+    }
+    return shell;
+}
+
+fn shell_login_name(shell: []const u8) []u8 {
+    const base = shell_basename(shell);
+    return xm.xasprintf("-{s}", .{base});
 }
 
 fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8) !void {

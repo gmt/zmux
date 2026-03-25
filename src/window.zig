@@ -300,6 +300,11 @@ pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {
     }
 }
 
+pub fn window_pane_reset_contents(wp: *T.WindowPane) void {
+    reset_screen(wp.base.grid, &wp.base);
+    if (wp.screen.grid != wp.base.grid) reset_screen(wp.screen.grid, wp.screen);
+}
+
 /// Push current zoom state.
 pub fn window_push_zoom(_w: *T.Window, _ignore: bool, _zoom: bool) bool {
     _ = _w;
@@ -332,6 +337,30 @@ fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
         .linedata = lines,
     };
     return g;
+}
+
+fn reset_screen(grid: *T.Grid, screen: *T.Screen) void {
+    for (grid.linedata) |*line| {
+        if (line.celldata.len > 0) {
+            for (line.celldata) |*cell| {
+                cell.* = .{
+                    .offset_or_data = .{
+                        .data = .{
+                            .attr = 0,
+                            .fg = 0,
+                            .bg = 0,
+                            .data = ' ',
+                        },
+                    },
+                    .flags = 0,
+                };
+            }
+        }
+        line.cellused = 0;
+    }
+    grid.hsize = 0;
+    screen.cx = 0;
+    screen.cy = 0;
 }
 
 fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {

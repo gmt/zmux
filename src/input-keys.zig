@@ -24,6 +24,83 @@ const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const key_string = @import("key-string.zig");
 
+const FixedSequence = struct {
+    key: T.key_code,
+    seq: []const u8,
+};
+
+const ModifierTemplate = struct {
+    key: T.key_code,
+    template: []const u8,
+};
+
+const fixed_sequences = [_]FixedSequence{
+    .{ .key = T.KEYC_F1, .seq = "\x1bOP" },
+    .{ .key = T.KEYC_F2, .seq = "\x1bOQ" },
+    .{ .key = T.KEYC_F3, .seq = "\x1bOR" },
+    .{ .key = T.KEYC_F4, .seq = "\x1bOS" },
+    .{ .key = T.KEYC_F5, .seq = "\x1b[15~" },
+    .{ .key = T.KEYC_F6, .seq = "\x1b[17~" },
+    .{ .key = T.KEYC_F7, .seq = "\x1b[18~" },
+    .{ .key = T.KEYC_F8, .seq = "\x1b[19~" },
+    .{ .key = T.KEYC_F9, .seq = "\x1b[20~" },
+    .{ .key = T.KEYC_F10, .seq = "\x1b[21~" },
+    .{ .key = T.KEYC_F11, .seq = "\x1b[23~" },
+    .{ .key = T.KEYC_F12, .seq = "\x1b[24~" },
+    .{ .key = T.KEYC_IC, .seq = "\x1b[2~" },
+    .{ .key = T.KEYC_DC, .seq = "\x1b[3~" },
+    .{ .key = T.KEYC_HOME, .seq = "\x1b[1~" },
+    .{ .key = T.KEYC_END, .seq = "\x1b[4~" },
+    .{ .key = T.KEYC_NPAGE, .seq = "\x1b[6~" },
+    .{ .key = T.KEYC_PPAGE, .seq = "\x1b[5~" },
+    .{ .key = T.KEYC_BTAB, .seq = "\x1b[Z" },
+    .{ .key = T.KEYC_UP, .seq = "\x1b[A" },
+    .{ .key = T.KEYC_DOWN, .seq = "\x1b[B" },
+    .{ .key = T.KEYC_RIGHT, .seq = "\x1b[C" },
+    .{ .key = T.KEYC_LEFT, .seq = "\x1b[D" },
+    .{ .key = T.KEYC_KP_SLASH, .seq = "/" },
+    .{ .key = T.KEYC_KP_STAR, .seq = "*" },
+    .{ .key = T.KEYC_KP_MINUS, .seq = "-" },
+    .{ .key = T.KEYC_KP_SEVEN, .seq = "7" },
+    .{ .key = T.KEYC_KP_EIGHT, .seq = "8" },
+    .{ .key = T.KEYC_KP_NINE, .seq = "9" },
+    .{ .key = T.KEYC_KP_PLUS, .seq = "+" },
+    .{ .key = T.KEYC_KP_FOUR, .seq = "4" },
+    .{ .key = T.KEYC_KP_FIVE, .seq = "5" },
+    .{ .key = T.KEYC_KP_SIX, .seq = "6" },
+    .{ .key = T.KEYC_KP_ONE, .seq = "1" },
+    .{ .key = T.KEYC_KP_TWO, .seq = "2" },
+    .{ .key = T.KEYC_KP_THREE, .seq = "3" },
+    .{ .key = T.KEYC_KP_ENTER, .seq = "\n" },
+    .{ .key = T.KEYC_KP_ZERO, .seq = "0" },
+    .{ .key = T.KEYC_KP_PERIOD, .seq = "." },
+};
+
+const modifier_templates = [_]ModifierTemplate{
+    .{ .key = T.KEYC_F1, .template = "\x1b[1;_P" },
+    .{ .key = T.KEYC_F2, .template = "\x1b[1;_Q" },
+    .{ .key = T.KEYC_F3, .template = "\x1b[1;_R" },
+    .{ .key = T.KEYC_F4, .template = "\x1b[1;_S" },
+    .{ .key = T.KEYC_F5, .template = "\x1b[15;_~" },
+    .{ .key = T.KEYC_F6, .template = "\x1b[17;_~" },
+    .{ .key = T.KEYC_F7, .template = "\x1b[18;_~" },
+    .{ .key = T.KEYC_F8, .template = "\x1b[19;_~" },
+    .{ .key = T.KEYC_F9, .template = "\x1b[20;_~" },
+    .{ .key = T.KEYC_F10, .template = "\x1b[21;_~" },
+    .{ .key = T.KEYC_F11, .template = "\x1b[23;_~" },
+    .{ .key = T.KEYC_F12, .template = "\x1b[24;_~" },
+    .{ .key = T.KEYC_UP, .template = "\x1b[1;_A" },
+    .{ .key = T.KEYC_DOWN, .template = "\x1b[1;_B" },
+    .{ .key = T.KEYC_RIGHT, .template = "\x1b[1;_C" },
+    .{ .key = T.KEYC_LEFT, .template = "\x1b[1;_D" },
+    .{ .key = T.KEYC_HOME, .template = "\x1b[1;_H" },
+    .{ .key = T.KEYC_END, .template = "\x1b[1;_F" },
+    .{ .key = T.KEYC_PPAGE, .template = "\x1b[5;_~" },
+    .{ .key = T.KEYC_NPAGE, .template = "\x1b[6;_~" },
+    .{ .key = T.KEYC_IC, .template = "\x1b[2;_~" },
+    .{ .key = T.KEYC_DC, .template = "\x1b[3;_~" },
+};
+
 pub fn input_key_get(bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len == 0) return null;
     if (bytes[0] == 0x1b) return parse_escape(bytes, event);
@@ -45,6 +122,8 @@ pub fn input_key_encode(key_in: T.key_code, buf: *[16]u8) error{UnsupportedKey}!
     if (masked == T.KEYC_NONE or masked == T.KEYC_UNKNOWN or masked == T.KEYC_ANY)
         return error.UnsupportedKey;
 
+    if (encode_fixed_key(masked, modifiers, buf)) |seq|
+        return seq;
     if (masked <= 0x7f)
         return encode_ascii_key(masked, modifiers, buf);
     if (T.keycIsUnicode(masked))
@@ -168,42 +247,16 @@ fn ctrl_key(ch: u8) ?T.key_code {
 }
 
 fn encode_ascii_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
-    if (modifiers == 0) {
-        buf[0] = @intCast(masked);
-        return buf[0..1];
-    }
-    if (modifiers == T.KEYC_CTRL) {
-        if (masked == '?') {
-            buf[0] = 0x7f;
-            return buf[0..1];
-        }
-        if ((masked >= '@' and masked <= '_') or (masked >= 'a' and masked <= 'z') or (masked >= 'A' and masked <= 'Z')) {
-            buf[0] = @intCast(std.ascii.toUpper(@intCast(masked)) & 0x1f);
-            return buf[0..1];
-        }
-        return error.UnsupportedKey;
-    }
-    if (modifiers == T.KEYC_META) {
+    const want_meta = modifiers & T.KEYC_META != 0;
+    const local_modifiers = modifiers & ~T.KEYC_META;
+    const start: usize = if (want_meta) 1 else 0;
+
+    if (want_meta) {
         buf[0] = 0x1b;
-        buf[1] = @intCast(masked);
-        return buf[0..2];
     }
-    if (modifiers == T.KEYC_SHIFT) {
-        if (masked >= 'a' and masked <= 'z') {
-            buf[0] = std.ascii.toUpper(@intCast(masked));
-            return buf[0..1];
-        }
-        buf[0] = @intCast(masked);
-        return buf[0..1];
-    }
-    if (modifiers == (T.KEYC_META | T.KEYC_CTRL)) {
-        var ctrl_buf: [16]u8 = undefined;
-        const ctrl = try encode_ascii_key(masked, T.KEYC_CTRL, &ctrl_buf);
-        buf[0] = 0x1b;
-        std.mem.copyForwards(u8, buf[1 .. 1 + ctrl.len], ctrl);
-        return buf[0 .. 1 + ctrl.len];
-    }
-    return error.UnsupportedKey;
+
+    const tail = try encode_ascii_key_tail(masked, local_modifiers, buf[start..]);
+    return buf[0 .. start + tail.len];
 }
 
 fn encode_unicode_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
@@ -222,16 +275,6 @@ fn encode_special_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) e
         T.C0_CR => "\r",
         T.C0_ESC => "\x1b",
         T.C0_BS, T.KEYC_BSPACE => "\x7f",
-        T.KEYC_UP => "\x1b[A",
-        T.KEYC_DOWN => "\x1b[B",
-        T.KEYC_RIGHT => "\x1b[C",
-        T.KEYC_LEFT => "\x1b[D",
-        T.KEYC_HOME => "\x1b[H",
-        T.KEYC_END => "\x1b[F",
-        T.KEYC_PPAGE => "\x1b[5~",
-        T.KEYC_NPAGE => "\x1b[6~",
-        T.KEYC_IC => "\x1b[2~",
-        T.KEYC_DC => "\x1b[3~",
         else => return error.UnsupportedKey,
     };
     if (modifiers == T.KEYC_META) {
@@ -241,6 +284,109 @@ fn encode_special_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) e
     }
     std.mem.copyForwards(u8, buf[0..seq.len], seq);
     return buf[0..seq.len];
+}
+
+fn encode_fixed_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) ?[]const u8 {
+    if (modifierTemplateFor(masked)) |template| {
+        if (modifierParameter(modifiers)) |parameter| {
+            return apply_modifier_template(template, parameter, buf);
+        }
+    }
+
+    if (fixedSequenceFor(masked)) |seq| {
+        return switch (modifiers) {
+            0 => copy_sequence(seq, buf),
+            T.KEYC_META => copy_sequence_with_meta(seq, buf),
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn encode_ascii_key_tail(masked: T.key_code, modifiers: T.key_code, out: []u8) error{UnsupportedKey}![]const u8 {
+    switch (modifiers) {
+        0 => {
+            out[0] = @intCast(masked);
+            return out[0..1];
+        },
+        T.KEYC_SHIFT => {
+            if (masked >= 'a' and masked <= 'z') {
+                out[0] = std.ascii.toUpper(@intCast(masked));
+                return out[0..1];
+            }
+            out[0] = @intCast(masked);
+            return out[0..1];
+        },
+        T.KEYC_CTRL, T.KEYC_SHIFT | T.KEYC_CTRL => {
+            out[0] = ctrl_ascii_byte(masked) orelse return error.UnsupportedKey;
+            return out[0..1];
+        },
+        else => return error.UnsupportedKey,
+    }
+}
+
+fn ctrl_ascii_byte(masked: T.key_code) ?u8 {
+    return switch (masked) {
+        '1', '!' => '1',
+        '9', '(' => '9',
+        '0', ')' => '0',
+        '=', '+' => '=',
+        ';', ':' => ';',
+        '\'', '"' => '\'',
+        ',', '<' => ',',
+        '.', '>' => '.',
+        '/', '-' => 0x1f,
+        '8', '?' => 0x7f,
+        ' ', '2' => 0x00,
+        '3'...'7' => @as(u8, @intCast(masked - '\x18')),
+        '@'...'~' => @as(u8, @intCast(masked & 0x1f)),
+        else => null,
+    };
+}
+
+fn fixedSequenceFor(masked: T.key_code) ?[]const u8 {
+    for (fixed_sequences) |entry| {
+        if (entry.key == masked) return entry.seq;
+    }
+    return null;
+}
+
+fn modifierTemplateFor(masked: T.key_code) ?[]const u8 {
+    for (modifier_templates) |entry| {
+        if (entry.key == masked) return entry.template;
+    }
+    return null;
+}
+
+fn modifierParameter(modifiers: T.key_code) ?u8 {
+    return switch (modifiers) {
+        T.KEYC_SHIFT => '2',
+        T.KEYC_META => '3',
+        T.KEYC_SHIFT | T.KEYC_META => '4',
+        T.KEYC_CTRL => '5',
+        T.KEYC_SHIFT | T.KEYC_CTRL => '6',
+        T.KEYC_META | T.KEYC_CTRL => '7',
+        T.KEYC_SHIFT | T.KEYC_META | T.KEYC_CTRL => '8',
+        else => null,
+    };
+}
+
+fn apply_modifier_template(template: []const u8, parameter: u8, buf: *[16]u8) []const u8 {
+    for (template, 0..) |ch, idx| {
+        buf[idx] = if (ch == '_') parameter else ch;
+    }
+    return buf[0..template.len];
+}
+
+fn copy_sequence(seq: []const u8, buf: *[16]u8) []const u8 {
+    std.mem.copyForwards(u8, buf[0..seq.len], seq);
+    return buf[0..seq.len];
+}
+
+fn copy_sequence_with_meta(seq: []const u8, buf: *[16]u8) []const u8 {
+    buf[0] = 0x1b;
+    std.mem.copyForwards(u8, buf[1 .. 1 + seq.len], seq);
+    return buf[0 .. 1 + seq.len];
 }
 
 test "input_key_get decodes printable control and cursor keys" {
@@ -271,4 +417,37 @@ test "input_key_encode matches supported VT-style special keys" {
     try std.testing.expectEqualStrings("\x1b[A", try input_key_encode(T.KEYC_UP, &buf));
     try std.testing.expectEqualStrings("\x1b[5~", try input_key_encode(T.KEYC_PPAGE, &buf));
     try std.testing.expectEqualStrings("\x1bx", try input_key_encode(@as(T.key_code, 'x') | T.KEYC_META, &buf));
+}
+
+test "input_key_encode ports tmux fixed function and keypad sequences" {
+    var buf: [16]u8 = undefined;
+
+    try std.testing.expectEqualStrings("\x1bOP", try input_key_encode(T.KEYC_F1 | T.KEYC_IMPLIED_META, &buf));
+    try std.testing.expectEqualStrings("\x1b[23~", try input_key_encode(T.KEYC_F11, &buf));
+    try std.testing.expectEqualStrings("1", try input_key_encode(T.KEYC_KP_ONE | T.KEYC_KEYPAD, &buf));
+    try std.testing.expectEqualStrings("\x1b1", try input_key_encode(T.KEYC_KP_ONE | T.KEYC_KEYPAD | T.KEYC_META, &buf));
+    try std.testing.expectEqualStrings("\n", try input_key_encode(T.KEYC_KP_ENTER, &buf));
+}
+
+test "input_key_encode ports tmux modifier-built special sequences" {
+    var buf: [16]u8 = undefined;
+
+    try std.testing.expectEqualStrings("\x1b[1;2P", try input_key_encode(T.KEYC_F1 | T.KEYC_SHIFT, &buf));
+    try std.testing.expectEqualStrings("\x1b[1;3A", try input_key_encode(T.KEYC_UP | T.KEYC_META, &buf));
+    try std.testing.expectEqualStrings("\x1b[1;5F", try input_key_encode(T.KEYC_END | T.KEYC_CTRL, &buf));
+    try std.testing.expectEqualStrings("\x1b[3;8~", try input_key_encode(T.KEYC_DC | T.KEYC_SHIFT | T.KEYC_META | T.KEYC_CTRL, &buf));
+}
+
+test "input_key_encode matches tmux vt10x ctrl remapping edge cases" {
+    var buf: [16]u8 = undefined;
+
+    try std.testing.expectEqualStrings("1", try input_key_encode(@as(T.key_code, '1') | T.KEYC_CTRL, &buf));
+    try std.testing.expectEqual(@as(usize, 1), (try input_key_encode(@as(T.key_code, '2') | T.KEYC_CTRL, &buf)).len);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[0]);
+    try std.testing.expectEqualStrings("\x1b", try input_key_encode(@as(T.key_code, '3') | T.KEYC_CTRL, &buf));
+    try std.testing.expectEqual(@as(usize, 1), (try input_key_encode(@as(T.key_code, '/') | T.KEYC_CTRL, &buf)).len);
+    try std.testing.expectEqual(@as(u8, 0x1f), buf[0]);
+    try std.testing.expectEqual(@as(usize, 2), (try input_key_encode(@as(T.key_code, '?') | T.KEYC_META | T.KEYC_CTRL, &buf)).len);
+    try std.testing.expectEqual(@as(u8, 0x1b), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x7f), buf[1]);
 }

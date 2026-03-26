@@ -63,6 +63,31 @@ pub fn paste_buffer_data(pb: *PasteBuffer, size: ?*usize) []const u8 {
     return pb.data;
 }
 
+pub fn paste_make_sample(pb: *PasteBuffer) []u8 {
+    const input_limit: usize = 200;
+    const output_limit: usize = 200;
+    const data = pb.data[0..@min(pb.data.len, input_limit)];
+
+    var out: std.ArrayList(u8) = .{};
+    var truncated = pb.data.len > input_limit;
+
+    for (data) |ch| {
+        const escaped_len = sample_escape_len(ch);
+        if (out.items.len + escaped_len > output_limit) {
+            truncated = true;
+            break;
+        }
+        append_sample_escaped(&out, ch);
+    }
+
+    if (truncated) {
+        while (out.items.len + 3 > output_limit and out.items.len > 0) _ = out.pop();
+        out.appendSlice(xm.allocator, "...") catch unreachable;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
 pub fn paste_walk(pb: ?*PasteBuffer) ?*PasteBuffer {
     ensure_init();
 
@@ -290,6 +315,40 @@ pub fn paste_reset_for_tests() void {
     paste_num_automatic = 0;
 }
 
+fn sample_escape_len(ch: u8) usize {
+    return switch (ch) {
+        0x07, 0x08, 0x0c, '\n', '\r', '\t', 0x0b, '\\', '"' => 2,
+        else => if (sample_byte_is_printable(ch) or ch >= 0x80) 1 else 4,
+    };
+}
+
+fn append_sample_escaped(out: *std.ArrayList(u8), ch: u8) void {
+    switch (ch) {
+        0x07 => out.appendSlice(xm.allocator, "\\a") catch unreachable,
+        0x08 => out.appendSlice(xm.allocator, "\\b") catch unreachable,
+        0x0c => out.appendSlice(xm.allocator, "\\f") catch unreachable,
+        '\n' => out.appendSlice(xm.allocator, "\\n") catch unreachable,
+        '\r' => out.appendSlice(xm.allocator, "\\r") catch unreachable,
+        '\t' => out.appendSlice(xm.allocator, "\\t") catch unreachable,
+        0x0b => out.appendSlice(xm.allocator, "\\v") catch unreachable,
+        '\\' => out.appendSlice(xm.allocator, "\\\\") catch unreachable,
+        '"' => out.appendSlice(xm.allocator, "\\\"") catch unreachable,
+        else => {
+            if (sample_byte_is_printable(ch) or ch >= 0x80) {
+                out.append(xm.allocator, ch) catch unreachable;
+            } else {
+                const escaped = xm.xasprintf("\\{o:0>3}", .{ch});
+                defer xm.allocator.free(escaped);
+                out.appendSlice(xm.allocator, escaped) catch unreachable;
+            }
+        },
+    }
+}
+
+fn sample_byte_is_printable(ch: u8) bool {
+    return ch >= 0x20 and ch <= 0x7e and ch != '\\' and ch != '"';
+}
+
 test "paste_add creates automatic buffers and get_top returns newest automatic" {
     buffer_limit_override = 10;
     defer buffer_limit_override = null;
@@ -368,4 +427,26 @@ test "paste_add honours automatic buffer limit" {
     try std.testing.expect(paste_get_name("buffer0") == null);
     try std.testing.expect(paste_get_name("buffer1") != null);
     try std.testing.expect(paste_get_name("buffer2") != null);
+}
+
+test "paste_make_sample escapes control bytes and truncates" {
+    paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_set(xm.xstrdup("a\n\t\"\\\x01"), "sample", &cause));
+
+    const pb = paste_get_name("sample") orelse return error.TestUnexpectedResult;
+    const sample = paste_make_sample(pb);
+    defer xm.allocator.free(sample);
+    try std.testing.expectEqualStrings("a\\n\\t\\\"\\\\\\001", sample);
+
+    const long = xm.allocator.alloc(u8, 205) catch unreachable;
+    @memset(long, 'x');
+    try std.testing.expectEqual(@as(i32, 0), paste_set(long, "long", &cause));
+
+    const long_pb = paste_get_name("long") orelse return error.TestUnexpectedResult;
+    const long_sample = paste_make_sample(long_pb);
+    defer xm.allocator.free(long_sample);
+    try std.testing.expectEqual(@as(usize, 200), long_sample.len);
+    try std.testing.expect(std.mem.endsWith(u8, long_sample, "..."));
 }

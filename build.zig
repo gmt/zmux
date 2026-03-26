@@ -17,6 +17,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filters = parseTestFilters(b, b.args);
 
     // --------------------------------------------------
     // Feature options (mirroring pkgbuild configure flags)
@@ -152,6 +153,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .filters = test_filters,
     });
     unit_tests.root_module.addOptions("build_options", build_options);
     unit_tests.root_module.addIncludePath(b.path("src/compat"));
@@ -201,4 +203,27 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(fuzz_exe);
         b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)").dependOn(&fuzz_exe.step);
     }
+}
+
+fn parseTestFilters(b: *std.Build, maybe_args: ?[]const []const u8) []const []const u8 {
+    const args = maybe_args orelse return &.{};
+
+    var filters: std.ArrayList([]const u8) = .{};
+    errdefer filters.deinit(b.allocator);
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--test-filter")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.panic("zig build test: missing value after --test-filter", .{});
+            }
+            filters.append(b.allocator, args[i]) catch @panic("OOM");
+            continue;
+        }
+        std.debug.panic("zig build test: unsupported extra argument: {s}", .{arg});
+    }
+
+    return filters.toOwnedSlice(b.allocator) catch @panic("OOM");
 }

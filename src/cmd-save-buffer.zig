@@ -47,9 +47,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     const bufdata = paste_mod.paste_buffer_data(pb.?, null);
-    if (cmd.entry == &entry_show and show_uses_direct_output(client)) {
-        cmdq.cmdq_print_data(item, bufdata);
-        return .normal;
+    if (cmd.entry == &entry_show) {
+        if (show_uses_control_output(client)) {
+            cmdq.cmdq_print_data(item, bufdata);
+            return .normal;
+        }
+        if (show_needs_view_mode(client)) {
+            cmdq.cmdq_error(item, "show-buffer attached-client view mode not supported yet", .{});
+            return .@"error";
+        }
     }
 
     const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
@@ -59,9 +65,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
-fn show_uses_direct_output(client: ?*T.Client) bool {
+fn show_uses_control_output(client: ?*T.Client) bool {
     if (client == null) return false;
-    return client.?.session != null or (client.?.flags & T.CLIENT_CONTROL) != 0;
+    return (client.?.flags & T.CLIENT_CONTROL) != 0;
+}
+
+fn show_needs_view_mode(client: ?*T.Client) bool {
+    if (client == null) return false;
+    return client.?.session != null;
 }
 
 fn write_buffer(
@@ -363,7 +374,7 @@ test "save-buffer expands the output path through the format context" {
     try std.testing.expectEqualStrings("fmt", contents);
 }
 
-test "show-buffer writes raw bytes for attached clients" {
+test "show-buffer rejects attached clients until view mode exists" {
     paste_mod.paste_reset_for_tests();
 
     var cause: ?[]u8 = null;
@@ -397,22 +408,22 @@ test "show-buffer writes raw bytes for attached clients" {
     const show = try cmd_mod.cmd_parse_one(&.{ "show-buffer", "-b", "named" }, null, &cause);
     defer cmd_mod.cmd_free(show);
 
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
 
     const pipe_fds = try std.posix.pipe();
     defer std.posix.close(pipe_fds[0]);
 
-    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
-    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
+    try std.posix.dup2(pipe_fds[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
 
-    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(show, &item));
-    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(show, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
     std.posix.close(pipe_fds[1]);
 
-    var output: [32]u8 = undefined;
+    var output: [96]u8 = undefined;
     const got = try std.posix.read(pipe_fds[0], output[0..]);
-    try std.testing.expectEqualStrings("a\nb", output[0..got]);
+    try std.testing.expectEqualStrings("show-buffer attached-client view mode not supported yet\n", output[0..got]);
 }
 
 test "show-buffer writes stdout for detached clients without sessions" {

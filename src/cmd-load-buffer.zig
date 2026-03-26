@@ -18,14 +18,18 @@
 //   ISC licence – same terms as above.
 
 const std = @import("std");
+const c = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const clipboard_mod = @import("clipboard.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const format_mod = @import("format.zig");
 const paste_mod = @import("paste.zig");
+const proc_mod = @import("proc.zig");
 const server_client_mod = @import("server-client.zig");
+const protocol = @import("zmux-protocol.zig");
 
 const ResolvedPath = struct {
     path: []const u8,
@@ -36,16 +40,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const client = cmdq.cmdq_get_client(item);
     const target_client = cmdq.cmdq_get_target_client(item);
-
-    if (args.has('w') and target_client != null and target_client.?.session != null) {
-        cmdq.cmdq_error(item, "buffer selection export not supported yet", .{});
-        return .@"error";
-    }
-
     const raw_path = format_path_from_client(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
     const data = read_buffer(item, client, raw_path) catch return .@"error";
+    const export_after_store = args.has('w') and data.len != 0;
 
     var cause: ?[]u8 = null;
     defer if (cause) |msg| xm.allocator.free(msg);
@@ -54,6 +53,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         xm.allocator.free(data);
         cmdq.cmdq_error(item, "{s}", .{cause orelse "load buffer failed"});
         return .@"error";
+    }
+
+    if (export_after_store) {
+        clipboard_mod.export_selection(target_client, "", data);
     }
 
     return .normal;
@@ -148,6 +151,11 @@ fn free_options_for_tests() void {
     opts.options_free(opts.global_w_options);
     opts.options_free(opts.global_s_options);
     opts.options_free(opts.global_options);
+}
+
+fn test_peer_dispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+    _ = _imsg;
+    _ = _arg;
 }
 
 test "load-buffer reads a named buffer from a relative path using client cwd" {
@@ -327,7 +335,7 @@ test "load-buffer write flag is a no-op without a sessionful target client" {
     try std.testing.expectEqualStrings("clipboard data", paste_mod.paste_buffer_data(pb, null));
 }
 
-test "load-buffer rejects unsupported clipboard export for a sessionful target client" {
+test "load-buffer write flag exports selection for an attached target client" {
     init_options_for_tests();
     defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
@@ -362,13 +370,28 @@ test "load-buffer rejects unsupported clipboard export for a sessionful target c
         .environ = &session_env,
     };
 
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "load-buffer-test-peer" };
+    defer proc.peers.deinit(xm.allocator);
+
     var target = T.Client{
         .name = "clip",
         .environ = &target_env,
         .tty = undefined,
         .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
     };
     target.session = &session;
+    target.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = target.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
     client_registry.add(&target);
 
     var client = T.Client{
@@ -382,9 +405,39 @@ test "load-buffer rejects unsupported clipboard export for a sessionful target c
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
 
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
     const load = try cmd_mod.cmd_parse_one(&.{ "load-buffer", "-w", "-t", "clip", "buffer.txt" }, null, &cause);
     defer cmd_mod.cmd_free(load);
 
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(load, &item));
-    try std.testing.expect(paste_mod.paste_get_name("buffer0") == null);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(load, &item));
+
+    const pb = paste_mod.paste_get_name("buffer0") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("clipboard data", paste_mod.paste_buffer_data(pb, null));
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const expected = try clipboard_mod.osc52_sequence(xm.allocator, "", "clipboard data");
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }

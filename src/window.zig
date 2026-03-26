@@ -154,6 +154,112 @@ pub fn window_get_last_pane(w: *T.Window) ?*T.WindowPane {
     return w.last_panes.items[w.last_panes.items.len - 1];
 }
 
+pub fn window_pane_find_up(wp: *T.WindowPane) ?*T.WindowPane {
+    const w = wp.window;
+    const status = opts.options_get_number(w.options, "pane-border-status");
+    const current = pane_full_size_offset(wp);
+
+    var edge = current.yoff;
+    if (status == T.PANE_STATUS_TOP) {
+        if (edge == 1) edge = w.sy + 1;
+    } else if (status == T.PANE_STATUS_BOTTOM) {
+        if (edge == 0) edge = w.sy;
+    } else {
+        if (edge == 0) edge = w.sy + 1;
+    }
+
+    const left = current.xoff;
+    const right = current.xoff + current.sx;
+
+    var best: ?*T.WindowPane = null;
+    for (w.panes.items) |next| {
+        if (next == wp) continue;
+        const candidate = pane_full_size_offset(next);
+        if (candidate.yoff + candidate.sy + 1 != edge) continue;
+
+        const cand_end = pane_range_end(candidate.xoff, candidate.sx);
+        if (!pane_ranges_overlap(left, right, candidate.xoff, cand_end)) continue;
+        best = choose_better_pane(best, next);
+    }
+    return best;
+}
+
+pub fn window_pane_find_down(wp: *T.WindowPane) ?*T.WindowPane {
+    const w = wp.window;
+    const status = opts.options_get_number(w.options, "pane-border-status");
+    const current = pane_full_size_offset(wp);
+
+    var edge = current.yoff + current.sy + 1;
+    if (status == T.PANE_STATUS_TOP) {
+        if (edge >= w.sy) edge = 1;
+    } else if (status == T.PANE_STATUS_BOTTOM) {
+        if (edge >= w.sy - 1) edge = 0;
+    } else {
+        if (edge >= w.sy) edge = 0;
+    }
+
+    const left = wp.xoff;
+    const right = wp.xoff + wp.sx;
+
+    var best: ?*T.WindowPane = null;
+    for (w.panes.items) |next| {
+        if (next == wp) continue;
+        const candidate = pane_full_size_offset(next);
+        if (candidate.yoff != edge) continue;
+
+        const cand_end = pane_range_end(candidate.xoff, candidate.sx);
+        if (!pane_ranges_overlap(left, right, candidate.xoff, cand_end)) continue;
+        best = choose_better_pane(best, next);
+    }
+    return best;
+}
+
+pub fn window_pane_find_left(wp: *T.WindowPane) ?*T.WindowPane {
+    const w = wp.window;
+    const current = pane_full_size_offset(wp);
+
+    var edge = current.xoff;
+    if (edge == 0) edge = w.sx + 1;
+
+    const top = current.yoff;
+    const bottom = current.yoff + current.sy;
+
+    var best: ?*T.WindowPane = null;
+    for (w.panes.items) |next| {
+        if (next == wp) continue;
+        const candidate = pane_full_size_offset(next);
+        if (candidate.xoff + candidate.sx + 1 != edge) continue;
+
+        const cand_end = pane_range_end(candidate.yoff, candidate.sy);
+        if (!pane_ranges_overlap(top, bottom, candidate.yoff, cand_end)) continue;
+        best = choose_better_pane(best, next);
+    }
+    return best;
+}
+
+pub fn window_pane_find_right(wp: *T.WindowPane) ?*T.WindowPane {
+    const w = wp.window;
+    const current = pane_full_size_offset(wp);
+
+    var edge = current.xoff + current.sx + 1;
+    if (edge >= w.sx) edge = 0;
+
+    const top = wp.yoff;
+    const bottom = wp.yoff + wp.sy;
+
+    var best: ?*T.WindowPane = null;
+    for (w.panes.items) |next| {
+        if (next == wp) continue;
+        const candidate = pane_full_size_offset(next);
+        if (candidate.xoff != edge) continue;
+
+        const cand_end = pane_range_end(candidate.yoff, candidate.sy);
+        if (!pane_ranges_overlap(top, bottom, candidate.yoff, cand_end)) continue;
+        best = choose_better_pane(best, next);
+    }
+    return best;
+}
+
 pub fn window_pane_index(w: *T.Window, wp: *T.WindowPane) ?usize {
     for (w.panes.items, 0..) |pane, idx| {
         if (pane == wp) return idx;
@@ -422,6 +528,36 @@ fn remove_last_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
             i += 1;
         }
     }
+}
+
+const PaneFullSize = struct {
+    xoff: u32,
+    yoff: u32,
+    sx: u32,
+    sy: u32,
+};
+
+fn pane_full_size_offset(wp: *T.WindowPane) PaneFullSize {
+    return .{
+        .xoff = wp.xoff,
+        .yoff = wp.yoff,
+        .sx = wp.sx,
+        .sy = wp.sy,
+    };
+}
+
+fn pane_range_end(start: u32, len: u32) u32 {
+    return if (len == 0) start else start + len - 1;
+}
+
+fn pane_ranges_overlap(left: u32, right: u32, cand_left: u32, cand_right: u32) bool {
+    return !(cand_right < left or cand_left > right);
+}
+
+fn choose_better_pane(best: ?*T.WindowPane, candidate: *T.WindowPane) *T.WindowPane {
+    if (best == null) return candidate;
+    if (candidate.active_point > best.?.active_point) return candidate;
+    return best.?;
 }
 
 test "window panes inherit from their window options and refresh cached pane state" {

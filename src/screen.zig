@@ -74,6 +74,12 @@ pub fn screen_alternate_active(wp: *T.WindowPane) bool {
     return wp.screen.saved_grid != null;
 }
 
+pub fn screen_set_title(s: *T.Screen, title: []const u8) bool {
+    if (s.title) |old| xm.allocator.free(old);
+    s.title = xm.xstrdup(title);
+    return true;
+}
+
 pub fn screen_save_cursor(s: *T.Screen) void {
     s.saved_cx = s.cx;
     s.saved_cy = s.cy;

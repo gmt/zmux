@@ -174,7 +174,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     }
 
     if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
-        if (key_bindings.key_bindings_get(table, event.key)) |binding| {
+        if (lookup_binding(table, event.key)) |binding| {
             _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, null);
             if (!std.mem.eql(u8, current_table, "root"))
                 server_client_mod.server_client_set_key_table(cl, null);
@@ -191,6 +191,12 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     write_pane_bytes(wp.fd, event.data[0..event.len]);
     win.window_pane_synchronize_key_bytes(wp, event.key, event.data[0..event.len]);
     return true;
+}
+
+fn lookup_binding(table: *T.KeyTable, key: T.key_code) ?*T.KeyBinding {
+    if (key_bindings.key_bindings_get(table, key)) |binding| return binding;
+    if (normalize_key(key) == T.KEYC_ANY) return null;
+    return key_bindings.key_bindings_get(table, T.KEYC_ANY);
 }
 
 fn is_prefix_key(s: *T.Session, key: T.key_code) bool {

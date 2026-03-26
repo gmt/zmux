@@ -211,8 +211,8 @@ fn inject_string(
     var use_literal = literal;
     if (!use_literal) {
         const key = key_string.key_string_lookup_string(value);
-        if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE and key != T.KEYC_ANY)
-            return inject_key(s, wl, wp, tc, key, true, dispatch_client, item, target, after);
+        if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE)
+            return inject_key(s, wl, wp, tc, key, false, dispatch_client, item, target, after);
         use_literal = true;
     }
 
@@ -1449,6 +1449,91 @@ test "send-keys with an unsupported triggering key is a quiet no-op" {
     try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys treats Any as a special key and quietly skips pane output" {
+    const setup = try test_session_with_empty_pane("send-any-noop");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-any-noop", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-any-noop:0.0", "Any" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys -K dispatches Any through target-client wildcard bindings" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "send-k-any", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("send-k-any") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&sc, &cause).?;
+
+    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-k-any:0", "-n", "wildcard" }, null, &cause);
+    key_bindings.key_bindings_add("root", T.KEYC_ANY, null, false, @ptrCast(bound));
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("wildcard-client"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "wildcard-client", "-K", "-t", "send-k-any:0.0", "Any" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    _ = cmdq.cmdq_next(&cl);
+    try std.testing.expectEqual(@as(usize, 2), s.windows.count());
 }
 
 test "send-keys mirrors pane writes to synchronized sibling panes" {

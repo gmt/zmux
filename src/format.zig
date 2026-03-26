@@ -35,6 +35,7 @@ const key_string = @import("key-string.zig");
 const names = @import("names.zig");
 const paste_mod = @import("paste.zig");
 const sess = @import("session.zig");
+const window_mod = @import("window.zig");
 
 pub const FormatContext = struct {
     item: ?*anyopaque = null,
@@ -2051,8 +2052,8 @@ fn resolve_pane_dead_status(alloc: std.mem.Allocator, ctx: *const FormatContext)
 
 fn resolve_pane_in_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
-    _ = wp;
-    return alloc.dupe(u8, "0") catch unreachable;
+    const value: []const u8 = if (window_mod.window_pane_mode(wp) != null) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
 }
 
 fn resolve_pane_current_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

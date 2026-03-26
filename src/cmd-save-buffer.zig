@@ -23,10 +23,14 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const grid_mod = @import("grid.zig");
 const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
+const screen_mod = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
+const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -53,8 +57,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             return .normal;
         }
         if (show_needs_view_mode(client)) {
-            cmdq.cmdq_error(item, "show-buffer attached-client view mode not supported yet", .{});
-            return .@"error";
+            if (!show_buffer_in_view_mode(client.?, bufdata)) {
+                cmdq.cmdq_error(item, "show-buffer attached-client view mode unavailable while another pane mode is active", .{});
+                return .@"error";
+            }
+            return .normal;
         }
     }
 
@@ -73,6 +80,82 @@ fn show_uses_control_output(client: ?*T.Client) bool {
 fn show_needs_view_mode(client: ?*T.Client) bool {
     if (client == null) return false;
     return client.?.session != null;
+}
+
+const show_buffer_view_mode = T.WindowMode{
+    .name = "show-buffer-view",
+    .key = show_buffer_view_key,
+};
+
+fn show_buffer_view_key(
+    wme: *T.WindowModeEntry,
+    _client: ?*T.Client,
+    _session: *T.Session,
+    _wl: *T.Winlink,
+    _key: T.key_code,
+    _mouse: ?*const T.MouseEvent,
+) void {
+    _ = _client;
+    _ = _session;
+    _ = _wl;
+    _ = _key;
+    _ = _mouse;
+    close_show_buffer_view_mode(wme.wp);
+}
+
+fn show_buffer_in_view_mode(client: *T.Client, data: []const u8) bool {
+    const session = client.session orelse return false;
+    const wl = session.curw orelse return false;
+    const wp = wl.window.active orelse return false;
+
+    if (!ensure_show_buffer_view_mode(wp)) return false;
+    render_show_buffer_view(wp, data);
+
+    client.flags |= T.CLIENT_REDRAWWINDOW;
+    wp.flags |= T.PANE_REDRAW;
+    return true;
+}
+
+fn ensure_show_buffer_view_mode(wp: *T.WindowPane) bool {
+    if (window_mod.window_pane_mode(wp)) |wme| {
+        return wme.mode == &show_buffer_view_mode;
+    }
+
+    screen_mod.screen_enter_alternate(wp, true);
+    _ = window_mod.window_pane_push_mode(wp, &show_buffer_view_mode, null, null);
+    return true;
+}
+
+fn close_show_buffer_view_mode(wp: *T.WindowPane) void {
+    if (window_mod.window_pane_mode(wp)) |wme| {
+        if (wme.mode == &show_buffer_view_mode) {
+            _ = window_mod.window_pane_pop_mode(wp, wme);
+        }
+    }
+    screen_mod.screen_leave_alternate(wp, true);
+    wp.flags |= T.PANE_REDRAW;
+}
+
+fn render_show_buffer_view(wp: *T.WindowPane, data: []const u8) void {
+    screen_mod.screen_reset_active(wp.screen);
+    wp.screen.cursor_visible = false;
+
+    var ctx = T.ScreenWriteCtx{ .s = wp.screen };
+    for (data) |byte| {
+        switch (byte) {
+            '\n' => screen_write.newline(&ctx),
+            '\r' => screen_write.carriage_return(&ctx),
+            '\t' => screen_write.tab(&ctx),
+            else => screen_write.putc(&ctx, view_byte(byte)),
+        }
+    }
+}
+
+fn view_byte(byte: u8) u8 {
+    return switch (byte) {
+        0x20...0x7e => byte,
+        else => '.',
+    };
 }
 
 fn write_buffer(
@@ -374,7 +457,7 @@ test "save-buffer expands the output path through the format context" {
     try std.testing.expectEqualStrings("fmt", contents);
 }
 
-test "show-buffer rejects attached clients until view mode exists" {
+test "show-buffer renders attached clients in the reduced view mode" {
     paste_mod.paste_reset_for_tests();
 
     var cause: ?[]u8 = null;
@@ -383,9 +466,45 @@ test "show-buffer rejects attached clients until view mode exists" {
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
 
+    const session_name = xm.xstrdup("show-buffer-attached");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(8, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(8, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 1,
+        .name = window_name,
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 2,
+        .window = &window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| close_show_buffer_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
     var session = T.Session{
         .id = 0,
-        .name = &.{},
+        .name = session_name,
         .cwd = "",
         .lastw = .{},
         .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
@@ -395,11 +514,19 @@ test "show-buffer rejects attached clients until view mode exists" {
     defer session.windows.deinit();
     defer session.lastw.deinit(xm.allocator);
 
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    session.curw = &winlink;
+
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
         .status = .{ .screen = undefined },
         .session = &session,
+        .flags = T.CLIENT_ATTACHED,
     };
 
     var list: cmd_mod.CmdList = .{};
@@ -417,13 +544,97 @@ test "show-buffer rejects attached clients until view mode exists" {
     try std.posix.dup2(pipe_fds[1], std.posix.STDERR_FILENO);
     defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
 
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(show, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(show, &item));
     try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
     std.posix.close(pipe_fds[1]);
 
     var output: [96]u8 = undefined;
     const got = try std.posix.read(pipe_fds[0], output[0..]);
-    try std.testing.expectEqualStrings("show-buffer attached-client view mode not supported yet\n", output[0..got]);
+    try std.testing.expectEqual(@as(usize, 0), got);
+    try std.testing.expect(screen_mod.screen_alternate_active(&pane));
+    try std.testing.expect(window_mod.window_pane_mode(&pane) != null);
+
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    const second_row = try grid_row_string(pane.screen.grid, 1);
+    defer xm.allocator.free(second_row);
+    try std.testing.expectEqualStrings("a", first_row);
+    try std.testing.expectEqualStrings("b", second_row);
+}
+
+test "show-buffer attached view mode dismisses on the next key" {
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("show-buffer-view");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(8, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(8, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 7,
+        .name = window_name,
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 9,
+        .window = &window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| close_show_buffer_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 5,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+
+    try std.testing.expect(show_buffer_in_view_mode(&client, "view"));
+    const mode = window_mod.window_pane_mode(&pane) orelse return error.TestUnexpectedResult;
+    show_buffer_view_key(mode, &client, &session, &winlink, 'q', null);
+
+    try std.testing.expect(!screen_mod.screen_alternate_active(&pane));
+    try std.testing.expect(window_mod.window_pane_mode(&pane) == null);
 }
 
 test "show-buffer writes stdout for detached clients without sessions" {
@@ -714,4 +925,15 @@ test "save-buffer reports strerror text for write failures" {
     const got = try std.posix.read(pipe_fds[0], output[0..]);
     try std.testing.expect(std.mem.indexOf(u8, output[0..got], "No such file or directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, output[0..got], "FileNotFound") == null);
+}
+
+fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
+    const used = grid_mod.line_used(gd, row);
+    const out = try xm.allocator.alloc(u8, used);
+    errdefer xm.allocator.free(out);
+
+    for (0..used) |idx| {
+        out[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
+    }
+    return out;
 }

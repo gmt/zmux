@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Greg Turner <gmt@pobox.com>
+// Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 // ISC licence – see COPYING.
 //
 // Ported from tmux/cmd-switch-client.c

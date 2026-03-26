@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Greg Turner <gmt@pobox.com>
+# Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 # Command	Context	zmux-status
 attach-session	client	implemented
 bind-key	none	unsupported

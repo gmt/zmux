@@ -95,7 +95,11 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
         .sx = sx,
         .sy = sy,
         .screen = screen_ptr,
-        .base = T.Screen{ .grid = base_grid, .rlower = if (sy == 0) 0 else sy - 1 },
+        .base = T.Screen{
+            .grid = base_grid,
+            .mode = T.MODE_CURSOR | T.MODE_WRAP,
+            .rlower = if (sy == 0) 0 else sy - 1,
+        },
         .input_pending = .{},
     };
     window_pane_options_changed(wp, null);

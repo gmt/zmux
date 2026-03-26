@@ -154,9 +154,11 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .cwd = cwd,
             .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
         };
-        // Inherit command from positional args
-        if (args.count() > 0) {
-            // TODO: pass argv from positional args to spawn context
+        const argv = argv_tail(args, 0);
+        defer if (argv) |slice| free_argv(slice);
+        if (argv) |slice| {
+            sc.argv = slice;
+            if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
         }
         wl = spawn_mod.spawn_window(&sc, &cause);
         if (wl == null) {
@@ -209,6 +211,18 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     log.log_debug("new session ${d} {s}", .{ s.id, s.name });
     return .normal;
+}
+
+fn argv_tail(args: *const @import("arguments.zig").Arguments, start: usize) ?[][]u8 {
+    if (args.count() <= start) return null;
+    const out = xm.allocator.alloc([]u8, args.count() - start) catch unreachable;
+    for (start..args.count()) |idx| out[idx - start] = xm.xstrdup(args.value_at(idx).?);
+    return out;
+}
+
+fn free_argv(argv: [][]u8) void {
+    for (argv) |arg| xm.allocator.free(arg);
+    xm.allocator.free(argv);
 }
 
 fn exec_has_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {

@@ -10,6 +10,7 @@ const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
+const env_mod = @import("environ.zig");
 const win_mod = @import("window.zig");
 const spawn_mod = @import("spawn.zig");
 const server_client_mod = @import("server-client.zig");
@@ -52,9 +53,19 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .item = @ptrCast(item),
         .s = s,
         .idx = -1,
+        .cwd = args.get('c'),
         .name = args.get('n'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
     };
+    const argv = argv_tail(args, 0);
+    defer if (argv) |slice| free_argv(slice);
+    if (argv) |slice| {
+        sc.argv = slice;
+        if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
+    }
+    const overlay = build_overlay_environment(args, item) catch return .@"error";
+    defer if (overlay) |env| env_mod.environ_free(env);
+    sc.environ = overlay;
     const wl = spawn_mod.spawn_window(&sc, &cause) orelse {
         cmdq.cmdq_error(item, "create window failed: {s}", .{cause orelse "unknown"});
         return .@"error";
@@ -75,6 +86,33 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_print(item, "{s}", .{rendered});
     }
     return .normal;
+}
+
+fn build_overlay_environment(args: *const @import("arguments.zig").Arguments, item: *cmdq.CmdqItem) !?*T.Environ {
+    const values = args.flags.get('e') orelse return null;
+    const env = env_mod.environ_create();
+    errdefer env_mod.environ_free(env);
+    for (values.items) |env_entry| {
+        if (std.mem.indexOfScalar(u8, env_entry, '=')) |_| {
+            env_mod.environ_put(env, env_entry, 0);
+        } else {
+            cmdq.cmdq_error(item, "invalid environment: {s}", .{env_entry});
+            return error.InvalidEnvironment;
+        }
+    }
+    return env;
+}
+
+fn argv_tail(args: *const @import("arguments.zig").Arguments, start: usize) ?[][]u8 {
+    if (args.count() <= start) return null;
+    const out = xm.allocator.alloc([]u8, args.count() - start) catch unreachable;
+    for (start..args.count()) |idx| out[idx - start] = xm.xstrdup(args.value_at(idx).?);
+    return out;
+}
+
+fn free_argv(argv: [][]u8) void {
+    for (argv) |arg| xm.allocator.free(arg);
+    xm.allocator.free(argv);
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

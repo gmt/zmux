@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
+const client_registry = @import("client-registry.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 
@@ -31,6 +32,7 @@ const protocol = @import("zmux-protocol.zig");
 
 pub const CmdqItem = struct {
     client: ?*T.Client,
+    target_client: ?*T.Client = null,
     cmdlist: *cmd_mod.CmdList,
     cmd: ?*cmd_mod.Cmd = null,
     state_flags: u32 = 0,
@@ -195,8 +197,40 @@ pub fn cmdq_get_flags(item: *CmdqItem) u32 {
     return item.state_flags;
 }
 
-pub fn cmdq_get_target_client(_item: *anyopaque) ?*T.Client {
-    _ = _item;
+pub fn cmdq_resolve_target_client(item: *CmdqItem, cmd: *cmd_mod.Cmd) ?*T.Client {
+    const flags = cmd.entry.flags;
+    if (flags & (T.CMD_CLIENT_CFLAG | T.CMD_CLIENT_TFLAG) == 0) return null;
+
+    const args = cmd_mod.cmd_get_args(cmd);
+    const explicit = if (flags & T.CMD_CLIENT_CFLAG != 0) args.get('c') else args.get('t');
+    return cmdq_find_client(item, explicit, flags & T.CMD_CLIENT_CANFAIL != 0);
+}
+
+pub fn cmdq_get_target_client(item_ptr: *anyopaque) ?*T.Client {
+    const item: *CmdqItem = @ptrCast(@alignCast(item_ptr));
+    return item.target_client;
+}
+
+fn cmdq_find_client(item: *CmdqItem, explicit: ?[]const u8, quiet: bool) ?*T.Client {
+    if (explicit == null) return item.client;
+
+    var target = explicit.?;
+    if (target.len != 0 and target[target.len - 1] == ':')
+        target = target[0 .. target.len - 1];
+
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == null) continue;
+        if (cl.name) |name| {
+            if (std.mem.eql(u8, target, name)) return cl;
+        }
+        if (cl.ttyname) |ttyname| {
+            if (std.mem.eql(u8, target, ttyname)) return cl;
+            if (std.mem.startsWith(u8, ttyname, "/dev/") and std.mem.eql(u8, target, ttyname["/dev/".len..]))
+                return cl;
+        }
+    }
+
+    if (!quiet) cmdq_error(item, "can't find client: {s}", .{target});
     return null;
 }
 

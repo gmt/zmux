@@ -209,12 +209,14 @@ pub fn session_create(
     next_session_id += 1;
 
     const actual_name = if (name) |n| xm.xstrdup(n) else xm.xasprintf("{d}", .{sid});
+    const now = std.time.milliTimestamp();
 
     s.* = T.Session{
         .id = sid,
         .name = actual_name,
         .cwd = xm.xstrdup(cwd),
-        .created = std.time.timestamp(),
+        .created = now,
+        .activity_time = now,
         .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = oo,
         .environ = environment,
@@ -224,6 +226,10 @@ pub fn session_create(
     log.log_debug("new session $%{d} {s}", .{ s.id, s.name });
     notify.notify_session("session-created", s);
     return s;
+}
+
+pub fn session_update_activity(s: *T.Session, from: ?i64) void {
+    s.activity_time = from orelse std.time.milliTimestamp();
 }
 
 pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {

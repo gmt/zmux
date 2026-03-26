@@ -272,7 +272,7 @@ fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
 
     cmd_find_clear_state(fs, flags);
     if (cmd_find_inside_pane(client)) |wp| {
-        const s = select_session_for_window(wp.window, null, flags) orelse return cmd_find_from_nothing(fs, flags);
+        const s = select_session_for_window(wp.window, flags) orelse return cmd_find_from_nothing(fs, flags);
         cmd_find_from_session(fs, s, flags);
         fs.idx = if (fs.wl) |wl| wl.idx else -1;
         return cmd_find_valid_state(fs);
@@ -283,53 +283,39 @@ fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
 
 fn cmd_find_from_nothing(fs: *T.CmdFindState, flags: u32) bool {
     cmd_find_clear_state(fs, flags);
-    const s = select_best_session(null, flags) orelse return false;
+    const s = select_best_session(flags) orelse return false;
     cmd_find_from_session(fs, s, flags);
     fs.idx = if (fs.wl) |wl| wl.idx else -1;
     return cmd_find_valid_state(fs);
 }
 
-fn select_best_session(preferred: ?*T.Session, flags: u32) ?*T.Session {
-    if (preferred) |candidate| {
-        if (sess.session_alive(candidate)) {
-            sess.session_repair_current(candidate);
-            if (candidate.curw != null and candidate.curw.?.window.active != null)
-                return candidate;
-        }
-    }
-
-    const sessions = sort_mod.sorted_sessions(.{ .order = .creation, .reversed = true });
-    defer xm.allocator.free(sessions);
-
-    var fallback: ?*T.Session = null;
-    for (sessions) |candidate| {
+fn select_best_session(flags: u32) ?*T.Session {
+    var best: ?*T.Session = null;
+    var sessions = sess.sessions.valueIterator();
+    while (sessions.next()) |entry| {
+        const candidate = entry.*;
         sess.session_repair_current(candidate);
         const wl = candidate.curw orelse continue;
         if (wl.window.active == null) continue;
-        if (fallback == null) fallback = candidate;
-        if (flags & T.CMD_FIND_PREFER_UNATTACHED != 0 and candidate.attached == 0)
-            return candidate;
+        if (cmd_find_session_better(candidate, best, flags))
+            best = candidate;
     }
-    return fallback;
+    return best;
 }
 
-fn select_session_for_window(window: *T.Window, preferred: ?*T.Session, flags: u32) ?*T.Session {
-    if (preferred) |candidate| {
-        if (sess.session_alive(candidate) and sess.session_has_window(candidate, window))
-            return candidate;
-    }
-
-    const sessions = sort_mod.sorted_sessions(.{ .order = .creation, .reversed = true });
-    defer xm.allocator.free(sessions);
-
-    var fallback: ?*T.Session = null;
-    for (sessions) |candidate| {
+fn select_session_for_window(window: *T.Window, flags: u32) ?*T.Session {
+    var best: ?*T.Session = null;
+    var sessions = sess.sessions.valueIterator();
+    while (sessions.next()) |entry| {
+        const candidate = entry.*;
         if (!sess.session_has_window(candidate, window)) continue;
-        if (fallback == null) fallback = candidate;
-        if (flags & T.CMD_FIND_PREFER_UNATTACHED != 0 and candidate.attached == 0)
-            return candidate;
+        sess.session_repair_current(candidate);
+        const wl = candidate.curw orelse continue;
+        if (wl.window.active == null) continue;
+        if (cmd_find_session_better(candidate, best, flags))
+            best = candidate;
     }
-    return fallback;
+    return best;
 }
 
 fn cmd_find_inside_pane(cl: *T.Client) ?*T.WindowPane {
@@ -357,6 +343,20 @@ fn pane_tty_name(wp: *T.WindowPane) []const u8 {
 
 fn cmd_find_client_better(candidate: *T.Client, than: ?*T.Client) bool {
     if (than == null) return true;
+    if (candidate.activity_time != than.?.activity_time)
+        return candidate.activity_time > than.?.activity_time;
+    return candidate.id > than.?.id;
+}
+
+fn cmd_find_session_better(candidate: *T.Session, than: ?*T.Session, flags: u32) bool {
+    if (than == null) return true;
+    if (flags & T.CMD_FIND_PREFER_UNATTACHED != 0) {
+        const than_attached = than.?.attached != 0;
+        if (than_attached and candidate.attached == 0) return true;
+        if (!than_attached and candidate.attached != 0) return false;
+    }
+    if (candidate.activity_time != than.?.activity_time)
+        return candidate.activity_time > than.?.activity_time;
     return candidate.id > than.?.id;
 }
 
@@ -389,12 +389,12 @@ pub fn cmd_find_current_client(item: ?*cmdq_mod.CmdqItem, quiet: bool) ?*T.Clien
     var found: ?*T.Client = null;
     if (client) |unattached| {
         if (cmd_find_inside_pane(unattached)) |wp| {
-            const s = select_session_for_window(wp.window, null, T.CMD_FIND_QUIET);
+            const s = select_session_for_window(wp.window, T.CMD_FIND_QUIET);
             if (s != null) found = cmd_find_best_client(s);
         }
     }
     if (found == null) {
-        const s = select_best_session(null, T.CMD_FIND_QUIET);
+        const s = select_best_session(T.CMD_FIND_QUIET);
         if (s != null) found = cmd_find_best_client(s);
     }
 
@@ -503,7 +503,7 @@ fn resolve_window_general(fs: *T.CmdFindState, current: *const T.CmdFindState, t
     if (target.len > 0 and target[0] == '@') {
         const id = std.fmt.parseUnsigned(u32, target[1..], 10) catch return false;
         const w = win_mod.window_find_by_id(id) orelse return false;
-        const s = select_session_for_window(w, current.s, fs.flags) orelse return false;
+        const s = select_session_for_window(w, fs.flags) orelse return false;
         fs.s = s;
         return set_state_for_window(fs, w);
     }
@@ -653,7 +653,7 @@ fn resolve_pane_general(fs: *T.CmdFindState, current: *const T.CmdFindState, tar
         const wp = win_mod.window_pane_find_by_id(id) orelse return false;
         fs.wp = wp;
         fs.w = wp.window;
-        const s = select_session_for_window(wp.window, current.s, fs.flags) orelse return false;
+        const s = select_session_for_window(wp.window, fs.flags) orelse return false;
         fs.s = s;
         return set_state_for_window(fs, wp.window);
     }
@@ -1397,4 +1397,122 @@ test "cmd_find_current_client prefers attached clients in the inside-pane sessio
 
     try std.testing.expectEqual(&attached_new, cmd_find_current_client(&item, false).?);
     try std.testing.expectEqual(&attached_new, cmd_find_client(&item, null, false).?);
+}
+
+test "cmd_find_current_client prefers higher activity over client id" {
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "activity-client-session", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("activity-client-session") != null) sess.session_destroy(s, false, "test");
+    s.attached = 2;
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    s.curw = wl;
+
+    const old_env = env_mod.environ_create();
+    defer env_mod.environ_free(old_env);
+    var older_id_newer_activity = T.Client{
+        .id = 1,
+        .activity_time = 200,
+        .environ = old_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    const new_env = env_mod.environ_create();
+    defer env_mod.environ_free(new_env);
+    var newer_id_older_activity = T.Client{
+        .id = 9,
+        .activity_time = 100,
+        .environ = new_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+
+    client_registry.add(&newer_id_older_activity);
+    client_registry.add(&older_id_newer_activity);
+    defer client_registry.clients.clearRetainingCapacity();
+
+    try std.testing.expectEqual(&older_id_newer_activity, cmd_find_current_client(null, false).?);
+    try std.testing.expectEqual(&older_id_newer_activity, cmd_find_client(null, null, false).?);
+}
+
+test "cmd_find_target prefers unattached session for shared window ids" {
+    const cmd_mod = @import("cmd.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const attached = sess.session_create(null, "shared-window-attached", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("shared-window-attached") != null) sess.session_destroy(attached, false, "test");
+    const unattached = sess.session_create(null, "shared-window-unattached", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("shared-window-unattached") != null) sess.session_destroy(unattached, false, "test");
+
+    var cause: ?[]u8 = null;
+    var attached_ctx: T.SpawnContext = .{ .s = attached, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const attached_wl = spawn.spawn_window(&attached_ctx, &cause).?;
+    attached.curw = attached_wl;
+    attached.attached = 1;
+    attached.activity_time = 500;
+
+    const unattached_wl = sess.session_attach(unattached, attached_wl.window, -1, &cause).?;
+    unattached.curw = unattached_wl;
+    unattached.attached = 0;
+    unattached.activity_time = 100;
+
+    const query_env = env_mod.environ_create();
+    defer env_mod.environ_free(query_env);
+    var query_client = T.Client{
+        .environ = query_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = attached,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &query_client, .cmdlist = &list };
+    var target: T.CmdFindState = .{};
+    const window_id = try std.fmt.allocPrint(xm.allocator, "@{d}", .{attached_wl.window.id});
+    defer xm.allocator.free(window_id);
+
+    try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, window_id, .window, T.CMD_FIND_PREFER_UNATTACHED));
+    try std.testing.expectEqual(unattached, target.s.?);
+    try std.testing.expectEqual(unattached_wl, target.wl.?);
+    try std.testing.expectEqual(attached_wl.window.active.?, target.wp.?);
 }

@@ -426,6 +426,15 @@ pub fn cmd_list_any_have(list: *CmdList, flag: u32) bool {
 // ── Execution ─────────────────────────────────────────────────────────────
 
 pub fn cmd_execute(cmd: *Cmd, item: *cmdq_mod.CmdqItem) T.CmdRetval {
+    const saved_cmd = item.cmd;
+    const saved_target_client = item.target_client;
+    item.cmd = cmd;
+    item.target_client = cmdq_mod.cmdq_resolve_target_client(item, cmd);
+    defer {
+        item.target_client = saved_target_client;
+        item.cmd = saved_cmd;
+    }
+
     log.log_debug("execute {s}", .{cmd.entry.name});
     return cmd.entry.exec(cmd, item);
 }

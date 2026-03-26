@@ -22,29 +22,192 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
-const log = @import("log.zig");
+const c = @import("c.zig");
+const cmdq = @import("cmd-queue.zig");
+const proc_mod = @import("proc.zig");
+const client_registry = @import("client-registry.zig");
 
 pub const ServerAclEntry = struct {
     uid: std.posix.uid_t,
-    deny: bool = false,
+    flags: u32 = 0,
 };
+
+pub const SERVER_ACL_READONLY: u32 = 0x1;
 
 var acl_entries: std.AutoHashMap(std.posix.uid_t, ServerAclEntry) = undefined;
 var acl_initialised = false;
 
+fn invalid_uid() std.posix.uid_t {
+    return std.math.maxInt(std.posix.uid_t);
+}
+
+fn server_acl_user_find(uid: std.posix.uid_t) ?*ServerAclEntry {
+    if (!acl_initialised) return null;
+    return acl_entries.getPtr(uid);
+}
+
 pub fn server_acl_init() void {
-    acl_entries = std.AutoHashMap(std.posix.uid_t, ServerAclEntry).init(xm.allocator);
-    acl_initialised = true;
-}
-
-pub fn server_acl_join(uid: std.posix.uid_t) bool {
-    if (!acl_initialised) return true;
-    if (acl_entries.get(uid)) |entry| {
-        return !entry.deny;
+    if (acl_initialised) {
+        acl_entries.clearRetainingCapacity();
+    } else {
+        acl_entries = std.AutoHashMap(std.posix.uid_t, ServerAclEntry).init(xm.allocator);
+        acl_initialised = true;
     }
-    return true; // default allow
+
+    const owner_uid: std.posix.uid_t = @intCast(std.os.linux.getuid());
+    if (owner_uid != 0)
+        server_acl_user_allow(0);
+    server_acl_user_allow(owner_uid);
 }
 
-pub fn server_acl_get_uid(peer: *T.ZmuxPeer) std.posix.uid_t {
-    return peer.uid;
+pub fn server_acl_user_exists(uid: std.posix.uid_t) bool {
+    return server_acl_user_find(uid) != null;
+}
+
+pub fn server_acl_user_is_readonly(uid: std.posix.uid_t) bool {
+    const user = server_acl_user_find(uid) orelse return false;
+    return (user.flags & SERVER_ACL_READONLY) != 0;
+}
+
+pub fn server_acl_display(item: *cmdq.CmdqItem) void {
+    var entries = std.ArrayList(ServerAclEntry){};
+    defer entries.deinit(xm.allocator);
+
+    var it = acl_entries.valueIterator();
+    while (it.next()) |entry| {
+        if (entry.uid == 0) continue;
+        entries.append(xm.allocator, entry.*) catch unreachable;
+    }
+
+    std.mem.sort(ServerAclEntry, entries.items, {}, struct {
+        fn lessThan(_: void, lhs: ServerAclEntry, rhs: ServerAclEntry) bool {
+            return lhs.uid < rhs.uid;
+        }
+    }.lessThan);
+
+    for (entries.items) |entry| {
+        const pw = c.posix_sys.getpwuid(entry.uid);
+        const name = if (pw != null)
+            std.mem.span(@as([*:0]const u8, @ptrCast(pw.?.*.pw_name)))
+        else
+            "unknown";
+        const access_mode: u8 = if ((entry.flags & SERVER_ACL_READONLY) != 0) 'R' else 'W';
+        cmdq.cmdq_print(item, "{s} ({c})", .{ name, access_mode });
+    }
+}
+
+pub fn server_acl_user_allow(uid: std.posix.uid_t) void {
+    if (!acl_initialised) server_acl_init();
+    const gop = acl_entries.getOrPut(uid) catch unreachable;
+    if (!gop.found_existing)
+        gop.value_ptr.* = .{ .uid = uid };
+}
+
+pub fn server_acl_user_deny(uid: std.posix.uid_t) void {
+    if (!acl_initialised) return;
+    _ = acl_entries.remove(uid);
+}
+
+pub fn server_acl_user_allow_write(uid: std.posix.uid_t) void {
+    const user = server_acl_user_find(uid) orelse return;
+    user.flags &= ~@as(u32, SERVER_ACL_READONLY);
+
+    for (client_registry.clients.items) |cl| {
+        const peer = cl.peer orelse continue;
+        const peer_uid = proc_mod.proc_get_peer_uid(peer);
+        if (peer_uid != invalid_uid() and peer_uid == uid)
+            cl.flags &= ~@as(u64, T.CLIENT_READONLY);
+    }
+}
+
+pub fn server_acl_user_deny_write(uid: std.posix.uid_t) void {
+    const user = server_acl_user_find(uid) orelse return;
+    user.flags |= SERVER_ACL_READONLY;
+
+    for (client_registry.clients.items) |cl| {
+        const peer = cl.peer orelse continue;
+        const peer_uid = proc_mod.proc_get_peer_uid(peer);
+        if (peer_uid != invalid_uid() and peer_uid == uid)
+            cl.flags |= T.CLIENT_READONLY;
+    }
+}
+
+pub fn server_acl_join(cl: *T.Client) bool {
+    const peer = cl.peer orelse return false;
+    const uid = proc_mod.proc_get_peer_uid(peer);
+    if (uid == invalid_uid()) return false;
+
+    const user = server_acl_user_find(uid) orelse return false;
+    if ((user.flags & SERVER_ACL_READONLY) != 0)
+        cl.flags |= T.CLIENT_READONLY
+    else
+        cl.flags &= ~@as(u64, T.CLIENT_READONLY);
+    return true;
+}
+
+pub fn server_acl_reset_for_tests() void {
+    server_acl_init();
+}
+
+test "server ACL join and readonly toggles follow stored entries" {
+    server_acl_reset_for_tests();
+
+    var peer = T.ZmuxPeer{
+        .parent = undefined,
+        .ibuf = undefined,
+        .event = null,
+        .uid = 12345,
+        .flags = 0,
+        .dispatchcb = undefined,
+        .arg = null,
+    };
+    var client = T.Client{
+        .peer = &peer,
+        .environ = undefined,
+        .tty = undefined,
+        .status = undefined,
+    };
+
+    try std.testing.expect(!server_acl_join(&client));
+
+    server_acl_user_allow(peer.uid);
+    try std.testing.expect(server_acl_join(&client));
+    try std.testing.expect(client.flags & T.CLIENT_READONLY == 0);
+
+    server_acl_user_deny_write(peer.uid);
+    client.flags &= ~@as(u64, T.CLIENT_READONLY);
+    try std.testing.expect(server_acl_join(&client));
+    try std.testing.expect(client.flags & T.CLIENT_READONLY != 0);
+}
+
+test "server ACL write toggles update live client flags" {
+    server_acl_reset_for_tests();
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    var peer = T.ZmuxPeer{
+        .parent = undefined,
+        .ibuf = undefined,
+        .event = null,
+        .uid = 22334,
+        .flags = 0,
+        .dispatchcb = undefined,
+        .arg = null,
+    };
+    var client = T.Client{
+        .peer = &peer,
+        .environ = undefined,
+        .tty = undefined,
+        .status = undefined,
+    };
+    client_registry.add(&client);
+
+    server_acl_user_allow(peer.uid);
+    server_acl_user_deny_write(peer.uid);
+    try std.testing.expect(client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(server_acl_user_is_readonly(peer.uid));
+
+    server_acl_user_allow_write(peer.uid);
+    try std.testing.expect(client.flags & T.CLIENT_READONLY == 0);
+    try std.testing.expect(!server_acl_user_is_readonly(peer.uid));
 }

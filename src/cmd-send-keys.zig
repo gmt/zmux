@@ -222,14 +222,37 @@ fn parse_repeat_count(raw: ?[]const u8, ctx: *const format_mod.FormatContext, it
     const text = cmd_format.require(item, template, ctx) orelse return null;
     defer xm.allocator.free(text);
 
-    const parsed = std.fmt.parseInt(u32, text, 10) catch {
-        cmdq.cmdq_error(item, "repeat count invalid: {s}", .{text});
+    const parsed = parse_repeat_count_value(text) catch |err| {
+        const cause = switch (err) {
+            error.Invalid => "invalid",
+            error.TooSmall => "too small",
+            error.TooLarge => "too large",
+        };
+        cmdq.cmdq_error(item, "repeat count {s}", .{cause});
         return null;
     };
-    if (parsed == 0) {
-        cmdq.cmdq_error(item, "repeat count invalid: {s}", .{text});
-        return null;
+    return parsed;
+}
+
+fn parse_repeat_count_value(text: []const u8) error{ Invalid, TooSmall, TooLarge }!u32 {
+    if (text.len == 0) return error.Invalid;
+
+    if (text[0] == '-') {
+        if (text.len == 1) return error.Invalid;
+        for (text[1..]) |ch| {
+            if (!std.ascii.isDigit(ch)) return error.Invalid;
+        }
+        return error.TooSmall;
     }
+
+    const digits = if (text[0] == '+') text[1..] else text;
+    if (digits.len == 0) return error.Invalid;
+
+    const parsed = std.fmt.parseInt(u32, digits, 10) catch |err| switch (err) {
+        error.InvalidCharacter => return error.Invalid,
+        error.Overflow => return error.TooLarge,
+    };
+    if (parsed == 0) return error.TooSmall;
     return parsed;
 }
 
@@ -635,6 +658,62 @@ test "send-keys expands repeat count options before parsing" {
     try std.testing.expectEqualStrings("xx", buf[0..n]);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys reports tmux-style too small repeat count errors" {
+    const setup = try test_session_with_empty_pane("send-repeat-too-small");
+    defer test_teardown_session("send-repeat-too-small", setup.s, -1, -1);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-N", "0", "-t", "send-repeat-too-small:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
+
+    const stderr_pipe = try std.posix.pipe();
+    defer std.posix.close(stderr_pipe[0]);
+
+    try std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
+    std.posix.close(stderr_pipe[1]);
+
+    var errbuf: [128]u8 = undefined;
+    const errlen = try std.posix.read(stderr_pipe[0], errbuf[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, errbuf[0..errlen], "repeat count too small") != null);
+}
+
+test "send-keys reports tmux-style too large repeat count errors" {
+    const setup = try test_session_with_empty_pane("send-repeat-too-large");
+    defer test_teardown_session("send-repeat-too-large", setup.s, -1, -1);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-N", "4294967296", "-t", "send-repeat-too-large:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
+
+    const stderr_pipe = try std.posix.pipe();
+    defer std.posix.close(stderr_pipe[0]);
+
+    try std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
+    std.posix.close(stderr_pipe[1]);
+
+    var errbuf: [128]u8 = undefined;
+    const errlen = try std.posix.read(stderr_pipe[0], errbuf[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, errbuf[0..errlen], "repeat count too large") != null);
 }
 
 test "send-keys expands formats before writing" {

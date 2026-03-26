@@ -28,6 +28,7 @@ const format_mod = @import("format.zig");
 const cmd_opts = @import("cmd-options.zig");
 const win = @import("window.zig");
 const alerts = @import("alerts.zig");
+const utf8 = @import("utf8.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -112,6 +113,8 @@ fn unset_option(target: cmd_opts.ResolvedTarget, name: []const u8, oe: ?*const T
 fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) void {
     if (std.mem.eql(u8, name, "monitor-silence"))
         alerts.alerts_reset_all();
+    if (std.mem.eql(u8, name, "codepoint-widths") and target.kind == .server and target.global)
+        utf8.utf8_update_width_cache();
     if (target.pane) |wp| {
         win.window_pane_options_changed(wp, name);
     }

@@ -299,6 +299,11 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     if (wp.shell) |shell| xm.allocator.free(shell);
     if (wp.cwd) |cwd| xm.allocator.free(cwd);
     wp.input_pending.deinit(xm.allocator);
+    while (wp.modes.items.len > 0) {
+        const wme = wp.modes.orderedRemove(0);
+        xm.allocator.destroy(wme);
+    }
+    wp.modes.deinit(xm.allocator);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
     if (wp.screen.title) |title| xm.allocator.free(title);
@@ -330,6 +335,38 @@ pub fn window_find_by_id(id: u32) ?*T.Window {
 
 pub fn window_pane_find_by_id(id: u32) ?*T.WindowPane {
     return all_window_panes.get(id);
+}
+
+pub fn window_pane_mode(wp: *T.WindowPane) ?*T.WindowModeEntry {
+    if (wp.modes.items.len == 0) return null;
+    return wp.modes.items[0];
+}
+
+pub fn window_pane_push_mode(
+    wp: *T.WindowPane,
+    mode: *const T.WindowMode,
+    data: ?*anyopaque,
+    swp: ?*T.WindowPane,
+) *T.WindowModeEntry {
+    const wme = xm.allocator.create(T.WindowModeEntry) catch unreachable;
+    wme.* = .{
+        .wp = wp,
+        .swp = swp,
+        .mode = mode,
+        .data = data,
+    };
+    wp.modes.insert(xm.allocator, 0, wme) catch unreachable;
+    return wme;
+}
+
+pub fn window_pane_pop_mode(wp: *T.WindowPane, wme: *T.WindowModeEntry) bool {
+    for (wp.modes.items, 0..) |current, idx| {
+        if (current != wme) continue;
+        _ = wp.modes.orderedRemove(idx);
+        xm.allocator.destroy(wme);
+        return true;
+    }
+    return false;
 }
 
 pub fn window_add_ref(w: *T.Window, _from: []const u8) void {

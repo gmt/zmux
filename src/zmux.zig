@@ -43,7 +43,7 @@ fn usage(to_stderr: bool) void {
     const stream = if (to_stderr) std.fs.File.stderr() else std.fs.File.stdout();
     _ = stream.writeAll(
         "usage: zmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n" ++
-        "            [-S socket-path] [-T features] [command [flags]]\n",
+            "            [-S socket-path] [-T features] [command [flags]]\n",
     ) catch {};
 }
 
@@ -102,8 +102,14 @@ pub fn main() !void {
     while (i < raw_args.len) : (i += 1) {
         const arg = raw_args[i];
         if (arg.len == 0 or arg[0] != '-') break;
-        if (std.mem.eql(u8, arg, "--")) { i += 1; break; }
-        if (arg.len < 2) { usage(true); std.process.exit(1); }
+        if (std.mem.eql(u8, arg, "--")) {
+            i += 1;
+            break;
+        }
+        if (arg.len < 2) {
+            usage(true);
+            std.process.exit(1);
+        }
 
         // Scan all flag characters in this arg.
         // Flags that take a value may have it inline (e.g. -Lname) or in
@@ -122,7 +128,10 @@ pub fn main() !void {
                         flags |= T.CLIENT_CONTROL;
                 },
                 'D' => flags |= T.CLIENT_NOFORK,
-                'h' => { usage(false); return; },
+                'h' => {
+                    usage(false);
+                    return;
+                },
                 'l' => flags |= T.CLIENT_LOGIN,
                 'N' => flags |= T.CLIENT_NOSTARTSERVER,
                 'u' => flags |= T.CLIENT_UTF8,
@@ -140,7 +149,10 @@ pub fn main() !void {
                         break :blk v;
                     } else blk: {
                         i += 1;
-                        if (i >= raw_args.len) { usage(true); std.process.exit(1); }
+                        if (i >= raw_args.len) {
+                            usage(true);
+                            std.process.exit(1);
+                        }
                         break :blk raw_args[i];
                     };
                     switch (opt_char) {
@@ -167,7 +179,10 @@ pub fn main() !void {
                         else => unreachable,
                     }
                 },
-                else => { usage(true); std.process.exit(1); },
+                else => {
+                    usage(true);
+                    std.process.exit(1);
+                },
             }
         }
     }
@@ -209,8 +224,8 @@ pub fn main() !void {
         flags |= T.CLIENT_UTF8;
     } else {
         const s = std.posix.getenv("LC_ALL") orelse
-                  std.posix.getenv("LC_CTYPE") orelse
-                  std.posix.getenv("LANG") orelse "";
+            std.posix.getenv("LC_CTYPE") orelse
+            std.posix.getenv("LANG") orelse "";
         if (std.ascii.indexOfIgnoreCase(s, "UTF-8")) |_| flags |= T.CLIENT_UTF8;
         if (std.ascii.indexOfIgnoreCase(s, "UTF8")) |_| flags |= T.CLIENT_UTF8;
     }
@@ -220,7 +235,7 @@ pub fn main() !void {
     proc_mod.libevent = base;
 
     // Hand off to client
-    const empty_argv: [1][*:0]const u8 = .{ "" };
+    const empty_argv: [1][*:0]const u8 = .{""};
     const rc = client_mod.client_main(base, cmd_argc, if (cmd_argc > 0) cmd_argv else &empty_argv, flags, feat);
     std.process.exit(@intCast(@as(i32, @max(rc, 0))));
 }
@@ -279,7 +294,8 @@ test {
     _ = @import("screen.zig");
     _ = @import("sort.zig");
     _ = @import("style.zig");
-_ = @import("tty-draw.zig");
-_ = @import("input-keys.zig");
+    _ = @import("tty.zig");
+    _ = @import("tty-draw.zig");
+    _ = @import("input-keys.zig");
     _ = @import("utf8.zig");
 }

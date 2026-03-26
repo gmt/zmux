@@ -1,0 +1,149 @@
+// Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
+//
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+// IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+// OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//
+// Ported in part from tmux/tty.c.
+// Original copyright:
+//   Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
+//   ISC licence – same terms as above.
+
+//! tty.zig – reduced server-side tty lifecycle and metadata helpers.
+
+const std = @import("std");
+const T = @import("types.zig");
+const xm = @import("xmalloc.zig");
+const proc_mod = @import("proc.zig");
+
+pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
+    tty.* = .{ .client = cl };
+}
+
+pub fn tty_set_size(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void {
+    tty.sx = @max(sx, 1);
+    tty.sy = @max(sy, 1);
+    tty.xpixel = if (xpixel == 0) T.DEFAULT_XPIXEL else xpixel;
+    tty.ypixel = if (ypixel == 0) T.DEFAULT_YPIXEL else ypixel;
+}
+
+pub fn tty_resize(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void {
+    tty_set_size(tty, sx, sy, xpixel, ypixel);
+    tty_invalidate(tty);
+}
+
+pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
+    cause.* = null;
+    tty.flags |= @intCast(T.TTY_OPENED);
+    tty.flags &= ~@as(i32, @intCast(T.TTY_NOCURSOR | T.TTY_FREEZE | T.TTY_BLOCK));
+    tty_start_tty(tty);
+    return 0;
+}
+
+pub fn tty_close(tty: *T.Tty) void {
+    tty_stop_tty(tty);
+    tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
+}
+
+pub fn tty_start_tty(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) return;
+    tty.flags |= @intCast(T.TTY_STARTED);
+    tty_invalidate(tty);
+}
+
+pub fn tty_stop_tty(tty: *T.Tty) void {
+    tty.flags &= ~@as(i32, @intCast(T.TTY_STARTED | T.TTY_BLOCK));
+}
+
+pub fn tty_invalidate(tty: *T.Tty) void {
+    tty.cx = std.math.maxInt(u32);
+    tty.cy = std.math.maxInt(u32);
+    tty.cstyle = .default;
+    tty.ccolour = -1;
+    tty.mode = 0;
+    tty.fg = 8;
+    tty.bg = 8;
+}
+
+pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
+    if (title.len == 0) return;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    const sequence = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
+    defer xm.allocator.free(sequence);
+    tty_write(tty, sequence);
+}
+
+fn tty_write(tty: *T.Tty, payload: []const u8) void {
+    const peer = tty.client.peer orelse return;
+    if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
+
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(xm.allocator);
+
+    const stream: i32 = 1;
+    buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch return;
+    buf.appendSlice(xm.allocator, payload) catch return;
+    _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+}
+
+test "tty_open starts reduced tty lifecycle" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+
+    cl.tty.cx = 7;
+    cl.tty.cy = 9;
+    cl.tty.mode = 123;
+    cl.tty.fg = 3;
+    cl.tty.bg = 4;
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), tty_open(&cl.tty, &cause));
+    try std.testing.expect(cause == null);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
+    try std.testing.expectEqual(std.math.maxInt(u32), cl.tty.cx);
+    try std.testing.expectEqual(std.math.maxInt(u32), cl.tty.cy);
+    try std.testing.expectEqual(@as(i32, 8), cl.tty.fg);
+    try std.testing.expectEqual(@as(i32, 8), cl.tty.bg);
+
+    tty_close(&cl.tty);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED))) == 0);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0);
+}
+
+test "tty_resize clamps size and restores default pixels" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+
+    tty_resize(&cl.tty, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 1), cl.tty.sx);
+    try std.testing.expectEqual(@as(u32, 1), cl.tty.sy);
+    try std.testing.expectEqual(T.DEFAULT_XPIXEL, cl.tty.xpixel);
+    try std.testing.expectEqual(T.DEFAULT_YPIXEL, cl.tty.ypixel);
+}

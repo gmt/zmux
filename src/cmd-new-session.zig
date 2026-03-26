@@ -41,6 +41,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const cl = cmdq.cmdq_get_client(item);
     const no_attach = (cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_NOATTACH) != 0;
     var target: T.CmdFindState = .{};
+    var cause: ?[]u8 = null;
 
     // has-session: just validate the -t target (cmd_find_target already did it)
     if (cmd.entry == &entry_has) {
@@ -101,6 +102,16 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // Determine CWD
     const cwd = server_client_mod.server_client_get_cwd(cl, null);
 
+    if (!args.has('d') and !no_attach) {
+        if (cl) |c| {
+            if (c.session == null and server_client_mod.server_client_open(c, &cause) != 0) {
+                defer if (cause) |msg| xm.allocator.free(msg);
+                cmdq.cmdq_error(item, "open terminal failed: {s}", .{cause orelse "unknown"});
+                return .@"error";
+            }
+        }
+    }
+
     var group_target: ?*T.Session = null;
     if (args.get('t')) |target_name| {
         if (cmd_find.cmd_find_target(&target, item, target_name, .session, 0) != 0)
@@ -131,7 +142,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         while (it.next()) |idx| keys.append(xm.allocator, idx.*) catch unreachable;
         std.sort.block(i32, keys.items, {}, std.sort.asc(i32));
 
-        var cause: ?[]u8 = null;
         for (keys.items) |idx| {
             const existing = sess.winlink_find_by_index(&group_session.windows, idx) orelse continue;
             const new_wl = sess.session_attach(s, existing.window, idx, &cause) orelse {
@@ -146,7 +156,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         wl = s.curw;
     } else {
         // Spawn the initial window
-        var cause: ?[]u8 = null;
+        var spawn_cause: ?[]u8 = null;
         var sc = T.SpawnContext{
             .item = @ptrCast(item),
             .s = s,
@@ -160,9 +170,9 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             sc.argv = slice;
             if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
         }
-        wl = spawn_mod.spawn_window(&sc, &cause);
+        wl = spawn_mod.spawn_window(&sc, &spawn_cause);
         if (wl == null) {
-            cmdq.cmdq_error(item, "create window failed: {s}", .{cause orelse "unknown"});
+            cmdq.cmdq_error(item, "create window failed: {s}", .{spawn_cause orelse "unknown"});
             sess.session_destroy(s, false, "exec_new_session");
             return .@"error";
         }

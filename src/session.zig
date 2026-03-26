@@ -28,6 +28,7 @@ const env_mod = @import("environ.zig");
 const sort_mod = @import("sort.zig");
 const win = @import("window.zig");
 const notify = @import("notify.zig");
+const utf8 = @import("utf8.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -270,10 +271,12 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
 /// Check a proposed session name for validity.  Returns null if invalid.
 pub fn session_check_name(name: []const u8) ?[]u8 {
     if (name.len == 0) return null;
-    for (name) |ch| {
-        if (ch == ':' or ch == '.') return null;
+    const copy = xm.xstrdup(name);
+    defer xm.allocator.free(copy);
+    for (copy) |*ch| {
+        if (ch.* == ':' or ch.* == '.') ch.* = '_';
     }
-    return xm.xstrdup(name);
+    return utf8.utf8_stravis(copy, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_TAB | utf8.VIS_NL);
 }
 
 // ── Winlink management ────────────────────────────────────────────────────
@@ -609,4 +612,11 @@ test "session_repair_current drops non-live winlinks" {
     session_repair_current(&s);
     try std.testing.expectEqual(live, s.curw.?);
     try std.testing.expectEqual(@as(usize, 0), s.lastw.items.len);
+}
+
+test "session_check_name sanitizes separators and escapes controls" {
+    const checked = session_check_name("bad:name.\n") orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(checked);
+
+    try std.testing.expectEqualStrings("bad_name_\\n", checked);
 }

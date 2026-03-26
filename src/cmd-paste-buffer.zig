@@ -117,67 +117,7 @@ fn paste_escaped(fd: i32, data: []const u8, separator: []const u8, item: *cmdq.C
 }
 
 fn escape_for_paste(data: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-
-    var pos: usize = 0;
-    while (pos < data.len) {
-        const start = pos;
-        var ud: T.Utf8Data = undefined;
-        if (utf8_mod.utf8_open(&ud, data[pos]) == .more) {
-            pos += 1;
-            var state: T.Utf8State = .more;
-            while (pos < data.len and state == .more) : (pos += 1)
-                state = utf8_mod.utf8_append(&ud, data[pos]);
-            if (state == .done) {
-                try out.appendSlice(xm.allocator, data[start..pos]);
-                continue;
-            }
-            pos = start;
-        }
-
-        try append_vis_safe_no_slash(&out, data[pos]);
-        pos += 1;
-    }
-    return out.toOwnedSlice(xm.allocator);
-}
-
-fn append_vis_safe_no_slash(out: *std.ArrayList(u8), ch: u8) !void {
-    if (is_vis_safe_visible(ch)) {
-        try out.append(xm.allocator, ch);
-        return;
-    }
-
-    if ((ch & 0x7f) == ' ') {
-        try out.append(xm.allocator, '0' + ((ch >> 6) & 0x07));
-        try out.append(xm.allocator, '0' + ((ch >> 3) & 0x07));
-        try out.append(xm.allocator, '0' + (ch & 0x07));
-        return;
-    }
-
-    if ((ch & 0x80) != 0) {
-        try out.append(xm.allocator, 'M');
-        return append_meta_or_control(out, ch & 0x7f);
-    }
-
-    return append_meta_or_control(out, ch);
-}
-
-fn append_meta_or_control(out: *std.ArrayList(u8), ch: u8) !void {
-    if (std.ascii.isControl(ch) or ch == 0x7f) {
-        try out.append(xm.allocator, '^');
-        try out.append(xm.allocator, if (ch == 0x7f) '?' else ch + '@');
-        return;
-    }
-
-    try out.append(xm.allocator, '-');
-    try out.append(xm.allocator, ch);
-}
-
-fn is_vis_safe_visible(ch: u8) bool {
-    if (ch == ' ' or ch == '\t' or ch == '\n') return true;
-    if (ch == '\x07' or ch == '\x08' or ch == '\r') return true;
-    return ch <= 0x7f and std.ascii.isPrint(ch) and ch != ' ';
+    return utf8_mod.utf8_stravisx(data, utf8_mod.VIS_SAFE | utf8_mod.VIS_NOSLASH);
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

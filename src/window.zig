@@ -30,6 +30,7 @@ const style_mod = @import("style.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
 const c = @import("c.zig");
+const utf8 = @import("utf8.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -446,7 +447,7 @@ pub fn window_rotate_panes(w: *T.Window, reverse: bool) ?*T.WindowPane {
 
 pub fn window_set_name(w: *T.Window, name: []const u8) void {
     xm.allocator.free(w.name);
-    w.name = xm.xstrdup(name);
+    w.name = utf8.utf8_stravis(name, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_TAB | utf8.VIS_NL);
 }
 
 pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32) void {

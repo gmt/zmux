@@ -29,6 +29,7 @@ const win_mod = @import("window.zig");
 const opts = @import("options.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
+const env_mod = @import("environ.zig");
 
 const ParsedTarget = struct {
     session: ?[]const u8 = null,
@@ -259,14 +260,24 @@ fn resolve_current_state(item: *cmdq_mod.CmdqItem, flags: u32) ?T.CmdFindState {
 }
 
 fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
-    if (cl) |client| {
-        if (client.session) |s| {
-            if (!sess.session_alive(s)) return false;
-            cmd_find_from_session(fs, s, flags);
-            fs.idx = if (fs.wl) |wl| wl.idx else -1;
-            return cmd_find_valid_state(fs);
-        }
+    if (cl == null) return cmd_find_from_nothing(fs, flags);
+    const client = cl.?;
+
+    if (client.session) |s| {
+        if (!sess.session_alive(s)) return false;
+        cmd_find_from_session(fs, s, flags);
+        fs.idx = if (fs.wl) |wl| wl.idx else -1;
+        return cmd_find_valid_state(fs);
     }
+
+    cmd_find_clear_state(fs, flags);
+    if (cmd_find_inside_pane(client)) |wp| {
+        const s = select_session_for_window(wp.window, null, flags) orelse return cmd_find_from_nothing(fs, flags);
+        cmd_find_from_session(fs, s, flags);
+        fs.idx = if (fs.wl) |wl| wl.idx else -1;
+        return cmd_find_valid_state(fs);
+    }
+
     return cmd_find_from_nothing(fs, flags);
 }
 
@@ -287,7 +298,7 @@ fn select_best_session(preferred: ?*T.Session, flags: u32) ?*T.Session {
         }
     }
 
-    const sessions = sort_mod.sorted_sessions(.{});
+    const sessions = sort_mod.sorted_sessions(.{ .order = .creation, .reversed = true });
     defer xm.allocator.free(sessions);
 
     var fallback: ?*T.Session = null;
@@ -308,7 +319,7 @@ fn select_session_for_window(window: *T.Window, preferred: ?*T.Session, flags: u
             return candidate;
     }
 
-    const sessions = sort_mod.sorted_sessions(.{});
+    const sessions = sort_mod.sorted_sessions(.{ .order = .creation, .reversed = true });
     defer xm.allocator.free(sessions);
 
     var fallback: ?*T.Session = null;
@@ -319,6 +330,103 @@ fn select_session_for_window(window: *T.Window, preferred: ?*T.Session, flags: u
             return candidate;
     }
     return fallback;
+}
+
+fn cmd_find_inside_pane(cl: *T.Client) ?*T.WindowPane {
+    if (cl.ttyname) |ttyname| {
+        var panes = win_mod.all_window_panes.valueIterator();
+        while (panes.next()) |entry| {
+            const wp = entry.*;
+            if (wp.fd == -1) continue;
+            if (std.mem.eql(u8, pane_tty_name(wp), ttyname))
+                return wp;
+        }
+    }
+
+    const entry = env_mod.environ_find(cl.environ, "TMUX_PANE") orelse return null;
+    const value = entry.value orelse return null;
+    if (value.len <= 1 or value[0] != '%') return null;
+    const id = std.fmt.parseUnsigned(u32, value[1..], 10) catch return null;
+    return win_mod.window_pane_find_by_id(id);
+}
+
+fn pane_tty_name(wp: *T.WindowPane) []const u8 {
+    const len = std.mem.indexOfScalar(u8, &wp.tty_name, 0) orelse wp.tty_name.len;
+    return wp.tty_name[0..len];
+}
+
+fn cmd_find_client_better(candidate: *T.Client, than: ?*T.Client) bool {
+    if (than == null) return true;
+    return candidate.id > than.?.id;
+}
+
+fn cmd_find_best_client(s: ?*T.Session) ?*T.Client {
+    var session_filter = s;
+    if (session_filter != null and session_filter.?.attached == 0)
+        session_filter = null;
+
+    var best: ?*T.Client = null;
+    const clients = sort_mod.sorted_clients(.{ .order = .creation, .reversed = true });
+    defer xm.allocator.free(clients);
+
+    for (clients) |candidate| {
+        if (candidate.session == null) continue;
+        if (session_filter != null and candidate.session != session_filter.?) continue;
+        if (cmd_find_client_better(candidate, best))
+            best = candidate;
+    }
+    return best;
+}
+
+pub fn cmd_find_current_client(item: ?*cmdq_mod.CmdqItem, quiet: bool) ?*T.Client {
+    var client: ?*T.Client = null;
+    if (item) |queued|
+        client = cmdq_mod.cmdq_get_client(queued);
+
+    if (client != null and client.?.session != null)
+        return client;
+
+    var found: ?*T.Client = null;
+    if (client) |unattached| {
+        if (cmd_find_inside_pane(unattached)) |wp| {
+            const s = select_session_for_window(wp.window, null, T.CMD_FIND_QUIET);
+            if (s != null) found = cmd_find_best_client(s);
+        }
+    }
+    if (found == null) {
+        const s = select_best_session(null, T.CMD_FIND_QUIET);
+        if (s != null) found = cmd_find_best_client(s);
+    }
+
+    if (found == null and item != null and !quiet)
+        cmdq_mod.cmdq_error(item.?, "no current client", .{});
+    return found;
+}
+
+pub fn cmd_find_client(item: ?*cmdq_mod.CmdqItem, target: ?[]const u8, quiet: bool) ?*T.Client {
+    if (target == null)
+        return cmd_find_current_client(item, quiet);
+
+    var trimmed = target.?;
+    if (trimmed.len != 0 and trimmed[trimmed.len - 1] == ':')
+        trimmed = trimmed[0 .. trimmed.len - 1];
+
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == null) continue;
+        if (cl.name) |name| {
+            if (std.mem.eql(u8, trimmed, name)) return cl;
+        }
+        if (cl.ttyname) |ttyname| {
+            if (std.mem.eql(u8, trimmed, ttyname)) return cl;
+            if (std.mem.startsWith(u8, ttyname, "/dev/") and
+                std.mem.eql(u8, trimmed, ttyname["/dev/".len..]))
+                return cl;
+        }
+    }
+
+    if (item != null and !quiet)
+        cmdq_mod.cmdq_error(item.?, "can't find client: {s}", .{trimmed});
+    return null;
 }
 
 fn resolve_session_state(fs: *T.CmdFindState, target: []const u8) bool {
@@ -847,7 +955,6 @@ fn fnmatch_matches(pattern: []const u8, text: []const u8) bool {
 
 test "cmd_find_target resolves current client state when target is omitted" {
     const cmd_mod = @import("cmd.zig");
-    const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -898,7 +1005,6 @@ test "cmd_find_target resolves current client state when target is omitted" {
 
 test "cmd_find_target resolves session prefixes and patterns" {
     const cmd_mod = @import("cmd.zig");
-    const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -950,7 +1056,6 @@ test "cmd_find_target resolves session prefixes and patterns" {
 
 test "cmd_find_target resolves window names, last window, and window-index targets" {
     const cmd_mod = @import("cmd.zig");
-    const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -1013,7 +1118,6 @@ test "cmd_find_target resolves window names, last window, and window-index targe
 
 test "cmd_find_target resolves explicit pane indexes within a window" {
     const cmd_mod = @import("cmd.zig");
-    const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -1051,7 +1155,6 @@ test "cmd_find_target resolves explicit pane indexes within a window" {
 
 test "cmd_find_target resolves last pane in the current window" {
     const cmd_mod = @import("cmd.zig");
-    const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -1095,4 +1198,203 @@ test "cmd_find_target resolves last pane in the current window" {
     var target: T.CmdFindState = .{};
     try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, "!", .pane, 0));
     try std.testing.expectEqual(second, target.wp.?);
+}
+
+test "cmd_find_target uses unattached inside-pane context to choose a session" {
+    const cmd_mod = @import("cmd.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const pane_session = sess.session_create(null, "pane-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("pane-session") != null) sess.session_destroy(pane_session, false, "test");
+    const newer_session = sess.session_create(null, "newer-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("newer-session") != null) sess.session_destroy(newer_session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var pane_ctx: T.SpawnContext = .{ .s = pane_session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const pane_wl = spawn.spawn_window(&pane_ctx, &cause).?;
+    var current_ctx: T.SpawnContext = .{ .s = pane_session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const current_wl = spawn.spawn_window(&current_ctx, &cause).?;
+    pane_session.curw = current_wl;
+    var newer_ctx: T.SpawnContext = .{ .s = newer_session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&newer_ctx, &cause).?;
+
+    pane_wl.window.panes.items[0].fd = 7;
+    defer pane_wl.window.panes.items[0].fd = -1;
+    @memset(&pane_wl.window.panes.items[0].tty_name, 0);
+    const tty = "/tmp/inside-pane-tty";
+    @memcpy(pane_wl.window.panes.items[0].tty_name[0..tty.len], tty);
+
+    const client_env = env_mod.environ_create();
+    defer env_mod.environ_free(client_env);
+    var client = T.Client{
+        .environ = client_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .ttyname = xm.xstrdup(tty),
+    };
+    defer xm.allocator.free(client.ttyname.?);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &client, .cmdlist = &list };
+    var target: T.CmdFindState = .{};
+
+    try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, null, .pane, 0));
+    try std.testing.expectEqual(pane_session, target.s.?);
+    try std.testing.expectEqual(current_wl, target.wl.?);
+    try std.testing.expectEqual(current_wl.window.active.?, target.wp.?);
+}
+
+test "cmd_find_target uses TMUX_PANE for unattached clients without tty matches" {
+    const cmd_mod = @import("cmd.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "tmux-pane-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("tmux-pane-session") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    s.curw = wl;
+
+    const client_env = env_mod.environ_create();
+    defer env_mod.environ_free(client_env);
+    const pane_id = try std.fmt.allocPrint(xm.allocator, "%{d}", .{wl.window.panes.items[0].id});
+    defer xm.allocator.free(pane_id);
+    env_mod.environ_set(client_env, "TMUX_PANE", 0, pane_id);
+
+    var client = T.Client{
+        .environ = client_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &client, .cmdlist = &list };
+    var target: T.CmdFindState = .{};
+
+    try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, null, .pane, 0));
+    try std.testing.expectEqual(s, target.s.?);
+    try std.testing.expectEqual(wl.window.active.?, target.wp.?);
+}
+
+test "cmd_find_current_client prefers attached clients in the inside-pane session" {
+    const cmd_mod = @import("cmd.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "client-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("client-session") != null) sess.session_destroy(s, false, "test");
+    s.attached = 2;
+    const other = sess.session_create(null, "other-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("other-session") != null) sess.session_destroy(other, false, "test");
+    other.attached = 1;
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    s.curw = wl;
+    wl.window.panes.items[0].fd = 9;
+    defer wl.window.panes.items[0].fd = -1;
+    @memset(&wl.window.panes.items[0].tty_name, 0);
+    const tty = "/tmp/current-client-tty";
+    @memcpy(wl.window.panes.items[0].tty_name[0..tty.len], tty);
+
+    const attached_old_env = env_mod.environ_create();
+    defer env_mod.environ_free(attached_old_env);
+    var attached_old = T.Client{
+        .id = 1,
+        .environ = attached_old_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    const attached_new_env = env_mod.environ_create();
+    defer env_mod.environ_free(attached_new_env);
+    var attached_new = T.Client{
+        .id = 2,
+        .environ = attached_new_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    const other_env = env_mod.environ_create();
+    defer env_mod.environ_free(other_env);
+    var other_client = T.Client{
+        .id = 3,
+        .environ = other_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = other,
+    };
+
+    client_registry.add(&attached_old);
+    client_registry.add(&attached_new);
+    client_registry.add(&other_client);
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const query_env = env_mod.environ_create();
+    defer env_mod.environ_free(query_env);
+    var query_client = T.Client{
+        .environ = query_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .ttyname = xm.xstrdup(tty),
+    };
+    defer xm.allocator.free(query_client.ttyname.?);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &query_client, .cmdlist = &list };
+
+    try std.testing.expectEqual(&attached_new, cmd_find_current_client(&item, false).?);
+    try std.testing.expectEqual(&attached_new, cmd_find_client(&item, null, false).?);
 }

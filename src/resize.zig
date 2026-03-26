@@ -429,7 +429,6 @@ test "recalculate_size applies smallest client size to a linked window" {
 
     var cause: ?[]u8 = null;
     const w = win.window_create(120, 50, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer win.window_remove_ref(w, "test");
     const wl = sess.session_attach(s, w, -1, &cause).?;
     const wp = win.window_add_pane(w, null, 120, 50);
     w.active = wp;

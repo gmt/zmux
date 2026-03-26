@@ -106,6 +106,7 @@ const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmd_capture_pane = @import("cmd-capture-pane.zig");
 const cmd_set_buffer = @import("cmd-set-buffer.zig");
 const cmd_save_buffer = @import("cmd-save-buffer.zig");
+const cmd_load_buffer = @import("cmd-load-buffer.zig");
 const cmd_send_keys = @import("cmd-send-keys.zig");
 const cmd_pipe_pane = @import("cmd-pipe-pane.zig");
 const cmd_respawn_pane = @import("cmd-respawn-pane.zig");
@@ -166,6 +167,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_set_buffer.entry_delete,
     &cmd_save_buffer.entry,
     &cmd_save_buffer.entry_show,
+    &cmd_load_buffer.entry,
     &cmd_send_keys.entry,
     &cmd_send_keys.entry_prefix,
     &cmd_pipe_pane.entry,

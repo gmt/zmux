@@ -33,15 +33,12 @@ const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 const server_fn = @import("server-fn.zig");
+const session_mod = @import("session.zig");
 const colour_mod = @import("colour.zig");
 const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('M')) {
-        cmdq.cmdq_error(item, "mouse event send-keys not supported yet", .{});
-        return .@"error";
-    }
 
     var target: T.CmdFindState = .{};
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
@@ -65,12 +62,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .window = wl.window,
         .pane = wp,
     };
-    const expanded_values = if (args.has('F'))
-        expand_values(args, &ctx, item) orelse return .@"error"
-    else
-        null;
-    defer if (expanded_values) |values| free_expanded_values(values);
-
     const repeat = parse_repeat_count(args.get('N'), &ctx, item) orelse return .@"error";
     if (args.has('N') and wme != null and (args.has('X') or args.count() == 0)) {
         if (wme.?.mode.command == null) {
@@ -108,6 +99,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
+    if (args.has('M')) return inject_mouse(item, s, wl, tc);
+
+    const expanded_values = if (args.has('F'))
+        expand_values(args, &ctx, item) orelse return .@"error"
+    else
+        null;
+    defer if (expanded_values) |values| free_expanded_values(values);
+
     if (args.has('R')) reset_pane(wp);
 
     if (args.count() == 0) {
@@ -140,6 +139,59 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
     return .normal;
+}
+
+const MouseTarget = struct {
+    s: *T.Session,
+    wl: *T.Winlink,
+    wp: *T.WindowPane,
+};
+
+fn inject_mouse(item: *cmdq.CmdqItem, default_session: *T.Session, default_wl: *T.Winlink, tc: ?*T.Client) T.CmdRetval {
+    const event = cmdq.cmdq_get_event(item);
+    const target = resolve_mouse_target(&event.m, default_session, default_wl) orelse {
+        cmdq.cmdq_error(item, "no mouse target", .{});
+        return .@"error";
+    };
+
+    if (window_mod.window_pane_mode(target.wp)) |wme| {
+        if (wme.mode.key) |mode_key| {
+            if (tc) |target_client|
+                mode_key(wme, target_client, target.s, target.wl, event.m.key & ~T.KEYC_MASK_FLAGS, &event.m);
+        }
+    }
+
+    // The reduced runtime can route queued mouse events to active pane modes,
+    // but it still lacks tmux's coordinate-rich pane-input mouse encoder.
+    return .normal;
+}
+
+fn resolve_mouse_target(mouse: *const T.MouseEvent, default_session: *T.Session, default_wl: *T.Winlink) ?MouseTarget {
+    if (!mouse.valid or mouse.wp == -1) return null;
+
+    const pane_id: u32 = std.math.cast(u32, mouse.wp) orelse return null;
+    const wp = window_mod.window_pane_find_by_id(pane_id) orelse return null;
+
+    if (default_wl.window == wp.window and session_mod.session_has_window(default_session, wp.window)) {
+        return .{
+            .s = default_session,
+            .wl = default_wl,
+            .wp = wp,
+        };
+    }
+
+    var sessions = session_mod.sessions.valueIterator();
+    while (sessions.next()) |session_entry| {
+        const candidate = session_entry.*;
+        if (!session_mod.session_has_window(candidate, wp.window)) continue;
+        const candidate_wl = session_mod.winlink_find_by_window(&candidate.windows, wp.window) orelse continue;
+        return .{
+            .s = candidate,
+            .wl = candidate_wl,
+            .wp = wp,
+        };
+    }
+    return null;
 }
 
 fn reset_pane(wp: *T.WindowPane) void {
@@ -1088,6 +1140,65 @@ test "send-keys routes active mode keys through the target client instead of wri
     setup.wp.fd = -1;
 }
 
+test "send-keys -M routes mouse events through active mode keys" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const setup = try test_session_with_empty_pane("send-mode-mouse");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-mode-mouse", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    var state = ModeKeyState{};
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_key_only, @ptrCast(&state), null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("mode-mouse-client"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-M", "-c", "mode-mouse-client", "-t", "send-mode-mouse:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{
+            .m = .{
+                .valid = true,
+                .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+                .wp = @intCast(setup.wp.id),
+            },
+        },
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.saw_client);
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), state.last_key);
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
 test "send-keys -X uses the active mode command and repeat prefix" {
     const setup = try test_session_with_empty_pane("send-mode-command");
     defer test_teardown_session("send-mode-command", setup.s, -1, -1);
@@ -1573,4 +1684,42 @@ test "send-keys mirrors pane writes to synchronized sibling panes" {
     var sibling_buf: [8]u8 = undefined;
     const sibling_len = try std.posix.read(sibling_pipe[0], &sibling_buf);
     try std.testing.expectEqualStrings("x", sibling_buf[0..sibling_len]);
+}
+
+test "send-keys -M errors when the queued event has no mouse target pane" {
+    const setup = try test_session_with_empty_pane("send-mode-missing-mouse");
+    defer test_teardown_session("send-mode-missing-mouse", setup.s, -1, -1);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-M", "-t", "send-mode-missing-mouse:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{
+            .m = .{
+                .valid = true,
+                .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+                .wp = -1,
+            },
+        },
+    };
+
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
+
+    const stderr_pipe = try std.posix.pipe();
+    defer std.posix.close(stderr_pipe[0]);
+
+    try std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
+    std.posix.close(stderr_pipe[1]);
+
+    var errbuf: [128]u8 = undefined;
+    const errlen = try std.posix.read(stderr_pipe[0], errbuf[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, errbuf[0..errlen], "no mouse target") != null);
 }

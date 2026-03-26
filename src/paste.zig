@@ -272,7 +272,7 @@ fn current_buffer_limit() u32 {
     return @intCast(@max(opts.options_get_number(opts.global_options, "buffer-limit"), 1));
 }
 
-fn reset_store_for_tests() void {
+pub fn paste_reset_for_tests() void {
     if (!paste_init) {
         paste_by_name = std.StringHashMap(*PasteBuffer).init(xm.allocator);
         paste_by_time = .{};
@@ -293,7 +293,7 @@ fn reset_store_for_tests() void {
 test "paste_add creates automatic buffers and get_top returns newest automatic" {
     buffer_limit_override = 10;
     defer buffer_limit_override = null;
-    reset_store_for_tests();
+    paste_reset_for_tests();
 
     paste_add(null, xm.xstrdup("one"));
     paste_add(null, xm.xstrdup("two"));
@@ -309,7 +309,7 @@ test "paste_add creates automatic buffers and get_top returns newest automatic" 
 test "paste_set creates and replaces named buffers" {
     buffer_limit_override = 10;
     defer buffer_limit_override = null;
-    reset_store_for_tests();
+    paste_reset_for_tests();
 
     var cause: ?[]u8 = null;
     try std.testing.expectEqual(@as(i32, 0), paste_set(xm.xstrdup("first"), "named", &cause));
@@ -322,7 +322,7 @@ test "paste_set creates and replaces named buffers" {
 test "paste_rename clears automatic flag and handles collisions" {
     buffer_limit_override = 10;
     defer buffer_limit_override = null;
-    reset_store_for_tests();
+    paste_reset_for_tests();
 
     paste_add(null, xm.xstrdup("auto"));
     var cause: ?[]u8 = null;
@@ -339,7 +339,7 @@ test "paste_rename clears automatic flag and handles collisions" {
 test "paste_walk iterates newest first" {
     buffer_limit_override = 10;
     defer buffer_limit_override = null;
-    reset_store_for_tests();
+    paste_reset_for_tests();
 
     var cause: ?[]u8 = null;
     _ = paste_set(xm.xstrdup("one"), "one", &cause);
@@ -359,7 +359,7 @@ test "paste_walk iterates newest first" {
 test "paste_add honours automatic buffer limit" {
     buffer_limit_override = 2;
     defer buffer_limit_override = null;
-    reset_store_for_tests();
+    paste_reset_for_tests();
 
     paste_add(null, xm.xstrdup("one"));
     paste_add(null, xm.xstrdup("two"));

@@ -209,6 +209,62 @@ test "save-buffer writes and appends a named buffer using client cwd for relativ
     try std.testing.expectEqualStrings("hellohello", contents);
 }
 
+test "save-buffer writes a named buffer using session cwd when client cwd is missing" {
+    paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("from session cwd"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+
+    const session_name = xm.xstrdup("save-session");
+    defer xm.allocator.free(session_name);
+
+    var session = T.Session{
+        .id = 1,
+        .name = session_name,
+        .cwd = cwd,
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &session_env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "buffer.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
+
+    const saved_path = try std.fmt.allocPrint(xm.allocator, "{s}/buffer.txt", .{cwd});
+    defer xm.allocator.free(saved_path);
+
+    const file = try std.fs.openFileAbsolute(saved_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(xm.allocator, 1024);
+    defer xm.allocator.free(contents);
+    try std.testing.expectEqualStrings("from session cwd", contents);
+}
+
 test "show-buffer writes raw bytes for attached clients" {
     paste_mod.paste_reset_for_tests();
 
@@ -259,6 +315,45 @@ test "show-buffer writes raw bytes for attached clients" {
     var output: [32]u8 = undefined;
     const got = try std.posix.read(pipe_fds[0], output[0..]);
     try std.testing.expectEqualStrings("a\nb", output[0..got]);
+}
+
+test "show-buffer writes stdout for detached clients without sessions" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("detached"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const show = try cmd_mod.cmd_parse_one(&.{ "show-buffer", "-b", "named" }, null, &cause);
+    defer cmd_mod.cmd_free(show);
+
+    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(saved_stdout);
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+
+    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
+    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(show, &item));
+    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
+    std.posix.close(pipe_fds[1]);
+
+    var output: [32]u8 = undefined;
+    const got = try std.posix.read(pipe_fds[0], output[0..]);
+    try std.testing.expectEqualStrings("detached", output[0..got]);
 }
 
 test "save-buffer reports strerror text for write failures" {

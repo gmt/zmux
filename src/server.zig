@@ -36,6 +36,7 @@ const cfg_mod = @import("cfg.zig");
 const build_options = @import("build_options");
 const client_registry = @import("client-registry.zig");
 const notify = @import("notify.zig");
+const server_acl = @import("server-acl.zig");
 
 // ── Global server state ───────────────────────────────────────────────────
 
@@ -121,6 +122,10 @@ export fn server_accept_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void 
     set_blocking(new_fd, false);
 
     const client_ptr = server_client_mod.server_client_create(new_fd);
+    if (!server_acl.server_acl_join(client_ptr)) {
+        client_ptr.exit_message = xm.xstrdup("access not allowed");
+        client_ptr.flags |= T.CLIENT_EXIT;
+    }
     log.log_debug("new client {*} on fd {d}", .{ client_ptr, new_fd });
 }
 
@@ -271,6 +276,7 @@ pub fn server_start(
         std.posix.close(lockfd);
     }
 
+    server_acl.server_acl_init();
     server_add_accept(0);
 
     // Load config files (queued via cmdq, will run in the first loop iteration)

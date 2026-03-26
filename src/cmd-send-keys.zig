@@ -72,7 +72,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null;
     defer if (expanded_values) |values| free_expanded_values(values);
 
-    const repeat = parse_repeat_count(args.get('N'), item) orelse return .@"error";
+    const repeat = parse_repeat_count(args.get('N'), &ctx, item) orelse return .@"error";
 
     if (cmd.entry == &entry_prefix) {
         const name = if (args.has('2')) "prefix2" else "prefix";
@@ -145,8 +145,11 @@ fn free_expanded_values(values: [][]u8) void {
     xm.allocator.free(values);
 }
 
-fn parse_repeat_count(raw: ?[]const u8, item: *cmdq.CmdqItem) ?u32 {
-    const text = raw orelse return 1;
+fn parse_repeat_count(raw: ?[]const u8, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?u32 {
+    const template = raw orelse return 1;
+    const text = cmd_format.require(item, template, ctx) orelse return null;
+    defer xm.allocator.free(text);
+
     const parsed = std.fmt.parseInt(u32, text, 10) catch {
         cmdq.cmdq_error(item, "repeat count invalid: {s}", .{text});
         return null;
@@ -159,10 +162,7 @@ fn parse_repeat_count(raw: ?[]const u8, item: *cmdq.CmdqItem) ?u32 {
 }
 
 fn inject_hex(wp: *T.WindowPane, tc: ?*T.Client, text: []const u8, dispatch_client: bool, item: *cmdq.CmdqItem) T.CmdRetval {
-    const value = std.fmt.parseInt(u8, text, 16) catch {
-        cmdq.cmdq_error(item, "invalid hex byte: {s}", .{text});
-        return .@"error";
-    };
+    const value = std.fmt.parseInt(u8, text, 16) catch return .normal;
     return inject_key(wp, tc, T.KEYC_LITERAL | value, false, dispatch_client, item);
 }
 
@@ -372,6 +372,48 @@ test "send-keys supports hex mode and repeat counts" {
     var buf: [16]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("A\rA\r", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys -H ignores invalid hex bytes and keeps later input" {
+    const setup = try test_session_with_empty_pane("send-hex-ignore");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-hex-ignore", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-H", "-t", "send-hex-ignore:0.0", "zz", "41" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("A", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys expands repeat count options before parsing" {
+    const setup = try test_session_with_empty_pane("send-repeat-format");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-repeat-format", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-N", "#{e|+:1,1}", "-t", "send-repeat-format:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("xx", buf[0..n]);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
 }

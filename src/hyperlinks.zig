@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const xm = @import("xmalloc.zig");
+const utf8 = @import("utf8.zig");
 
 pub const MAX_HYPERLINKS: usize = 5000;
 
@@ -88,21 +89,29 @@ pub fn hyperlinks_put(hl: *Hyperlinks, uri_in: []const u8, internal_id_in: ?[]co
     ensure_global_init();
 
     const internal_id_src = internal_id_in orelse "";
+    const uri = utf8.utf8_stravis(uri_in, utf8.VIS_OCTAL | utf8.VIS_CSTYLE);
+    errdefer xm.allocator.free(uri);
+    const internal_id = utf8.utf8_stravis(internal_id_src, utf8.VIS_OCTAL | utf8.VIS_CSTYLE);
+    errdefer xm.allocator.free(internal_id);
     const anonymous = internal_id_src.len == 0;
-    const dedupe_key = if (anonymous) null else make_dedupe_key(internal_id_src, uri_in);
+    const dedupe_key = if (anonymous) null else make_dedupe_key(internal_id, uri);
     defer if (dedupe_key) |key| xm.allocator.free(key);
 
     if (dedupe_key) |key| {
-        if (hl.by_uri.get(key)) |existing| return existing.inner;
+        if (hl.by_uri.get(key)) |existing| {
+            xm.allocator.free(uri);
+            xm.allocator.free(internal_id);
+            return existing.inner;
+        }
     }
 
     const hlu = xm.allocator.create(HyperlinkUri) catch unreachable;
     hlu.* = .{
         .tree = hl,
         .inner = hl.next_inner,
-        .internal_id = xm.xstrdup(internal_id_src),
+        .internal_id = internal_id,
         .external_id = xm.xasprintf("tmux{X}", .{hyperlinks_next_external_id}),
-        .uri = xm.xstrdup(uri_in),
+        .uri = uri,
         .dedupe_key = if (dedupe_key) |key| xm.xstrdup(key) else null,
     };
     hl.next_inner += 1;
@@ -209,6 +218,23 @@ test "hyperlinks_get returns stored fields" {
     try std.testing.expectEqualStrings("https://example.com/docs", uri);
     try std.testing.expectEqualStrings("internal", internal_id);
     try std.testing.expectEqualStrings("tmux1", external_id);
+}
+
+test "hyperlinks escape strings before deduping and storage" {
+    reset_global_state_for_tests();
+    const hl = hyperlinks_init();
+    defer hyperlinks_free(hl);
+
+    const uri_in = [_]u8{ 'u', 0x01 };
+    const first = hyperlinks_put(hl, &uri_in, "pane:1");
+    const second = hyperlinks_put(hl, &uri_in, "pane:1");
+    try std.testing.expectEqual(first, second);
+
+    var uri: []const u8 = undefined;
+    var internal_id: []const u8 = undefined;
+    try std.testing.expect(hyperlinks_get(hl, first, &uri, &internal_id, null));
+    try std.testing.expectEqualStrings("u\\001", uri);
+    try std.testing.expectEqualStrings("pane:1", internal_id);
 }
 
 test "hyperlinks copy and free share ownership" {

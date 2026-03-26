@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const grid = @import("grid.zig");
 const xm = @import("xmalloc.zig");
+const utf8 = @import("utf8.zig");
 
 pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
     const g = grid.grid_create(sx, sy, hlimit);
@@ -75,9 +76,15 @@ pub fn screen_alternate_active(wp: *T.WindowPane) bool {
 }
 
 pub fn screen_set_title(s: *T.Screen, title: []const u8) bool {
+    if (!utf8.utf8_isvalid(title)) return false;
     if (s.title) |old| xm.allocator.free(old);
     s.title = xm.xstrdup(title);
     return true;
+}
+
+pub fn screen_set_path(s: *T.Screen, path: []const u8) void {
+    if (s.path) |old| xm.allocator.free(old);
+    s.path = utf8.utf8_stravis(path, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_TAB | utf8.VIS_NL);
 }
 
 pub fn screen_save_cursor(s: *T.Screen) void {
@@ -170,4 +177,20 @@ test "screen alternate helpers switch current screen and restore cursor" {
     try std.testing.expectEqual(&wp.base, screen_current(&wp));
     try std.testing.expectEqual(@as(u32, 2), wp.base.cx);
     try std.testing.expectEqual(@as(u32, 1), wp.base.cy);
+}
+
+test "screen title rejects invalid utf8 and path is escaped" {
+    const s = screen_init(4, 2, 100);
+    defer {
+        if (s.title) |title| xm.allocator.free(title);
+        if (s.path) |path| xm.allocator.free(path);
+        grid.grid_free(s.grid);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(screen_set_title(s, "valid"));
+    try std.testing.expect(!screen_set_title(s, &.{ 'a', 0xff }));
+
+    screen_set_path(s, "one\ntwo");
+    try std.testing.expectEqualStrings("one\\ntwo", s.path.?);
 }

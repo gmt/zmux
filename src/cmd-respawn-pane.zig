@@ -69,14 +69,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 }
 
 pub fn build_overlay_environment(args: *const @import("arguments.zig").Arguments, item: *cmdq.CmdqItem) !?*T.Environ {
-    const values = args.flags.get('e') orelse return null;
+    const env_entry = args.entry('e') orelse return null;
     const env = env_mod.environ_create();
     errdefer env_mod.environ_free(env);
-    for (values.items) |env_entry| {
-        if (std.mem.indexOfScalar(u8, env_entry, '=')) |_| {
-            env_mod.environ_put(env, env_entry, 0);
+    for (env_entry.values.items) |value| {
+        if (std.mem.indexOfScalar(u8, value, '=')) |_| {
+            env_mod.environ_put(env, value, 0);
         } else {
-            cmdq.cmdq_error(item, "invalid environment: {s}", .{env_entry});
+            cmdq.cmdq_error(item, "invalid environment: {s}", .{value});
             return error.InvalidEnvironment;
         }
     }

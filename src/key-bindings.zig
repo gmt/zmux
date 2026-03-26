@@ -308,9 +308,9 @@ const DefaultBindingSpec = struct {
 };
 
 const default_list_keys_argv = [_][]const u8{ "list-keys", "-N" };
-const default_new_window_argv = [_][]const u8{ "new-window" };
-const default_display_message_argv = [_][]const u8{ "display-message" };
-const default_refresh_client_argv = [_][]const u8{ "refresh-client" };
+const default_new_window_argv = [_][]const u8{"new-window"};
+const default_display_message_argv = [_][]const u8{"display-message"};
+const default_refresh_client_argv = [_][]const u8{"refresh-client"};
 
 const default_binding_specs = [_]DefaultBindingSpec{
     .{
@@ -360,7 +360,7 @@ fn install_select_window_default(idx: u8) void {
     const target_buf: [3]u8 = .{ ':', '=', idx + '0' };
     const note = xm.xasprintf("Select window {d}", .{idx});
     defer xm.allocator.free(note);
-    const argv = [_][]const u8{ "select-window", target_buf[0..] };
+    const argv = [_][]const u8{ "select-window", "-t", target_buf[0..] };
     const spec = DefaultBindingSpec{
         .table = "prefix",
         .key = key_buf[0],

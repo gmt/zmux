@@ -95,10 +95,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.count() == 0) {
         if (args.has('N') or args.has('R')) return .normal;
         const event = cmdq.cmdq_get_event(item);
-        if (event.key == T.KEYC_NONE or event.key == T.KEYC_UNKNOWN) {
-            cmdq.cmdq_error(item, "send-keys requires a triggering key event when no keys are given", .{});
-            return .@"error";
-        }
+        if (event.key == T.KEYC_NONE or event.key == T.KEYC_UNKNOWN) return .normal;
 
         var replay_count: u32 = repeat;
         while (replay_count > 0) : (replay_count -= 1) {
@@ -759,6 +756,35 @@ test "send-keys replays the triggering key when no arguments are given" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("x", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys with no arguments and no triggering key is a quiet no-op" {
+    const setup = try test_session_with_empty_pane("send-replay-missing");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-replay-missing", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-replay-missing:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{ .key = T.KEYC_NONE },
+    };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
 }

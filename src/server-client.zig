@@ -25,6 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
+const file_write_mod = @import("file-write.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
@@ -32,6 +33,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
 const sess_mod = @import("session.zig");
+const tty_mod = @import("tty.zig");
 const tty_draw = @import("tty-draw.zig");
 const input_keys = @import("input-keys.zig");
 const resize_mod = @import("resize.zig");
@@ -61,6 +63,7 @@ pub fn server_client_create(fd: i32) *T.Client {
         .pane_cache = .{},
         .flags = 0,
     };
+    tty_mod.tty_init(&cl.tty, cl);
     next_client_id += 1;
 
     const srv = @import("server.zig");
@@ -80,6 +83,7 @@ pub fn server_client_create(fd: i32) *T.Client {
 
 pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
+    file_write_mod.fail_pending_writes_for_client(cl);
     const srv = @import("server.zig");
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
@@ -94,8 +98,10 @@ pub fn server_client_lost(cl: *T.Client) void {
     if (cl.term_name) |term_name| xm.allocator.free(term_name);
     if (cl.ttyname) |ttyname| xm.allocator.free(ttyname);
     if (cl.title) |title| xm.allocator.free(title);
+    if (cl.path) |path| xm.allocator.free(path);
     if (cl.key_table_name) |name| xm.allocator.free(name);
     cl.stdin_pending.deinit(xm.allocator);
+    tty_mod.tty_close(&cl.tty);
     tty_draw.tty_draw_free(&cl.pane_cache);
     env_mod.environ_free(cl.environ);
     xm.allocator.destroy(cl);
@@ -125,6 +131,7 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .command => server_client_dispatch_command(cl, imsg_msg),
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
+        .write_ready => file_write_mod.handle_write_ready(imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);
             server_client_lost(cl);
@@ -141,10 +148,7 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (data_len < @sizeOf(protocol.MsgResize)) return;
     const msg: *const protocol.MsgResize = @ptrCast(@alignCast(imsg_msg.data.?));
 
-    cl.tty.sx = @max(msg.sx, 1);
-    cl.tty.sy = @max(msg.sy, 1);
-    cl.tty.xpixel = if (msg.xpixel == 0) T.DEFAULT_XPIXEL else msg.xpixel;
-    cl.tty.ypixel = if (msg.ypixel == 0) T.DEFAULT_YPIXEL else msg.ypixel;
+    tty_mod.tty_resize(&cl.tty, msg.sx, msg.sy, msg.xpixel, msg.ypixel);
     cl.flags |= T.CLIENT_SIZECHANGED;
 
     if (cl.session) |s| {
@@ -338,6 +342,7 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
 }
 
 pub fn server_client_force_redraw(cl: *T.Client) void {
+    tty_mod.tty_invalidate(&cl.tty);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     cl.flags |= T.CLIENT_REDRAWWINDOW;
 }
@@ -454,11 +459,15 @@ pub fn server_client_check_nested(cl: *T.Client) bool {
 
 pub fn server_client_open(cl: *T.Client, cause: *?[]u8) i32 {
     if (cl.flags & T.CLIENT_CONTROL != 0) return 0;
+    if (server_client_uses_server_tty(cl)) {
+        cause.* = xm.xasprintf("can't use {s}", .{cl.ttyname orelse "/dev/tty"});
+        return -1;
+    }
     if (cl.flags & T.CLIENT_TERMINAL == 0) {
         cause.* = xm.xstrdup("not a terminal");
         return -1;
     }
-    return 0;
+    return tty_mod.tty_open(&cl.tty, cause);
 }
 
 fn server_client_draw(cl: *T.Client) void {
@@ -491,22 +500,23 @@ fn server_client_draw(cl: *T.Client) void {
         if (cl.title) |old| xm.allocator.free(old);
         cl.title = if (title.len != 0) xm.xstrdup(title) else null;
     }
-    if (title_changed and title.len != 0) {
-        const title_seq = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
-        defer xm.allocator.free(title_seq);
-        if (cl.peer) |peer| {
-            var title_buf: std.ArrayList(u8) = .{};
-            defer title_buf.deinit(xm.allocator);
-            const stream: i32 = 1;
-            title_buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            title_buf.appendSlice(xm.allocator, title_seq) catch unreachable;
-            _ = proc_mod.proc_send(peer, .write, -1, title_buf.items.ptr, title_buf.items.len);
-        }
-    }
+    if (title_changed and title.len != 0) tty_mod.tty_set_title(&cl.tty, title);
 }
 
 fn wl_name(w: *T.Window) []const u8 {
     return w.name;
+}
+
+fn server_client_uses_server_tty(cl: *const T.Client) bool {
+    const ttyname = cl.ttyname orelse return false;
+    if (std.mem.eql(u8, ttyname, "/dev/tty")) return true;
+
+    for ([_]c_int{ 0, 1, 2 }) |fd| {
+        if (c.posix_sys.isatty(fd) == 0) continue;
+        const current = c.posix_sys.ttyname(fd) orelse continue;
+        if (std.mem.eql(u8, ttyname, std.mem.span(current))) return true;
+    }
+    return false;
 }
 
 test "server_client_resolve_cwd prefers accessible directories and falls back" {
@@ -571,9 +581,20 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
     xm.allocator.free(cause.?);
 
     cause = null;
+    cl.ttyname = xm.xstrdup("/dev/tty");
+    defer xm.allocator.free(cl.ttyname.?);
     cl.flags = T.CLIENT_TERMINAL;
+    try std.testing.expectEqual(@as(i32, -1), server_client_open(&cl, &cause));
+    try std.testing.expectEqualStrings("can't use /dev/tty", cause.?);
+    xm.allocator.free(cause.?);
+
+    cause = null;
+    xm.allocator.free(cl.ttyname.?);
+    cl.ttyname = xm.xstrdup("/tmp/zmux-test-tty");
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
     try std.testing.expect(cause == null);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
 
     cl.flags = T.CLIENT_CONTROL;
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));

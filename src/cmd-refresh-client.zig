@@ -11,6 +11,7 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const server_client_mod = @import("server-client.zig");
+const tty_mod = @import("tty.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -23,8 +24,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             var it = std.mem.splitScalar(u8, size_str, ',');
             if (it.next()) |ws| sx = std.fmt.parseInt(u32, ws, 10) catch 80;
             if (it.next()) |hs| sy = std.fmt.parseInt(u32, hs, 10) catch 24;
-            cl.tty.sx = sx;
-            cl.tty.sy = sy;
+            tty_mod.tty_resize(&cl.tty, sx, sy, cl.tty.xpixel, cl.tty.ypixel);
             cl.flags |= T.CLIENT_SIZECHANGED;
             if (cl.session) |s| {
                 server_client_mod.server_client_apply_session_size(cl, s);

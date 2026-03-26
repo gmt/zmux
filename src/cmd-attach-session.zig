@@ -22,6 +22,7 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     var target = cmdq.cmdq_get_target(item);
     const cl = cmdq.cmdq_get_client(item);
+    var cause: ?[]u8 = null;
 
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, 0) != 0)
         return .@"error";
@@ -35,6 +36,11 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cl) |c| {
         if ((c.flags & T.CLIENT_CONTROL) == 0 and (c.flags & T.CLIENT_TERMINAL) == 0) {
             cmdq.cmdq_error(item, "not a terminal", .{});
+            return .@"error";
+        }
+        if (c.session == null and server_client_mod.server_client_open(c, &cause) != 0) {
+            defer if (cause) |msg| xm.allocator.free(msg);
+            cmdq.cmdq_error(item, "open terminal failed: {s}", .{cause orelse "unknown"});
             return .@"error";
         }
         server_client_mod.server_client_attach(c, s);

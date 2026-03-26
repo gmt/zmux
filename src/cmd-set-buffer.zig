@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const clipboard_mod = @import("clipboard.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const paste_mod = @import("paste.zig");
@@ -28,11 +29,6 @@ const paste_mod = @import("paste.zig");
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const target_client = cmdq.cmdq_get_target_client(item);
-
-    if (args.has('w') and target_client != null) {
-        cmdq.cmdq_error(item, "buffer selection export not supported yet", .{});
-        return .@"error";
-    }
 
     var pb: ?*paste_mod.PasteBuffer = null;
     var bufname: ?[]u8 = null;
@@ -77,10 +73,18 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
     bufdata.appendSlice(xm.allocator, new_data) catch unreachable;
 
-    if (paste_mod.paste_set(bufdata.toOwnedSlice(xm.allocator) catch unreachable, bufname, &cause) != 0) {
+    const stored_data = bufdata.toOwnedSlice(xm.allocator) catch unreachable;
+    errdefer xm.allocator.free(stored_data);
+
+    if (paste_mod.paste_set(stored_data, bufname, &cause) != 0) {
         cmdq.cmdq_error(item, "{s}", .{cause orelse "set buffer failed"});
         return .@"error";
     }
+
+    if (args.has('w')) {
+        clipboard_mod.export_selection(target_client, "", stored_data);
+    }
+
     return .normal;
 }
 
@@ -203,7 +207,7 @@ test "delete-buffer removes the current top automatic buffer" {
     try std.testing.expect(paste_mod.paste_get_top(null) == null);
 }
 
-test "set-buffer write flag rejects resolved target-client export seam" {
+test "set-buffer write flag keeps buffer writes even without clipboard transport" {
     init_options_for_tests();
     defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
@@ -230,6 +234,7 @@ test "set-buffer write flag rejects resolved target-client export seam" {
         .environ = &env,
         .tty = undefined,
         .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
     };
     target.session = &session;
     client_registry.add(&target);
@@ -240,6 +245,8 @@ test "set-buffer write flag rejects resolved target-client export seam" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expect(paste_mod.paste_get_top(null) == null);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const pb = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello", paste_mod.paste_buffer_data(pb, null));
 }

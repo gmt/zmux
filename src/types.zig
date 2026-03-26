@@ -693,6 +693,7 @@ pub const Session = struct {
     name: []u8,
     cwd: []const u8,
     created: i64 = 0,
+    activity_time: i64 = 0,
 
     curw: ?*Winlink = null,
     lastw: std.ArrayList(*Winlink) = .{},
@@ -871,6 +872,10 @@ pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
     peer: ?*ZmuxPeer = null,
+
+    creation_time: i64 = 0,
+    activity_time: i64 = 0,
+    last_activity_time: i64 = 0,
 
     pid: std.posix.pid_t = 0,
     fd: i32 = -1,

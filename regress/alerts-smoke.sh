@@ -25,7 +25,7 @@ window_flags() {
 }
 
 session_alerts() {
-    smoke_cmd display-message -p -t alerts '#{session_alerts}'
+    smoke_cmd display-message -p -t alerts:0.0 '#{session_alerts}'
 }
 
 has_flag() {

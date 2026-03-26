@@ -608,6 +608,7 @@ pub const WindowPane = struct {
 pub const WINDOW_BELL: u32 = 0x01;
 pub const WINDOW_ACTIVITY: u32 = 0x02;
 pub const WINDOW_SILENCE: u32 = 0x04;
+pub const WINDOW_ALERTFLAGS: u32 = WINDOW_BELL | WINDOW_ACTIVITY | WINDOW_SILENCE;
 pub const WINDOW_ZOOMED: u32 = 0x08;
 pub const WINDOW_RESIZE: u32 = 0x20;
 
@@ -640,6 +641,8 @@ pub const Window = struct {
     options: *Options,
     references: u32 = 0,
     winlinks: std.ArrayList(*Winlink) = .{},
+    alerts_timer: ?*c.libevent.event = null,
+    alerts_queued: bool = false,
 };
 
 // ── Winlink ───────────────────────────────────────────────────────────────
@@ -647,6 +650,7 @@ pub const Window = struct {
 pub const WINLINK_BELL: u32 = 0x01;
 pub const WINLINK_ACTIVITY: u32 = 0x02;
 pub const WINLINK_SILENCE: u32 = 0x04;
+pub const WINLINK_ALERTFLAGS: u32 = WINLINK_BELL | WINLINK_ACTIVITY | WINLINK_SILENCE;
 pub const WINLINK_VISITED: u32 = 0x08;
 
 pub const Winlink = struct {
@@ -1062,6 +1066,9 @@ pub const ALERT_NONE: u32 = 0;
 pub const ALERT_ANY: u32 = 1;
 pub const ALERT_CURRENT: u32 = 2;
 pub const ALERT_OTHER: u32 = 3;
+pub const VISUAL_OFF: u32 = 0;
+pub const VISUAL_ON: u32 = 1;
+pub const VISUAL_BOTH: u32 = 2;
 
 pub const WINDOW_SIZE_LARGEST: u32 = 0;
 pub const WINDOW_SIZE_SMALLEST: u32 = 1;

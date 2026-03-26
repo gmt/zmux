@@ -24,6 +24,7 @@ const c = @import("c.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
 const input_mod = @import("input.zig");
+const alerts = @import("alerts.zig");
 
 pub fn pane_io_start(wp: *T.WindowPane) void {
     if (wp.fd < 0 or wp.event != null) return;
@@ -77,6 +78,8 @@ export fn pane_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
 }
 
 pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
+    if (bytes.len != 0)
+        alerts.alerts_queue(wp.window, T.WINDOW_ACTIVITY);
     pipe_bytes(wp, bytes);
     input_mod.input_parse_screen(wp, bytes);
 }

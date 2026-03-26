@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const alerts = @import("alerts.zig");
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len == 0) return;
@@ -75,6 +76,7 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
 
 fn handle_plain(ctx: *T.ScreenWriteCtx, ch: u8) void {
     switch (ch) {
+        0x07 => if (ctx.wp) |wp| alerts.alerts_queue(wp.window, T.WINDOW_BELL),
         '\r' => screen_write.carriage_return(ctx),
         '\n' => screen_write.newline(ctx),
         0x08 => screen_write.backspace(ctx),

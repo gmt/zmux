@@ -29,6 +29,7 @@ const pane_io = @import("pane-io.zig");
 const style_mod = @import("style.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
+const c = @import("c.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -235,6 +236,11 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
     w.references -= 1;
     if (w.references == 0) {
         _ = windows.remove(w.id);
+        if (w.alerts_timer) |ev| {
+            _ = c.libevent.event_del(ev);
+            c.libevent.event_free(ev);
+            w.alerts_timer = null;
+        }
         while (w.panes.items.len > 0) {
             const wp = w.panes.items[w.panes.items.len - 1];
             window_remove_pane(w, wp);

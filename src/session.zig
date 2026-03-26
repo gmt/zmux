@@ -85,6 +85,111 @@ pub fn session_group_contains(s: *T.Session) ?*T.SessionGroup {
     return null;
 }
 
+pub fn session_group_new(name: []const u8) *T.SessionGroup {
+    if (session_group_find(name)) |sg| return sg;
+
+    const sg = xm.allocator.create(T.SessionGroup) catch unreachable;
+    sg.* = .{
+        .name = xm.xstrdup(name),
+    };
+    session_groups.put(sg.name, sg) catch unreachable;
+    return sg;
+}
+
+pub fn session_group_add(sg: *T.SessionGroup, s: *T.Session) void {
+    if (session_group_contains(s) != null) return;
+    sg.sessions.append(xm.allocator, s) catch unreachable;
+}
+
+fn session_group_remove(s: *T.Session) void {
+    const sg = session_group_contains(s) orelse return;
+
+    var i: usize = 0;
+    while (i < sg.sessions.items.len) : (i += 1) {
+        if (sg.sessions.items[i] == s) {
+            _ = sg.sessions.orderedRemove(i);
+            break;
+        }
+    }
+
+    if (sg.sessions.items.len == 0) {
+        _ = session_groups.remove(sg.name);
+        xm.allocator.free(sg.name);
+        sg.sessions.deinit(xm.allocator);
+        xm.allocator.destroy(sg);
+    }
+}
+
+pub fn session_group_synchronize_from(target: *T.Session) void {
+    const sg = session_group_contains(target) orelse return;
+
+    for (sg.sessions.items) |s| {
+        if (s != target)
+            session_group_synchronize1(target, s);
+    }
+}
+
+fn session_group_synchronize1(target: *T.Session, s: *T.Session) void {
+    if (target.windows.count() == 0) return;
+
+    const old_current_idx = if (s.curw) |wl| wl.idx else null;
+    const target_current_idx = if (target.curw) |wl| wl.idx else null;
+
+    var old_lastw_indices: std.ArrayList(i32) = .{};
+    defer old_lastw_indices.deinit(xm.allocator);
+    for (s.lastw.items) |wl| {
+        if (session_has_live_winlink_ptr(s, wl))
+            old_lastw_indices.append(xm.allocator, wl.idx) catch unreachable;
+    }
+
+    var old_indices: std.ArrayList(i32) = .{};
+    defer old_indices.deinit(xm.allocator);
+    var old_it = s.windows.keyIterator();
+    while (old_it.next()) |idx|
+        old_indices.append(xm.allocator, idx.*) catch unreachable;
+
+    for (old_indices.items) |idx|
+        _ = session_detach_index(s, idx, "session_group_synchronize1");
+
+    var target_indices: std.ArrayList(i32) = .{};
+    defer target_indices.deinit(xm.allocator);
+    var target_it = target.windows.keyIterator();
+    while (target_it.next()) |idx|
+        target_indices.append(xm.allocator, idx.*) catch unreachable;
+    std.sort.block(i32, target_indices.items, {}, std.sort.asc(i32));
+
+    for (target_indices.items) |idx| {
+        const target_wl = winlink_find_by_index(&target.windows, idx) orelse continue;
+        var cause: ?[]u8 = null;
+        const new_wl = session_attach(s, target_wl.window, idx, &cause) orelse unreachable;
+        new_wl.flags |= target_wl.flags & T.WINLINK_ALERTFLAGS;
+    }
+
+    if (old_current_idx) |idx| {
+        s.curw = winlink_find_by_index(&s.windows, idx);
+    } else if (target_current_idx) |idx| {
+        s.curw = winlink_find_by_index(&s.windows, idx);
+    } else {
+        s.curw = session_first_winlink(s);
+    }
+
+    s.lastw.clearRetainingCapacity();
+    for (old_lastw_indices.items) |idx| {
+        const wl = winlink_find_by_index(&s.windows, idx) orelse continue;
+        if (s.curw != null and s.curw.? == wl) continue;
+
+        var duplicate = false;
+        for (s.lastw.items) |existing| {
+            if (existing == wl) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            s.lastw.append(xm.allocator, wl) catch unreachable;
+    }
+}
+
 // ── Creation / destruction ────────────────────────────────────────────────
 
 pub fn session_create(
@@ -126,6 +231,7 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
     log.log_debug("destroy session $%{d} {s}", .{ s.id, s.name });
     _ = sessions.remove(s.name);
     notify.notify_session("session-closed", s);
+    session_group_remove(s);
 
     var window_counts = std.AutoHashMap(*T.Window, u32).init(xm.allocator);
     defer window_counts.deinit();
@@ -184,6 +290,27 @@ pub fn winlink_find_by_window(wwl: *std.AutoHashMap(i32, *T.Winlink), w: *T.Wind
     return null;
 }
 
+fn window_add_winlink(w: *T.Window, wl: *T.Winlink) void {
+    w.winlinks.append(xm.allocator, wl) catch unreachable;
+}
+
+fn window_remove_winlink(w: *T.Window, wl: *T.Winlink) void {
+    var i: usize = 0;
+    while (i < w.winlinks.items.len) : (i += 1) {
+        if (w.winlinks.items[i] == wl) {
+            _ = w.winlinks.orderedRemove(i);
+            return;
+        }
+    }
+}
+
+pub fn session_rebind_winlink(wl: *T.Winlink, w: *T.Window) void {
+    if (wl.window == w) return;
+    window_remove_winlink(wl.window, wl);
+    wl.window = w;
+    window_add_winlink(w, wl);
+}
+
 /// Add a window to a session at the given index (or next free index).
 pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.Winlink {
     _ = cause;
@@ -194,6 +321,7 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
     const wl = xm.allocator.create(T.Winlink) catch unreachable;
     wl.* = .{ .idx = actual_idx, .session = s, .window = w };
     s.windows.put(actual_idx, wl) catch unreachable;
+    window_add_winlink(w, wl);
     w.references += 1;
     notify.notify_session_window("window-linked", s, w);
     return wl;
@@ -278,6 +406,7 @@ pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) bool {
         const wl = kv.value;
         if (s.curw == wl) s.curw = null;
         session_remove_lastw_reference(s, wl);
+        window_remove_winlink(wl.window, wl);
         notify.notify_session_window("window-unlinked", s, wl.window);
         win.window_remove_ref(wl.window, from);
         xm.allocator.destroy(wl);
@@ -349,7 +478,6 @@ pub fn session_renumber_windows(s: *T.Session) void {
     s.curw = if (new_current_idx) |idx| s.windows.get(idx) else session_first_winlink(s);
     session_prune_lastw(s);
 }
-
 
 pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {
     var best: ?*T.Winlink = null;

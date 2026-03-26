@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Greg Turner <gmt@pobox.com>
+// Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -18,7 +18,7 @@
 //   ISC licence - same terms as above.
 //
 // Additional zmux port work:
-//   Copyright (c) 2026 Greg Turner <gmt@pobox.com>
+//   Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 
 //! alerts.zig - reduced window/session alert handling.
 //!

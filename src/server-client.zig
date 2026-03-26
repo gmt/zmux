@@ -89,6 +89,10 @@ pub fn server_client_lost(cl: *T.Client) void {
         c.libevent.event_free(ev);
         cl.escape_timer = null;
     }
+    if (cl.cwd) |cwd| xm.allocator.free(@constCast(cwd));
+    if (cl.name) |name| xm.allocator.free(@constCast(name));
+    if (cl.term_name) |term_name| xm.allocator.free(term_name);
+    if (cl.ttyname) |ttyname| xm.allocator.free(ttyname);
     if (cl.title) |title| xm.allocator.free(title);
     if (cl.key_table_name) |name| xm.allocator.free(name);
     cl.stdin_pending.deinit(xm.allocator);
@@ -189,8 +193,7 @@ fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_ty
         .identify_cwd => {
             if (data_len > 0) {
                 const cwd = data[0 .. data_len - 1];
-                if (cl.cwd) |old| xm.allocator.free(@constCast(old));
-                cl.cwd = xm.xstrdup(cwd);
+                server_client_set_cwd(cl, server_client_resolve_cwd(cwd));
             }
         },
         .identify_environ => {
@@ -206,10 +209,48 @@ fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_ty
         },
         .identify_done => {
             cl.flags |= T.CLIENT_IDENTIFIED;
+            server_client_finalize_identify(cl);
             log.log_debug("client {*} identified", .{cl});
         },
         else => {},
     }
+}
+
+fn server_client_finalize_identify(cl: *T.Client) void {
+    if (cl.term_name == null or cl.term_name.?.len == 0) {
+        if (cl.term_name) |old| xm.allocator.free(old);
+        cl.term_name = xm.xstrdup("unknown");
+    }
+    if (cl.name) |old| {
+        xm.allocator.free(@constCast(old));
+        cl.name = null;
+    }
+    cl.name = server_client_build_name(cl);
+}
+
+fn server_client_build_name(cl: *const T.Client) []const u8 {
+    if (cl.ttyname) |ttyname| {
+        if (ttyname.len != 0) return xm.xstrdup(ttyname);
+    }
+    return xm.xasprintf("client-{d}", .{cl.pid});
+}
+
+fn server_client_resolve_cwd(candidate: []const u8) []const u8 {
+    if (server_client_cwd_exists(candidate)) return candidate;
+    if (std.posix.getenv("HOME")) |home| return home;
+    return "/";
+}
+
+fn server_client_cwd_exists(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return false;
+    var dir = std.fs.openDirAbsolute(path, .{}) catch return false;
+    dir.close();
+    return true;
+}
+
+fn server_client_set_cwd(cl: *T.Client, cwd: []const u8) void {
+    if (cl.cwd) |old| xm.allocator.free(@constCast(old));
+    cl.cwd = xm.xstrdup(cwd);
 }
 
 fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
@@ -411,9 +452,12 @@ pub fn server_client_check_nested(cl: *T.Client) bool {
     return false;
 }
 
-pub fn server_client_open(_cl: *T.Client, _cause: *?[]u8) i32 {
-    _ = _cl;
-    _ = _cause;
+pub fn server_client_open(cl: *T.Client, cause: *?[]u8) i32 {
+    if (cl.flags & T.CLIENT_CONTROL != 0) return 0;
+    if (cl.flags & T.CLIENT_TERMINAL == 0) {
+        cause.* = xm.xstrdup("not a terminal");
+        return -1;
+    }
     return 0;
 }
 
@@ -463,4 +507,74 @@ fn server_client_draw(cl: *T.Client) void {
 
 fn wl_name(w: *T.Window) []const u8 {
     return w.name;
+}
+
+test "server_client_resolve_cwd prefers accessible directories and falls back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const real = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(real);
+
+    const resolved = server_client_resolve_cwd(real);
+    try std.testing.expectEqualStrings(real, resolved);
+
+    const missing = "/tmp/zmux-server-client-missing-cwd";
+    const fallback = server_client_resolve_cwd(missing);
+    try std.testing.expect(!std.mem.eql(u8, missing, fallback));
+    if (std.posix.getenv("HOME")) |home|
+        try std.testing.expectEqualStrings(home, fallback)
+    else
+        try std.testing.expectEqualStrings("/", fallback);
+}
+
+test "server_client_finalize_identify supplies client name and default term" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .pid = 42,
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    cl.tty = .{ .client = &cl };
+    defer {
+        if (cl.name) |name| xm.allocator.free(@constCast(name));
+        if (cl.term_name) |term_name| xm.allocator.free(term_name);
+        if (cl.ttyname) |ttyname| xm.allocator.free(ttyname);
+    }
+
+    server_client_finalize_identify(&cl);
+    try std.testing.expectEqualStrings("unknown", cl.term_name.?);
+    try std.testing.expectEqualStrings("client-42", cl.name.?);
+
+    cl.ttyname = xm.xstrdup("/dev/pts/test");
+    server_client_finalize_identify(&cl);
+    try std.testing.expectEqualStrings("/dev/pts/test", cl.name.?);
+}
+
+test "server_client_open rejects non-terminal clients but accepts reduced local-terminal path" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    cl.tty = .{ .client = &cl };
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, -1), server_client_open(&cl, &cause));
+    try std.testing.expectEqualStrings("not a terminal", cause.?);
+    xm.allocator.free(cause.?);
+
+    cause = null;
+    cl.flags = T.CLIENT_TERMINAL;
+    try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
+    try std.testing.expect(cause == null);
+
+    cl.flags = T.CLIENT_CONTROL;
+    try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
 }

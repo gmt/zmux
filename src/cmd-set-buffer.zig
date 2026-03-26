@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const client_registry = @import("client-registry.zig");
 const paste_mod = @import("paste.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -199,5 +200,46 @@ test "delete-buffer removes the current top automatic buffer" {
     const delete = try cmd_mod.cmd_parse_one(&.{"delete-buffer"}, null, &cause);
     defer cmd_mod.cmd_free(delete);
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(delete, &item));
+    try std.testing.expect(paste_mod.paste_get_top(null) == null);
+}
+
+test "set-buffer write flag rejects resolved target-client export seam" {
+    init_options_for_tests();
+    defer free_options_for_tests();
+    paste_mod.paste_reset_for_tests();
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    const session_name = xm.xstrdup("clip-session");
+    defer xm.allocator.free(session_name);
+
+    var session = T.Session{
+        .id = 1,
+        .name = session_name,
+        .cwd = "",
+        .options = @import("options.zig").global_s_options,
+        .environ = &session_env,
+    };
+
+    var target = T.Client{
+        .name = "clip",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target.session = &session;
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-buffer", "-w", "-t", "clip", "hello" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(paste_mod.paste_get_top(null) == null);
 }

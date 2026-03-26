@@ -489,6 +489,25 @@ pub fn window_pane_reset_contents(wp: *T.WindowPane) void {
     wp.input_pending.clearRetainingCapacity();
 }
 
+pub fn window_pane_visible(wp: *T.WindowPane) bool {
+    if (wp.window.flags & T.WINDOW_ZOOMED == 0) return true;
+    return wp == wp.window.active;
+}
+
+pub fn window_pane_synchronize_key_bytes(wp: *T.WindowPane, key: T.key_code, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    if (T.keycIsMouse(key)) return;
+    if (opts.options_get_number(wp.options, "synchronize-panes") == 0) return;
+
+    for (wp.window.panes.items) |loop| {
+        if (loop == wp) continue;
+        if (loop.fd < 0 or loop.flags & T.PANE_INPUTOFF != 0) continue;
+        if (!window_pane_visible(loop)) continue;
+        if (opts.options_get_number(loop.options, "synchronize-panes") == 0) continue;
+        write_pane_bytes_best_effort(loop.fd, bytes);
+    }
+}
+
 /// Push current zoom state.
 pub fn window_push_zoom(_w: *T.Window, _ignore: bool, _zoom: bool) bool {
     _ = _w;
@@ -559,6 +578,15 @@ fn choose_better_pane(best: ?*T.WindowPane, candidate: *T.WindowPane) *T.WindowP
     if (best == null) return candidate;
     if (candidate.active_point > best.?.active_point) return candidate;
     return best.?;
+}
+
+fn write_pane_bytes_best_effort(fd: i32, bytes: []const u8) void {
+    var rest = bytes;
+    while (rest.len > 0) {
+        const written = std.posix.write(fd, rest) catch return;
+        if (written == 0) return;
+        rest = rest[written..];
+    }
 }
 
 test "window panes inherit from their window options and refresh cached pane state" {

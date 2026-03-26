@@ -240,8 +240,7 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
                 window_mod.window_pane_synchronize_key_bytes(wp, key, text);
                 return .normal;
             }
-            cmdq.cmdq_error(item, "unsupported key: {s}", .{key_string.key_string_lookup_key(key, 0)});
-            return .@"error";
+            return .normal;
         },
     };
     pane_input.write_all(wp.fd, bytes, item) catch return .@"error";
@@ -884,6 +883,35 @@ test "send-keys with no arguments and no triggering key is a quiet no-op" {
         .client = null,
         .cmdlist = &list,
         .event = .{ .key = T.KEYC_NONE },
+    };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys with an unsupported triggering key is a quiet no-op" {
+    const setup = try test_session_with_empty_pane("send-replay-unsupported");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-replay-unsupported", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-replay-unsupported:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{ .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane) },
     };
 
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));

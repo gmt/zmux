@@ -168,13 +168,12 @@ pub fn key_bindings_dispatch(
     binding: *T.KeyBinding,
     item: ?*T.CmdqItem,
     client: ?*T.Client,
-    event: ?*anyopaque,
+    event: ?*const T.key_event,
     fs: ?*T.CmdFindState,
 ) ?*T.CmdqItem {
-    _ = event;
     _ = fs;
     if (binding.cmdlist) |list| {
-        cmdq_mod.cmdq_append(client, @ptrCast(@alignCast(cmd_mod.cmd_list_ref(list))));
+        cmdq_mod.cmdq_append_event(client, @ptrCast(@alignCast(cmd_mod.cmd_list_ref(list))), event);
     }
     return item;
 }

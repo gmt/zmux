@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
+const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const client_registry = @import("client-registry.zig");
 const proc_mod = @import("proc.zig");
@@ -35,6 +36,7 @@ pub const CmdqItem = struct {
     target_client: ?*T.Client = null,
     cmdlist: *cmd_mod.CmdList,
     cmd: ?*cmd_mod.Cmd = null,
+    event: T.key_event = .{ .key = T.KEYC_NONE },
     state_flags: u32 = 0,
     retval: i32 = 0,
     next: ?*CmdqItem = null,
@@ -75,9 +77,18 @@ pub fn cmdq_free(q: *CmdqList) void {
 
 /// Append a command list to the per-client (or server) queue.
 pub fn cmdq_append(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) void {
+    cmdq_append_event(cl, cmdlist, null);
+}
+
+pub fn cmdq_append_event(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, event: ?*const T.key_event) void {
     ensure_init();
     const item = xm.allocator.create(CmdqItem) catch unreachable;
-    item.* = .{ .client = cl, .cmdlist = cmdlist, .retval = 0 };
+    item.* = .{
+        .client = cl,
+        .cmdlist = cmdlist,
+        .event = if (event) |ev| ev.* else .{ .key = T.KEYC_NONE },
+        .retval = 0,
+    };
 
     const q: *CmdqList = if (cl) |c| blk: {
         const key: usize = @intFromPtr(c);
@@ -193,6 +204,10 @@ pub fn cmdq_get_current(item: *CmdqItem) T.CmdFindState {
     return .{};
 }
 
+pub fn cmdq_get_event(item: *CmdqItem) *T.key_event {
+    return &item.event;
+}
+
 pub fn cmdq_get_flags(item: *CmdqItem) u32 {
     return item.state_flags;
 }
@@ -281,6 +296,52 @@ pub fn cmdq_write_client_data(cl: ?*T.Client, stream: i32, data: []const u8) voi
 
     const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
     _ = file.writeAll(data) catch {};
+}
+
+test "cmdq_append_event preserves the triggering key for queued commands" {
+    const env_mod = @import("environ.zig");
+
+    const capture = struct {
+        var seen_key: T.key_code = T.KEYC_NONE;
+
+        fn exec(_: *cmd_mod.Cmd, item: *CmdqItem) T.CmdRetval {
+            seen_key = cmdq_get_event(item).key;
+            return .normal;
+        }
+    };
+
+    const entry = cmd_mod.CmdEntry{
+        .name = "cmdq-test-capture-event",
+        .exec = capture.exec,
+    };
+
+    const list = xm.allocator.create(cmd_mod.CmdList) catch unreachable;
+    defer cmd_mod.cmd_list_free(list);
+    list.* = .{};
+
+    const cmd = xm.allocator.create(cmd_mod.Cmd) catch unreachable;
+    cmd.* = .{
+        .entry = &entry,
+        .args = args_mod.Arguments.init(xm.allocator),
+    };
+    list.append(cmd);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    cl.tty.client = &cl;
+
+    capture.seen_key = T.KEYC_NONE;
+    var event = T.key_event{ .key = 'x', .len = 1 };
+    event.data[0] = 'x';
+
+    cmdq_append_event(&cl, list, &event);
+    try std.testing.expectEqual(@as(u32, 1), cmdq_next(&cl));
+    try std.testing.expectEqual(@as(T.key_code, 'x'), capture.seen_key);
 }
 
 pub fn cmd_wait_for_flush() void {}

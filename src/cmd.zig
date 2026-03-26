@@ -98,6 +98,7 @@ const cmd_select_pane = @import("cmd-select-pane.zig");
 const cmd_split_window = @import("cmd-split-window.zig");
 const cmd_join_pane = @import("cmd-join-pane.zig");
 const cmd_resize_pane = @import("cmd-resize-pane.zig");
+const cmd_resize_window = @import("cmd-resize-window.zig");
 const cmd_swap_pane = @import("cmd-swap-pane.zig");
 const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmd_capture_pane = @import("cmd-capture-pane.zig");
@@ -150,6 +151,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_join_pane.entry_join,
     &cmd_join_pane.entry_move,
     &cmd_resize_pane.entry,
+    &cmd_resize_window.entry,
     &cmd_swap_pane.entry,
     &cmd_display_panes.entry,
     &cmd_capture_pane.entry,
@@ -434,7 +436,7 @@ test "cmd_parse_from_argv_with_cause preserves parse cause" {
 
     try std.testing.expectError(
         ParseError.UnknownCommand,
-        cmd_parse_from_argv_with_cause(&.{ "definitely-not-real" }, null, &cause),
+        cmd_parse_from_argv_with_cause(&.{"definitely-not-real"}, null, &cause),
     );
     try std.testing.expectEqualStrings("unknown command: definitely-not-real", cause.?);
 }

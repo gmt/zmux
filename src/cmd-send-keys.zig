@@ -24,24 +24,18 @@ const cmd_mod = @import("cmd.zig");
 const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const client_registry = @import("client-registry.zig");
 const input_keys = @import("input-keys.zig");
 const key_string = @import("key-string.zig");
 const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
+const server_fn = @import("server-fn.zig");
 const colour_mod = @import("colour.zig");
 const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('c')) {
-        cmdq.cmdq_error(item, "target client selection not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('K')) {
-        cmdq.cmdq_error(item, "key-table dispatch send-keys not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('M')) {
         cmdq.cmdq_error(item, "mouse event send-keys not supported yet", .{});
         return .@"error";
@@ -57,10 +51,20 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
     const wl = target.wl orelse return .@"error";
     const wp = target.wp orelse return .@"error";
+    const tc = blk: {
+        const found = find_target_client(item, args.get('c'));
+        if (found == null and args.has('c')) return .@"error";
+        break :blk found;
+    };
+
+    if (tc != null and tc.?.flags & T.CLIENT_READONLY != 0 and !args.has('X')) {
+        cmdq.cmdq_error(item, "client is read-only", .{});
+        return .@"error";
+    }
 
     const ctx = format_mod.FormatContext{
         .item = @ptrCast(item),
-        .client = cmdq.cmdq_get_client(item),
+        .client = tc orelse cmdq.cmdq_get_client(item),
         .session = s,
         .winlink = wl,
         .window = wl.window,
@@ -102,7 +106,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    if (wp.fd < 0) {
+    if (!args.has('K') and wp.fd < 0) {
         cmdq.cmdq_error(item, "pane is not accepting input", .{});
         return .@"error";
     }
@@ -113,13 +117,36 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         while (idx < args.count()) : (idx += 1) {
             const value = if (expanded_values) |values| values[idx] else args.value_at(idx).?;
             if (args.has('H')) {
-                if (send_hex_byte(wp, value, item) != .normal) return .@"error";
+                if (inject_hex(wp, tc, value, item) != .normal) return .@"error";
                 continue;
             }
-            if (send_arg(wp, value, args.has('l'), item) != .normal) return .@"error";
+            if (inject_string(wp, tc, value, args.has('l'), item) != .normal) return .@"error";
         }
     }
     return .normal;
+}
+
+fn find_target_client(item: *cmdq.CmdqItem, explicit: ?[]const u8) ?*T.Client {
+    if (explicit == null) return cmdq.cmdq_get_client(item);
+
+    var target = explicit.?;
+    if (target.len != 0 and target[target.len - 1] == ':')
+        target = target[0 .. target.len - 1];
+
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == null) continue;
+        if (cl.name) |name| {
+            if (std.mem.eql(u8, target, name)) return cl;
+        }
+        if (cl.ttyname) |ttyname| {
+            if (std.mem.eql(u8, target, ttyname)) return cl;
+            if (std.mem.startsWith(u8, ttyname, "/dev/") and std.mem.eql(u8, target, ttyname["/dev/".len..]))
+                return cl;
+        }
+    }
+
+    cmdq.cmdq_error(item, "can't find client: {s}", .{target});
+    return null;
 }
 
 fn reset_pane(wp: *T.WindowPane) void {
@@ -158,28 +185,75 @@ fn parse_repeat_count(raw: ?[]const u8, item: *cmdq.CmdqItem) ?u32 {
     return parsed;
 }
 
-fn send_hex_byte(wp: *T.WindowPane, text: []const u8, item: *cmdq.CmdqItem) T.CmdRetval {
+fn inject_hex(wp: *T.WindowPane, tc: ?*T.Client, text: []const u8, item: *cmdq.CmdqItem) T.CmdRetval {
     const value = std.fmt.parseInt(u8, text, 16) catch {
         cmdq.cmdq_error(item, "invalid hex byte: {s}", .{text});
         return .@"error";
     };
-    pane_input.write_all(wp.fd, &.{value}, item) catch return .@"error";
+    return inject_key(wp, tc, T.KEYC_LITERAL | value, false, item);
+}
+
+fn inject_string(wp: *T.WindowPane, tc: ?*T.Client, value: []const u8, literal: bool, item: *cmdq.CmdqItem) T.CmdRetval {
+    var use_literal = literal;
+    if (!use_literal) {
+        const key = key_string.key_string_lookup_string(value);
+        if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE and key != T.KEYC_ANY)
+            return inject_key(wp, tc, key, true, item);
+        use_literal = true;
+    }
+
+    if (!use_literal) return .normal;
+
+    var index: usize = 0;
+    while (index < value.len) {
+        const key = next_literal_key(value, &index);
+        if (inject_key(wp, tc, key, false, item) != .normal) return .@"error";
+    }
     return .normal;
 }
 
-fn send_arg(wp: *T.WindowPane, value: []const u8, literal: bool, item: *cmdq.CmdqItem) T.CmdRetval {
-    if (literal) {
-        pane_input.write_all(wp.fd, value, item) catch return .@"error";
-        return .normal;
+fn next_literal_key(value: []const u8, index: *usize) T.key_code {
+    const first = value[index.*];
+    if (first <= 0x7f) {
+        index.* += 1;
+        return first;
     }
 
-    const key = key_string.key_string_lookup_string(value);
-    if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE and key != T.KEYC_ANY) {
-        return send_key(wp, key, true, item);
+    const seq_len = std.unicode.utf8ByteSequenceLength(first) catch {
+        index.* += 1;
+        return first;
+    };
+    if (index.* + seq_len > value.len) {
+        index.* += 1;
+        return first;
     }
 
-    pane_input.write_all(wp.fd, value, item) catch return .@"error";
-    return .normal;
+    const cp = std.unicode.utf8Decode(value[index.* .. index.* + seq_len]) catch {
+        index.* += 1;
+        return first;
+    };
+    index.* += seq_len;
+    return cp;
+}
+
+fn inject_key(wp: *T.WindowPane, tc: ?*T.Client, key: T.key_code, allow_literal_fallback: bool, item: *cmdq.CmdqItem) T.CmdRetval {
+    if (tc) |target_client| return dispatch_key(target_client, key, item);
+    return send_key(wp, key, allow_literal_fallback, item);
+}
+
+fn dispatch_key(tc: *T.Client, key: T.key_code, item: *cmdq.CmdqItem) T.CmdRetval {
+    var event = T.key_event{ .key = key | T.KEYC_SENT };
+    var buf: [16]u8 = undefined;
+    if (input_keys.input_key_encode(key, &buf)) |bytes| {
+        event.len = bytes.len;
+        @memcpy(event.data[0..bytes.len], bytes);
+    } else |_| {
+        event.len = 0;
+    }
+
+    if (server_fn.server_client_handle_key(tc, &event)) return .normal;
+    cmdq.cmdq_error(item, "unsupported key for client dispatch: {s}", .{key_string.key_string_lookup_key(key, 0)});
+    return .@"error";
 }
 
 fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -202,7 +276,7 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "send-keys",
     .alias = "send",
-    .usage = "[-Hl] [-N repeat-count] [-t target-pane] key ...",
+    .usage = "[-FHKlMRX] [-c target-client] [-N repeat-count] [-t target-pane] [key ...]",
     .template = "c:FHKlMN:Rt:X",
     .lower = 0,
     .upper = -1,
@@ -379,4 +453,142 @@ test "send-keys -R resets pane state before writing keys" {
     try std.testing.expect(setup.wp.flags & T.PANE_THEMECHANGED != 0);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys -K dispatches through a named target client key table" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+    const key_bindings = @import("key-bindings.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "send-k-client", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("send-k-client") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&sc, &cause).?;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("remote"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "remote", "-K", "-t", "send-k-client:0.0", "C-b", "c" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    _ = cmdq.cmdq_next(&cl);
+    try std.testing.expectEqual(@as(usize, 2), s.windows.count());
+}
+
+test "send-keys -K forwards unbound keys to the named client pane" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+    const key_bindings = @import("key-bindings.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "send-k-forward", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("send-k-forward") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    defer {
+        if (wp.fd >= 0) std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("named-client"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "named-client", "-K", "-t", "send-k-forward:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
+test "send-keys rejects an unknown target client" {
+    const setup = try test_session_with_empty_pane("send-missing-client");
+    defer test_teardown_session("send-missing-client", setup.s, -1, -1);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "ghost", "-t", "send-missing-client:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
 }

@@ -314,7 +314,7 @@ fn server_client_process_stdin_pending(cl: *T.Client) void {
         const used = input_keys.input_key_get(cl.stdin_pending.items[consumed..], &event) orelse break;
         if (used == 0) break;
         consumed += used;
-        server_fn.server_client_handle_key(cl, &event);
+        _ = server_fn.server_client_handle_key(cl, &event);
     }
 
     if (consumed != 0) {
@@ -363,7 +363,7 @@ export fn server_client_escape_timeout_cb(_fd: c_int, _events: c_short, arg: ?*a
 
     var event = T.key_event{ .key = T.C0_ESC, .len = 1 };
     event.data[0] = 0x1b;
-    server_fn.server_client_handle_key(cl, &event);
+    _ = server_fn.server_client_handle_key(cl, &event);
 
     const remaining = cl.stdin_pending.items.len - 1;
     if (remaining != 0) {

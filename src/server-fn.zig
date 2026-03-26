@@ -158,10 +158,10 @@ pub fn server_destroy_pane(wp: *T.WindowPane, notify: bool) void {
     server_status_window(w);
 }
 
-pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) void {
-    const s = cl.session orelse return;
-    const wl = s.curw orelse return;
-    const wp = wl.window.active orelse return;
+pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
+    const s = cl.session orelse return false;
+    const wl = s.curw orelse return false;
+    const wp = wl.window.active orelse return false;
 
     const current_table = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");
@@ -170,7 +170,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) void {
 
     if (std.mem.eql(u8, current_table, "root") and is_prefix_key(s, event.key)) {
         server_client_mod.server_client_set_key_table(cl, "prefix");
-        return;
+        return true;
     }
 
     if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
@@ -178,17 +178,18 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) void {
             _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, null);
             if (!std.mem.eql(u8, current_table, "root"))
                 server_client_mod.server_client_set_key_table(cl, null);
-            return;
+            return true;
         }
     }
 
     if (!std.mem.eql(u8, current_table, "root")) {
         server_client_mod.server_client_set_key_table(cl, null);
-        return;
+        return true;
     }
 
-    if (wp.fd < 0 or event.len == 0) return;
+    if (wp.fd < 0 or event.len == 0) return false;
     write_pane_bytes(wp.fd, event.data[0..event.len]);
+    return true;
 }
 
 fn is_prefix_key(s: *T.Session, key: T.key_code) bool {
@@ -291,12 +292,12 @@ test "server_client_handle_key uses prefix table and queues bound commands" {
 
     var prefix_event = T.key_event{ .key = @as(T.key_code, 'b') | T.KEYC_CTRL, .data = std.mem.zeroes([16]u8), .len = 1 };
     prefix_event.data[0] = 0x02;
-    server_client_handle_key(&cl, &prefix_event);
+    _ = server_client_handle_key(&cl, &prefix_event);
     try std.testing.expectEqualStrings("prefix", cl.key_table_name.?);
 
     var create_event = T.key_event{ .key = 'c', .data = std.mem.zeroes([16]u8), .len = 1 };
     create_event.data[0] = 'c';
-    server_client_handle_key(&cl, &create_event);
+    _ = server_client_handle_key(&cl, &create_event);
     try std.testing.expect(cl.key_table_name == null);
     _ = cmdq.cmdq_next(&cl);
     try std.testing.expectEqual(@as(usize, 2), s.windows.count());
@@ -353,7 +354,7 @@ test "server_client_handle_key forwards unbound keys to pane" {
 
     var event = T.key_event{ .key = 'x', .data = std.mem.zeroes([16]u8), .len = 1 };
     event.data[0] = 'x';
-    server_client_handle_key(&cl, &event);
+    _ = server_client_handle_key(&cl, &event);
 
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);

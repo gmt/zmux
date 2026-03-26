@@ -344,10 +344,12 @@ pub fn window_set_name(w: *T.Window, name: []const u8) void {
 }
 
 pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32) void {
-    _ = _xpixel;
-    _ = _ypixel;
     w.sx = sx;
     w.sy = sy;
+    if (_xpixel != -1)
+        w.xpixel = if (_xpixel == 0) T.DEFAULT_XPIXEL else @intCast(_xpixel);
+    if (_ypixel != -1)
+        w.ypixel = if (_ypixel == 0) T.DEFAULT_YPIXEL else @intCast(_ypixel);
 }
 
 pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {

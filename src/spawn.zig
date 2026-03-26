@@ -30,6 +30,7 @@ const env_mod = @import("environ.zig");
 const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
 const pane_io = @import("pane-io.zig");
+const resize_mod = @import("resize.zig");
 const c = @import("c.zig");
 
 extern fn openpty(
@@ -320,13 +321,11 @@ fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8) !void {
 
 fn client_size(sc: *T.SpawnContext) struct { u32, u32 } {
     if (sc.s) |s| {
-        const dw = opts.options_get_string(opts.global_s_options, "default-size");
         var sx: u32 = 80;
         var sy: u32 = 24;
-        var it = std.mem.splitScalar(u8, dw, 'x');
-        if (it.next()) |ws| sx = std.fmt.parseInt(u32, ws, 10) catch 80;
-        if (it.next()) |hs| sy = std.fmt.parseInt(u32, hs, 10) catch 24;
-        _ = s;
+        var xpixel: u32 = 0;
+        var ypixel: u32 = 0;
+        resize_mod.default_window_size(null, s, null, &sx, &sy, &xpixel, &ypixel, -1);
         return .{ sx, sy };
     }
     return .{ 80, 24 };

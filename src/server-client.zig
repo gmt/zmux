@@ -34,6 +34,7 @@ const win_mod = @import("window.zig");
 const sess_mod = @import("session.zig");
 const tty_draw = @import("tty-draw.zig");
 const input_keys = @import("input-keys.zig");
+const resize_mod = @import("resize.zig");
 const server_fn = @import("server-fn.zig");
 const c = @import("c.zig");
 const notify = @import("notify.zig");
@@ -136,6 +137,7 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     cl.tty.sy = @max(msg.sy, 1);
     cl.tty.xpixel = if (msg.xpixel == 0) T.DEFAULT_XPIXEL else msg.xpixel;
     cl.tty.ypixel = if (msg.ypixel == 0) T.DEFAULT_YPIXEL else msg.ypixel;
+    cl.flags |= T.CLIENT_SIZECHANGED;
 
     if (cl.session) |s| {
         server_client_apply_session_size(cl, s);
@@ -266,16 +268,8 @@ pub fn server_client_loop() void {
 }
 
 pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
-    const wl = s.curw orelse return;
-    const sx = if (cl.tty.sx == 0) @as(u32, 80) else cl.tty.sx;
-    const sy = if (cl.tty.sy == 0) @as(u32, 24) else cl.tty.sy;
-    const w = wl.window;
-
-    win_mod.window_resize(w, sx, sy, @intCast(w.xpixel), @intCast(w.ypixel));
-    for (w.panes.items) |wp| {
-        wp.sx = sx;
-        wp.sy = sy;
-    }
+    if (s.curw) |wl| wl.window.latest = @ptrCast(cl);
+    resize_mod.recalculate_sizes_now(true);
 }
 
 pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {

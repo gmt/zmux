@@ -562,6 +562,8 @@ pub const PANE_FOCUSED: u32 = 0x0004;
 pub const PANE_INPUTOFF: u32 = 0x0040;
 pub const PANE_EXITED: u32 = 0x0100;
 pub const PANE_EMPTY: u32 = 0x0800;
+pub const PANE_STYLECHANGED: u32 = 0x1000;
+pub const PANE_THEMECHANGED: u32 = 0x2000;
 
 pub const WindowPane = struct {
     id: u32,

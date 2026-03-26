@@ -269,6 +269,54 @@ test "paste-buffer deletes a named buffer even when pane input is disabled" {
     try std.testing.expectEqual(@as(usize, 0), n);
 }
 
+test "paste-buffer is a no-op when no automatic buffer exists" {
+    const setup = try test_session_with_empty_pane("paste-buffer-empty");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("paste-buffer-empty", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-t", "paste-buffer-empty:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "paste-buffer leaves the buffer intact when pane input is disabled without -d" {
+    const setup = try test_session_with_empty_pane("paste-buffer-inputoff");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("paste-buffer-inputoff", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    setup.wp.flags |= T.PANE_INPUTOFF;
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("hidden"), "named", &cause));
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-b", "named", "-t", "paste-buffer-inputoff:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(paste_mod.paste_get_name("named") != null);
+
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqual(@as(usize, 0), n);
+}
+
 test "paste-buffer errors when the target pane has exited" {
     const setup = try test_session_with_empty_pane("paste-buffer-exited");
     defer test_teardown_session("paste-buffer-exited", setup.s, -1, -1);

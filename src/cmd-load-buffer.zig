@@ -25,22 +25,16 @@ const clipboard_mod = @import("clipboard.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
-const format_mod = @import("format.zig");
+const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
-const server_client_mod = @import("server-client.zig");
 const protocol = @import("zmux-protocol.zig");
-
-const ResolvedPath = struct {
-    path: []const u8,
-    owned: bool = false,
-};
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const client = cmdq.cmdq_get_client(item);
     const target_client = cmdq.cmdq_get_target_client(item);
-    const raw_path = format_path_from_client(item, client, args.value_at(0).?);
+    const raw_path = file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
     const data = read_buffer(item, client, raw_path) catch return .@"error";
@@ -62,27 +56,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
-fn format_path_from_client(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) []u8 {
-    const session = if (client) |cl| cl.session else null;
-    const winlink = if (session) |s| s.curw else null;
-    const pane = if (winlink) |wl| wl.window.active else null;
-    return format_mod.format_single(item, raw_path, client, session, winlink, pane);
-}
-
-fn resolve_path(client: ?*T.Client, raw_path: []const u8) ResolvedPath {
-    if (std.mem.eql(u8, raw_path, "-")) return .{ .path = raw_path };
-    if (std.mem.startsWith(u8, raw_path, "~/")) {
-        const home = std.posix.getenv("HOME") orelse "";
-        return .{ .path = xm.xasprintf("{s}/{s}", .{ home, raw_path[2..] }), .owned = true };
-    }
-    if (std.mem.startsWith(u8, raw_path, "/")) return .{ .path = raw_path };
-
-    const cwd = server_client_mod.server_client_get_cwd(client, null);
-    return .{ .path = xm.xasprintf("{s}/{s}", .{ cwd, raw_path }), .owned = true };
-}
-
 fn read_buffer(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) ![]u8 {
-    const resolved = resolve_path(client, raw_path);
+    const resolved = file_path_mod.resolve_path(client, raw_path);
     defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
 
     if (std.mem.eql(u8, resolved.path, "-")) {

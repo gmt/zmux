@@ -136,6 +136,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/kill-session-process-exit.sh" \
         "$SCRIPT_DIR/control-client-size.sh" \
         "$SCRIPT_DIR/control-notify-smoke.sh" \
+        "$SCRIPT_DIR/alerts-smoke.sh" \
         "$SCRIPT_DIR/session-group-resize.sh" \
         "$SCRIPT_DIR/second-socket-attach.sh" \
         "$SCRIPT_DIR/command-order.sh" \

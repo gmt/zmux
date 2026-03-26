@@ -602,5 +602,3 @@ test "cmdq waiting items block later entries until continued" {
     try std.testing.expectEqual(@as(u32, 1), callbacks.waited);
     try std.testing.expectEqual(@as(u32, 1), callbacks.ran_after);
 }
-
-pub fn cmd_wait_for_flush() void {}

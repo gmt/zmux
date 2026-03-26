@@ -27,22 +27,55 @@ const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const client_registry = @import("client-registry.zig");
 const proc_mod = @import("proc.zig");
-const protocol = @import("zmux-protocol.zig");
+
+const CMDQ_FIRED: u32 = 0x1;
+const CMDQ_WAITING: u32 = 0x2;
+
+const CmdqType = enum {
+    command,
+    callback,
+};
+
+pub const CmdqCb = *const fn (*CmdqItem, ?*anyopaque) T.CmdRetval;
+
+pub const CmdqState = struct {
+    references: u32 = 1,
+    flags: u32 = 0,
+    event: T.key_event = .{ .key = T.KEYC_NONE },
+    current: T.CmdFindState = blankFindState(),
+};
+
+var default_state: CmdqState = .{};
 
 // ── Concrete types for the opaque T.CmdqItem / T.CmdqList ────────────────
 
 pub const CmdqItem = struct {
-    client: ?*T.Client,
+    name: []const u8 = "(cmdq)",
+    queue: ?*CmdqList = null,
+    next: ?*CmdqItem = null,
+
+    client: ?*T.Client = null,
     target_client: ?*T.Client = null,
-    cmdlist: *cmd_mod.CmdList,
-    cmd: ?*cmd_mod.Cmd = null,
+
+    item_type: CmdqType = .command,
+    group: u32 = 0,
+    flags: u32 = 0,
+
+    state: *CmdqState = &default_state,
     event: T.key_event = .{ .key = T.KEYC_NONE },
     state_flags: u32 = 0,
-    retval: i32 = 0,
-    next: ?*CmdqItem = null,
+    source: T.CmdFindState = blankFindState(),
+    target: T.CmdFindState = blankFindState(),
+
+    cmdlist: ?*cmd_mod.CmdList = null,
+    cmd: ?*cmd_mod.Cmd = null,
+
+    cb: ?CmdqCb = null,
+    data: ?*anyopaque = null,
 };
 
 pub const CmdqList = struct {
+    item: ?*CmdqItem = null,
     head: ?*CmdqItem = null,
     tail: ?*CmdqItem = null,
 };
@@ -52,10 +85,81 @@ var server_queue: CmdqList = .{};
 var client_queues: std.AutoHashMap(usize, CmdqList) = undefined;
 var queues_init = false;
 
+fn blankFindState() T.CmdFindState {
+    return .{ .idx = -1 };
+}
+
+fn copyFindState(src: *const T.CmdFindState) T.CmdFindState {
+    var dst = src.*;
+    dst.current = null;
+    return dst;
+}
+
 fn ensure_init() void {
     if (queues_init) return;
     client_queues = std.AutoHashMap(usize, CmdqList).init(xm.allocator);
     queues_init = true;
+}
+
+fn get_queue(cl: ?*T.Client, create: bool) ?*CmdqList {
+    ensure_init();
+    if (cl) |c| {
+        const key: usize = @intFromPtr(c);
+        if (create) {
+            const gop = client_queues.getOrPut(key) catch unreachable;
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            return gop.value_ptr;
+        }
+        return client_queues.getPtr(key);
+    }
+    return &server_queue;
+}
+
+fn destroy_item(item: *CmdqItem) void {
+    if (item.cmdlist) |cmdlist| cmd_mod.cmd_list_unref(@ptrCast(cmdlist));
+    cmdq_free_state(item.state);
+    xm.allocator.destroy(item);
+}
+
+fn pop_head(queue: *CmdqList) ?*CmdqItem {
+    const item = queue.head orelse return null;
+    queue.head = item.next;
+    if (queue.head == null) queue.tail = null;
+    item.next = null;
+    if (queue.item == item) queue.item = null;
+    return item;
+}
+
+fn remove_group(item: *CmdqItem) void {
+    if (item.group == 0) return;
+
+    const queue = item.queue orelse return;
+    var prev = item;
+    var next = item.next;
+    while (next) |candidate| {
+        if (candidate.group == item.group) {
+            prev.next = candidate.next;
+            if (queue.tail == candidate) queue.tail = prev;
+            next = candidate.next;
+            candidate.next = null;
+            destroy_item(candidate);
+            continue;
+        }
+        prev = candidate;
+        next = candidate.next;
+    }
+}
+
+fn fire_command(item: *CmdqItem) T.CmdRetval {
+    return cmd_mod.cmd_execute(item.cmd.?, item);
+}
+
+fn fire_callback(item: *CmdqItem) T.CmdRetval {
+    return item.cb.?(item, item.data);
+}
+
+fn empty_callback(_: *CmdqItem, _: ?*anyopaque) T.CmdRetval {
+    return .normal;
 }
 
 // ── Queue operations ──────────────────────────────────────────────────────
@@ -70,9 +174,128 @@ pub fn cmdq_free(q: *CmdqList) void {
     var item = q.head;
     while (item) |it| {
         item = it.next;
-        xm.allocator.destroy(it);
+        destroy_item(it);
     }
     xm.allocator.destroy(q);
+}
+
+pub fn cmdq_new_state(current: ?*const T.CmdFindState, event: ?*const T.key_event, flags: u32) *CmdqState {
+    const state = xm.allocator.create(CmdqState) catch unreachable;
+    state.* = .{
+        .flags = flags,
+        .event = if (event) |ev| ev.* else .{ .key = T.KEYC_NONE },
+        .current = if (current) |fs| copyFindState(fs) else blankFindState(),
+    };
+    return state;
+}
+
+pub fn cmdq_link_state(state: *CmdqState) *CmdqState {
+    state.references += 1;
+    return state;
+}
+
+pub fn cmdq_copy_state(state: *CmdqState, current: ?*const T.CmdFindState) *CmdqState {
+    const source = current orelse &state.current;
+    return cmdq_new_state(source, &state.event, state.flags);
+}
+
+pub fn cmdq_free_state(state: *CmdqState) void {
+    if (state.references == 0) return;
+    state.references -= 1;
+    if (state.references == 0) xm.allocator.destroy(state);
+}
+
+pub fn cmdq_get_command(cmdlist_ptr: *T.CmdList, state: ?*CmdqState) *CmdqItem {
+    const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(cmdlist_ptr));
+    if (cmdlist.head == null) {
+        cmd_mod.cmd_list_unref(cmdlist_ptr);
+        return cmdq_get_callback1("cmdq-empty-command", empty_callback, null);
+    }
+
+    const actual_state = state orelse cmdq_new_state(null, null, 0);
+    const created_state = state == null;
+    defer if (created_state) cmdq_free_state(actual_state);
+
+    var first: ?*CmdqItem = null;
+    var last: ?*CmdqItem = null;
+    var first_cmd = true;
+    var cmd = cmdlist.head;
+    while (cmd) |current_cmd| : (cmd = current_cmd.next) {
+        if (!first_cmd) _ = cmd_mod.cmd_list_ref(cmdlist_ptr);
+
+        const item = xm.allocator.create(CmdqItem) catch unreachable;
+        item.* = .{
+            .name = current_cmd.entry.name,
+            .item_type = .command,
+            .group = cmdlist.group,
+            .state = cmdq_link_state(actual_state),
+            .event = actual_state.event,
+            .state_flags = actual_state.flags,
+            .cmdlist = cmdlist,
+            .cmd = current_cmd,
+        };
+
+        if (last) |previous| {
+            previous.next = item;
+        } else {
+            first = item;
+        }
+        last = item;
+        first_cmd = false;
+    }
+
+    return first.?;
+}
+
+pub fn cmdq_get_callback1(name: []const u8, cb: CmdqCb, data: ?*anyopaque) *CmdqItem {
+    const item = xm.allocator.create(CmdqItem) catch unreachable;
+    item.* = .{
+        .name = name,
+        .item_type = .callback,
+        .state = cmdq_new_state(null, null, 0),
+        .cb = cb,
+        .data = data,
+    };
+    return item;
+}
+
+pub fn cmdq_get_callback(cb: CmdqCb, data: ?*anyopaque) *CmdqItem {
+    return cmdq_get_callback1("cmdq-callback", cb, data);
+}
+
+pub fn cmdq_append_item(cl: ?*T.Client, first: *CmdqItem) *CmdqItem {
+    const queue = get_queue(cl, true).?;
+    var item: ?*CmdqItem = first;
+    var last = first;
+    while (item) |current| : (item = current.next) {
+        current.client = cl;
+        current.queue = queue;
+        last = current;
+    }
+
+    if (queue.tail) |tail| {
+        tail.next = first;
+    } else {
+        queue.head = first;
+    }
+    queue.tail = last;
+    return last;
+}
+
+pub fn cmdq_insert_after(after: *CmdqItem, first: *CmdqItem) *CmdqItem {
+    const queue = after.queue orelse unreachable;
+    var item: ?*CmdqItem = first;
+    var last = first;
+    while (item) |current| : (item = current.next) {
+        current.client = after.client;
+        current.queue = queue;
+        last = current;
+    }
+
+    last.next = after.next;
+    after.next = first;
+    if (queue.tail == after) queue.tail = last;
+    return last;
 }
 
 /// Append a command list to the per-client (or server) queue.
@@ -81,92 +304,79 @@ pub fn cmdq_append(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) void {
 }
 
 pub fn cmdq_append_event(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, event: ?*const T.key_event) void {
-    ensure_init();
-    const item = xm.allocator.create(CmdqItem) catch unreachable;
-    item.* = .{
-        .client = cl,
-        .cmdlist = cmdlist,
-        .event = if (event) |ev| ev.* else .{ .key = T.KEYC_NONE },
-        .retval = 0,
-    };
-
-    const q: *CmdqList = if (cl) |c| blk: {
-        const key: usize = @intFromPtr(c);
-        const gop = client_queues.getOrPut(key) catch unreachable;
-        if (!gop.found_existing) gop.value_ptr.* = .{};
-        break :blk gop.value_ptr;
-    } else &server_queue;
-
-    if (q.tail) |tail| {
-        tail.next = item;
-        q.tail = item;
-    } else {
-        q.head = item;
-        q.tail = item;
-    }
+    const state = cmdq_new_state(null, event, 0);
+    defer cmdq_free_state(state);
+    _ = cmdq_append_item(cl, cmdq_get_command(@ptrCast(cmdlist), state));
 }
 
-/// Drain one item from the queue for the given client (null = server queue).
-/// Returns the number of items processed.
+/// Drain items from the queue for the given client (null = server queue).
+/// Returns the number of non-waiting items processed.
 pub fn cmdq_next(cl: ?*T.Client) u32 {
-    ensure_init();
-    const q: *CmdqList = if (cl) |c| blk: {
-        const key: usize = @intFromPtr(c);
-        const q_ptr = client_queues.getPtr(key) orelse return 0;
-        break :blk q_ptr;
-    } else &server_queue;
+    const queue = get_queue(cl, false) orelse return 0;
+    const first = queue.head orelse return 0;
+    if (first.flags & CMDQ_WAITING != 0) return 0;
 
-    var count: u32 = 0;
+    var items: u32 = 0;
+    while (queue.head) |item| {
+        queue.item = item;
 
-    while (q.head) |item| {
-        q.head = item.next;
-        if (q.head == null) q.tail = null;
+        if (item.flags & CMDQ_WAITING != 0) return items;
 
-        var cmd_node = item.cmdlist.head;
-        var overall_retval: T.CmdRetval = .normal;
-        while (cmd_node) |cmd| {
-            cmd_node = cmd.next;
-            const result = cmd_mod.cmd_execute(cmd, item);
-            switch (result) {
+        if (item.flags & CMDQ_FIRED == 0) {
+            const retval = switch (item.item_type) {
+                .command => fire_command(item),
+                .callback => fire_callback(item),
+            };
+            item.flags |= CMDQ_FIRED;
+
+            switch (retval) {
+                .wait => {
+                    item.flags |= CMDQ_WAITING;
+                    return items;
+                },
                 .@"error" => {
-                    log.log_warn("command error: {s}", .{cmd.entry.name});
-                    overall_retval = .@"error";
-                    break;
+                    remove_group(item);
+                    items += 1;
                 },
-                .wait => break,
                 .stop => {
-                    xm.allocator.destroy(item);
-                    return count;
+                    _ = pop_head(queue);
+                    destroy_item(item);
+                    return items;
                 },
-                .normal => {},
+                .normal => items += 1,
             }
         }
 
-        if (item.client) |c_ptr| {
-            const should_exit =
-                (c_ptr.flags & T.CLIENT_CONTROL == 0 and c_ptr.flags & T.CLIENT_ATTACHED == 0) or
-                (c_ptr.flags & T.CLIENT_EXIT != 0);
-            if (should_exit) {
-                if (c_ptr.peer) |peer| {
-                    const retval: i32 = if (overall_retval == .@"error") 1 else 0;
-                    _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
-                }
-            }
-        }
-
-        xm.allocator.destroy(item);
-        count += 1;
+        _ = pop_head(queue);
+        destroy_item(item);
     }
-    return count;
+
+    queue.item = null;
+    return items;
+}
+
+pub fn cmdq_continue(item: *CmdqItem) void {
+    item.flags &= ~CMDQ_WAITING;
 }
 
 pub fn cmdq_run_immediate_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, state_flags: u32) T.CmdRetval {
     defer cmd_mod.cmd_list_free(cmdlist);
 
-    var item = CmdqItem{ .client = cl, .cmdlist = cmdlist, .state_flags = state_flags, .retval = 0 };
+    const state = cmdq_new_state(null, null, state_flags);
+    defer cmdq_free_state(state);
+
+    var item = CmdqItem{
+        .item_type = .command,
+        .client = cl,
+        .state = state,
+        .state_flags = state_flags,
+        .cmdlist = cmdlist,
+    };
+
     var cmd_node = cmdlist.head;
     while (cmd_node) |cmd| {
         cmd_node = cmd.next;
+        item.cmd = cmd;
         const result = cmd_mod.cmd_execute(cmd, &item);
         switch (result) {
             .normal => {},
@@ -187,29 +397,49 @@ pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval
 
 pub fn cmdq_get_name(item: *CmdqItem) []const u8 {
     if (item.cmd) |cmd| return cmd.entry.name;
-    return "(cmdq)";
+    return item.name;
 }
 
 pub fn cmdq_get_client(item: *CmdqItem) ?*T.Client {
     return item.client;
 }
 
+pub fn cmdq_get_target_client(item_ptr: *anyopaque) ?*T.Client {
+    const item: *CmdqItem = @ptrCast(@alignCast(item_ptr));
+    return item.target_client;
+}
+
+pub fn cmdq_get_state(item: *CmdqItem) *CmdqState {
+    return item.state;
+}
+
 pub fn cmdq_get_target(item: *CmdqItem) T.CmdFindState {
-    _ = item;
-    return .{};
+    return item.target;
+}
+
+pub fn cmdq_get_source(item: *CmdqItem) T.CmdFindState {
+    return item.source;
 }
 
 pub fn cmdq_get_current(item: *CmdqItem) T.CmdFindState {
-    _ = item;
-    return .{};
+    return item.state.current;
 }
 
 pub fn cmdq_get_event(item: *CmdqItem) *T.key_event {
-    return &item.event;
+    if (item.state == &default_state) return &item.event;
+    return &item.state.event;
 }
 
 pub fn cmdq_get_flags(item: *CmdqItem) u32 {
-    return item.state_flags;
+    if (item.state == &default_state) return item.state_flags;
+    return item.state.flags;
+}
+
+pub fn cmdq_running(cl: ?*T.Client) ?*CmdqItem {
+    const queue = get_queue(cl, false) orelse return null;
+    const item = queue.item orelse return null;
+    if (item.flags & CMDQ_WAITING != 0) return null;
+    return item;
 }
 
 pub fn cmdq_resolve_target_client(item: *CmdqItem, cmd: *cmd_mod.Cmd) ?*T.Client {
@@ -219,11 +449,6 @@ pub fn cmdq_resolve_target_client(item: *CmdqItem, cmd: *cmd_mod.Cmd) ?*T.Client
     const args = cmd_mod.cmd_get_args(cmd);
     const explicit = if (flags & T.CMD_CLIENT_CFLAG != 0) args.get('c') else args.get('t');
     return cmdq_find_client(item, explicit, flags & T.CMD_CLIENT_CANFAIL != 0);
-}
-
-pub fn cmdq_get_target_client(item_ptr: *anyopaque) ?*T.Client {
-    const item: *CmdqItem = @ptrCast(@alignCast(item_ptr));
-    return item.target_client;
 }
 
 fn cmdq_find_client(item: *CmdqItem, explicit: ?[]const u8, quiet: bool) ?*T.Client {
@@ -316,7 +541,6 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
     };
 
     const list = xm.allocator.create(cmd_mod.CmdList) catch unreachable;
-    defer cmd_mod.cmd_list_free(list);
     list.* = .{};
 
     const cmd = xm.allocator.create(cmd_mod.Cmd) catch unreachable;
@@ -339,9 +563,44 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
     var event = T.key_event{ .key = 'x', .len = 1 };
     event.data[0] = 'x';
 
-    cmdq_append_event(&cl, list, &event);
+    cmdq_append_event(&cl, @ptrCast(list), &event);
     try std.testing.expectEqual(@as(u32, 1), cmdq_next(&cl));
     try std.testing.expectEqual(@as(T.key_code, 'x'), capture.seen_key);
+}
+
+test "cmdq waiting items block later entries until continued" {
+    const callbacks = struct {
+        var waited: u32 = 0;
+        var ran_after: u32 = 0;
+
+        fn wait(item: *CmdqItem, _: ?*anyopaque) T.CmdRetval {
+            _ = item;
+            waited += 1;
+            return .wait;
+        }
+
+        fn after(item: *CmdqItem, _: ?*anyopaque) T.CmdRetval {
+            _ = item;
+            ran_after += 1;
+            return .normal;
+        }
+    };
+
+    callbacks.waited = 0;
+    callbacks.ran_after = 0;
+
+    const waiting = cmdq_get_callback1("cmdq-test-wait", callbacks.wait, null);
+    _ = cmdq_append_item(null, waiting);
+    _ = cmdq_append_item(null, cmdq_get_callback1("cmdq-test-after", callbacks.after, null));
+
+    try std.testing.expectEqual(@as(u32, 0), cmdq_next(null));
+    try std.testing.expectEqual(@as(u32, 1), callbacks.waited);
+    try std.testing.expectEqual(@as(u32, 0), callbacks.ran_after);
+
+    cmdq_continue(waiting);
+    try std.testing.expectEqual(@as(u32, 1), cmdq_next(null));
+    try std.testing.expectEqual(@as(u32, 1), callbacks.waited);
+    try std.testing.expectEqual(@as(u32, 1), callbacks.ran_after);
 }
 
 pub fn cmd_wait_for_flush() void {}

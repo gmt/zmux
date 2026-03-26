@@ -61,7 +61,7 @@ respawn-pane	pane	unsupported
 respawn-window	window	unsupported
 rotate-window	window	unsupported
 run-shell	pane	unsupported
-save-buffer	none	unsupported
+save-buffer	none	implemented
 select-layout	pane	unsupported
 select-pane	pane	unsupported
 select-window	window	implemented
@@ -73,7 +73,7 @@ set-environment	session	unsupported
 set-hook	pane	unsupported
 set-option	pane	unsupported
 set-window-option	window	unsupported
-show-buffer	none	unsupported
+show-buffer	none	implemented
 show-environment	session	unsupported
 show-hooks	pane	unsupported
 show-messages	client	unsupported

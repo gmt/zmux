@@ -88,9 +88,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         const expanded = format_mod.format_single(item, title, cmdq.cmdq_get_client(item), s, wl, wp);
         defer xm.allocator.free(expanded);
 
-        _ = screen.screen_set_title(wp.screen, expanded);
-        server_fn.server_status_window(wl.window);
-        notify.notify_pane("pane-title-changed", wp);
+        if (screen.screen_set_title(wp.screen, expanded)) {
+            server_fn.server_status_window(wl.window);
+            notify.notify_pane("pane-title-changed", wp);
+        }
         return .normal;
     }
 

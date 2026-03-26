@@ -208,6 +208,17 @@ var locale_ready = false;
 var utf8_no_width = false;
 var utf8_width_cache_ready = false;
 
+pub const VIS_OCTAL: u32 = 0x01;
+pub const VIS_CSTYLE: u32 = 0x02;
+pub const VIS_SP: u32 = 0x04;
+pub const VIS_TAB: u32 = 0x08;
+pub const VIS_NL: u32 = 0x10;
+pub const VIS_SAFE: u32 = 0x20;
+pub const VIS_NOSLASH: u32 = 0x40;
+pub const VIS_GLOB: u32 = 0x100;
+pub const VIS_DQ: u32 = 0x200;
+pub const VIS_ALL: u32 = 0x400;
+
 pub fn utf8_update_width_cache() void {
     resetWidthCache();
     for (opts.options_get_array(opts.global_options, "codepoint-widths")) |entry| {
@@ -320,6 +331,56 @@ pub fn utf8_append(ud: *T.Utf8Data, ch: u8) T.Utf8State {
         ud.width = width;
     }
     return .done;
+}
+
+pub fn utf8_strvis(src: []const u8, flag: u32) []u8 {
+    return utf8_stravisx(src, flag);
+}
+
+pub fn utf8_stravis(src: []const u8, flag: u32) []u8 {
+    return utf8_stravisx(src, flag);
+}
+
+pub fn utf8_strvisx(src: []const u8, flag: u32) []u8 {
+    return utf8_stravisx(src, flag);
+}
+
+pub fn utf8_stravisx(src: []const u8, flag: u32) []u8 {
+    var out: std.ArrayList(u8) = .{};
+
+    var pos: usize = 0;
+    while (pos < src.len) {
+        const start = pos;
+        var ud: T.Utf8Data = undefined;
+        if (utf8_open(&ud, src[pos]) == .more) {
+            pos += 1;
+            var state: T.Utf8State = .more;
+            while (pos < src.len and state == .more) : (pos += 1) {
+                state = utf8_append(&ud, src[pos]);
+            }
+            if (state == .done) {
+                out.appendSlice(xm.allocator, ud.data[0..ud.size]) catch unreachable;
+                continue;
+            }
+            pos = start;
+        }
+
+        if ((flag & VIS_DQ) != 0 and src[pos] == '$' and pos + 1 < src.len) {
+            const next = src[pos + 1];
+            if (std.ascii.isAlphabetic(next) or next == '_' or next == '{') {
+                out.append(xm.allocator, '\\') catch unreachable;
+                out.append(xm.allocator, '$') catch unreachable;
+                pos += 1;
+                continue;
+            }
+        }
+
+        const nextc: u8 = if (pos + 1 < src.len) src[pos + 1] else 0;
+        appendVisByte(&out, src[pos], flag, nextc);
+        pos += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 pub fn utf8_isvalid(s: []const u8) bool {
@@ -572,6 +633,87 @@ fn utf8PackFailure(ud: *const T.Utf8Data, uc: *T.utf8_char) T.Utf8State {
     else
         uc.* = utf8SetSize(1) | utf8SetWidth(1) | 0x2020;
     return .@"error";
+}
+
+fn appendVisByte(out: *std.ArrayList(u8), ch: u8, flag: u32, nextc: u8) void {
+    if (isVisVisible(ch, flag)) {
+        if ((ch == '"' and (flag & VIS_DQ) != 0) or (ch == '\\' and (flag & VIS_NOSLASH) == 0))
+            out.append(xm.allocator, '\\') catch unreachable;
+        out.append(xm.allocator, ch) catch unreachable;
+        return;
+    }
+
+    if ((flag & VIS_CSTYLE) != 0) {
+        switch (ch) {
+            '\n' => return out.appendSlice(xm.allocator, "\\n") catch unreachable,
+            '\r' => return out.appendSlice(xm.allocator, "\\r") catch unreachable,
+            0x08 => return out.appendSlice(xm.allocator, "\\b") catch unreachable,
+            0x07 => return out.appendSlice(xm.allocator, "\\a") catch unreachable,
+            0x0b => return out.appendSlice(xm.allocator, "\\v") catch unreachable,
+            '\t' => return out.appendSlice(xm.allocator, "\\t") catch unreachable,
+            0x0c => return out.appendSlice(xm.allocator, "\\f") catch unreachable,
+            ' ' => return out.appendSlice(xm.allocator, "\\s") catch unreachable,
+            0 => {
+                out.appendSlice(xm.allocator, "\\0") catch unreachable;
+                if (isOctal(nextc))
+                    out.appendSlice(xm.allocator, "00") catch unreachable;
+                return;
+            },
+            else => {},
+        }
+    }
+
+    const glob_magic = ch == '*' or ch == '?' or ch == '[' or ch == '#';
+    if ((ch & 0x7f) == ' ' or (flag & VIS_OCTAL) != 0 or ((flag & VIS_GLOB) != 0 and glob_magic)) {
+        out.append(xm.allocator, '\\') catch unreachable;
+        out.append(xm.allocator, '0' + ((ch >> 6) & 0x07)) catch unreachable;
+        out.append(xm.allocator, '0' + ((ch >> 3) & 0x07)) catch unreachable;
+        out.append(xm.allocator, '0' + (ch & 0x07)) catch unreachable;
+        return;
+    }
+
+    if ((flag & VIS_NOSLASH) == 0)
+        out.append(xm.allocator, '\\') catch unreachable;
+
+    if ((ch & 0x80) != 0) {
+        out.append(xm.allocator, 'M') catch unreachable;
+        appendMetaOrControl(out, ch & 0x7f);
+        return;
+    }
+
+    appendMetaOrControl(out, ch);
+}
+
+fn appendMetaOrControl(out: *std.ArrayList(u8), ch: u8) void {
+    if (std.ascii.isControl(ch) or ch == 0x7f) {
+        out.append(xm.allocator, '^') catch unreachable;
+        out.append(xm.allocator, if (ch == 0x7f) '?' else ch + '@') catch unreachable;
+        return;
+    }
+
+    out.append(xm.allocator, '-') catch unreachable;
+    out.append(xm.allocator, ch) catch unreachable;
+}
+
+fn isVisVisible(ch: u8, flag: u32) bool {
+    if (ch != '\\' and (flag & VIS_ALL) != 0) return false;
+
+    const graph = isAsciiGraph(ch);
+    const glob_graph = graph and (((ch != '*' and ch != '?' and ch != '[' and ch != '#') or (flag & VIS_GLOB) == 0));
+    if (glob_graph) return true;
+    if ((flag & VIS_SP) == 0 and ch == ' ') return true;
+    if ((flag & VIS_TAB) == 0 and ch == '\t') return true;
+    if ((flag & VIS_NL) == 0 and ch == '\n') return true;
+    if ((flag & VIS_SAFE) != 0 and (ch == 0x08 or ch == 0x07 or ch == '\r' or graph)) return true;
+    return false;
+}
+
+fn isAsciiGraph(ch: u8) bool {
+    return ch <= 0x7f and ch != ' ' and std.ascii.isPrint(ch);
+}
+
+fn isOctal(ch: u8) bool {
+    return ch >= '0' and ch <= '7';
 }
 
 fn utf8SetSize(size: anytype) T.utf8_char {
@@ -859,6 +1001,27 @@ test "utf8 validation and sanitize follow tmux-style rules" {
     const sanitized = utf8_sanitize(&.{ 'A', 0xf0, 0x9f, 0x99, 0x82, 0x01, 0xff });
     defer xm.allocator.free(sanitized);
     try std.testing.expectEqualStrings("A____", sanitized);
+}
+
+test "utf8 strvis keeps valid utf8 and escapes invalid bytes" {
+    resetUtf8StateForTests();
+
+    const escaped = utf8_strvisx(&.{ 'A', '\n', 0xc3, '(', 0xf0, 0x9f, 0x99, 0x82 }, VIS_OCTAL | VIS_CSTYLE | VIS_TAB | VIS_NL);
+    defer xm.allocator.free(escaped);
+
+    try std.testing.expectEqualStrings("A\\n\\303(🙂", escaped);
+}
+
+test "utf8 strvis handles dollar quoting and exact-length NUL escapes" {
+    resetUtf8StateForTests();
+
+    const shell = utf8_stravis("$HOME", VIS_DQ | VIS_OCTAL | VIS_CSTYLE | VIS_TAB | VIS_NL);
+    defer xm.allocator.free(shell);
+    try std.testing.expectEqualStrings("\\$HOME", shell);
+
+    const nul = utf8_strvisx(&.{ 0, '7' }, VIS_CSTYLE);
+    defer xm.allocator.free(nul);
+    try std.testing.expectEqualStrings("\\0007", nul);
 }
 
 test "utf8_strlen strwidth and cstrhas cover utf8_data strings" {

@@ -46,9 +46,13 @@ var next_client_id: u32 = 0;
 pub fn server_client_create(fd: i32) *T.Client {
     const cl = xm.allocator.create(T.Client) catch unreachable;
     const env = env_mod.environ_create();
+    const now = std.time.milliTimestamp();
 
     cl.* = T.Client{
         .id = next_client_id,
+        .creation_time = now,
+        .activity_time = now,
+        .last_activity_time = now,
         .pid = std.os.linux.getpid(),
         .fd = fd,
         .environ = env,
@@ -285,6 +289,7 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     cl.session = s;
     s.attached += 1;
     if (s.curw) |wl| wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
+    sess.session_update_activity(s, null);
     alerts.alerts_check_session(s);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);

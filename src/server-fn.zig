@@ -162,6 +162,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     const s = cl.session orelse return false;
     const wl = s.curw orelse return false;
     const wp = wl.window.active orelse return false;
+    const now = std.time.milliTimestamp();
+
+    cl.last_activity_time = cl.activity_time;
+    cl.activity_time = now;
+    sess.session_update_activity(s, now);
 
     const current_table = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");

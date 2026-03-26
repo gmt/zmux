@@ -925,7 +925,7 @@ fn eval_name_check_expr(
             const s = ctx_session(ctx) orelse break :blk false;
             var it = s.windows.valueIterator();
             while (it.next()) |wl| {
-                if (std.mem.eql(u8, wl.window.name, expanded.text)) break :blk true;
+                if (std.mem.eql(u8, wl.*.window.name, expanded.text)) break :blk true;
             }
             break :blk false;
         },
@@ -1773,9 +1773,9 @@ fn resolve_session_alerts(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
     var has_silence = false;
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
-        has_activity = has_activity or (wl.flags & T.WINLINK_ACTIVITY != 0);
-        has_bell = has_bell or (wl.flags & T.WINLINK_BELL != 0);
-        has_silence = has_silence or (wl.flags & T.WINLINK_SILENCE != 0);
+        has_activity = has_activity or (wl.*.flags & T.WINLINK_ACTIVITY != 0);
+        has_bell = has_bell or (wl.*.flags & T.WINLINK_BELL != 0);
+        has_silence = has_silence or (wl.*.flags & T.WINLINK_SILENCE != 0);
     }
 
     var out: std.ArrayList(u8) = .{};
@@ -2049,7 +2049,7 @@ test "format_expand resolves direct keys and aliases" {
         .name = xm.xstrdup("alpha"),
         .cwd = "",
         .created = 1234567890,
-        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = undefined,
         .environ = undefined,
     };
@@ -2114,7 +2114,7 @@ test "format_expand handles conditionals and comparisons" {
         .name = xm.xstrdup("beta"),
         .cwd = "",
         .created = 1,
-        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = undefined,
         .environ = undefined,
         .attached = 1,
@@ -2141,7 +2141,7 @@ test "format_expand handles time modifier and incomplete formats" {
         .name = xm.xstrdup("gamma"),
         .cwd = "",
         .created = 0,
-        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = undefined,
         .environ = undefined,
     };
@@ -2218,7 +2218,7 @@ test "format_expand handles match and arithmetic modifiers" {
         .name = xm.xstrdup("fmtbox"),
         .cwd = "",
         .created = 1,
-        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = undefined,
         .environ = undefined,
     };

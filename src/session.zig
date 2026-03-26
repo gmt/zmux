@@ -109,7 +109,7 @@ pub fn session_create(
         .name = actual_name,
         .cwd = xm.xstrdup(cwd),
         .created = std.time.timestamp(),
-        .windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator),
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
         .options = oo,
         .environ = environment,
     };
@@ -132,7 +132,7 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
 
     var wit = s.windows.valueIterator();
     while (wit.next()) |wl| {
-        const gop = window_counts.getOrPut(wl.window) catch unreachable;
+        const gop = window_counts.getOrPut(wl.*.window) catch unreachable;
         if (!gop.found_existing) gop.value_ptr.* = 0;
         gop.value_ptr.* += 1;
     }
@@ -172,14 +172,14 @@ pub fn session_check_name(name: []const u8) ?[]u8 {
 
 // ── Winlink management ────────────────────────────────────────────────────
 
-pub fn winlink_find_by_index(wwl: *std.AutoHashMap(i32, T.Winlink), idx: i32) ?*T.Winlink {
-    return wwl.getPtr(idx);
+pub fn winlink_find_by_index(wwl: *std.AutoHashMap(i32, *T.Winlink), idx: i32) ?*T.Winlink {
+    return wwl.get(idx);
 }
 
-pub fn winlink_find_by_window(wwl: *std.AutoHashMap(i32, T.Winlink), w: *T.Window) ?*T.Winlink {
+pub fn winlink_find_by_window(wwl: *std.AutoHashMap(i32, *T.Winlink), w: *T.Window) ?*T.Winlink {
     var it = wwl.valueIterator();
     while (it.next()) |wl| {
-        if (wl.window == w) return wl;
+        if (wl.*.window == w) return wl.*;
     }
     return null;
 }
@@ -191,11 +191,12 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
         break :blk session_next_index(s);
     } else idx;
 
-    const wl = T.Winlink{ .idx = actual_idx, .session = s, .window = w };
+    const wl = xm.allocator.create(T.Winlink) catch unreachable;
+    wl.* = .{ .idx = actual_idx, .session = s, .window = w };
     s.windows.put(actual_idx, wl) catch unreachable;
     w.references += 1;
     notify.notify_session_window("window-linked", s, w);
-    return s.windows.getPtr(actual_idx);
+    return wl;
 }
 
 pub fn session_detach(_s: *T.Session, _wl: ?*T.Winlink) void {
@@ -204,14 +205,86 @@ pub fn session_detach(_s: *T.Session, _wl: ?*T.Winlink) void {
     _ = session_detach_index(s, wl.idx, "session_detach");
 }
 
-pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) ?T.Winlink {
-    if (s.windows.fetchRemove(idx)) |kv| {
-        if (s.curw != null and s.curw.?.idx == idx) s.curw = null;
-        notify.notify_session_window("window-unlinked", s, kv.value.window);
-        win.window_remove_ref(kv.value.window, from);
-        return kv.value;
+fn session_has_live_winlink_ptr(s: *T.Session, candidate: *T.Winlink) bool {
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        if (wl.* == candidate) return true;
     }
-    return null;
+    return false;
+}
+
+fn session_remove_lastw_reference(s: *T.Session, target: *T.Winlink) void {
+    var i: usize = 0;
+    while (i < s.lastw.items.len) {
+        if (s.lastw.items[i] == target) {
+            _ = s.lastw.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn session_prune_lastw(s: *T.Session) void {
+    var i: usize = 0;
+    while (i < s.lastw.items.len) {
+        const candidate = s.lastw.items[i];
+        if (!session_has_live_winlink_ptr(s, candidate) or (s.curw != null and s.curw.? == candidate)) {
+            _ = s.lastw.orderedRemove(i);
+            continue;
+        }
+        var j: usize = 0;
+        var duplicate = false;
+        while (j < i) : (j += 1) {
+            if (s.lastw.items[j] == candidate) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            _ = s.lastw.orderedRemove(i);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+pub fn session_repair_current(s: *T.Session) void {
+    if (s.curw) |current| {
+        if (!session_has_live_winlink_ptr(s, current))
+            s.curw = null;
+    }
+    session_prune_lastw(s);
+    if (s.curw == null)
+        s.curw = if (s.lastw.items.len > 0) s.lastw.items[0] else session_first_winlink(s);
+    if (s.curw) |current|
+        session_remove_lastw_reference(s, current);
+}
+
+pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
+    session_repair_current(s);
+    if (!session_has_live_winlink_ptr(s, wl)) return false;
+    if (s.curw == wl) return true;
+    session_remove_lastw_reference(s, wl);
+    if (s.curw) |old| {
+        session_remove_lastw_reference(s, old);
+        s.lastw.insert(xm.allocator, 0, old) catch unreachable;
+    }
+    s.curw = wl;
+    return true;
+}
+
+pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) bool {
+    if (s.windows.fetchRemove(idx)) |kv| {
+        const wl = kv.value;
+        if (s.curw == wl) s.curw = null;
+        session_remove_lastw_reference(s, wl);
+        notify.notify_session_window("window-unlinked", s, wl.window);
+        win.window_remove_ref(wl.window, from);
+        xm.allocator.destroy(wl);
+        session_repair_current(s);
+        return true;
+    }
+    return false;
 }
 
 pub fn session_has_window(s: *T.Session, w: *T.Window) bool {
@@ -224,7 +297,7 @@ pub fn session_window_link_count(w: *T.Window) u32 {
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window == w) count += 1;
+            if (wl.*.window == w) count += 1;
         }
     }
     return count;
@@ -240,7 +313,7 @@ pub fn session_renumber_windows(s: *T.Session) void {
     const RenumberEntry = struct {
         old_idx: i32,
         current: bool,
-        wl: T.Winlink,
+        wl: *T.Winlink,
     };
 
     const old_current_idx = if (s.curw) |wl| wl.idx else -1;
@@ -250,8 +323,8 @@ pub fn session_renumber_windows(s: *T.Session) void {
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
         entries.append(xm.allocator, .{
-            .old_idx = wl.idx,
-            .current = wl.idx == old_current_idx,
+            .old_idx = wl.*.idx,
+            .current = wl.*.idx == old_current_idx,
             .wl = wl.*,
         }) catch unreachable;
     }
@@ -261,20 +334,20 @@ pub fn session_renumber_windows(s: *T.Session) void {
         }
     }.less);
 
-    var new_windows = std.AutoHashMap(i32, T.Winlink).init(xm.allocator);
+    var new_windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator);
     var next_idx: i32 = @intCast(opts.options_get_number(s.options, "base-index"));
     var new_current_idx: ?i32 = null;
     for (entries.items) |entry| {
-        var wl = entry.wl;
-        wl.idx = next_idx;
-        new_windows.put(next_idx, wl) catch unreachable;
+        entry.wl.idx = next_idx;
+        new_windows.put(next_idx, entry.wl) catch unreachable;
         if (entry.current) new_current_idx = next_idx;
         next_idx += 1;
     }
 
     s.windows.deinit();
     s.windows = new_windows;
-    s.curw = if (new_current_idx) |idx| s.windows.getPtr(idx) else session_first_winlink(s);
+    s.curw = if (new_current_idx) |idx| s.windows.get(idx) else session_first_winlink(s);
+    session_prune_lastw(s);
 }
 
 
@@ -282,7 +355,7 @@ pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {
     var best: ?*T.Winlink = null;
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
-        if (best == null or wl.idx < best.?.idx) best = wl;
+        if (best == null or wl.*.idx < best.?.idx) best = wl.*;
     }
     return best;
 }
@@ -317,4 +390,95 @@ pub fn session_previous_session(
         return sorted[(idx + sorted.len - 1) % sorted.len];
     }
     return null;
+}
+
+test "session_set_current maintains last-window history" {
+    var s = T.Session{
+        .id = 1,
+        .name = xm.xstrdup("session-history"),
+        .cwd = "",
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = undefined,
+    };
+    defer {
+        var it = s.windows.valueIterator();
+        while (it.next()) |wl| xm.allocator.destroy(wl.*);
+        s.windows.deinit();
+        s.lastw.deinit(xm.allocator);
+        xm.allocator.free(s.name);
+    }
+
+    const w1 = xm.allocator.create(T.Window) catch unreachable;
+    const w2 = xm.allocator.create(T.Window) catch unreachable;
+    defer xm.allocator.destroy(w1);
+    defer xm.allocator.destroy(w2);
+    w1.* = .{ .id = 1, .name = xm.xstrdup("one"), .sx = 80, .sy = 24, .options = undefined };
+    w2.* = .{ .id = 2, .name = xm.xstrdup("two"), .sx = 80, .sy = 24, .options = undefined };
+    defer xm.allocator.free(w1.name);
+    defer xm.allocator.free(w2.name);
+    defer w1.panes.deinit(xm.allocator);
+    defer w1.last_panes.deinit(xm.allocator);
+    defer w1.winlinks.deinit(xm.allocator);
+    defer w2.panes.deinit(xm.allocator);
+    defer w2.last_panes.deinit(xm.allocator);
+    defer w2.winlinks.deinit(xm.allocator);
+
+    const wl1 = xm.allocator.create(T.Winlink) catch unreachable;
+    const wl2 = xm.allocator.create(T.Winlink) catch unreachable;
+    wl1.* = .{ .idx = 0, .session = &s, .window = w1 };
+    wl2.* = .{ .idx = 1, .session = &s, .window = w2 };
+    s.windows.put(0, wl1) catch unreachable;
+    s.windows.put(1, wl2) catch unreachable;
+    s.curw = wl1;
+
+    try std.testing.expect(session_set_current(&s, wl2));
+    try std.testing.expectEqual(wl2, s.curw.?);
+    try std.testing.expectEqual(@as(usize, 1), s.lastw.items.len);
+    try std.testing.expectEqual(wl1, s.lastw.items[0]);
+
+    try std.testing.expect(session_set_current(&s, wl1));
+    try std.testing.expectEqual(wl1, s.curw.?);
+    try std.testing.expectEqual(@as(usize, 1), s.lastw.items.len);
+    try std.testing.expectEqual(wl2, s.lastw.items[0]);
+}
+
+test "session_repair_current drops non-live winlinks" {
+    var s = T.Session{
+        .id = 2,
+        .name = xm.xstrdup("session-repair"),
+        .cwd = "",
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = undefined,
+    };
+    defer {
+        var it = s.windows.valueIterator();
+        while (it.next()) |wl| xm.allocator.destroy(wl.*);
+        s.windows.deinit();
+        s.lastw.deinit(xm.allocator);
+        xm.allocator.free(s.name);
+    }
+
+    const w = xm.allocator.create(T.Window) catch unreachable;
+    defer xm.allocator.destroy(w);
+    w.* = .{ .id = 3, .name = xm.xstrdup("live"), .sx = 80, .sy = 24, .options = undefined };
+    defer xm.allocator.free(w.name);
+    defer w.panes.deinit(xm.allocator);
+    defer w.last_panes.deinit(xm.allocator);
+    defer w.winlinks.deinit(xm.allocator);
+
+    const live = xm.allocator.create(T.Winlink) catch unreachable;
+    const stale = xm.allocator.create(T.Winlink) catch unreachable;
+    defer xm.allocator.destroy(stale);
+    live.* = .{ .idx = 0, .session = &s, .window = w };
+    stale.* = .{ .idx = 9, .session = &s, .window = w };
+    s.windows.put(0, live) catch unreachable;
+    s.curw = stale;
+    s.lastw.append(xm.allocator, stale) catch unreachable;
+    s.lastw.append(xm.allocator, live) catch unreachable;
+
+    session_repair_current(&s);
+    try std.testing.expectEqual(live, s.curw.?);
+    try std.testing.expectEqual(@as(usize, 0), s.lastw.items.len);
 }

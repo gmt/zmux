@@ -33,6 +33,7 @@ const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const key_string = @import("key-string.zig");
 const names = @import("names.zig");
+const paste_mod = @import("paste.zig");
 const sess = @import("session.zig");
 
 pub const FormatContext = struct {
@@ -42,6 +43,7 @@ pub const FormatContext = struct {
     winlink: ?*T.Winlink = null,
     window: ?*T.Window = null,
     pane: ?*T.WindowPane = null,
+    paste_buffer: ?*paste_mod.PasteBuffer = null,
 
     message_text: ?[]const u8 = null,
 
@@ -113,6 +115,11 @@ const resolver_table = [_]Resolver{
     .{ .name = "alternate_on", .func = resolve_alternate_on },
     .{ .name = "alternate_saved_x", .func = resolve_alternate_saved_x },
     .{ .name = "alternate_saved_y", .func = resolve_alternate_saved_y },
+    .{ .name = "buffer_created", .func = resolve_buffer_created },
+    .{ .name = "buffer_full", .func = resolve_buffer_full },
+    .{ .name = "buffer_name", .func = resolve_buffer_name },
+    .{ .name = "buffer_sample", .func = resolve_buffer_sample },
+    .{ .name = "buffer_size", .func = resolve_buffer_size },
     .{ .name = "cursor_flag", .func = resolve_cursor_flag },
     .{ .name = "cursor_x", .func = resolve_cursor_x },
     .{ .name = "cursor_y", .func = resolve_cursor_y },
@@ -1536,6 +1543,10 @@ fn ctx_pane(ctx: *const FormatContext) ?*T.WindowPane {
     return null;
 }
 
+fn ctx_buffer(ctx: *const FormatContext) ?*paste_mod.PasteBuffer {
+    return ctx.paste_buffer;
+}
+
 fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
 }
@@ -1721,6 +1732,34 @@ fn resolve_alternate_saved_y(alloc: std.mem.Allocator, ctx: *const FormatContext
     _ = alloc;
     const wp = ctx_pane(ctx) orelse return null;
     return xm.xasprintf("{d}", .{wp.screen.saved_cy});
+}
+
+fn resolve_buffer_created(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const pb = ctx_buffer(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{paste_mod.paste_buffer_created(pb)});
+}
+
+fn resolve_buffer_full(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const pb = ctx_buffer(ctx) orelse return null;
+    return alloc.dupe(u8, paste_mod.paste_buffer_data(pb, null)) catch unreachable;
+}
+
+fn resolve_buffer_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const pb = ctx_buffer(ctx) orelse return null;
+    return alloc.dupe(u8, paste_mod.paste_buffer_name(pb)) catch unreachable;
+}
+
+fn resolve_buffer_sample(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const pb = ctx_buffer(ctx) orelse return null;
+    return paste_mod.paste_make_sample(pb);
+}
+
+fn resolve_buffer_size(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const pb = ctx_buffer(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{paste_mod.paste_buffer_data(pb, null).len});
 }
 
 fn resolve_cursor_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

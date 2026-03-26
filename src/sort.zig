@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const key_bindings = @import("key-bindings.zig");
+const paste_mod = @import("paste.zig");
 const sess = @import("session.zig");
 const registry = @import("client-registry.zig");
 
@@ -97,6 +98,18 @@ pub fn sorted_clients(sort_crit: T.SortCriteria) []*T.Client {
     return items;
 }
 
+pub fn sorted_buffers(sort_crit: T.SortCriteria) []*paste_mod.PasteBuffer {
+    var list: std.ArrayList(*paste_mod.PasteBuffer) = .{};
+    var pb = paste_mod.paste_walk(null);
+    while (pb) |current| : (pb = paste_mod.paste_walk(current)) {
+        list.append(xm.allocator, current) catch unreachable;
+    }
+
+    const items = list.toOwnedSlice(xm.allocator) catch unreachable;
+    sort_buffers_in_place(items, sort_crit);
+    return items;
+}
+
 pub fn sorted_key_bindings(sort_crit: T.SortCriteria) []*T.KeyBinding {
     var list: std.ArrayList(*T.KeyBinding) = .{};
     var table = key_bindings.key_bindings_first_table();
@@ -160,6 +173,15 @@ fn sort_clients_in_place(items: []*T.Client, sort_crit: T.SortCriteria) void {
     std.sort.block(*T.Client, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, client_less_than);
 }
 
+fn sort_buffers_in_place(items: []*paste_mod.PasteBuffer, sort_crit: T.SortCriteria) void {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
+        if (sort_crit.reversed) reverse_slice(*paste_mod.PasteBuffer, items);
+        return;
+    }
+    std.sort.block(*paste_mod.PasteBuffer, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, buffer_less_than);
+}
+
 fn sort_key_bindings_in_place(items: []*T.KeyBinding, sort_crit: T.SortCriteria) void {
     const effective = if (sort_crit.order == .end) T.SortOrder.index else sort_crit.order;
     if (effective == .order) {
@@ -194,6 +216,10 @@ fn pane_less_than(ctx: PaneSortContext, a: *T.WindowPane, b: *T.WindowPane) bool
 
 fn client_less_than(ctx: SortContext, a: *T.Client, b: *T.Client) bool {
     return order_to_less(compare_client(a, b, ctx.order), ctx.reversed);
+}
+
+fn buffer_less_than(ctx: SortContext, a: *paste_mod.PasteBuffer, b: *paste_mod.PasteBuffer) bool {
+    return order_to_less(compare_buffer(a, b, ctx.order), ctx.reversed);
 }
 
 fn key_binding_less_than(ctx: SortContext, a: *T.KeyBinding, b: *T.KeyBinding) bool {
@@ -252,6 +278,17 @@ fn compare_client(a: *T.Client, b: *T.Client, order: T.SortOrder) std.math.Order
     };
     if (primary != .eq) return primary;
     return std.math.order(a.id, b.id);
+}
+
+fn compare_buffer(a: *paste_mod.PasteBuffer, b: *paste_mod.PasteBuffer, order: T.SortOrder) std.math.Order {
+    const primary = switch (order) {
+        .creation => std.math.order(a.order, b.order),
+        .name => std.mem.order(u8, a.name, b.name),
+        .size => std.math.order(a.data.len, b.data.len),
+        else => std.math.Order.eq,
+    };
+    if (primary != .eq) return primary;
+    return std.mem.order(u8, a.name, b.name);
 }
 
 fn compare_key_binding(a: *T.KeyBinding, b: *T.KeyBinding, order: T.SortOrder) std.math.Order {
@@ -325,6 +362,27 @@ test "sort_order_from_string parses aliases" {
     try std.testing.expectEqual(T.SortOrder.index, sort_order_from_string("key"));
     try std.testing.expectEqual(T.SortOrder.name, sort_order_from_string("title"));
     try std.testing.expectEqual(T.SortOrder.end, sort_order_from_string("mystery"));
+}
+
+test "sorted_buffers preserves walk order and supports creation sort" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("bbb"), "beta", &cause));
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("a"), "alpha", &cause));
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("cccc"), "gamma", &cause));
+
+    const natural = sorted_buffers(.{});
+    defer xm.allocator.free(natural);
+    try std.testing.expectEqualStrings("gamma", natural[0].name);
+    try std.testing.expectEqualStrings("alpha", natural[1].name);
+    try std.testing.expectEqualStrings("beta", natural[2].name);
+
+    const by_creation = sorted_buffers(.{ .order = .creation });
+    defer xm.allocator.free(by_creation);
+    try std.testing.expectEqualStrings("beta", by_creation[0].name);
+    try std.testing.expectEqualStrings("alpha", by_creation[1].name);
+    try std.testing.expectEqualStrings("gamma", by_creation[2].name);
 }
 
 test "sorted_key_bindings_table supports index modifier and order views" {

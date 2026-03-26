@@ -30,6 +30,7 @@ const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const utf8_mod = @import("utf8.zig");
 const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -141,21 +142,63 @@ fn render_show_buffer_view(wp: *T.WindowPane, data: []const u8) void {
     wp.screen.cursor_visible = false;
 
     var ctx = T.ScreenWriteCtx{ .s = wp.screen };
-    for (data) |byte| {
-        switch (byte) {
-            '\n' => screen_write.newline(&ctx),
-            '\r' => screen_write.carriage_return(&ctx),
-            '\t' => screen_write.tab(&ctx),
-            else => screen_write.putc(&ctx, view_byte(byte)),
-        }
+    var start: usize = 0;
+    for (data, 0..) |byte, idx| {
+        if (byte != '\n') continue;
+        render_show_buffer_line(&ctx, data[start..idx]);
+        screen_write.newline(&ctx);
+        start = idx + 1;
+    }
+    render_show_buffer_line(&ctx, data[start..]);
+}
+
+fn render_show_buffer_line(ctx: *T.ScreenWriteCtx, line: []const u8) void {
+    var remaining = line;
+    while (remaining.len != 0) {
+        const consumed = render_show_buffer_unit(ctx, remaining);
+        remaining = remaining[consumed..];
     }
 }
 
-fn view_byte(byte: u8) u8 {
-    return switch (byte) {
-        0x20...0x7e => byte,
-        else => '.',
-    };
+fn render_show_buffer_unit(ctx: *T.ScreenWriteCtx, bytes: []const u8) usize {
+    const byte = bytes[0];
+    switch (byte) {
+        '\r' => {
+            screen_write.carriage_return(ctx);
+            return 1;
+        },
+        '\t' => {
+            screen_write.tab(ctx);
+            return 1;
+        },
+        0x20...0x7e => {
+            screen_write.putc(ctx, byte);
+            return 1;
+        },
+        else => {},
+    }
+
+    var ud: T.Utf8Data = undefined;
+    if (utf8_mod.utf8_open(&ud, byte) == .more) {
+        var idx: usize = 1;
+        var state: T.Utf8State = .more;
+        while (idx < bytes.len and state == .more) : (idx += 1) {
+            state = utf8_mod.utf8_append(&ud, bytes[idx]);
+        }
+        if (state == .done) {
+            screen_write.putn(ctx, ud.data[0..ud.size]);
+            return ud.size;
+        }
+    }
+
+    render_show_buffer_escape(ctx, byte);
+    return 1;
+}
+
+fn render_show_buffer_escape(ctx: *T.ScreenWriteCtx, byte: u8) void {
+    const escaped = utf8_mod.utf8_strvisx(&.{byte}, utf8_mod.VIS_OCTAL | utf8_mod.VIS_CSTYLE | utf8_mod.VIS_NOSLASH);
+    defer xm.allocator.free(escaped);
+    screen_write.putn(ctx, escaped);
 }
 
 fn write_buffer(
@@ -635,6 +678,80 @@ test "show-buffer attached view mode dismisses on the next key" {
 
     try std.testing.expect(!screen_mod.screen_alternate_active(&pane));
     try std.testing.expect(window_mod.window_pane_mode(&pane) == null);
+}
+
+test "show-buffer attached view escapes control bytes instead of replacing them" {
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("show-buffer-escapes");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(16, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(16, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 11,
+        .name = window_name,
+        .sx = 16,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 13,
+        .window = &window,
+        .options = undefined,
+        .sx = 16,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| close_show_buffer_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 6,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+
+    try std.testing.expect(show_buffer_in_view_mode(&client, &.{ 'A', 0x01, 0x7f, 'B' }));
+
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    try std.testing.expectEqualStrings("A\\001\\177B", first_row);
 }
 
 test "show-buffer writes stdout for detached clients without sessions" {

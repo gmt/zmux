@@ -114,6 +114,7 @@ const cmd_pipe_pane = @import("cmd-pipe-pane.zig");
 const cmd_respawn_pane = @import("cmd-respawn-pane.zig");
 const cmd_respawn_window = @import("cmd-respawn-window.zig");
 const cmd_rotate_window = @import("cmd-rotate-window.zig");
+const cmd_wait_for = @import("cmd-wait-for.zig");
 
 const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry,
@@ -178,6 +179,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_respawn_pane.entry,
     &cmd_respawn_window.entry,
     &cmd_rotate_window.entry,
+    &cmd_wait_for.entry,
 };
 
 // ── Lookup ────────────────────────────────────────────────────────────────

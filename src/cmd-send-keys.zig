@@ -26,6 +26,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const input_keys = @import("input-keys.zig");
 const key_string = @import("key-string.zig");
+const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 
@@ -150,13 +151,13 @@ fn send_hex_byte(wp: *T.WindowPane, text: []const u8, item: *cmdq.CmdqItem) T.Cm
         cmdq.cmdq_error(item, "invalid hex byte: {s}", .{text});
         return .@"error";
     };
-    write_all(wp.fd, &.{value}, item) catch return .@"error";
+    pane_input.write_all(wp.fd, &.{value}, item) catch return .@"error";
     return .normal;
 }
 
 fn send_arg(wp: *T.WindowPane, value: []const u8, literal: bool, item: *cmdq.CmdqItem) T.CmdRetval {
     if (literal) {
-        write_all(wp.fd, value, item) catch return .@"error";
+        pane_input.write_all(wp.fd, value, item) catch return .@"error";
         return .normal;
     }
 
@@ -165,7 +166,7 @@ fn send_arg(wp: *T.WindowPane, value: []const u8, literal: bool, item: *cmdq.Cmd
         return send_key(wp, key, true, item);
     }
 
-    write_all(wp.fd, value, item) catch return .@"error";
+    pane_input.write_all(wp.fd, value, item) catch return .@"error";
     return .normal;
 }
 
@@ -175,33 +176,15 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
         error.UnsupportedKey => {
             if (allow_literal_fallback) {
                 const text = key_string.key_string_lookup_key(key, 0);
-                write_all(wp.fd, text, item) catch return .@"error";
+                pane_input.write_all(wp.fd, text, item) catch return .@"error";
                 return .normal;
             }
             cmdq.cmdq_error(item, "unsupported key: {s}", .{key_string.key_string_lookup_key(key, 0)});
             return .@"error";
         },
     };
-    write_all(wp.fd, bytes, item) catch return .@"error";
+    pane_input.write_all(wp.fd, bytes, item) catch return .@"error";
     return .normal;
-}
-
-fn write_all(fd: i32, bytes: []const u8, item: *cmdq.CmdqItem) !void {
-    var rest = bytes;
-    while (rest.len > 0) {
-        const written = std.posix.write(fd, rest) catch |err| {
-            switch (err) {
-                error.WouldBlock => cmdq.cmdq_error(item, "pane input would block", .{}),
-                else => cmdq.cmdq_error(item, "pane input failed", .{}),
-            }
-            return err;
-        };
-        if (written == 0) {
-            cmdq.cmdq_error(item, "pane input closed", .{});
-            return error.BrokenPipe;
-        }
-        rest = rest[written..];
-    }
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

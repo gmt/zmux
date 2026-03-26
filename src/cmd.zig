@@ -74,6 +74,7 @@ const cmd_list_sessions = @import("cmd-list-sessions.zig");
 const cmd_list_windows = @import("cmd-list-windows.zig");
 const cmd_list_panes = @import("cmd-list-panes.zig");
 const cmd_list_clients = @import("cmd-list-clients.zig");
+const cmd_list_buffers = @import("cmd-list-buffers.zig");
 const cmd_display_message = @import("cmd-display-message.zig");
 const cmd_start_server = @import("cmd-start-server.zig");
 const cmd_select_window = @import("cmd-select-window.zig");
@@ -124,6 +125,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_list_windows.entry,
     &cmd_list_panes.entry,
     &cmd_list_clients.entry,
+    &cmd_list_buffers.entry,
     &cmd_display_message.entry,
     &cmd_start_server.entry,
     &cmd_select_window.entry,

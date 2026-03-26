@@ -25,6 +25,8 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
+const proc_mod = @import("proc.zig");
+const protocol = @import("zmux-protocol.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -156,6 +158,11 @@ fn free_options_for_tests() void {
     opts.options_free(opts.global_w_options);
     opts.options_free(opts.global_s_options);
     opts.options_free(opts.global_options);
+}
+
+fn test_peer_dispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+    _ = _imsg;
+    _ = _arg;
 }
 
 test "save-buffer writes and appends a named buffer using client cwd for relative paths" {
@@ -445,6 +452,148 @@ test "show-buffer writes stdout for detached clients without sessions" {
     var output: [32]u8 = undefined;
     const got = try std.posix.read(pipe_fds[0], output[0..]);
     try std.testing.expectEqualStrings("detached", output[0..got]);
+}
+
+test "save-buffer writes stdout when given dash for detached clients" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("stdout-save"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "-" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(saved_stdout);
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+
+    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
+    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
+    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
+    std.posix.close(pipe_fds[1]);
+
+    var output: [32]u8 = undefined;
+    const got = try std.posix.read(pipe_fds[0], output[0..]);
+    try std.testing.expectEqualStrings("stdout-save", output[0..got]);
+}
+
+test "save-buffer reports bad file descriptor for dash on attached clients" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("attached-save"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .flags = T.CLIENT_ATTACHED,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "-" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+
+    try std.posix.dup2(pipe_fds[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(save, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
+    std.posix.close(pipe_fds[1]);
+
+    var output: [64]u8 = undefined;
+    const got = try std.posix.read(pipe_fds[0], output[0..]);
+    try std.testing.expectEqualStrings("Bad file descriptor: -\n", output[0..got]);
+}
+
+test "show-buffer writes raw bytes over the peer transport for control clients" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("peer-data"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "save-buffer-test-peer" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = &env,
+        .flags = T.CLIENT_CONTROL,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const show = try cmd_mod.cmd_parse_one(&.{ "show-buffer", "-b", "named" }, null, &cause);
+    defer cmd_mod.cmd_free(show);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(show, &item));
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+    try std.testing.expectEqualStrings("peer-data", payload[@sizeOf(i32)..]);
 }
 
 test "save-buffer reports strerror text for write failures" {

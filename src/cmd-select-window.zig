@@ -28,7 +28,7 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
     const wl = target.wl orelse return .@"error";
 
-    s.curw = wl;
+    _ = sess.session_set_current(s, wl);
     // Update client if one is attached
     if (cl) |c| {
         if (c.session == s) {
@@ -59,7 +59,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "create window failed: {s}", .{cause orelse "unknown"});
         return .@"error";
     };
-    if (!args.has('d')) s.curw = wl;
+    if (!args.has('d')) _ = sess.session_set_current(s, wl);
     server_fn.server_redraw_session(s);
     if (args.has('P')) {
         const state = T.CmdFindState{

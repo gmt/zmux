@@ -29,6 +29,8 @@ const key_string = @import("key-string.zig");
 const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
+const colour_mod = @import("colour.zig");
+const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -44,10 +46,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "mouse event send-keys not supported yet", .{});
         return .@"error";
     }
-    if (args.has('R')) {
-        cmdq.cmdq_error(item, "terminal reset send-keys not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('X')) {
         cmdq.cmdq_error(item, "mode-command send-keys not supported yet", .{});
         return .@"error";
@@ -59,10 +57,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
     const wl = target.wl orelse return .@"error";
     const wp = target.wp orelse return .@"error";
-    if (wp.fd < 0) {
-        cmdq.cmdq_error(item, "pane is not accepting input", .{});
-        return .@"error";
-    }
 
     const ctx = format_mod.FormatContext{
         .item = @ptrCast(item),
@@ -81,6 +75,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const repeat = parse_repeat_count(args.get('N'), item) orelse return .@"error";
 
     if (cmd.entry == &entry_prefix) {
+        if (wp.fd < 0) {
+            cmdq.cmdq_error(item, "pane is not accepting input", .{});
+            return .@"error";
+        }
         const name = if (args.has('2')) "prefix2" else "prefix";
         const prefix_text = opts.options_get_string(s.options, name);
         if (prefix_text.len == 0) return .normal;
@@ -96,8 +94,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
+    if (args.has('R')) reset_pane(wp);
+
     if (args.count() == 0) {
+        if (args.has('N') or args.has('R')) return .normal;
         cmdq.cmdq_error(item, "implicit key replay not supported yet", .{});
+        return .@"error";
+    }
+
+    if (wp.fd < 0) {
+        cmdq.cmdq_error(item, "pane is not accepting input", .{});
         return .@"error";
     }
 
@@ -114,6 +120,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
     return .normal;
+}
+
+fn reset_pane(wp: *T.WindowPane) void {
+    colour_mod.colour_palette_clear(&wp.palette);
+    window_mod.window_pane_reset_contents(wp);
+    wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED | T.PANE_REDRAW;
 }
 
 fn expand_values(args: *const @import("arguments.zig").Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
@@ -201,8 +213,8 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub const entry_prefix: cmd_mod.CmdEntry = .{
     .name = "send-prefix",
     .alias = null,
-    .usage = "[-2] [-N repeat-count] [-t target-pane]",
-    .template = "2N:t:",
+    .usage = "[-2] [-t target-pane]",
+    .template = "2t:",
     .lower = 0,
     .upper = 0,
     .flags = T.CMD_AFTERHOOK,
@@ -331,6 +343,40 @@ test "send-keys expands formats before writing" {
     var buf: [64]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("send-format-test:logs\r", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys -R resets pane state before writing keys" {
+    const grid = @import("grid.zig");
+
+    const setup = try test_session_with_empty_pane("send-reset-test");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-reset-test", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    grid.set_ascii(setup.wp.base.grid, 0, 0, 'X');
+    try setup.wp.input_pending.appendSlice(xm.allocator, "leftover");
+    setup.wp.palette.fg = 2;
+    setup.wp.palette.bg = 4;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-R", "-t", "send-reset-test:0.0", "Enter" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("\r", buf[0..n]);
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(setup.wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(usize, 0), setup.wp.input_pending.items.len);
+    try std.testing.expectEqual(@as(i32, 8), setup.wp.palette.fg);
+    try std.testing.expectEqual(@as(i32, 8), setup.wp.palette.bg);
+    try std.testing.expect(setup.wp.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(setup.wp.flags & T.PANE_STYLECHANGED != 0);
+    try std.testing.expect(setup.wp.flags & T.PANE_THEMECHANGED != 0);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
 }

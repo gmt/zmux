@@ -37,6 +37,7 @@ const build_options = @import("build_options");
 const client_registry = @import("client-registry.zig");
 const notify = @import("notify.zig");
 const server_acl = @import("server-acl.zig");
+const cmd_wait_for = @import("cmd-wait-for.zig");
 
 // ── Global server state ───────────────────────────────────────────────────
 
@@ -161,23 +162,31 @@ fn server_loop() bool {
     const exit_unattached = opts.options_get_number(opts.global_options, "exit-unattached");
     const nsess = sess.sessions.count();
     const ncli = client_registry.clients.items.len;
+    var attached_clients: usize = 0;
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != null) attached_clients += 1;
+    }
 
-    log.log_debug("server_loop: exit_empty={d} exit_unattached={d} nsess={d} ncli={d} server_exit={}", .{
-        exit_empty, exit_unattached, nsess, ncli, server_exit,
+    log.log_debug("server_loop: exit_empty={d} exit_unattached={d} nsess={d} ncli={d} attached={d} server_exit={}", .{
+        exit_empty, exit_unattached, nsess, ncli, attached_clients, server_exit,
     });
 
     // If exit-empty is off and we haven't been told to exit, stay alive
     if (exit_empty != 1 and !server_exit)
         return false;
 
-    // While clients are connected, stay alive
-    if (ncli > 0)
-        return false;
-
     // While sessions exist and exit-unattached is off, stay alive
     if (exit_unattached != 1) {
         if (nsess > 0) return false;
     }
+
+    if (attached_clients > 0)
+        return false;
+
+    // Wake any detached wait-for clients before deciding if the server can exit.
+    cmd_wait_for.cmd_wait_for_flush();
+    if (client_registry.clients.items.len > 0)
+        return false;
 
     log.log_debug("server_loop: exiting", .{});
     return true;

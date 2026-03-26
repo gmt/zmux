@@ -381,11 +381,21 @@ pub fn server_client_set_key_table(cl: *T.Client, name: ?[]const u8) void {
     if (name) |new_name| cl.key_table_name = xm.xstrdup(new_name);
 }
 
-pub fn server_client_get_cwd(cl: ?*T.Client, _s: ?*T.Session) []const u8 {
-    _ = _s;
+pub fn server_client_get_cwd(cl: ?*T.Client, s: ?*T.Session) []const u8 {
     if (cl) |c_val| {
-        if (c_val.cwd) |cwd| return cwd;
+        if (c_val.session == null) {
+            if (c_val.cwd) |cwd| return cwd;
+        }
     }
+    if (s) |session| {
+        if (session.cwd.len != 0) return session.cwd;
+    }
+    if (cl) |c_val| {
+        if (c_val.session) |session| {
+            if (session.cwd.len != 0) return session.cwd;
+        }
+    }
+    if (std.posix.getenv("HOME")) |home| return home;
     return "/";
 }
 

@@ -87,22 +87,23 @@ fn read_buffer(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) !
 
     if (std.mem.eql(u8, resolved.path, "-")) {
         if (client == null or (client.?.flags & (T.CLIENT_ATTACHED | T.CLIENT_CONTROL)) != 0) {
-            cmdq.cmdq_error(item, "BadFileDescriptor: {s}", .{resolved.path});
+            report_errno_path(item, @intFromEnum(std.posix.E.BADF), resolved.path);
             return error.BadFileDescriptor;
         }
         return read_fd_alloc(item, std.posix.STDIN_FILENO, resolved.path);
     }
 
-    const file = std.fs.openFileAbsolute(resolved.path, .{}) catch |err| {
-        cmdq.cmdq_error(item, "{s}: {s}", .{ @errorName(err), resolved.path });
-        return err;
-    };
-    defer file.close();
+    const path_z = xm.xm_dupeZ(resolved.path);
+    defer xm.allocator.free(path_z);
 
-    return file.readToEndAlloc(xm.allocator, std.math.maxInt(usize)) catch |err| {
-        cmdq.cmdq_error(item, "{s}: {s}", .{ @errorName(err), resolved.path });
-        return err;
-    };
+    const fd = c.posix_sys.open(path_z, c.posix_sys.O_RDONLY, @as(c.posix_sys.mode_t, 0));
+    if (fd == -1) {
+        report_last_errno_path(item, resolved.path);
+        return error.OpenFailed;
+    }
+    defer _ = c.posix_sys.close(fd);
+
+    return read_fd_alloc(item, fd, resolved.path);
 }
 
 fn read_fd_alloc(item: *cmdq.CmdqItem, fd: i32, path: []const u8) ![]u8 {
@@ -111,18 +112,32 @@ fn read_fd_alloc(item: *cmdq.CmdqItem, fd: i32, path: []const u8) ![]u8 {
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const got = std.posix.read(fd, buf[0..]) catch |err| {
-            cmdq.cmdq_error(item, "{s}: {s}", .{ @errorName(err), path });
-            return err;
-        };
+        const got = c.posix_sys.read(fd, @ptrCast(buf[0..].ptr), buf.len);
+        if (got == -1) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+            report_last_errno_path(item, path);
+            return error.ReadFailed;
+        }
         if (got == 0) break;
-        out.appendSlice(xm.allocator, buf[0..got]) catch |err| {
-            cmdq.cmdq_error(item, "{s}: {s}", .{ @errorName(err), path });
-            return err;
+        out.appendSlice(xm.allocator, buf[0..@as(usize, @intCast(got))]) catch {
+            report_errno_path(item, @intFromEnum(std.posix.E.NOMEM), path);
+            return error.OutOfMemory;
         };
     }
 
-    return out.toOwnedSlice(xm.allocator);
+    return out.toOwnedSlice(xm.allocator) catch {
+        report_errno_path(item, @intFromEnum(std.posix.E.NOMEM), path);
+        return error.OutOfMemory;
+    };
+}
+
+fn report_last_errno_path(item: *cmdq.CmdqItem, path: []const u8) void {
+    report_errno_path(item, std.c._errno().*, path);
+}
+
+fn report_errno_path(item: *cmdq.CmdqItem, errno_value: c_int, path: []const u8) void {
+    const err = std.mem.span(c.posix_sys.strerror(errno_value));
+    cmdq.cmdq_error(item, "{s}: {s}", .{ err, path });
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -193,6 +208,95 @@ test "load-buffer reads a named buffer from a relative path using client cwd" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(load, &item));
     const pb = paste_mod.paste_get_name("named") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("hello from disk", paste_mod.paste_buffer_data(pb, null));
+}
+
+test "load-buffer reads a named buffer from session cwd when client cwd is missing" {
+    init_options_for_tests();
+    defer free_options_for_tests();
+    paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("buffer.txt", .{});
+    defer file.close();
+    try file.writeAll("hello from session cwd");
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+
+    const session_name = xm.xstrdup("cwd-session");
+    defer xm.allocator.free(session_name);
+
+    var session = T.Session{
+        .id = 1,
+        .name = session_name,
+        .cwd = cwd,
+        .options = @import("options.zig").global_s_options,
+        .environ = &session_env,
+    };
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+    };
+
+    var cause: ?[]u8 = null;
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const load = try cmd_mod.cmd_parse_one(&.{ "load-buffer", "-b", "session-cwd", "buffer.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(load);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(load, &item));
+    const pb = paste_mod.paste_get_name("session-cwd") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello from session cwd", paste_mod.paste_buffer_data(pb, null));
+}
+
+test "load-buffer reports tmux-style strerror text for read failures" {
+    paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+    const missing_path = try std.fmt.allocPrint(xm.allocator, "{s}/missing-buffer.txt", .{cwd});
+    defer xm.allocator.free(missing_path);
+
+    var cause: ?[]u8 = null;
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    const load = try cmd_mod.cmd_parse_one(&.{ "load-buffer", missing_path }, null, &cause);
+    defer cmd_mod.cmd_free(load);
+
+    const saved_stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(saved_stderr);
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+
+    try std.posix.dup2(pipe_fds[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO) catch {};
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(load, &item));
+    try std.posix.dup2(saved_stderr, std.posix.STDERR_FILENO);
+    std.posix.close(pipe_fds[1]);
+
+    var output: [256]u8 = undefined;
+    const got = try std.posix.read(pipe_fds[0], output[0..]);
+
+    const expected = try std.fmt.allocPrint(xm.allocator, "No such file or directory: {s}\n", .{missing_path});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, output[0..got]);
 }
 
 test "load-buffer reads stdin when path is dash" {

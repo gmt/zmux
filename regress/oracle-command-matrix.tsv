@@ -65,8 +65,8 @@ save-buffer	none	unsupported
 select-layout	pane	unsupported
 select-pane	pane	unsupported
 select-window	window	implemented
-send-keys	pane	unsupported
-send-prefix	pane	unsupported
+send-keys	pane	implemented
+send-prefix	pane	implemented
 server-access	pane	unsupported
 set-buffer	none	unsupported
 set-environment	session	unsupported

@@ -164,6 +164,11 @@ pub fn key_bindings_has_repeat(bindings: []const *T.KeyBinding) i32 {
     return 0;
 }
 
+fn key_bindings_read_only(item: *cmdq_mod.CmdqItem, _: ?*anyopaque) T.CmdRetval {
+    cmdq_mod.cmdq_error(item, "client is read-only", .{});
+    return .@"error";
+}
+
 pub fn key_bindings_dispatch(
     binding: *T.KeyBinding,
     item: ?*T.CmdqItem,
@@ -171,9 +176,24 @@ pub fn key_bindings_dispatch(
     event: ?*const T.key_event,
     fs: ?*T.CmdFindState,
 ) ?*T.CmdqItem {
-    _ = fs;
     if (binding.cmdlist) |list| {
-        cmdq_mod.cmdq_append_event(client, @ptrCast(@alignCast(cmd_mod.cmd_list_ref(list))), event);
+        const allowed =
+            client == null or
+            (client.?.flags & T.CLIENT_READONLY == 0) or
+            cmd_mod.cmd_list_all_have(list, T.CMD_READONLY);
+
+        var new_item: *cmdq_mod.CmdqItem = if (allowed) blk: {
+            const state_flags: u32 = if (binding.flags & T.KEY_BINDING_REPEAT != 0) T.CMDQ_STATE_REPEAT else 0;
+            const state = cmdq_mod.cmdq_new_state(fs, event, state_flags);
+            defer cmdq_mod.cmdq_free_state(state);
+            break :blk cmdq_mod.cmdq_get_command(cmd_mod.cmd_list_ref(list), state);
+        } else cmdq_mod.cmdq_get_callback1("key-bindings-read-only", key_bindings_read_only, null);
+
+        if (item) |after| {
+            return @ptrCast(cmdq_mod.cmdq_insert_after(@ptrCast(@alignCast(after)), new_item));
+        }
+        new_item = cmdq_mod.cmdq_append_item(client, new_item);
+        return @ptrCast(new_item);
     }
     return item;
 }
@@ -459,4 +479,79 @@ test "key bindings retain shared cmdlists across default restores" {
 
     key_bindings_reset_table("prefix");
     try std.testing.expectEqual(@as(u32, 2), list.references);
+}
+
+test "key bindings dispatch preserves the supplied current target state" {
+    const args_mod = @import("arguments.zig");
+    const cmd_find = @import("cmd-find.zig");
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+
+    const capture = struct {
+        var seen_session: ?[]const u8 = null;
+
+        fn exec(_: *cmd_mod.Cmd, item: *cmdq_mod.CmdqItem) T.CmdRetval {
+            var target: T.CmdFindState = .{};
+            if (cmd_find.cmd_find_target(&target, item, null, .session, 0) != 0)
+                return .@"error";
+            seen_session = target.s.?.name;
+            return .normal;
+        }
+    };
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "dispatch-current", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("dispatch-current") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&sc, &cause).?;
+
+    const list = xm.allocator.create(cmd_mod.CmdList) catch unreachable;
+    defer cmd_mod.cmd_list_free(list);
+    list.* = .{};
+
+    const entry = cmd_mod.CmdEntry{
+        .name = "key-bindings-current-target-test",
+        .exec = capture.exec,
+    };
+
+    const cmd = xm.allocator.create(cmd_mod.Cmd) catch unreachable;
+    cmd.* = .{
+        .entry = &entry,
+        .args = args_mod.Arguments.init(xm.allocator),
+    };
+    list.append(cmd);
+
+    var binding = T.KeyBinding{
+        .key = 'x',
+        .tablename = "test",
+        .cmdlist = @ptrCast(list),
+    };
+
+    capture.seen_session = null;
+    var current: T.CmdFindState = .{};
+    cmd_find.cmd_find_from_session(&current, s, 0);
+
+    _ = key_bindings_dispatch(&binding, null, null, null, &current);
+    try std.testing.expectEqual(@as(u32, 1), cmdq_mod.cmdq_next(null));
+    try std.testing.expectEqualStrings("dispatch-current", capture.seen_session.?);
 }

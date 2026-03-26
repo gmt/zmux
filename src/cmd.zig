@@ -423,6 +423,15 @@ pub fn cmd_list_any_have(list: *CmdList, flag: u32) bool {
     return false;
 }
 
+pub fn cmd_list_all_have(list_ptr: *T.CmdList, flag: u32) bool {
+    const list: *CmdList = @ptrCast(@alignCast(list_ptr));
+    var cmd = list.head;
+    while (cmd) |c| : (cmd = c.next) {
+        if (c.entry.flags & flag == 0) return false;
+    }
+    return true;
+}
+
 // ── Execution ─────────────────────────────────────────────────────────────
 
 pub fn cmd_execute(cmd: *Cmd, item: *cmdq_mod.CmdqItem) T.CmdRetval {

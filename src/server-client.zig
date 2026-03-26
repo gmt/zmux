@@ -38,6 +38,7 @@ const server_fn = @import("server-fn.zig");
 const c = @import("c.zig");
 const notify = @import("notify.zig");
 const client_registry = @import("client-registry.zig");
+const alerts = @import("alerts.zig");
 
 var next_client_id: u32 = 0;
 
@@ -289,6 +290,8 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     }
     cl.session = s;
     s.attached += 1;
+    if (s.curw) |wl| wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
+    alerts.alerts_check_session(s);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);
     if (old_session != s) notify.notify_client("client-session-changed", cl);

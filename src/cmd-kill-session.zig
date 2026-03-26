@@ -14,6 +14,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const sess = @import("session.zig");
 const srv = @import("server.zig");
+const alerts = @import("alerts.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -24,7 +25,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
 
     if (args.has('C')) {
-        // clear alerts only
+        alerts.alerts_clear_session(s);
         srv.server_redraw_session(s);
         return .normal;
     } else if (args.has('a')) {

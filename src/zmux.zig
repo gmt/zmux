@@ -266,6 +266,7 @@ pub fn getversion() []const u8 {
 
 test {
     _ = @import("attributes.zig");
+    _ = @import("alerts.zig");
     _ = @import("colour.zig");
     _ = @import("grid.zig");
     _ = @import("hyperlinks.zig");

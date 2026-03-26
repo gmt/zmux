@@ -1768,20 +1768,23 @@ fn resolve_session_attached(alloc: std.mem.Allocator, ctx: *const FormatContext)
 
 fn resolve_session_alerts(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const s = ctx_session(ctx) orelse return null;
-    var has_activity = false;
-    var has_bell = false;
-    var has_silence = false;
-    var it = s.windows.valueIterator();
-    while (it.next()) |wl| {
-        has_activity = has_activity or (wl.*.flags & T.WINLINK_ACTIVITY != 0);
-        has_bell = has_bell or (wl.*.flags & T.WINLINK_BELL != 0);
-        has_silence = has_silence or (wl.*.flags & T.WINLINK_SILENCE != 0);
-    }
+    const items = sort_mod.sorted_winlinks_session(s, .{});
+    defer xm.allocator.free(items);
 
     var out: std.ArrayList(u8) = .{};
-    if (has_activity) out.append(alloc, '#') catch unreachable;
-    if (has_bell) out.append(alloc, '!') catch unreachable;
-    if (has_silence) out.append(alloc, '~') catch unreachable;
+    for (items) |wl| {
+        if ((wl.flags & T.WINLINK_ALERTFLAGS) == 0)
+            continue;
+        if (out.items.len != 0)
+            out.append(alloc, ',') catch unreachable;
+        out.writer(alloc).print("{d}", .{wl.idx}) catch unreachable;
+        if ((wl.flags & T.WINLINK_ACTIVITY) != 0)
+            out.append(alloc, '#') catch unreachable;
+        if ((wl.flags & T.WINLINK_BELL) != 0)
+            out.append(alloc, '!') catch unreachable;
+        if ((wl.flags & T.WINLINK_SILENCE) != 0)
+            out.append(alloc, '~') catch unreachable;
+    }
     return out.toOwnedSlice(alloc) catch unreachable;
 }
 
@@ -2133,6 +2136,58 @@ test "format_expand handles conditionals and comparisons" {
     defer xm.allocator.free(out.text);
     try std.testing.expect(out.complete);
     try std.testing.expectEqualStrings("attached 1 1 1 1", out.text);
+}
+
+test "format_expand renders tmux-style session_alerts per window index" {
+    var s = T.Session{
+        .id = 12,
+        .name = xm.xstrdup("alerts"),
+        .cwd = "",
+        .created = 1,
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = undefined,
+    };
+    defer {
+        var it = s.windows.valueIterator();
+        while (it.next()) |wl| xm.allocator.destroy(wl.*);
+        s.windows.deinit();
+        xm.allocator.free(s.name);
+    }
+
+    var w1 = T.Window{ .id = 1, .name = xm.xstrdup("one"), .sx = 80, .sy = 24, .options = undefined };
+    var w2 = T.Window{ .id = 2, .name = xm.xstrdup("two"), .sx = 80, .sy = 24, .options = undefined };
+    var w3 = T.Window{ .id = 3, .name = xm.xstrdup("three"), .sx = 80, .sy = 24, .options = undefined };
+    defer {
+        w1.panes.deinit(xm.allocator);
+        w1.last_panes.deinit(xm.allocator);
+        w1.winlinks.deinit(xm.allocator);
+        xm.allocator.free(w1.name);
+        w2.panes.deinit(xm.allocator);
+        w2.last_panes.deinit(xm.allocator);
+        w2.winlinks.deinit(xm.allocator);
+        xm.allocator.free(w2.name);
+        w3.panes.deinit(xm.allocator);
+        w3.last_panes.deinit(xm.allocator);
+        w3.winlinks.deinit(xm.allocator);
+        xm.allocator.free(w3.name);
+    }
+
+    const wl3 = xm.allocator.create(T.Winlink) catch unreachable;
+    const wl1 = xm.allocator.create(T.Winlink) catch unreachable;
+    const wl2 = xm.allocator.create(T.Winlink) catch unreachable;
+    wl3.* = .{ .idx = 3, .session = &s, .window = &w3, .flags = T.WINLINK_BELL };
+    wl1.* = .{ .idx = 1, .session = &s, .window = &w1, .flags = T.WINLINK_ACTIVITY };
+    wl2.* = .{ .idx = 2, .session = &s, .window = &w2, .flags = T.WINLINK_BELL | T.WINLINK_SILENCE };
+    s.windows.put(wl3.idx, wl3) catch unreachable;
+    s.windows.put(wl1.idx, wl1) catch unreachable;
+    s.windows.put(wl2.idx, wl2) catch unreachable;
+
+    const ctx = FormatContext{ .session = &s };
+    const out = format_expand(xm.allocator, "#{session_alerts}", &ctx);
+    defer xm.allocator.free(out.text);
+    try std.testing.expect(out.complete);
+    try std.testing.expectEqualStrings("1#,2!~,3!", out.text);
 }
 
 test "format_expand handles time modifier and incomplete formats" {

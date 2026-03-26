@@ -72,7 +72,7 @@ pub fn server_kill_window(w: *T.Window, detach_last: bool) void {
 
         var wit = s.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window == w) indices.append(xm.allocator, wl.idx) catch unreachable;
+            if (wl.*.window == w) indices.append(xm.allocator, wl.*.idx) catch unreachable;
         }
 
         for (indices.items) |idx| {

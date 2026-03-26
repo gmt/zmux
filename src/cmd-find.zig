@@ -35,6 +35,7 @@ pub fn cmd_find_valid_state(fs: *const T.CmdFindState) bool {
 /// Walk the state and generate a default find state from the server context.
 pub fn cmd_find_from_session(current: *T.CmdFindState, s: *T.Session, _flags: u32) void {
     _ = _flags;
+    sess.session_repair_current(s);
     current.s = s;
     current.wl = s.curw;
     current.w = if (s.curw) |wl| wl.window else null;
@@ -55,11 +56,16 @@ pub fn cmd_find_target(
     if (target == null or target.?.len == 0) {
         if (cl) |c| {
             if (c.session) |s| {
-                fs.s = s;
-                fs.wl = s.curw;
-                fs.w = if (s.curw) |wl| wl.window else null;
-                fs.wp = if (fs.w) |w| w.active else null;
-                return 0;
+                if (!sess.session_alive(s)) {
+                    c.session = null;
+                } else {
+                    sess.session_repair_current(s);
+                    fs.s = s;
+                    fs.wl = s.curw;
+                    fs.w = if (s.curw) |wl| wl.window else null;
+                    fs.wp = if (fs.w) |w| w.active else null;
+                    return 0;
+                }
             }
         }
         // Fall through to first session
@@ -70,6 +76,7 @@ pub fn cmd_find_target(
             .session => {
                 if (t.len > 0 and t[0] == '$') {
                     if (sess.session_find_by_id_str(t)) |s| {
+                        sess.session_repair_current(s);
                         fs.s = s;
                         fs.wl = s.curw;
                         fs.w = if (s.curw) |wl| wl.window else null;
@@ -84,6 +91,7 @@ pub fn cmd_find_target(
                     name = name[0..colon];
                 if (name.len > 0) {
                     if (sess.session_find(name)) |s| {
+                        sess.session_repair_current(s);
                         fs.s = s;
                         fs.wl = s.curw;
                         fs.w = if (s.curw) |wl| wl.window else null;
@@ -192,6 +200,7 @@ pub fn cmd_find_target(
     // No target specified: use first available session
     var sit = sess.sessions.valueIterator();
     if (sit.next()) |s| {
+        sess.session_repair_current(s.*);
         fs.s = s.*;
         fs.wl = s.*.curw;
         fs.w = if (s.*.curw) |wl| wl.window else null;
@@ -246,7 +255,13 @@ fn find_window_with_index(fs: *T.CmdFindState, cl: ?*T.Client, target: []const u
 fn resolve_window_target_session(cl: ?*T.Client, session_name: []const u8) ?*T.Session {
     if (session_name.len == 0) {
         if (cl) |c| {
-            if (c.session) |s| return s;
+            if (c.session) |s| {
+                if (!sess.session_alive(s)) {
+                    c.session = null;
+                } else {
+                    return s;
+                }
+            }
         }
         var sit = sess.sessions.valueIterator();
         return if (sit.next()) |s| s.* else null;

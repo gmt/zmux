@@ -26,6 +26,7 @@ const cmd_find = @import("cmd-find.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const notify = @import("notify.zig");
+const sess = @import("session.zig");
 const win = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -69,7 +70,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    s.curw = wl;
+    _ = sess.session_set_current(s, wl);
     _ = win.window_set_active_pane(wl.window, wp, true);
 
     const cl = cmdq.cmdq_get_client(item);
@@ -92,7 +93,7 @@ fn exec_last_pane(item: *cmdq.CmdqItem, target_flag: ?[]const u8) T.CmdRetval {
         return .@"error";
     };
 
-    s.curw = wl;
+    _ = sess.session_set_current(s, wl);
     if (!win.window_set_active_pane(wl.window, last, true)) return .normal;
 
     const cl = cmdq.cmdq_get_client(item);
@@ -134,10 +135,10 @@ pub const entry_last: cmd_mod.CmdEntry = .{
 test "select-pane switches active pane and last-pane switches back" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess = @import("session.zig");
+    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
-    sess.session_init_globals(xm.allocator);
+    sess_mod.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
@@ -153,8 +154,8 @@ test "select-pane switches active pane and last-pane switches back" {
     env_mod.global_environ = env_mod.environ_create();
     defer env_mod.environ_free(env_mod.global_environ);
 
-    const s = sess.session_create(null, "select-pane-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
-    defer if (sess.session_find("select-pane-test") != null) sess.session_destroy(s, false, "test");
+    const s = sess_mod.session_create(null, "select-pane-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-test") != null) sess_mod.session_destroy(s, false, "test");
 
     var cause: ?[]u8 = null;
     var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
@@ -183,10 +184,10 @@ test "select-pane switches active pane and last-pane switches back" {
 test "select-pane can set pane title" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess = @import("session.zig");
+    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
-    sess.session_init_globals(xm.allocator);
+    sess_mod.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
@@ -202,8 +203,8 @@ test "select-pane can set pane title" {
     env_mod.global_environ = env_mod.environ_create();
     defer env_mod.environ_free(env_mod.global_environ);
 
-    const s = sess.session_create(null, "select-pane-title", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
-    defer if (sess.session_find("select-pane-title") != null) sess.session_destroy(s, false, "test");
+    const s = sess_mod.session_create(null, "select-pane-title", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-title") != null) sess_mod.session_destroy(s, false, "test");
 
     var cause: ?[]u8 = null;
     var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };

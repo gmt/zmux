@@ -677,7 +677,7 @@ pub const Session = struct {
 
     curw: ?*Winlink = null,
     lastw: std.ArrayList(*Winlink) = .{},
-    windows: std.AutoHashMap(i32, Winlink) = undefined, // keyed by idx
+    windows: std.AutoHashMap(i32, *Winlink) = undefined, // keyed by idx
 
     statusat: i32 = 0,
     statuslines: u32 = 1,

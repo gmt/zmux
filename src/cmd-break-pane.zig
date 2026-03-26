@@ -152,8 +152,8 @@ fn find_result_winlink(dst_s: *T.Session, w: *T.Window, explicit_idx: i32, exclu
     var match: ?*T.Winlink = null;
     var it = dst_s.windows.valueIterator();
     while (it.next()) |wl| {
-        if (wl.window != w or wl.idx == exclude_idx) continue;
-        if (match == null or wl.idx < match.?.idx) match = wl;
+        if (wl.*.window != w or wl.*.idx == exclude_idx) continue;
+        if (match == null or wl.*.idx < match.?.idx) match = wl.*;
     }
     return match;
 }

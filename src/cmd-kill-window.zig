@@ -43,13 +43,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
         var it = s.windows.valueIterator();
         while (it.next()) |current| {
-            if (current.idx == wl.idx) continue;
-            if (current.window == wl.window) {
-                duplicate_links.append(xm.allocator, current.idx) catch unreachable;
+            if (current.*.idx == wl.idx) continue;
+            if (current.*.window == wl.window) {
+                duplicate_links.append(xm.allocator, current.*.idx) catch unreachable;
                 continue;
             }
-            if (!contains_window(other_windows.items, current.window))
-                other_windows.append(xm.allocator, current.window) catch unreachable;
+            if (!contains_window(other_windows.items, current.*.window))
+                other_windows.append(xm.allocator, current.*.window) catch unreachable;
         }
 
         for (duplicate_links.items) |idx| {

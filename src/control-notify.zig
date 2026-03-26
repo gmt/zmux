@@ -40,7 +40,7 @@ fn client_display_name(cl: *T.Client) []const u8 {
 fn session_has_window(s: *T.Session, w: *T.Window) bool {
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
-        if (wl.window == w) return true;
+        if (wl.*.window == w) return true;
     }
     return false;
 }

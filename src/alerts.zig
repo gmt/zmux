@@ -50,7 +50,7 @@ pub fn alerts_reset_all() void {
 pub fn alerts_check_session(s: *T.Session) void {
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
-        _ = alerts_check_all(wl.window);
+        _ = alerts_check_all(wl.*.window);
     }
 }
 
@@ -58,8 +58,8 @@ pub fn alerts_clear_session(s: *T.Session) void {
     s.flags &= ~@as(u32, T.SESSION_ALERTED);
     var it = s.windows.valueIterator();
     while (it.next()) |wl| {
-        wl.window.flags &= ~@as(u32, T.WINDOW_ALERTFLAGS);
-        wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
+        wl.*.window.flags &= ~@as(u32, T.WINDOW_ALERTFLAGS);
+        wl.*.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
     }
     mark_session_redraw(s);
 }
@@ -146,23 +146,23 @@ fn alerts_check_bell(w: *T.Window) u32 {
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window != w)
+            if (wl.*.window != w)
                 continue;
 
-            if (s.*.curw != wl or s.*.attached == 0) {
-                wl.flags |= T.WINLINK_BELL;
+            if (s.*.curw != wl.* or s.*.attached == 0) {
+                wl.*.flags |= T.WINLINK_BELL;
                 mark_session_redraw(s.*);
             }
-            if (!alerts_action_applies(wl, "bell-action"))
+            if (!alerts_action_applies(wl.*, "bell-action"))
                 continue;
 
-            notify.notify_winlink("alert-bell", wl);
+            notify.notify_winlink("alert-bell", wl.*);
 
             if ((s.*.flags & T.SESSION_ALERTED) != 0)
                 continue;
             s.*.flags |= T.SESSION_ALERTED;
 
-            alerts_set_message(wl, "Bell", "visual-bell");
+            alerts_set_message(wl.*, "Bell", "visual-bell");
         }
     }
 
@@ -181,25 +181,25 @@ fn alerts_check_activity(w: *T.Window) u32 {
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window != w)
+            if (wl.*.window != w)
                 continue;
-            if ((wl.flags & T.WINLINK_ACTIVITY) != 0)
+            if ((wl.*.flags & T.WINLINK_ACTIVITY) != 0)
                 continue;
 
-            if (s.*.curw != wl or s.*.attached == 0) {
-                wl.flags |= T.WINLINK_ACTIVITY;
+            if (s.*.curw != wl.* or s.*.attached == 0) {
+                wl.*.flags |= T.WINLINK_ACTIVITY;
                 mark_session_redraw(s.*);
             }
-            if (!alerts_action_applies(wl, "activity-action"))
+            if (!alerts_action_applies(wl.*, "activity-action"))
                 continue;
 
-            notify.notify_winlink("alert-activity", wl);
+            notify.notify_winlink("alert-activity", wl.*);
 
             if ((s.*.flags & T.SESSION_ALERTED) != 0)
                 continue;
             s.*.flags |= T.SESSION_ALERTED;
 
-            alerts_set_message(wl, "Activity", "visual-activity");
+            alerts_set_message(wl.*, "Activity", "visual-activity");
         }
     }
 
@@ -218,25 +218,25 @@ fn alerts_check_silence(w: *T.Window) u32 {
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window != w)
+            if (wl.*.window != w)
                 continue;
-            if ((wl.flags & T.WINLINK_SILENCE) != 0)
+            if ((wl.*.flags & T.WINLINK_SILENCE) != 0)
                 continue;
 
-            if (s.*.curw != wl or s.*.attached == 0) {
-                wl.flags |= T.WINLINK_SILENCE;
+            if (s.*.curw != wl.* or s.*.attached == 0) {
+                wl.*.flags |= T.WINLINK_SILENCE;
                 mark_session_redraw(s.*);
             }
-            if (!alerts_action_applies(wl, "silence-action"))
+            if (!alerts_action_applies(wl.*, "silence-action"))
                 continue;
 
-            notify.notify_winlink("alert-silence", wl);
+            notify.notify_winlink("alert-silence", wl.*);
 
             if ((s.*.flags & T.SESSION_ALERTED) != 0)
                 continue;
             s.*.flags |= T.SESSION_ALERTED;
 
-            alerts_set_message(wl, "Silence", "visual-silence");
+            alerts_set_message(wl.*, "Silence", "visual-silence");
         }
     }
 
@@ -248,7 +248,7 @@ fn clear_session_alerted(w: *T.Window) void {
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
         while (wit.next()) |wl| {
-            if (wl.window == w)
+            if (wl.*.window == w)
                 s.*.flags &= ~@as(u32, T.SESSION_ALERTED);
         }
     }

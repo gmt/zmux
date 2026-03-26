@@ -63,7 +63,7 @@ pub fn sorted_sessions(sort_crit: T.SortCriteria) []*T.Session {
 pub fn sorted_winlinks_session(s: *T.Session, sort_crit: T.SortCriteria) []*T.Winlink {
     var list: std.ArrayList(*T.Winlink) = .{};
     var it = s.windows.valueIterator();
-    while (it.next()) |entry| list.append(xm.allocator, entry) catch unreachable;
+    while (it.next()) |entry| list.append(xm.allocator, entry.*) catch unreachable;
 
     const items = list.toOwnedSlice(xm.allocator) catch unreachable;
     sort_winlinks_in_place(items, sort_crit, .index);
@@ -75,7 +75,7 @@ pub fn sorted_winlinks(sort_crit: T.SortCriteria) []*T.Winlink {
     var sit = sess.sessions.valueIterator();
     while (sit.next()) |s| {
         var wit = s.*.windows.valueIterator();
-        while (wit.next()) |wl| list.append(xm.allocator, wl) catch unreachable;
+        while (wit.next()) |wl| list.append(xm.allocator, wl.*) catch unreachable;
     }
 
     const items = list.toOwnedSlice(xm.allocator) catch unreachable;

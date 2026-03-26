@@ -20,12 +20,14 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const client_registry = @import("client-registry.zig");
 const input_keys = @import("input-keys.zig");
+const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
@@ -40,10 +42,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "mouse event send-keys not supported yet", .{});
         return .@"error";
     }
-    if (args.has('X')) {
-        cmdq.cmdq_error(item, "mode-command send-keys not supported yet", .{});
-        return .@"error";
-    }
 
     var target: T.CmdFindState = .{};
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
@@ -51,6 +49,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
     const wl = target.wl orelse return .@"error";
     const wp = target.wp orelse return .@"error";
+    const wme = window_mod.window_pane_mode(wp);
     const tc = cmdq.cmdq_get_target_client(item);
 
     if (tc != null and tc.?.flags & T.CLIENT_READONLY != 0 and !args.has('X')) {
@@ -73,6 +72,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     defer if (expanded_values) |values| free_expanded_values(values);
 
     const repeat = parse_repeat_count(args.get('N'), &ctx, item) orelse return .@"error";
+    if (args.has('N') and wme != null and (args.has('X') or args.count() == 0)) {
+        if (wme.?.mode.command == null) {
+            cmdq.cmdq_error(item, "not in a mode", .{});
+            return .@"error";
+        }
+        wme.?.prefix = repeat;
+    }
 
     if (cmd.entry == &entry_prefix) {
         const name = if (args.has('2')) "prefix2" else "prefix";
@@ -85,8 +91,19 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
         var n = repeat;
         while (n > 0) : (n -= 1) {
-            if (inject_key(wp, tc, key, false, false, item) != .normal) return .@"error";
+            if (inject_key(s, wl, wp, tc, key, false, false, item) != .normal) return .@"error";
         }
+        return .normal;
+    }
+
+    if (args.has('X')) {
+        if (wme == null or wme.?.mode.command == null) {
+            cmdq.cmdq_error(item, "not in a mode", .{});
+            return .@"error";
+        }
+        const event = cmdq.cmdq_get_event(item);
+        const mouse: ?*const T.MouseEvent = if (event.m.valid) &event.m else null;
+        wme.?.mode.command.?(wme.?, tc, s, wl, @ptrCast(args), mouse);
         return .normal;
     }
 
@@ -99,7 +116,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
         var replay_count: u32 = repeat;
         while (replay_count > 0) : (replay_count -= 1) {
-            if (inject_key(wp, tc, event.key, false, false, item) != .normal) return .@"error";
+            if (inject_key(s, wl, wp, tc, event.key, false, false, item) != .normal) return .@"error";
         }
         return .normal;
     }
@@ -110,10 +127,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         while (idx < args.count()) : (idx += 1) {
             const value = if (expanded_values) |values| values[idx] else args.value_at(idx).?;
             if (args.has('H')) {
-                if (inject_hex(wp, tc, value, args.has('K'), item) != .normal) return .@"error";
+                if (inject_hex(s, wl, wp, tc, value, args.has('K'), item) != .normal) return .@"error";
                 continue;
             }
-            if (inject_string(wp, tc, value, args.has('l'), args.has('K'), item) != .normal) return .@"error";
+            if (inject_string(s, wl, wp, tc, value, args.has('l'), args.has('K'), item) != .normal) return .@"error";
         }
     }
     return .normal;
@@ -125,7 +142,7 @@ fn reset_pane(wp: *T.WindowPane) void {
     wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED | T.PANE_REDRAW;
 }
 
-fn expand_values(args: *const @import("arguments.zig").Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
+fn expand_values(args: *const args_mod.Arguments, ctx: *const format_mod.FormatContext, item: *cmdq.CmdqItem) ?[][]u8 {
     const values = xm.allocator.alloc([]u8, args.count()) catch unreachable;
     for (0..args.count()) |idx| {
         values[idx] = cmd_format.require(item, args.value_at(idx).?, ctx) orelse {
@@ -158,17 +175,34 @@ fn parse_repeat_count(raw: ?[]const u8, ctx: *const format_mod.FormatContext, it
     return parsed;
 }
 
-fn inject_hex(wp: *T.WindowPane, tc: ?*T.Client, text: []const u8, dispatch_client: bool, item: *cmdq.CmdqItem) T.CmdRetval {
+fn inject_hex(
+    s: *T.Session,
+    wl: *T.Winlink,
+    wp: *T.WindowPane,
+    tc: ?*T.Client,
+    text: []const u8,
+    dispatch_client: bool,
+    item: *cmdq.CmdqItem,
+) T.CmdRetval {
     const value = std.fmt.parseInt(u8, text, 16) catch return .normal;
-    return inject_key(wp, tc, T.KEYC_LITERAL | value, false, dispatch_client, item);
+    return inject_key(s, wl, wp, tc, T.KEYC_LITERAL | value, false, dispatch_client, item);
 }
 
-fn inject_string(wp: *T.WindowPane, tc: ?*T.Client, value: []const u8, literal: bool, dispatch_client: bool, item: *cmdq.CmdqItem) T.CmdRetval {
+fn inject_string(
+    s: *T.Session,
+    wl: *T.Winlink,
+    wp: *T.WindowPane,
+    tc: ?*T.Client,
+    value: []const u8,
+    literal: bool,
+    dispatch_client: bool,
+    item: *cmdq.CmdqItem,
+) T.CmdRetval {
     var use_literal = literal;
     if (!use_literal) {
         const key = key_string.key_string_lookup_string(value);
         if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE and key != T.KEYC_ANY)
-            return inject_key(wp, tc, key, true, dispatch_client, item);
+            return inject_key(s, wl, wp, tc, key, true, dispatch_client, item);
         use_literal = true;
     }
 
@@ -177,7 +211,7 @@ fn inject_string(wp: *T.WindowPane, tc: ?*T.Client, value: []const u8, literal: 
     var index: usize = 0;
     while (index < value.len) {
         const key = next_literal_key(value, &index);
-        if (inject_key(wp, tc, key, false, dispatch_client, item) != .normal) return .@"error";
+        if (inject_key(s, wl, wp, tc, key, false, dispatch_client, item) != .normal) return .@"error";
     }
     return .normal;
 }
@@ -206,9 +240,31 @@ fn next_literal_key(value: []const u8, index: *usize) T.key_code {
     return cp;
 }
 
-fn inject_key(wp: *T.WindowPane, tc: ?*T.Client, key: T.key_code, allow_literal_fallback: bool, dispatch_client: bool, item: *cmdq.CmdqItem) T.CmdRetval {
+fn inject_key(
+    s: *T.Session,
+    wl: *T.Winlink,
+    wp: *T.WindowPane,
+    tc: ?*T.Client,
+    key: T.key_code,
+    allow_literal_fallback: bool,
+    dispatch_client: bool,
+    item: *cmdq.CmdqItem,
+) T.CmdRetval {
     if (dispatch_client) {
         if (tc) |target_client| return dispatch_key(target_client, key);
+        return .normal;
+    }
+    if (window_mod.window_pane_mode(wp)) |wme| {
+        if (wme.mode.key_table) |key_table| {
+            const table = key_bindings.key_bindings_get_table(key_table(wme), true).?;
+            if (key_bindings.key_bindings_get(table, key & ~T.KEYC_MASK_FLAGS)) |binding|
+                _ = key_bindings.key_bindings_dispatch(binding, @ptrCast(item), tc, null, null);
+            return .normal;
+        }
+        if (wme.mode.key) |mode_key| {
+            if (tc) |target_client| mode_key(wme, target_client, s, wl, key & ~T.KEYC_MASK_FLAGS, null);
+            return .normal;
+        }
         return .normal;
     }
     return send_key(wp, key, allow_literal_fallback, item);
@@ -308,6 +364,77 @@ fn test_teardown_session(name: []const u8, s: *T.Session, fd_read: i32, fd_write
     opts.options_free(opts.global_s_options);
     opts.options_free(opts.global_options);
 }
+
+const ModeKeyState = struct {
+    calls: usize = 0,
+    saw_client: bool = false,
+    last_key: T.key_code = T.KEYC_NONE,
+};
+
+const ModeCommandState = struct {
+    calls: usize = 0,
+    saw_client: bool = false,
+    saw_mouse: bool = false,
+    prefix: u32 = 0,
+    arg_count: usize = 0,
+    first_arg_is_enter: bool = false,
+};
+
+fn test_mode_table_name(_: *T.WindowModeEntry) []const u8 {
+    return "send-keys-mode";
+}
+
+fn test_mode_key(
+    wme: *T.WindowModeEntry,
+    tc: ?*T.Client,
+    s: *T.Session,
+    wl: *T.Winlink,
+    key: T.key_code,
+    mouse: ?*const T.MouseEvent,
+) void {
+    _ = s;
+    _ = wl;
+    _ = mouse;
+    const state: *ModeKeyState = @ptrCast(@alignCast(wme.data.?));
+    state.calls += 1;
+    state.saw_client = tc != null;
+    state.last_key = key;
+}
+
+fn test_mode_command(
+    wme: *T.WindowModeEntry,
+    tc: ?*T.Client,
+    s: *T.Session,
+    wl: *T.Winlink,
+    raw_args: *const anyopaque,
+    mouse: ?*const T.MouseEvent,
+) void {
+    _ = s;
+    _ = wl;
+    const state: *ModeCommandState = @ptrCast(@alignCast(wme.data.?));
+    const args: *const args_mod.Arguments = @ptrCast(@alignCast(raw_args));
+    state.calls += 1;
+    state.saw_client = tc != null;
+    state.saw_mouse = mouse != null;
+    state.prefix = wme.prefix;
+    state.arg_count = args.count();
+    state.first_arg_is_enter = args.count() > 0 and std.mem.eql(u8, args.value_at(0).?, "Enter");
+}
+
+const test_mode_table: T.WindowMode = .{
+    .name = "mode-table",
+    .key_table = test_mode_table_name,
+};
+
+const test_mode_key_only: T.WindowMode = .{
+    .name = "mode-key",
+    .key = test_mode_key,
+};
+
+const test_mode_command_only: T.WindowMode = .{
+    .name = "mode-command",
+    .command = test_mode_command,
+};
 
 test "send-keys writes literal text and enter to pane fd" {
     const setup = try test_session_with_empty_pane("send-keys-test");
@@ -543,7 +670,6 @@ test "send-keys -K dispatches through a named target client key table" {
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
     const win = @import("window.zig");
-    const key_bindings = @import("key-bindings.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -600,7 +726,6 @@ test "send-keys -K forwards unbound keys to the named client pane" {
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
     const win = @import("window.zig");
-    const key_bindings = @import("key-bindings.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -667,7 +792,6 @@ test "send-keys with -c still writes directly to the target pane unless -K is se
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
     const win = @import("window.zig");
-    const key_bindings = @import("key-bindings.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -779,6 +903,131 @@ test "send-keys -K without a dispatchable client is a no-op" {
     try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys dispatches active mode table bindings instead of writing to the pane" {
+    key_bindings.key_bindings_init();
+
+    const setup = try test_session_with_empty_pane("send-mode-table");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-mode-table", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_table, null, null);
+
+    var cause: ?[]u8 = null;
+    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-mode-table:0", "-n", "bound" }, null, &cause);
+    key_bindings.key_bindings_add("send-keys-mode", 'x', null, false, @ptrCast(bound));
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-mode-table:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    _ = cmdq.cmdq_next(null);
+    try std.testing.expectEqual(@as(usize, 2), setup.s.windows.count());
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys routes active mode keys through the target client instead of writing to the pane" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const setup = try test_session_with_empty_pane("send-mode-key");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-mode-key", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    var state = ModeKeyState{};
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_key_only, @ptrCast(&state), null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("mode-client"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "mode-client", "-t", "send-mode-key:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.saw_client);
+    try std.testing.expectEqual(@as(T.key_code, 'x'), state.last_key);
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys -X uses the active mode command and repeat prefix" {
+    const setup = try test_session_with_empty_pane("send-mode-command");
+    defer test_teardown_session("send-mode-command", setup.s, -1, -1);
+
+    var state = ModeCommandState{};
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_command_only, @ptrCast(&state), null);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-X", "-N", "3", "-t", "send-mode-command:0.0", "Enter" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{
+            .key = T.KEYC_NONE,
+            .m = .{ .valid = true, .key = T.KEYC_MOUSEMOVE },
+        },
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expectEqual(@as(u32, 3), state.prefix);
+    try std.testing.expectEqual(@as(usize, 1), state.arg_count);
+    try std.testing.expect(state.first_arg_is_enter);
+    try std.testing.expect(state.saw_mouse);
+}
+
+test "send-keys pane_in_mode reflects the reduced active mode stack" {
+    const setup = try test_session_with_empty_pane("send-pane-in-mode");
+    defer test_teardown_session("send-pane-in-mode", setup.s, -1, -1);
+
+    const before = format_mod.format_single(null, "#{pane_in_mode}", null, setup.s, setup.s.curw, setup.wp);
+    defer xm.allocator.free(before);
+    try std.testing.expectEqualStrings("0", before);
+
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_command_only, null, null);
+
+    const after = format_mod.format_single(null, "#{pane_in_mode}", null, setup.s, setup.s.curw, setup.wp);
+    defer xm.allocator.free(after);
+    try std.testing.expectEqualStrings("1", after);
 }
 
 test "send-keys rejects read-only target clients before writing" {

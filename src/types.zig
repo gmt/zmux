@@ -565,6 +565,21 @@ pub const PANE_EMPTY: u32 = 0x0800;
 pub const PANE_STYLECHANGED: u32 = 0x1000;
 pub const PANE_THEMECHANGED: u32 = 0x2000;
 
+pub const WindowMode = struct {
+    name: []const u8 = "",
+    key: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, key_code, ?*const MouseEvent) void = null,
+    key_table: ?*const fn (*WindowModeEntry) []const u8 = null,
+    command: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, *const anyopaque, ?*const MouseEvent) void = null,
+};
+
+pub const WindowModeEntry = struct {
+    wp: *WindowPane,
+    swp: ?*WindowPane = null,
+    mode: *const WindowMode,
+    data: ?*anyopaque = null,
+    prefix: u32 = 0,
+};
+
 pub const WindowPane = struct {
     id: u32,
     active_point: u32 = 0,
@@ -596,6 +611,7 @@ pub const WindowPane = struct {
     screen: *Screen,
     base: Screen,
     input_pending: std.ArrayList(u8) = .{},
+    modes: std.ArrayList(*WindowModeEntry) = .{},
 
     // Colour palette
     palette: ColourPalette = .{},
@@ -838,10 +854,17 @@ pub const ClientPaneCache = struct {
     valid: bool = false,
 };
 
+pub const MouseEvent = struct {
+    valid: bool = false,
+    key: key_code = KEYC_NONE,
+    wp: i32 = -1,
+};
+
 pub const key_event = struct {
     key: key_code = KEYC_UNKNOWN,
     data: [16]u8 = std.mem.zeroes([16]u8),
     len: usize = 0,
+    m: MouseEvent = .{},
 };
 
 pub const Client = struct {

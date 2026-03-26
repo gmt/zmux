@@ -30,6 +30,7 @@ pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
     const s = @import("xmalloc.zig").allocator.create(T.Screen) catch unreachable;
     s.* = .{
         .grid = g,
+        .mode = T.MODE_CURSOR | T.MODE_WRAP,
         .rlower = if (sy == 0) 0 else sy - 1,
     };
     return s;
@@ -41,6 +42,7 @@ pub fn screen_reset(s: *T.Screen) void {
     s.cy = 0;
     s.rupper = 0;
     s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+    s.mode = T.MODE_CURSOR | T.MODE_WRAP;
     s.cursor_visible = true;
     s.bracketed_paste = false;
     s.saved_cx = 0;
@@ -63,6 +65,7 @@ pub fn screen_reset_active(s: *T.Screen) void {
     s.cy = 0;
     s.rupper = 0;
     s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+    s.mode = T.MODE_CURSOR | T.MODE_WRAP;
     s.cursor_visible = true;
     s.bracketed_paste = false;
 }

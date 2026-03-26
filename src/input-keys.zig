@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const key_string = @import("key-string.zig");
+const opts = @import("options.zig");
 
 const FixedSequence = struct {
     key: T.key_code,
@@ -129,6 +130,73 @@ pub fn input_key_encode(key_in: T.key_code, buf: *[16]u8) error{UnsupportedKey}!
     if (T.keycIsUnicode(masked))
         return encode_unicode_key(masked, modifiers, buf);
     return encode_special_key(masked, modifiers, buf);
+}
+
+pub fn input_key_encode_screen(screen: *const T.Screen, key_in: T.key_code, buf: *[32]u8) error{UnsupportedKey}![]const u8 {
+    var key = key_in;
+    if (T.keycIsMouse(key)) return buf[0..0];
+
+    if (key & T.KEYC_LITERAL != 0) {
+        buf[0] = @intCast(key & 0xff);
+        return buf[0..1];
+    }
+
+    if ((key & T.KEYC_MASK_KEY) == T.KEYC_BSPACE) {
+        const remapped = configured_backspace_key();
+        if ((key & T.KEYC_MASK_MODIFIERS) == 0) {
+            if (backspace_byte_for_key(remapped)) |byte| {
+                buf[0] = byte;
+                return buf[0..1];
+            }
+            return buf[0..0];
+        }
+        key = remapped | (key & (T.KEYC_MASK_FLAGS | T.KEYC_MASK_MODIFIERS));
+    }
+
+    if ((key & T.KEYC_MASK_KEY) == T.KEYC_BTAB) {
+        if (effective_screen_mode(screen) & T.MODE_KEYS_EXTENDED_2 != 0) {
+            key = T.C0_HT | (key & ~T.KEYC_MASK_KEY) | T.KEYC_SHIFT;
+        } else {
+            key &= ~T.KEYC_MASK_MODIFIERS;
+        }
+    }
+
+    if (key & ~T.KEYC_MASK_KEY == 0) {
+        if (key == T.C0_HT or key == T.C0_CR or key == T.C0_ESC or (key >= 0x20 and key <= 0x7f)) {
+            buf[0] = @intCast(key);
+            return buf[0..1];
+        }
+        if (T.keycIsUnicode(key & T.KEYC_MASK_KEY)) {
+            var data: T.Utf8Data = undefined;
+            utf8.utf8_to_data(@intCast(key & T.KEYC_MASK_KEY), &data);
+            std.mem.copyForwards(u8, buf[0..data.size], data.data[0..data.size]);
+            return buf[0..data.size];
+        }
+    }
+
+    var lookup_key = key;
+    const mode = effective_screen_mode(screen);
+    if (mode & T.MODE_KKEYPAD == 0) lookup_key &= ~T.KEYC_KEYPAD;
+    if (mode & T.MODE_KCURSOR == 0) lookup_key &= ~T.KEYC_CURSOR;
+
+    if (encode_lookup_key(lookup_key, buf)) |seq| {
+        if (T.keycIsPaste(lookup_key) and mode & T.MODE_BRACKETPASTE == 0) return buf[0..0];
+        return seq;
+    }
+
+    const masked = lookup_key & T.KEYC_MASK_KEY;
+    if ((masked >= T.KEYC_BASE and masked < T.KEYC_BASE_END) or
+        (masked >= T.KEYC_USER and masked < T.KEYC_USER_END))
+        return buf[0..0];
+
+    switch (mode & T.EXTENDED_KEY_MODES) {
+        T.MODE_KEYS_EXTENDED_2 => return encode_extended_key(lookup_key, buf),
+        T.MODE_KEYS_EXTENDED => {
+            if (encode_mode1_key(lookup_key, buf)) |seq| return seq;
+            return encode_extended_key(lookup_key, buf);
+        },
+        else => return encode_vt10x_key(lookup_key, buf),
+    }
 }
 
 fn parse_escape(bytes: []const u8, event: *T.key_event) ?usize {
@@ -389,6 +457,210 @@ fn copy_sequence_with_meta(seq: []const u8, buf: *[16]u8) []const u8 {
     return buf[0 .. 1 + seq.len];
 }
 
+fn effective_screen_mode(screen: *const T.Screen) i32 {
+    var mode = screen.mode;
+    if (opts.options_get_number(opts.global_options, "extended-keys") == 2 and
+        mode & T.EXTENDED_KEY_MODES == 0)
+        mode |= T.MODE_KEYS_EXTENDED;
+    return mode;
+}
+
+fn configured_backspace_key() T.key_code {
+    const raw = opts.options_get_string(opts.global_options, "backspace");
+    if (raw.len == 0) return 0x7f;
+
+    const parsed = key_string.key_string_lookup_string(raw);
+    if (parsed != T.KEYC_UNKNOWN and parsed != T.KEYC_NONE) return parsed;
+    if (raw.len == 1) return raw[0];
+    return 0x7f;
+}
+
+fn backspace_byte_for_key(key: T.key_code) ?u8 {
+    const modifiers = key & T.KEYC_MASK_MODIFIERS;
+    if (modifiers == 0) {
+        const masked = key & T.KEYC_MASK_KEY;
+        if (masked <= 0xff) return @intCast(masked);
+        return null;
+    }
+    if (modifiers != T.KEYC_CTRL) return null;
+
+    const masked = key & T.KEYC_MASK_KEY;
+    if (masked == '?') return 0x7f;
+    if (masked >= '@' and masked <= '_') return @intCast(masked - 0x40);
+    if (masked >= 'a' and masked <= 'z') return @intCast(masked - 0x60);
+    return null;
+}
+
+fn encode_lookup_key(key: T.key_code, buf: *[32]u8) ?[]const u8 {
+    if (encode_exact_lookup_key(key, buf)) |seq| return seq;
+
+    if (key & T.KEYC_META != 0 and key & T.KEYC_IMPLIED_META == 0) {
+        if (encode_exact_lookup_key(key & ~T.KEYC_META, buf[1..])) |seq| {
+            buf[0] = 0x1b;
+            return buf[0 .. 1 + seq.len];
+        }
+    }
+    if (key & T.KEYC_CURSOR != 0) return encode_exact_lookup_key(key & ~T.KEYC_CURSOR, buf);
+    if (key & T.KEYC_KEYPAD != 0) return encode_exact_lookup_key(key & ~T.KEYC_KEYPAD, buf);
+    return null;
+}
+
+fn encode_exact_lookup_key(key: T.key_code, buf: []u8) ?[]const u8 {
+    const key_no_implied = key & ~T.KEYC_IMPLIED_META;
+    const masked = key_no_implied & T.KEYC_MASK_KEY;
+    const modifiers = key_no_implied & T.KEYC_MASK_MODIFIERS;
+    const flags = key_no_implied & (T.KEYC_CURSOR | T.KEYC_KEYPAD);
+
+    if (flags == 0) {
+        if (modifierTemplateFor(masked)) |template| {
+            if (modifierParameter(modifiers)) |parameter| {
+                if (template.len > buf.len) return null;
+                for (template, 0..) |ch, idx| {
+                    buf[idx] = if (ch == '_') parameter else ch;
+                }
+                return buf[0..template.len];
+            }
+        }
+    }
+
+    if (flags == 0 and modifiers == 0) {
+        if (fixedSequenceFor(masked)) |seq| {
+            if (seq.len > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..seq.len], seq);
+            return buf[0..seq.len];
+        }
+        if (pasteSequenceFor(masked)) |seq| {
+            if (seq.len > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..seq.len], seq);
+            return buf[0..seq.len];
+        }
+    }
+
+    if (flags == T.KEYC_CURSOR and modifiers == 0) {
+        if (cursorSequenceFor(masked)) |seq| {
+            if (seq.len > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..seq.len], seq);
+            return buf[0..seq.len];
+        }
+    }
+
+    if (flags == T.KEYC_KEYPAD and modifiers == 0) {
+        if (keypadApplicationSequenceFor(masked)) |seq| {
+            if (seq.len > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..seq.len], seq);
+            return buf[0..seq.len];
+        }
+    }
+
+    return null;
+}
+
+fn pasteSequenceFor(masked: T.key_code) ?[]const u8 {
+    return switch (masked) {
+        T.KEYC_PASTE_START => "\x1b[200~",
+        T.KEYC_PASTE_END => "\x1b[201~",
+        else => null,
+    };
+}
+
+fn cursorSequenceFor(masked: T.key_code) ?[]const u8 {
+    return switch (masked) {
+        T.KEYC_UP => "\x1bOA",
+        T.KEYC_DOWN => "\x1bOB",
+        T.KEYC_RIGHT => "\x1bOC",
+        T.KEYC_LEFT => "\x1bOD",
+        else => null,
+    };
+}
+
+fn keypadApplicationSequenceFor(masked: T.key_code) ?[]const u8 {
+    return switch (masked) {
+        T.KEYC_KP_SLASH => "\x1bOo",
+        T.KEYC_KP_STAR => "\x1bOj",
+        T.KEYC_KP_MINUS => "\x1bOm",
+        T.KEYC_KP_SEVEN => "\x1bOw",
+        T.KEYC_KP_EIGHT => "\x1bOx",
+        T.KEYC_KP_NINE => "\x1bOy",
+        T.KEYC_KP_PLUS => "\x1bOk",
+        T.KEYC_KP_FOUR => "\x1bOt",
+        T.KEYC_KP_FIVE => "\x1bOu",
+        T.KEYC_KP_SIX => "\x1bOv",
+        T.KEYC_KP_ONE => "\x1bOq",
+        T.KEYC_KP_TWO => "\x1bOr",
+        T.KEYC_KP_THREE => "\x1bOs",
+        T.KEYC_KP_ENTER => "\x1bOM",
+        T.KEYC_KP_ZERO => "\x1bOp",
+        T.KEYC_KP_PERIOD => "\x1bOn",
+        else => null,
+    };
+}
+
+fn encode_extended_key(key_in: T.key_code, buf: *[32]u8) error{UnsupportedKey}![]const u8 {
+    const key = key_in & ~T.KEYC_IMPLIED_META;
+    const modifier = modifierParameter(key & T.KEYC_MASK_MODIFIERS) orelse return error.UnsupportedKey;
+
+    var base_key = key & T.KEYC_MASK_KEY;
+    if (T.keycIsUnicode(key)) {
+        var ud: T.Utf8Data = undefined;
+        var wc: u32 = 0;
+        utf8.utf8_to_data(@intCast(base_key), &ud);
+        if (utf8.utf8_from_data(&ud, &wc) != .done) return error.UnsupportedKey;
+        base_key = wc;
+    }
+
+    return if (opts.options_get_number(opts.global_options, "extended-keys-format") == 1)
+        std.fmt.bufPrint(buf, "\x1b[27;{c};{}~", .{ modifier, base_key }) catch error.UnsupportedKey
+    else
+        std.fmt.bufPrint(buf, "\x1b[{};{c}u", .{ base_key, modifier }) catch error.UnsupportedKey;
+}
+
+fn encode_vt10x_key(key_in: T.key_code, buf: *[32]u8) error{UnsupportedKey}![]const u8 {
+    var key = key_in & ~T.KEYC_IMPLIED_META;
+    var start: usize = 0;
+
+    if (key & T.KEYC_META != 0) {
+        buf[0] = 0x1b;
+        start = 1;
+    }
+
+    if (T.keycIsUnicode(key)) {
+        const codepoint: u21 = std.math.cast(u21, key & T.KEYC_MASK_KEY) orelse return error.UnsupportedKey;
+        const size = std.unicode.utf8Encode(codepoint, buf[start..]) catch return error.UnsupportedKey;
+        return buf[0 .. start + size];
+    }
+
+    const onlykey = key & T.KEYC_MASK_KEY;
+    if (onlykey == '\r' or onlykey == '\n' or onlykey == '\t') key &= ~T.KEYC_CTRL;
+
+    if (key & T.KEYC_CTRL != 0) {
+        key = ctrl_ascii_byte(onlykey) orelse return error.UnsupportedKey;
+    } else {
+        key = onlykey;
+    }
+
+    if (key > 0x7f) return error.UnsupportedKey;
+    buf[start] = @intCast(key);
+    return buf[0 .. start + 1];
+}
+
+fn encode_mode1_key(key: T.key_code, buf: *[32]u8) ?[]const u8 {
+    const onlykey = key & T.KEYC_MASK_KEY;
+
+    if ((key & (T.KEYC_CTRL | T.KEYC_META)) == T.KEYC_META)
+        return encode_vt10x_key(key, buf) catch null;
+
+    if (key & T.KEYC_CTRL != 0 and
+        (onlykey == ' ' or
+            onlykey == '/' or
+            onlykey == '@' or
+            onlykey == '^' or
+            (onlykey >= '2' and onlykey <= '8') or
+            (onlykey >= '@' and onlykey <= '~')))
+        return encode_vt10x_key(key, buf) catch null;
+
+    return null;
+}
+
 test "input_key_get decodes printable control and cursor keys" {
     var event: T.key_event = .{};
 
@@ -450,4 +722,46 @@ test "input_key_encode matches tmux vt10x ctrl remapping edge cases" {
     try std.testing.expectEqual(@as(usize, 2), (try input_key_encode(@as(T.key_code, '?') | T.KEYC_META | T.KEYC_CTRL, &buf)).len);
     try std.testing.expectEqual(@as(u8, 0x1b), buf[0]);
     try std.testing.expectEqual(@as(u8, 0x7f), buf[1]);
+}
+
+test "input_key_encode_screen honors screen mode dependent mappings" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var dummy_grid: T.Grid = undefined;
+    var screen = T.Screen{ .grid = &dummy_grid };
+    var buf: [32]u8 = undefined;
+
+    try std.testing.expectEqualStrings("\x1b[A", try input_key_encode_screen(&screen, T.KEYC_UP | T.KEYC_CURSOR, &buf));
+    screen.mode = T.MODE_KCURSOR;
+    try std.testing.expectEqualStrings("\x1bOA", try input_key_encode_screen(&screen, T.KEYC_UP | T.KEYC_CURSOR, &buf));
+
+    screen.mode = 0;
+    try std.testing.expectEqualStrings("1", try input_key_encode_screen(&screen, T.KEYC_KP_ONE | T.KEYC_KEYPAD, &buf));
+    screen.mode = T.MODE_KKEYPAD;
+    try std.testing.expectEqualStrings("\x1bOq", try input_key_encode_screen(&screen, T.KEYC_KP_ONE | T.KEYC_KEYPAD, &buf));
+
+    screen.mode = 0;
+    try std.testing.expectEqual(@as(usize, 0), (try input_key_encode_screen(&screen, T.KEYC_PASTE_START, &buf)).len);
+    screen.mode = T.MODE_BRACKETPASTE;
+    try std.testing.expectEqualStrings("\x1b[200~", try input_key_encode_screen(&screen, T.KEYC_PASTE_START, &buf));
+}
+
+test "input_key_encode_screen ports backspace and extended-key options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var dummy_grid: T.Grid = undefined;
+    var screen = T.Screen{ .grid = &dummy_grid };
+    var buf: [32]u8 = undefined;
+
+    opts.options_set_string(opts.global_options, false, "backspace", "C-h");
+    const backspace = try input_key_encode_screen(&screen, T.KEYC_BSPACE, &buf);
+    try std.testing.expectEqual(@as(usize, 1), backspace.len);
+    try std.testing.expectEqual(@as(u8, 0x08), backspace[0]);
+
+    screen.mode = T.MODE_KEYS_EXTENDED_2;
+    try std.testing.expectEqualStrings("\x1b[27;2;9~", try input_key_encode_screen(&screen, T.KEYC_BTAB, &buf));
 }

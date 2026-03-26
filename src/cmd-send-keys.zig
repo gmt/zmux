@@ -237,6 +237,7 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
             if (allow_literal_fallback) {
                 const text = key_string.key_string_lookup_key(key, 0);
                 pane_input.write_all(wp.fd, text, item) catch return .@"error";
+                window_mod.window_pane_synchronize_key_bytes(wp, key, text);
                 return .normal;
             }
             cmdq.cmdq_error(item, "unsupported key: {s}", .{key_string.key_string_lookup_key(key, 0)});
@@ -244,6 +245,7 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
         },
     };
     pane_input.write_all(wp.fd, bytes, item) catch return .@"error";
+    window_mod.window_pane_synchronize_key_bytes(wp, key, bytes);
     return .normal;
 }
 
@@ -894,4 +896,43 @@ test "send-keys with no arguments and no triggering key is a quiet no-op" {
     try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys mirrors pane writes to synchronized sibling panes" {
+    const win = @import("window.zig");
+
+    const setup = try test_session_with_empty_pane("send-sync");
+    defer test_teardown_session("send-sync", setup.s, -1, -1);
+
+    const sibling = win.window_add_pane(setup.wp.window, null, setup.wp.sx, setup.wp.sy);
+    const source_pipe = try std.posix.pipe();
+    const sibling_pipe = try std.posix.pipe();
+    defer std.posix.close(source_pipe[0]);
+    defer std.posix.close(sibling_pipe[0]);
+    setup.wp.fd = source_pipe[1];
+    sibling.fd = sibling_pipe[1];
+    defer {
+        if (setup.wp.fd >= 0) std.posix.close(setup.wp.fd);
+        if (sibling.fd >= 0) std.posix.close(sibling.fd);
+        setup.wp.fd = -1;
+        sibling.fd = -1;
+    }
+
+    opts.options_set_number(setup.wp.options, "synchronize-panes", 1);
+    opts.options_set_number(sibling.options, "synchronize-panes", 1);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-sync:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var source_buf: [8]u8 = undefined;
+    const source_len = try std.posix.read(source_pipe[0], &source_buf);
+    try std.testing.expectEqualStrings("x", source_buf[0..source_len]);
+
+    var sibling_buf: [8]u8 = undefined;
+    const sibling_len = try std.posix.read(sibling_pipe[0], &sibling_buf);
+    try std.testing.expectEqualStrings("x", sibling_buf[0..sibling_len]);
 }

@@ -189,6 +189,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
 
     if (wp.fd < 0 or event.len == 0) return false;
     write_pane_bytes(wp.fd, event.data[0..event.len]);
+    win.window_pane_synchronize_key_bytes(wp, event.key, event.data[0..event.len]);
     return true;
 }
 
@@ -359,6 +360,77 @@ test "server_client_handle_key forwards unbound keys to pane" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
+test "server_client_handle_key mirrors unbound keys to synchronized panes" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-forward-sync", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-forward-sync") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+    const sibling = win.window_add_pane(wl.window, null, wp.sx, wp.sy);
+
+    const source_pipe = try std.posix.pipe();
+    const sibling_pipe = try std.posix.pipe();
+    defer std.posix.close(source_pipe[0]);
+    defer std.posix.close(sibling_pipe[0]);
+    wp.fd = source_pipe[1];
+    sibling.fd = sibling_pipe[1];
+    defer {
+        if (wp.fd >= 0) std.posix.close(wp.fd);
+        if (sibling.fd >= 0) std.posix.close(sibling.fd);
+        wp.fd = -1;
+        sibling.fd = -1;
+    }
+
+    opts_mod.options_set_number(wp.options, "synchronize-panes", 1);
+    opts_mod.options_set_number(sibling.options, "synchronize-panes", 1);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    var event = T.key_event{ .key = 'x', .data = std.mem.zeroes([16]u8), .len = 1 };
+    event.data[0] = 'x';
+    _ = server_client_handle_key(&cl, &event);
+
+    var source_buf: [8]u8 = undefined;
+    const source_len = try std.posix.read(source_pipe[0], &source_buf);
+    try std.testing.expectEqualStrings("x", source_buf[0..source_len]);
+
+    var sibling_buf: [8]u8 = undefined;
+    const sibling_len = try std.posix.read(sibling_pipe[0], &sibling_buf);
+    try std.testing.expectEqualStrings("x", sibling_buf[0..sibling_len]);
 }
 
 test "server_link_window replaces occupied destination with -k and server_unlink_window drops one link" {

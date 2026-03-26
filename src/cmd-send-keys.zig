@@ -32,6 +32,7 @@ const key_string = @import("key-string.zig");
 const pane_input = @import("pane-input.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
+const screen_mod = @import("screen.zig");
 const server_fn = @import("server-fn.zig");
 const session_mod = @import("session.zig");
 const colour_mod = @import("colour.zig");
@@ -381,8 +382,8 @@ fn dispatch_key(tc: *T.Client, key: T.key_code) T.CmdRetval {
 fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, item: *cmdq.CmdqItem) T.CmdRetval {
     if (wp.fd < 0 or wp.flags & T.PANE_INPUTOFF != 0) return .normal;
 
-    var buf: [16]u8 = undefined;
-    const bytes = input_keys.input_key_encode(key, &buf) catch |err| switch (err) {
+    var buf: [32]u8 = undefined;
+    const bytes = input_keys.input_key_encode_screen(screen_mod.screen_current(wp), key, &buf) catch |err| switch (err) {
         error.UnsupportedKey => {
             if (allow_literal_fallback) {
                 const text = key_string.key_string_lookup_key(key, 0);
@@ -393,6 +394,7 @@ fn send_key(wp: *T.WindowPane, key: T.key_code, allow_literal_fallback: bool, it
             return .normal;
         },
     };
+    if (bytes.len == 0) return .normal;
     pane_input.write_all(wp.fd, bytes, item) catch return .@"error";
     window_mod.window_pane_synchronize_key_bytes(wp, key, bytes);
     return .normal;
@@ -614,6 +616,28 @@ test "send-keys supports hex mode and repeat counts" {
     var buf: [16]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("A\rA\r", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys uses the pane screen mode for cursor-key output" {
+    const setup = try test_session_with_empty_pane("send-cursor-mode-test");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-cursor-mode-test", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    screen_mod.screen_current(setup.wp).mode |= T.MODE_KCURSOR;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-cursor-mode-test:0.0", "Up" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("\x1bOA", buf[0..n]);
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
 }

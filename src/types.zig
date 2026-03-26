@@ -269,6 +269,32 @@ pub fn keycIsPaste(key: key_code) bool {
 pub const MODEKEY_EMACS: u32 = 0;
 pub const MODEKEY_VI: u32 = 1;
 
+pub const MODE_CURSOR: i32 = 0x1;
+pub const MODE_INSERT: i32 = 0x2;
+pub const MODE_KCURSOR: i32 = 0x4;
+pub const MODE_KKEYPAD: i32 = 0x8;
+pub const MODE_WRAP: i32 = 0x10;
+pub const MODE_MOUSE_STANDARD: i32 = 0x20;
+pub const MODE_MOUSE_BUTTON: i32 = 0x40;
+pub const MODE_CURSOR_BLINKING: i32 = 0x80;
+pub const MODE_MOUSE_UTF8: i32 = 0x100;
+pub const MODE_MOUSE_SGR: i32 = 0x200;
+pub const MODE_BRACKETPASTE: i32 = 0x400;
+pub const MODE_FOCUSON: i32 = 0x800;
+pub const MODE_MOUSE_ALL: i32 = 0x1000;
+pub const MODE_ORIGIN: i32 = 0x2000;
+pub const MODE_CRLF: i32 = 0x4000;
+pub const MODE_KEYS_EXTENDED: i32 = 0x8000;
+pub const MODE_CURSOR_VERY_VISIBLE: i32 = 0x10000;
+pub const MODE_CURSOR_BLINKING_SET: i32 = 0x20000;
+pub const MODE_KEYS_EXTENDED_2: i32 = 0x40000;
+pub const MODE_THEME_UPDATES: i32 = 0x80000;
+pub const MODE_SYNC: i32 = 0x100000;
+
+pub const ALL_MOUSE_MODES: i32 = MODE_MOUSE_STANDARD | MODE_MOUSE_BUTTON | MODE_MOUSE_ALL;
+pub const MOTION_MOUSE_MODES: i32 = MODE_MOUSE_BUTTON | MODE_MOUSE_ALL;
+pub const EXTENDED_KEY_MODES: i32 = MODE_KEYS_EXTENDED | MODE_KEYS_EXTENDED_2;
+
 pub const SortOrder = enum {
     activity,
     creation,

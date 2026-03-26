@@ -42,29 +42,11 @@ pub fn stringify_argv(alloc: std.mem.Allocator, argv: []const []const u8) []u8 {
 }
 
 pub fn append_arguments(out: *std.ArrayList(u8), args: *const args_mod.Arguments) void {
-    var flags: std.ArrayList(u8) = .{};
-    defer flags.deinit(xm.allocator);
-
-    var it = args.flags.iterator();
-    while (it.next()) |flag_entry| flags.append(xm.allocator, flag_entry.key_ptr.*) catch unreachable;
-    std.sort.block(u8, flags.items, {}, less_than_u8);
-
-    for (flags.items) |flag| {
-        const values = args.flags.get(flag).?;
-        for (values.items) |value| {
-            out.appendSlice(xm.allocator, " -") catch unreachable;
-            out.append(xm.allocator, flag) catch unreachable;
-            if (value.len != 0) {
-                out.append(xm.allocator, ' ') catch unreachable;
-                append_shell_word(out, value);
-            }
-        }
-    }
-
-    for (args.values.items) |value| {
-        out.append(xm.allocator, ' ') catch unreachable;
-        append_shell_word(out, value);
-    }
+    const rendered = args_mod.args_print(args);
+    defer xm.allocator.free(rendered);
+    if (rendered.len == 0) return;
+    out.append(xm.allocator, ' ') catch unreachable;
+    out.appendSlice(xm.allocator, rendered) catch unreachable;
 }
 
 pub fn append_shell_word(out: *std.ArrayList(u8), word: []const u8) void {
@@ -97,18 +79,11 @@ pub fn needs_quotes(word: []const u8) bool {
     return false;
 }
 
-fn less_than_u8(_: void, a: u8, b: u8) bool {
-    return a < b;
-}
-
 test "append_arguments renders flags and quoted values" {
-    var args = args_mod.Arguments.init(xm.allocator);
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{ "-a", "hello world", "plain" }, "a:", 1, 1, &cause);
     defer args.deinit();
-
-    var a_values: std.ArrayList([]u8) = .{};
-    a_values.append(xm.allocator, xm.xstrdup("hello world")) catch unreachable;
-    args.flags.put('a', a_values) catch unreachable;
-    args.values.append(xm.allocator, xm.xstrdup("plain")) catch unreachable;
+    defer if (cause) |msg| xm.allocator.free(msg);
 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);

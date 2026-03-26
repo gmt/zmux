@@ -495,6 +495,49 @@ test "send-keys -R resets pane state before writing keys" {
     setup.wp.fd = -1;
 }
 
+test "send-keys -R with no arguments resets pane state without replaying the triggering key" {
+    const grid = @import("grid.zig");
+
+    const setup = try test_session_with_empty_pane("send-reset-noargs");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-reset-noargs", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    grid.set_ascii(setup.wp.base.grid, 0, 0, 'X');
+    try setup.wp.input_pending.appendSlice(xm.allocator, "leftover");
+    setup.wp.palette.fg = 2;
+    setup.wp.palette.bg = 4;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-R", "-t", "send-reset-noargs:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{ .key = 'x', .len = 1 },
+    };
+    item.event.data[0] = 'x';
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(setup.wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(usize, 0), setup.wp.input_pending.items.len);
+    try std.testing.expectEqual(@as(i32, 8), setup.wp.palette.fg);
+    try std.testing.expectEqual(@as(i32, 8), setup.wp.palette.bg);
+    try std.testing.expect(setup.wp.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(setup.wp.flags & T.PANE_STYLECHANGED != 0);
+    try std.testing.expect(setup.wp.flags & T.PANE_THEMECHANGED != 0);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
 test "send-keys -K dispatches through a named target client key table" {
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
@@ -884,6 +927,36 @@ test "send-keys with no arguments and no triggering key is a quiet no-op" {
         .cmdlist = &list,
         .event = .{ .key = T.KEYC_NONE },
     };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys with -N and no arguments is a quiet no-op" {
+    const setup = try test_session_with_empty_pane("send-replay-repeat");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-replay-repeat", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-N", "2", "-t", "send-replay-repeat:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{ .key = 'x', .len = 1 },
+    };
+    item.event.data[0] = 'x';
 
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
 

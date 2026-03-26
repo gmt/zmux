@@ -25,6 +25,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             if (it.next()) |hs| sy = std.fmt.parseInt(u32, hs, 10) catch 24;
             cl.tty.sx = sx;
             cl.tty.sy = sy;
+            cl.flags |= T.CLIENT_SIZECHANGED;
             if (cl.session) |s| {
                 server_client_mod.server_client_apply_session_size(cl, s);
             }

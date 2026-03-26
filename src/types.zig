@@ -545,7 +545,7 @@ pub const LayoutType = enum {
 };
 
 pub const LayoutCell = struct {
-    @"type": LayoutType = .windowpane,
+    type: LayoutType = .windowpane,
     parent: ?*LayoutCell = null,
     sx: u32 = 0,
     sy: u32 = 0,
@@ -696,7 +696,7 @@ pub const Session = struct {
 pub const OptionsType = enum {
     string,
     number,
-    @"bool",
+    bool,
     choice,
     colour,
     style,
@@ -719,7 +719,7 @@ pub const OPTIONS_TABLE_PANE: OptionsScope = .{ .pane = true };
 
 pub const OptionsTableEntry = struct {
     name: []const u8,
-    @"type": OptionsType,
+    type: OptionsType,
     scope: OptionsScope,
     default_num: i64 = 0,
     default_str: ?[]const u8 = null,
@@ -734,7 +734,7 @@ pub const OptionsTableEntry = struct {
 pub const OptionsValue = union(OptionsType) {
     string: []u8,
     number: i64,
-    @"bool": bool,
+    bool: bool,
     choice: u32,
     colour: i32,
     style: Style,
@@ -801,6 +801,9 @@ pub const CLIENT_READONLY: u64 = 0x040000;
 pub const CLIENT_IGNORESIZE: u64 = 0x080000;
 pub const CLIENT_NOFORK: u64 = 0x100000;
 pub const CLIENT_DEFAULTSOCKET: u64 = 0x200000;
+pub const CLIENT_SIZECHANGED: u64 = 0x400000;
+pub const CLIENT_STATUSOFF: u64 = 0x800000;
+pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
 
 pub const ClientExitReason = enum {
     none,
@@ -1011,7 +1014,7 @@ pub const ArgsType = enum {
 };
 
 pub const ArgsValue = struct {
-    @"type": ArgsType = .none,
+    type: ArgsType = .none,
     data: union {
         string: []u8,
         cmdlist: *CmdList,

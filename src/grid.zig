@@ -101,6 +101,12 @@ pub fn delete_lines(gd: *T.Grid, row: u32, bottom: u32, count: u32) void {
     while (n > 0) : (n -= 1) scroll_up(gd, row, bottom);
 }
 
+pub fn remove_history(gd: *T.Grid, count: u32) void {
+    if (count > gd.hsize) return;
+    gd.hsize -= count;
+    if (gd.hscrolled > gd.hsize) gd.hscrolled = gd.hsize;
+}
+
 pub fn set_ascii(gd: *T.Grid, row: u32, col: u32, ch: u8) void {
     if (row >= gd.linedata.len or col >= gd.sx) return;
     ensure_line_capacity(gd, row);
@@ -159,4 +165,19 @@ test "grid set_ascii and scroll_up keep content bounded" {
     scroll_up(gd, 0, 1);
     try std.testing.expectEqual(@as(u8, 'b'), ascii_at(gd, 0, 0));
     try std.testing.expectEqual(@as(u8, ' '), ascii_at(gd, 1, 0));
+}
+
+test "grid remove_history trims tracked history and clamps hscrolled" {
+    const gd = grid_create(4, 2, 100);
+    defer grid_free(gd);
+
+    gd.hsize = 5;
+    gd.hscrolled = 7;
+
+    remove_history(gd, 3);
+    try std.testing.expectEqual(@as(u32, 2), gd.hsize);
+    try std.testing.expectEqual(@as(u32, 2), gd.hscrolled);
+
+    remove_history(gd, 3);
+    try std.testing.expectEqual(@as(u32, 2), gd.hsize);
 }

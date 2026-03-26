@@ -102,8 +102,17 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.count() == 0) {
         if (args.has('N') or args.has('R')) return .normal;
-        cmdq.cmdq_error(item, "implicit key replay not supported yet", .{});
-        return .@"error";
+        const event = cmdq.cmdq_get_event(item);
+        if (event.key == T.KEYC_NONE or event.key == T.KEYC_UNKNOWN) {
+            cmdq.cmdq_error(item, "send-keys requires a triggering key event when no keys are given", .{});
+            return .@"error";
+        }
+
+        var replay_count: u32 = repeat;
+        while (replay_count > 0) : (replay_count -= 1) {
+            if (inject_key(wp, tc, event.key, false, item) != .normal) return .@"error";
+        }
+        return .normal;
     }
 
     if (!args.has('K') and wp.fd < 0) {
@@ -591,4 +600,38 @@ test "send-keys rejects an unknown target client" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "send-keys replays the triggering key when no arguments are given" {
+    const setup = try test_session_with_empty_pane("send-replay-test");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-replay-test", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-replay-test:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{ .key = 'x', .len = 1 },
+    };
+    item.event.data[0] = 'x';
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&poll_fds, 100));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("x", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
 }

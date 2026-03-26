@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const pane_input = @import("pane-input.zig");
 const paste_mod = @import("paste.zig");
 const screen_mod = @import("screen.zig");
 const utf8_mod = @import("utf8.zig");
@@ -54,7 +55,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (pb != null and (wp.flags & T.PANE_INPUTOFF) == 0) {
         const separator = resolve_separator(args);
         if (args.has('p') and screen_mod.screen_current(wp).bracketed_paste) {
-            write_all(wp.fd, "\x1b[200~", item) catch return .@"error";
+            pane_input.write_all(wp.fd, "\x1b[200~", item) catch return .@"error";
         }
 
         const bufdata = paste_mod.paste_buffer_data(pb.?, null);
@@ -65,7 +66,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
 
         if (args.has('p') and screen_mod.screen_current(wp).bracketed_paste) {
-            write_all(wp.fd, "\x1b[201~", item) catch return .@"error";
+            pane_input.write_all(wp.fd, "\x1b[201~", item) catch return .@"error";
         }
     }
 
@@ -86,12 +87,12 @@ fn paste_raw(fd: i32, data: []const u8, separator: []const u8, item: *cmdq.CmdqI
     while (start < data.len) {
         const newline_offset = std.mem.indexOfScalarPos(u8, data, start, '\n');
         if (newline_offset) |line_end| {
-            try write_all(fd, data[start..line_end], item);
-            try write_all(fd, separator, item);
+            try pane_input.write_all(fd, data[start..line_end], item);
+            try pane_input.write_all(fd, separator, item);
             start = line_end + 1;
             continue;
         }
-        try write_all(fd, data[start..], item);
+        try pane_input.write_all(fd, data[start..], item);
         return;
     }
 }
@@ -103,14 +104,14 @@ fn paste_escaped(fd: i32, data: []const u8, separator: []const u8, item: *cmdq.C
         if (newline_offset) |line_end| {
             const escaped = try escape_for_paste(data[start..line_end]);
             defer xm.allocator.free(escaped);
-            try write_all(fd, escaped, item);
-            try write_all(fd, separator, item);
+            try pane_input.write_all(fd, escaped, item);
+            try pane_input.write_all(fd, separator, item);
             start = line_end + 1;
             continue;
         }
         const escaped = try escape_for_paste(data[start..]);
         defer xm.allocator.free(escaped);
-        try write_all(fd, escaped, item);
+        try pane_input.write_all(fd, escaped, item);
         return;
     }
 }
@@ -177,24 +178,6 @@ fn is_vis_safe_visible(ch: u8) bool {
     if (ch == ' ' or ch == '\t' or ch == '\n') return true;
     if (ch == '\x07' or ch == '\x08' or ch == '\r') return true;
     return ch <= 0x7f and std.ascii.isPrint(ch) and ch != ' ';
-}
-
-fn write_all(fd: i32, bytes: []const u8, item: *cmdq.CmdqItem) !void {
-    var rest = bytes;
-    while (rest.len > 0) {
-        const written = std.posix.write(fd, rest) catch |err| {
-            switch (err) {
-                error.WouldBlock => cmdq.cmdq_error(item, "pane input would block", .{}),
-                else => cmdq.cmdq_error(item, "pane input failed", .{}),
-            }
-            return err;
-        };
-        if (written == 0) {
-            cmdq.cmdq_error(item, "pane input closed", .{});
-            return error.BrokenPipe;
-        }
-        rest = rest[written..];
-    }
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -273,6 +256,28 @@ test "paste-buffer writes raw bytes with a custom separator" {
     setup.wp.fd = -1;
 }
 
+test "paste-buffer uses the most recent automatic buffer by default" {
+    const setup = try test_session_with_empty_pane("paste-buffer-top");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("paste-buffer-top", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("top\nbuffer"), null, &cause));
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-S", "-t", "paste-buffer-top:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [32]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("top\rbuffer", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
 test "paste-buffer escapes invalid bytes and wraps bracketed paste when requested" {
     const setup = try test_session_with_empty_pane("paste-buffer-bracket");
     const pipe_fds = try std.posix.pipe();
@@ -322,4 +327,30 @@ test "paste-buffer deletes a named buffer even when pane input is disabled" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "paste-buffer errors when the target pane has exited" {
+    const setup = try test_session_with_empty_pane("paste-buffer-exited");
+    defer test_teardown_session("paste-buffer-exited", setup.s, -1, -1);
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("named"), "named", &cause));
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-b", "named", "-t", "paste-buffer-exited:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "paste-buffer errors when a named buffer does not exist" {
+    const setup = try test_session_with_empty_pane("paste-buffer-missing");
+    defer test_teardown_session("paste-buffer-missing", setup.s, -1, -1);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-b", "missing", "-t", "paste-buffer-missing:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
 }

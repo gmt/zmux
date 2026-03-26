@@ -209,6 +209,10 @@ pub fn cmdq_print(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void
     cmdq_write_client(item.client, 1, fmt, args);
 }
 
+pub fn cmdq_print_data(item: *CmdqItem, data: []const u8) void {
+    cmdq_write_client_data(item.client, 1, data);
+}
+
 pub fn cmdq_write_client(cl: ?*T.Client, stream: i32, comptime fmt: []const u8, args: anytype) void {
     const msg = xm.xasprintf(fmt, args);
     defer xm.allocator.free(msg);
@@ -227,6 +231,22 @@ pub fn cmdq_write_client(cl: ?*T.Client, stream: i32, comptime fmt: []const u8, 
     const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
     _ = file.writeAll(msg) catch {};
     _ = file.writeAll("\n") catch {};
+}
+
+pub fn cmdq_write_client_data(cl: ?*T.Client, stream: i32, data: []const u8) void {
+    if (cl) |c_ptr| {
+        if (c_ptr.peer) |peer| {
+            var buf: std.ArrayList(u8) = .{};
+            defer buf.deinit(xm.allocator);
+            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+            buf.appendSlice(xm.allocator, data) catch unreachable;
+            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+            return;
+        }
+    }
+
+    const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
+    _ = file.writeAll(data) catch {};
 }
 
 pub fn cmd_wait_for_flush() void {}

@@ -243,6 +243,31 @@ test "paste-buffer escapes invalid bytes and wraps bracketed paste when requeste
     setup.wp.fd = -1;
 }
 
+test "paste-buffer checks bracketed paste on the active alternate screen" {
+    const setup = try test_session_with_empty_pane("paste-buffer-alt-bracket");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("paste-buffer-alt-bracket", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    screen_mod.screen_enter_alternate(setup.wp, false);
+    screen_mod.screen_current(setup.wp).bracketed_paste = true;
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("alt"), "named", &cause));
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "paste-buffer", "-p", "-S", "-b", "named", "-t", "paste-buffer-alt-bracket:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var buf: [32]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualSlices(u8, "\x1b[200~alt\x1b[201~", buf[0..n]);
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
 test "paste-buffer deletes a named buffer even when pane input is disabled" {
     const setup = try test_session_with_empty_pane("paste-buffer-delete");
     const pipe_fds = try std.posix.pipe();

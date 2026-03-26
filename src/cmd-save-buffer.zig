@@ -23,14 +23,8 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
-const format_mod = @import("format.zig");
+const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
-const server_client_mod = @import("server-client.zig");
-
-const ResolvedPath = struct {
-    path: []const u8,
-    owned: bool = false,
-};
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -56,7 +50,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else format_path_from_client(item, client, args.value_at(0).?);
+    const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
     write_buffer(item, client, raw_path, args.has('a'), bufdata) catch return .@"error";
@@ -68,25 +62,6 @@ fn show_uses_direct_output(client: ?*T.Client) bool {
     return client.?.session != null or (client.?.flags & T.CLIENT_CONTROL) != 0;
 }
 
-fn format_path_from_client(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) []u8 {
-    const session = if (client) |cl| cl.session else null;
-    const winlink = if (session) |s| s.curw else null;
-    const pane = if (winlink) |wl| wl.window.active else null;
-    return format_mod.format_single(item, raw_path, client, session, winlink, pane);
-}
-
-fn resolve_path(client: ?*T.Client, raw_path: []const u8) ResolvedPath {
-    if (std.mem.eql(u8, raw_path, "-")) return .{ .path = raw_path };
-    if (std.mem.startsWith(u8, raw_path, "~/")) {
-        const home = std.posix.getenv("HOME") orelse "";
-        return .{ .path = xm.xasprintf("{s}/{s}", .{ home, raw_path[2..] }), .owned = true };
-    }
-    if (std.mem.startsWith(u8, raw_path, "/")) return .{ .path = raw_path };
-
-    const cwd = server_client_mod.server_client_get_cwd(client, null);
-    return .{ .path = xm.xasprintf("{s}/{s}", .{ cwd, raw_path }), .owned = true };
-}
-
 fn write_buffer(
     item: *cmdq.CmdqItem,
     client: ?*T.Client,
@@ -94,7 +69,7 @@ fn write_buffer(
     append: bool,
     data: []const u8,
 ) !void {
-    const resolved = resolve_path(client, raw_path);
+    const resolved = file_path_mod.resolve_path(client, raw_path);
     defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
 
     if (std.mem.eql(u8, resolved.path, "-")) {
@@ -165,6 +140,23 @@ pub const entry_show: cmd_mod.CmdEntry = .{
     .flags = T.CMD_AFTERHOOK,
     .exec = exec,
 };
+
+fn init_options_for_tests() void {
+    const opts = @import("options.zig");
+    opts.global_options = opts.options_create(null);
+    opts.global_s_options = opts.options_create(null);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+}
+
+fn free_options_for_tests() void {
+    const opts = @import("options.zig");
+    opts.options_free(opts.global_w_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_options);
+}
 
 test "save-buffer writes and appends a named buffer using client cwd for relative paths" {
     paste_mod.paste_reset_for_tests();
@@ -263,6 +255,105 @@ test "save-buffer writes a named buffer using session cwd when client cwd is mis
     const contents = try file.readToEndAlloc(xm.allocator, 1024);
     defer xm.allocator.free(contents);
     try std.testing.expectEqualStrings("from session cwd", contents);
+}
+
+test "save-buffer uses the newest automatic buffer when no name is provided" {
+    init_options_for_tests();
+    defer free_options_for_tests();
+    paste_mod.paste_reset_for_tests();
+    paste_mod.paste_add(null, xm.xstrdup("older"));
+    paste_mod.paste_add(null, xm.xstrdup("newer"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .cwd = cwd,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    var cause: ?[]u8 = null;
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "buffer.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
+
+    const saved_path = try std.fmt.allocPrint(xm.allocator, "{s}/buffer.txt", .{cwd});
+    defer xm.allocator.free(saved_path);
+
+    const file = try std.fs.openFileAbsolute(saved_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(xm.allocator, 1024);
+    defer xm.allocator.free(contents);
+    try std.testing.expectEqualStrings("newer", contents);
+}
+
+test "save-buffer expands the output path through the format context" {
+    paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("fmt"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+
+    const session_name = xm.xstrdup("fmt-session");
+    defer xm.allocator.free(session_name);
+
+    var session = T.Session{
+        .id = 1,
+        .name = session_name,
+        .cwd = cwd,
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &session_env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "#{session_name}.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
+
+    const saved_path = try std.fmt.allocPrint(xm.allocator, "{s}/fmt-session.txt", .{cwd});
+    defer xm.allocator.free(saved_path);
+
+    const file = try std.fs.openFileAbsolute(saved_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(xm.allocator, 1024);
+    defer xm.allocator.free(contents);
+    try std.testing.expectEqualStrings("fmt", contents);
 }
 
 test "show-buffer writes raw bytes for attached clients" {

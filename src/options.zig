@@ -121,6 +121,15 @@ pub fn options_get_string(oo: *T.Options, name: []const u8) []const u8 {
     };
 }
 
+/// Get an array option value; returns an empty slice if not found.
+pub fn options_get_array(oo: *T.Options, name: []const u8) []const []const u8 {
+    const v = options_get(oo, name) orelse return &.{};
+    return switch (v.*) {
+        .array => |arr| arr.items,
+        else => &.{},
+    };
+}
+
 /// Get a raw style option string; returns null if absent or non-string.
 pub fn options_get_style_string(oo: *T.Options, name: []const u8) ?[]const u8 {
     const v = options_get(oo, name) orelse return null;

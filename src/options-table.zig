@@ -41,6 +41,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "backspace",            .@"type" = .string,  .scope = S,  .default_str = "\x7f" },
     .{ .name = "buffer-limit",         .@"type" = .number,  .scope = S,  .default_num = 50, .minimum = 1 },
     .{ .name = "command-alias",        .@"type" = .array,   .scope = S },
+    .{ .name = "codepoint-widths",     .@"type" = .array,   .scope = S },
     .{ .name = "copy-command",         .@"type" = .string,  .scope = S,  .default_str = "" },
     .{ .name = "default-terminal",     .@"type" = .string,  .scope = S,  .default_str = "tmux-256color" },
     .{ .name = "editor",               .@"type" = .string,  .scope = S,  .default_str = "/usr/bin/vi" },

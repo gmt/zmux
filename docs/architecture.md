@@ -231,12 +231,13 @@ the prompt editor/runtime was still open.
 The next checkpoint down is now also landed in shared prompt-editor form:
 
 - `src/utf8.zig` now extends `utf8.CellBuffer` with cursor-facing range,
-  delete, and visible-window helpers so prompt/runtime consumers can stay on
-  shared display-cell storage instead of reaching back into raw byte edits
+  delete, visible-window, and reduced word-reader helpers so prompt/runtime
+  consumers can stay on shared display-cell storage instead of reaching back
+  into raw byte edits
 - `src/status-prompt.zig` now owns shared cursor motion, delete-at-cursor,
-  word motion, history traversal, completion replacement, and cursor-window
-  rendering over that shared cell buffer instead of an append/backspace-only
-  byte editor
+  word motion, word deletion, completion replacement boundaries, history
+  traversal, and cursor-window rendering over that shared cell buffer instead
+  of an append/backspace-only byte editor
 - `src/cmd-command-prompt.zig` now supplies command and target completion
   vocabulary through a consumer-side callback while still relying on the
   shared prompt editor for word finding and replacement
@@ -709,8 +710,8 @@ through truthful lower layers.
 | append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `Y` | `-` | open: combine logic now reaches live pane writes with padding-cell consequences, but the reduced writer still lacks fuller tmux side effects and higher consumer adoption |
 | store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `Y` | `-` | open: direct grid storage now has a real live writer, but there is still no broader shared reader/search/editor surface above it |
 | write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `Y` | `-` | open: live pane writes now use `putGlyph`/`putBytes` over truthful storage and attached-client row emission now preserves stored UTF-8 cell payload bytes, but the writer/runtime is still a reduced seam without tmux's fuller insert/selection/tty collection path |
-| trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the reduced status/prompt renderer now consumes those width rules, but shared search/read/edit consumers are still missing and grid-reader-style search remains byte-oriented |
-| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the shared prompt editor now stores shared cell payloads through `utf8.CellBuffer`, owns cursor motion/history traversal/completion replacement plus prompt command mode/quote-next rendering on that shared path, and the reduced status/message runtime now owns timer and saved-screen lifetime, but persisted range consumers, broader message-producer adoption, and fuller display-consumer reach are still missing |
+| trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and prompt word/search boundaries now ride the lower `utf8.CellBufferReader` surface, but broader shared search/read consumers are still missing and grid-reader-style grid search remains byte-oriented |
+| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the shared prompt editor now stores shared cell payloads through `utf8.CellBuffer`, owns cursor motion/history traversal/completion replacement plus prompt command mode/quote-next rendering on that shared path, and now also reuses the lower `utf8.CellBufferReader` seam for word motion and delete-word behavior, but persisted range consumers, broader message-producer adoption, and fuller display-consumer reach are still missing |
 | choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
 
 The current read of the matrix is deliberately blunt:

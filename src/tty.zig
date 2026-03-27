@@ -99,10 +99,13 @@ pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !
 
     const supports_mouse = tty_features.supportsTty(tty, .mouse);
     const supports_bpaste = tty_features.supportsTty(tty, .bpaste);
+    const supports_focus = tty_features.supportsTty(tty, .focus);
     if (!supports_mouse)
         actual &= ~@as(i32, T.ALL_MOUSE_MODES);
     if (!supports_bpaste)
         actual &= ~@as(i32, T.MODE_BRACKETPASTE);
+    if (!supports_focus)
+        actual &= ~@as(i32, T.MODE_FOCUSON);
 
     const changed = actual ^ tty.mode;
     if ((changed & T.ALL_MOUSE_MODES) != 0 and (supports_mouse or (tty.mode & T.ALL_MOUSE_MODES) != 0)) {
@@ -117,13 +120,44 @@ pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !
             try out.appendSlice(xm.allocator, "\x1b[?1000h");
     }
     if ((changed & T.MODE_BRACKETPASTE) != 0 and (supports_bpaste or (tty.mode & T.MODE_BRACKETPASTE) != 0)) {
-        if (supports_bpaste and (actual & T.MODE_BRACKETPASTE) != 0)
-            try out.appendSlice(xm.allocator, "\x1b[?2004h")
-        else
-            try out.appendSlice(xm.allocator, "\x1b[?2004l");
+        try appendCapabilityToggle(
+            tty,
+            out,
+            "Enbp",
+            "Dsbp",
+            "\x1b[?2004h",
+            "\x1b[?2004l",
+            (actual & T.MODE_BRACKETPASTE) != 0,
+        );
+    }
+    if ((changed & T.MODE_FOCUSON) != 0 and (supports_focus or (tty.mode & T.MODE_FOCUSON) != 0)) {
+        try appendCapabilityToggle(
+            tty,
+            out,
+            "Enfcs",
+            "Dsfcs",
+            "\x1b[?1004h",
+            "\x1b[?1004l",
+            (actual & T.MODE_FOCUSON) != 0,
+        );
     }
 
     tty.mode = actual;
+}
+
+fn appendCapabilityToggle(
+    tty: *const T.Tty,
+    out: *std.ArrayList(u8),
+    enable_cap: []const u8,
+    disable_cap: []const u8,
+    fallback_enable: []const u8,
+    fallback_disable: []const u8,
+    enabled: bool,
+) !void {
+    const cap_name = if (enabled) enable_cap else disable_cap;
+    const fallback = if (enabled) fallback_enable else fallback_disable;
+    const sequence = tty_term.stringCapability(tty, cap_name) orelse fallback;
+    try out.appendSlice(xm.allocator, sequence);
 }
 
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
@@ -193,7 +227,7 @@ test "tty_resize clamps size and restores default pixels" {
     try std.testing.expectEqual(T.DEFAULT_YPIXEL, cl.tty.ypixel);
 }
 
-test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negotiation" {
+test "tty_append_mode_update emits reduced outer mouse, bracketed-paste, and focus negotiation" {
     const env_mod = @import("environ.zig");
 
     const env = env_mod.environ_create();
@@ -203,6 +237,8 @@ test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negot
         @constCast("kmous=\x1b[M"),
         @constCast("Enbp=\x1b[?2004h"),
         @constCast("Dsbp=\x1b[?2004l"),
+        @constCast("Enfcs=\x1b[?1004h"),
+        @constCast("Dsfcs=\x1b[?1004l"),
     };
     var cl = T.Client{
         .environ = env,
@@ -215,15 +251,17 @@ test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negot
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
-    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE, &out);
+    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE | T.MODE_FOCUSON, &out);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1006h") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1002h") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?2004h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1004h") != null);
 
     out.clearRetainingCapacity();
     try tty_append_mode_update(&cl.tty, 0, &out);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1006l") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?2004l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1004l") != null);
 }
 
 test "tty_append_mode_update suppresses unsupported outer modes on reduced dumb terminals" {
@@ -243,9 +281,34 @@ test "tty_append_mode_update suppresses unsupported outer modes on reduced dumb 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
-    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE, &out);
+    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE | T.MODE_FOCUSON, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     try std.testing.expectEqual(@as(i32, 0), cl.tty.mode);
+}
+
+test "tty_append_mode_update falls back to standard toggles when only feature bits are known" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_features = tty_features.featureBit(.bpaste) | tty_features.featureBit(.focus),
+    };
+    tty_init(&cl.tty, &cl);
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    try tty_append_mode_update(&cl.tty, T.MODE_BRACKETPASTE | T.MODE_FOCUSON, &out);
+    try std.testing.expectEqualStrings("\x1b[?2004h\x1b[?1004h", out.items);
+
+    out.clearRetainingCapacity();
+    try tty_append_mode_update(&cl.tty, 0, &out);
+    try std.testing.expectEqualStrings("\x1b[?2004l\x1b[?1004l", out.items);
 }
 
 test "tty_set_title honours the reduced title capability seam" {

@@ -29,6 +29,8 @@ const win = @import("window.zig");
 const opts = @import("options.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
+const cmd_find = @import("cmd-find.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -184,6 +186,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     const wl = s.curw orelse return false;
     const wp = wl.window.active orelse return false;
     const now = std.time.milliTimestamp();
+    var target_session = s;
+    var target_wl = wl;
+    var target_wp = wp;
+    var mouse_find_state: T.CmdFindState = .{};
+    var binding_find_state: ?*T.CmdFindState = null;
 
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
@@ -197,6 +204,27 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
 
     if (status_prompt.status_prompt_handle_key(cl, event)) return true;
 
+    if (event.key == T.KEYC_MOUSE) {
+        if (!mouse_runtime.translate_client_mouse_event(cl, event)) return true;
+        if (cmd_find.cmd_find_from_mouse(&mouse_find_state, &event.m, 0)) {
+            binding_find_state = &mouse_find_state;
+            target_session = mouse_find_state.s orelse s;
+            target_wl = mouse_find_state.wl orelse wl;
+            target_wp = mouse_find_state.wp orelse wp;
+        }
+
+        if (mouse_runtime.key_target(event.key)) |target| {
+            if (target == .pane) {
+                if (win.window_pane_mode(target_wp)) |wme| {
+                    if (wme.mode.key) |mode_key| {
+                        mode_key(wme, cl, target_session, target_wl, event.key & ~T.KEYC_MASK_FLAGS, &event.m);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     const current_table = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");
         break :blk if (configured.len != 0) configured else "root";
@@ -209,7 +237,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
 
     if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
         if (lookup_binding(table, event.key)) |binding| {
-            _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, null);
+            _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, binding_find_state);
             if (!std.mem.eql(u8, current_table, "root"))
                 server_client_mod.server_client_set_key_table(cl, null);
             return true;
@@ -221,6 +249,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         return true;
     }
 
+    if (T.keycIsMouse(event.key)) return true;
     if (wp.fd < 0 or event.len == 0) return false;
     write_pane_bytes(wp.fd, event.data[0..event.len]);
     win.window_pane_synchronize_key_bytes(wp, event.key, event.data[0..event.len]);
@@ -539,6 +568,90 @@ test "server_client_handle_key mirrors unbound keys to synchronized panes" {
     var sibling_buf: [8]u8 = undefined;
     const sibling_len = try std.posix.read(sibling_pipe[0], &sibling_buf);
     try std.testing.expectEqualStrings("x", sibling_buf[0..sibling_len]);
+}
+
+test "server_client_handle_key routes raw mouse events through the shared pane mouse runtime" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    const ModeState = struct {
+        calls: usize = 0,
+        last_key: T.key_code = T.KEYC_NONE,
+        saw_mouse: bool = false,
+    };
+
+    const mode_callbacks = struct {
+        fn key(
+            wme: *T.WindowModeEntry,
+            client: ?*T.Client,
+            session: *T.Session,
+            wl: *T.Winlink,
+            key_code: T.key_code,
+            mouse: ?*const T.MouseEvent,
+        ) void {
+            _ = client;
+            _ = session;
+            _ = wl;
+            const state: *ModeState = @ptrCast(@alignCast(wme.data.?));
+            state.calls += 1;
+            state.last_key = key_code;
+            state.saw_mouse = mouse != null;
+        }
+    };
+
+    const test_mode = T.WindowMode{
+        .name = "server-fn-mouse-test",
+        .key = mode_callbacks.key,
+    };
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-mouse-runtime", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-mouse-runtime") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+    var state = ModeState{};
+    _ = win.window_pane_push_mode(wp, &test_mode, @ptrCast(&state), null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty = .{ .client = &cl, .sx = wp.sx, .sy = wp.sy };
+
+    var event = T.key_event{
+        .key = T.KEYC_MOUSE,
+        .len = 1,
+        .m = .{ .x = 1, .y = 1, .b = T.MOUSE_BUTTON_1 },
+    };
+    try std.testing.expect(server_client_handle_key(&cl, &event));
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.saw_mouse);
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), state.last_key);
 }
 
 test "server_link_window replaces occupied destination with -k and server_unlink_window drops one link" {

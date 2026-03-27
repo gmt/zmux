@@ -30,6 +30,7 @@ const opts = @import("options.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const env_mod = @import("environ.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 
 const ParsedTarget = struct {
     session: ?[]const u8 = null,
@@ -78,6 +79,18 @@ pub fn cmd_find_from_session(current: *T.CmdFindState, s: *T.Session, flags: u32
     current.wl = s.curw;
     current.w = if (s.curw) |wl| wl.window else null;
     current.wp = if (current.w) |w| w.active else null;
+}
+
+pub fn cmd_find_from_mouse(fs: *T.CmdFindState, mouse: *const T.MouseEvent, flags: u32) bool {
+    cmd_find_clear_state(fs, flags);
+
+    fs.wp = mouse_runtime.cmd_mouse_pane(mouse, &fs.s, &fs.wl) orelse {
+        cmd_find_clear_state(fs, flags);
+        return false;
+    };
+    fs.w = fs.wl.?.window;
+    fs.idx = fs.wl.?.idx;
+    return true;
 }
 
 /// Resolve a target string to a cmd_find_state.
@@ -130,8 +143,31 @@ pub fn cmd_find_target(
     }
 
     if (std.mem.eql(u8, raw_target, "=") or std.mem.eql(u8, raw_target, "{mouse}")) {
+        const mouse = &cmdq_mod.cmdq_get_event(item).m;
+        switch (find_type) {
+            .pane => {
+                if (cmd_find_from_mouse(fs, mouse, flags)) return 0;
+                if (mouse_runtime.cmd_mouse_window(mouse, &fs.s)) |mouse_wl| {
+                    fs.wl = mouse_wl;
+                    fs.w = mouse_wl.window;
+                    fs.wp = mouse_wl.window.active;
+                    fs.idx = mouse_wl.idx;
+                    return 0;
+                }
+            },
+            .window, .session => {
+                if (mouse_runtime.cmd_mouse_window(mouse, &fs.s)) |mouse_wl| {
+                    fs.wl = mouse_wl;
+                    fs.w = mouse_wl.window;
+                    fs.wp = mouse_wl.window.active;
+                    fs.idx = mouse_wl.idx;
+                    return 0;
+                }
+            },
+        }
+
         if (flags & T.CMD_FIND_QUIET == 0)
-            cmdq_mod.cmdq_error(item, "mouse target not supported yet", .{});
+            cmdq_mod.cmdq_error(item, "no mouse target", .{});
         return fail_target(fs, flags);
     }
     if (std.mem.eql(u8, raw_target, "~") or std.mem.eql(u8, raw_target, "{marked}")) {
@@ -1521,4 +1557,60 @@ test "cmd_find_target prefers unattached session for shared window ids" {
     try std.testing.expectEqual(unattached, target.s.?);
     try std.testing.expectEqual(unattached_wl, target.wl.?);
     try std.testing.expectEqual(attached_wl.window.active.?, target.wp.?);
+}
+
+test "cmd_find_target resolves {mouse} through the shared mouse runtime state" {
+    const cmd_mod = @import("cmd.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "mouse-target", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("mouse-target") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    s.curw = wl;
+    const wp = wl.window.active.?;
+
+    const query_env = env_mod.environ_create();
+    defer env_mod.environ_free(query_env);
+    var query_client = T.Client{
+        .environ = query_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &query_client, .cmdlist = &list };
+    item.event.m = .{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .status),
+        .s = @intCast(s.id),
+        .w = @intCast(wl.window.id),
+        .wp = @intCast(wp.id),
+    };
+
+    var target: T.CmdFindState = .{};
+    try std.testing.expectEqual(@as(i32, 0), cmd_find_target(&target, &item, "{mouse}", .pane, 0));
+    try std.testing.expectEqual(s, target.s.?);
+    try std.testing.expectEqual(wl, target.wl.?);
+    try std.testing.expectEqual(wp, target.wp.?);
 }

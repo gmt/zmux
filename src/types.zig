@@ -78,6 +78,42 @@ pub const KEYC_MASK_KEY: key_code = 0x000fffffffffff;
 
 pub const KEYC_CLICK_TIMEOUT: u32 = 300;
 
+pub const MOUSE_MASK_BUTTONS: u32 = 195;
+pub const MOUSE_MASK_SHIFT: u32 = 4;
+pub const MOUSE_MASK_META: u32 = 8;
+pub const MOUSE_MASK_CTRL: u32 = 16;
+pub const MOUSE_MASK_DRAG: u32 = 32;
+
+pub const MOUSE_WHEEL_UP: u32 = 64;
+pub const MOUSE_WHEEL_DOWN: u32 = 65;
+
+pub const MOUSE_BUTTON_1: u32 = 0;
+pub const MOUSE_BUTTON_2: u32 = 1;
+pub const MOUSE_BUTTON_3: u32 = 2;
+pub const MOUSE_BUTTON_6: u32 = 66;
+pub const MOUSE_BUTTON_7: u32 = 67;
+pub const MOUSE_BUTTON_8: u32 = 128;
+pub const MOUSE_BUTTON_9: u32 = 129;
+pub const MOUSE_BUTTON_10: u32 = 130;
+pub const MOUSE_BUTTON_11: u32 = 131;
+
+pub fn mouseButtons(b: u32) u32 {
+    return b & MOUSE_MASK_BUTTONS;
+}
+
+pub fn mouseWheel(b: u32) bool {
+    const buttons = mouseButtons(b);
+    return buttons == MOUSE_WHEEL_UP or buttons == MOUSE_WHEEL_DOWN;
+}
+
+pub fn mouseDrag(b: u32) bool {
+    return b & MOUSE_MASK_DRAG != 0;
+}
+
+pub fn mouseRelease(b: u32) bool {
+    return mouseButtons(b) == 3;
+}
+
 pub const KeyMouseTarget = enum(key_code) {
     pane = 0,
     status = 1,
@@ -643,6 +679,9 @@ pub const Tty = struct {
     acs: [256][2]u8 = [_][2]u8{[_]u8{ 0, 0 }} ** 256,
     u8_cap_present: bool = false,
     u8_cap: i32 = 0,
+    mouse_last_x: u32 = 0,
+    mouse_last_y: u32 = 0,
+    mouse_last_b: u32 = 0,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────
@@ -974,8 +1013,23 @@ pub const ClientPaneCache = struct {
 
 pub const MouseEvent = struct {
     valid: bool = false,
+    ignore: bool = false,
     key: key_code = KEYC_NONE,
+    statusat: i32 = -1,
+    statuslines: u32 = 0,
+    x: u32 = 0,
+    y: u32 = 0,
+    b: u32 = 0,
+    lx: u32 = 0,
+    ly: u32 = 0,
+    lb: u32 = 0,
+    ox: u32 = 0,
+    oy: u32 = 0,
+    s: i32 = -1,
+    w: i32 = -1,
     wp: i32 = -1,
+    sgr_type: u8 = ' ',
+    sgr_b: u32 = 0,
 };
 
 pub const key_event = struct {

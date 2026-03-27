@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const args_mod = @import("arguments.zig");
 const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
@@ -39,6 +40,11 @@ pub const ResolvedTarget = struct {
     winlink: ?*T.Winlink = null,
     window: ?*T.Window = null,
     pane: ?*T.WindowPane = null,
+};
+
+const CollectedValue = struct {
+    value: *const T.OptionsValue,
+    inherited: bool,
 };
 
 pub fn resolve_target(
@@ -131,25 +137,25 @@ pub fn is_custom_option(name: []const u8) bool {
     return name.len > 0 and name[0] == '@';
 }
 
-pub fn collect_lines(target: ResolvedTarget, name: ?[]const u8, values_only: bool) [][]u8 {
+pub fn collect_lines(target: ResolvedTarget, name: ?[]const u8, values_only: bool, include_inherited: bool) [][]u8 {
     if (name) |single_name| {
-        return collect_single(target, single_name, values_only);
+        return collect_single(target, single_name, values_only, include_inherited);
     }
 
     var lines: std.ArrayList([]u8) = .{};
+    append_custom_lines(&lines, target, values_only);
     for (@import("options-table.zig").options_table) |*oe| {
         if (!option_allowed(oe, target.kind)) continue;
-        const value = opts.options_get(target.options, oe.name) orelse continue;
-        append_lines(&lines, oe.name, value, oe, values_only);
+        const collected = lookup_value(target.options, oe.name, include_inherited) orelse continue;
+        append_lines(&lines, oe.name, collected.value, oe, values_only, collected.inherited);
     }
-    append_custom_lines(&lines, target, values_only);
     return lines.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
-fn collect_single(target: ResolvedTarget, name: []const u8, values_only: bool) [][]u8 {
-    const value = opts.options_get(target.options, name) orelse return &.{};
+fn collect_single(target: ResolvedTarget, name: []const u8, values_only: bool, include_inherited: bool) [][]u8 {
+    const collected = lookup_value(target.options, name, include_inherited) orelse return xm.allocator.alloc([]u8, 0) catch unreachable;
     var lines: std.ArrayList([]u8) = .{};
-    append_lines(&lines, name, value, opts.options_table_entry(name), values_only);
+    append_lines(&lines, name, collected.value, opts.options_table_entry(name), values_only, collected.inherited);
     return lines.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
@@ -165,7 +171,7 @@ fn append_custom_lines(lines: *std.ArrayList([]u8), target: ResolvedTarget, valu
     std.sort.block([]const u8, names.items, {}, less_than_string);
     for (names.items) |name| {
         const value = target.options.entries.getPtr(name).?;
-        append_lines(lines, name, value, null, values_only);
+        append_lines(lines, name, value, null, values_only, false);
     }
 }
 
@@ -175,31 +181,73 @@ fn append_lines(
     value: *const T.OptionsValue,
     oe: ?*const T.OptionsTableEntry,
     values_only: bool,
+    inherited: bool,
 ) void {
     switch (value.*) {
         .array => |arr| {
             if (arr.items.len == 0) {
-                if (!values_only) lines.append(xm.allocator, xm.xstrdup(name)) catch unreachable;
+                if (!values_only) {
+                    const line = if (inherited)
+                        xm.xasprintf("{s}*", .{name})
+                    else
+                        xm.xstrdup(name);
+                    lines.append(xm.allocator, line) catch unreachable;
+                }
                 return;
             }
             for (arr.items, 0..) |item, idx| {
-                const line = if (values_only)
+                const rendered = if (values_only)
                     xm.xstrdup(item)
                 else
-                    xm.xasprintf("{s}[{d}] {s}", .{ name, idx, item });
+                    args_mod.args_escape(item);
+                defer xm.allocator.free(rendered);
+                const line = if (values_only)
+                    xm.xstrdup(rendered)
+                else if (inherited)
+                    xm.xasprintf("{s}[{d}]* {s}", .{ name, idx, rendered })
+                else
+                    xm.xasprintf("{s}[{d}] {s}", .{ name, idx, rendered });
                 lines.append(xm.allocator, line) catch unreachable;
             }
         },
         else => {
             const rendered = opts.options_value_to_string(name, value, oe);
             defer xm.allocator.free(rendered);
-            const line = if (values_only)
-                xm.xstrdup(rendered)
+            const escaped = if (!values_only and should_escape_value(value, oe))
+                args_mod.args_escape(rendered)
             else
-                xm.xasprintf("{s} {s}", .{ name, rendered });
+                null;
+            defer if (escaped) |value_text| xm.allocator.free(value_text);
+            const value_text = escaped orelse rendered;
+            const line = if (values_only)
+                xm.xstrdup(value_text)
+            else if (inherited)
+                xm.xasprintf("{s}* {s}", .{ name, value_text })
+            else
+                xm.xasprintf("{s} {s}", .{ name, value_text });
             lines.append(xm.allocator, line) catch unreachable;
         },
     }
+}
+
+fn lookup_value(oo: *T.Options, name: []const u8, include_inherited: bool) ?CollectedValue {
+    if (opts.options_get_only(oo, name)) |value| return .{ .value = value, .inherited = false };
+    if (!include_inherited) return null;
+
+    var parent = oo.parent;
+    while (parent) |current| : (parent = current.parent) {
+        if (opts.options_get_only(current, name)) |value| {
+            return .{ .value = value, .inherited = true };
+        }
+    }
+    return null;
+}
+
+fn should_escape_value(value: *const T.OptionsValue, oe: ?*const T.OptionsTableEntry) bool {
+    return switch (value.*) {
+        .string => if (oe) |entry| entry.type == .string else true,
+        else => false,
+    };
 }
 
 fn requested_scope(args: *const @import("arguments.zig").Arguments, window_default: bool) ScopeKind {
@@ -260,11 +308,74 @@ test "resolve_target and collect_lines support pane scoped options" {
     const resolved = resolve_target(&item, cmd_mod.cmd_get_args(cmd), false).?;
     try std.testing.expectEqual(wp, resolved.pane.?);
 
-    const lines = collect_lines(resolved, "@pane-note", false);
+    const lines = collect_lines(resolved, "@pane-note", false, false);
     defer {
         for (lines) |line| xm.allocator.free(line);
         xm.allocator.free(lines);
     }
     try std.testing.expectEqual(@as(usize, 1), lines.len);
     try std.testing.expectEqualStrings("@pane-note active", lines[0]);
+}
+
+test "collect_lines keeps builtins local-only unless -A requests inherited values" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_string(opts.global_s_options, false, "status-left", "global left");
+    opts.options_set_string(opts.global_s_options, false, "@theme", "solarized dark");
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "show-parent", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const target = ResolvedTarget{
+        .kind = .session,
+        .options = s.options,
+        .global = false,
+        .session = s,
+    };
+
+    const local_builtin = collect_lines(target, "status-left", false, false);
+    defer xm.allocator.free(local_builtin);
+    try std.testing.expectEqual(@as(usize, 0), local_builtin.len);
+
+    const inherited_builtin = collect_lines(target, "status-left", false, true);
+    defer {
+        for (inherited_builtin) |line| xm.allocator.free(line);
+        xm.allocator.free(inherited_builtin);
+    }
+    try std.testing.expectEqual(@as(usize, 1), inherited_builtin.len);
+    try std.testing.expectEqualStrings("status-left* \"global left\"", inherited_builtin[0]);
+
+    const inherited_custom = collect_lines(target, "@theme", false, true);
+    defer {
+        for (inherited_custom) |line| xm.allocator.free(line);
+        xm.allocator.free(inherited_custom);
+    }
+    try std.testing.expectEqual(@as(usize, 1), inherited_custom.len);
+    try std.testing.expectEqualStrings("@theme* \"solarized dark\"", inherited_custom[0]);
+
+    const all_with_inherited = collect_lines(target, null, false, true);
+    defer {
+        for (all_with_inherited) |line| xm.allocator.free(line);
+        xm.allocator.free(all_with_inherited);
+    }
+    for (all_with_inherited) |line| {
+        try std.testing.expect(!std.mem.startsWith(u8, line, "@theme"));
+    }
 }

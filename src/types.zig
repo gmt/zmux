@@ -903,6 +903,7 @@ pub const OptionsTableEntry = struct {
     name: []const u8,
     type: OptionsType,
     scope: OptionsScope,
+    is_hook: bool = false,
     default_num: i64 = 0,
     default_str: ?[]const u8 = null,
     default_arr: ?[]const []const u8 = null,

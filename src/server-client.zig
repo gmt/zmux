@@ -46,6 +46,7 @@ const alerts = @import("alerts.zig");
 const status = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
+const screen_mod = @import("screen.zig");
 
 var next_client_id: u32 = 0;
 
@@ -351,12 +352,13 @@ pub fn server_client_loop() void {
         }
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.flags & T.CLIENT_SUSPENDED != 0) continue;
-        if (cl.flags & T.CLIENT_REDRAW == 0) continue;
+        const redraw_flags = cl.flags & T.CLIENT_REDRAW;
+        if (redraw_flags == 0) continue;
         if (cl.flags & T.CLIENT_CONTROL != 0) {
             cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
             continue;
         }
-        server_client_draw(cl);
+        server_client_draw(cl, redraw_flags);
         cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
     }
 }
@@ -389,13 +391,13 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
 pub fn server_client_force_redraw(cl: *T.Client) void {
     tty_mod.tty_invalidate(&cl.tty);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
-    cl.flags |= T.CLIENT_REDRAWWINDOW;
+    cl.flags |= T.CLIENT_REDRAW;
 }
 
 pub fn server_client_attach(cl: *T.Client, s: *T.Session) void {
     server_client_set_session(cl, s);
     server_client_set_key_table(cl, null);
-    cl.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAWWINDOW;
+    cl.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAW;
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
     }
@@ -575,80 +577,147 @@ fn canUseCachedPaneDraw(w: *T.Window, wp: *T.WindowPane) bool {
     return bounds.xoff == 0 and bounds.yoff == 0;
 }
 
-fn server_client_draw(cl: *T.Client) void {
-    const s = cl.session orelse return;
-    const wl = s.curw orelse return;
-    const wp = wl.window.active orelse return;
+fn redraw_needs_body(redraw_flags: u64) bool {
+    return (redraw_flags & (T.CLIENT_REDRAWWINDOW |
+        T.CLIENT_REDRAWBORDERS |
+        T.CLIENT_REDRAWPANES |
+        T.CLIENT_REDRAWOVERLAY |
+        T.CLIENT_REDRAWSCROLLBARS)) != 0;
+}
+
+fn redraw_needs_status(redraw_flags: u64, body_draw: bool, overlay_rows: u32) bool {
+    if (overlay_rows == 0) return false;
+    if (body_draw) return true;
+    return (redraw_flags & (T.CLIENT_REDRAWSTATUS | T.CLIENT_REDRAWSTATUSALWAYS)) != 0;
+}
+
+fn current_body_cursor(
+    w: *T.Window,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) BodyRenderResult {
+    var result = BodyRenderResult{};
+    const active = w.active orelse return result;
+    if (!win_mod.window_pane_visible(active)) return result;
+
+    const screen = screen_mod.screen_current(active);
+    if (!screen.cursor_visible or screen.cx >= active.sx or screen.cy >= active.sy) return result;
+
+    const bounds = win_mod.window_pane_draw_bounds(active);
+    const scrollbar = win_mod.window_pane_scrollbar_layout(active);
+    const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
+        @min(bounds.sx, scrollbar.?.width + scrollbar.?.pad)
+    else
+        0;
+    const cursor_x = bounds.xoff + cursor_prefix + screen.cx;
+    const cursor_y = bounds.yoff + screen.cy;
+    if (cursor_x >= sx_limit or cursor_y >= sy_limit) return result;
+
+    result.cursor_visible = true;
+    result.cursor_x = cursor_x;
+    result.cursor_y = row_offset + cursor_y;
+    return result;
+}
+
+fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
+    const s = cl.session orelse return null;
+    const wl = s.curw orelse return null;
+    const wp = wl.window.active orelse return null;
     const overlay_rows = status.overlay_rows(cl);
     const pane_row_offset = status.pane_row_offset(cl);
     const tty_sx = if (cl.tty.sx == 0) win_mod.window_pane_total_width(wp) else cl.tty.sx;
     const tty_sy = if (cl.tty.sy == 0) wp.base.grid.sy + overlay_rows else cl.tty.sy;
     const pane_area_sy = if (tty_sy > overlay_rows) tty_sy - overlay_rows else 0;
-    if (tty_sx == 0 or pane_area_sy == 0) return;
+    if (tty_sx == 0) return null;
+
+    const body_needs_draw = redraw_needs_body(redraw_flags);
+    const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
 
     var body = BodyRenderResult{};
-    if (canUseCachedPaneDraw(wl.window, wp)) {
-        win_mod.window_pane_update_scrollbar_geometry(wp);
-        const pane_width = win_mod.window_pane_total_width(wp);
-        const sx = @min(tty_sx, pane_width);
-        const sy = @min(pane_area_sy, wp.base.grid.sy);
-        if (sx == 0 or sy == 0) return;
-
-        body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return;
-        body.cursor_visible = cl.pane_cache.cursor_visible;
-        body.cursor_x = cl.pane_cache.cursor_x;
-        body.cursor_y = pane_row_offset + cl.pane_cache.cursor_y;
+    if (body_needs_draw and pane_area_sy != 0) {
+        if (canUseCachedPaneDraw(wl.window, wp)) {
+            win_mod.window_pane_update_scrollbar_geometry(wp);
+            const pane_width = win_mod.window_pane_total_width(wp);
+            const sx = @min(tty_sx, pane_width);
+            const sy = @min(pane_area_sy, wp.base.grid.sy);
+            if (sx != 0 and sy != 0) {
+                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
+                body.cursor_visible = cl.pane_cache.cursor_visible;
+                body.cursor_x = cl.pane_cache.cursor_x;
+                body.cursor_y = pane_row_offset + cl.pane_cache.cursor_y;
+            }
+        } else {
+            const rendered = tty_draw.tty_draw_render_window(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null;
+            body = .{
+                .payload = rendered.payload,
+                .cursor_visible = rendered.cursor_visible,
+                .cursor_x = rendered.cursor_x,
+                .cursor_y = rendered.cursor_y,
+            };
+            tty_draw.tty_draw_invalidate(&cl.pane_cache);
+        }
     } else {
-        const rendered = tty_draw.tty_draw_render_window(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return;
-        body = .{
-            .payload = rendered.payload,
-            .cursor_visible = rendered.cursor_visible,
-            .cursor_x = rendered.cursor_x,
-            .cursor_y = rendered.cursor_y,
-        };
-        tty_draw.tty_draw_invalidate(&cl.pane_cache);
+        body = current_body_cursor(wl.window, tty_sx, pane_area_sy, pane_row_offset);
     }
     defer if (body.payload.len != 0) xm.allocator.free(body.payload);
 
-    const status_render = status.render(cl);
+    const status_render = if (status_needs_draw) status.render(cl) else status.RenderResult{};
     defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
     var mode_payload: std.ArrayList(u8) = .{};
     defer mode_payload.deinit(xm.allocator);
-    tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return;
+    tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return null;
 
-    if (mode_payload.items.len != 0 or body.payload.len != 0 or status_render.payload.len != 0) {
+    if (mode_payload.items.len == 0 and body.payload.len == 0 and status_render.payload.len == 0) return null;
+
+    var buf: std.ArrayList(u8) = .{};
+    errdefer buf.deinit(xm.allocator);
+    buf.appendSlice(xm.allocator, mode_payload.items) catch return null;
+    buf.appendSlice(xm.allocator, body.payload) catch return null;
+    if (status_render.payload.len != 0) {
+        buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
+        buf.appendSlice(xm.allocator, status_render.payload) catch return null;
+        if (status_render.cursor_visible) {
+            const cursor = std.fmt.allocPrint(
+                xm.allocator,
+                "\x1b[{d};{d}H\x1b[?25h",
+                .{ status_render.cursor_y + 1, status_render.cursor_x + 1 },
+            ) catch return null;
+            defer xm.allocator.free(cursor);
+            buf.appendSlice(xm.allocator, cursor) catch return null;
+        } else if (body.cursor_visible) {
+            const cursor = std.fmt.allocPrint(
+                xm.allocator,
+                "\x1b[{d};{d}H\x1b[?25h",
+                .{ body.cursor_y + 1, body.cursor_x + 1 },
+            ) catch return null;
+            defer xm.allocator.free(cursor);
+            buf.appendSlice(xm.allocator, cursor) catch return null;
+        }
+    }
+
+    return buf.toOwnedSlice(xm.allocator) catch return null;
+}
+
+fn server_client_draw(cl: *T.Client, redraw_flags: u64) void {
+    const payload = build_client_draw_payload(cl, redraw_flags);
+    defer if (payload) |bytes| xm.allocator.free(bytes);
+
+    if (payload) |bytes| {
         if (cl.peer) |peer| {
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(xm.allocator);
             const stream: i32 = 1;
             buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, mode_payload.items) catch unreachable;
-            buf.appendSlice(xm.allocator, body.payload) catch unreachable;
-            if (status_render.payload.len != 0) {
-                buf.appendSlice(xm.allocator, "\x1b[?25l") catch unreachable;
-                buf.appendSlice(xm.allocator, status_render.payload) catch unreachable;
-                if (status_render.cursor_visible) {
-                    const cursor = std.fmt.allocPrint(
-                        xm.allocator,
-                        "\x1b[{d};{d}H\x1b[?25h",
-                        .{ status_render.cursor_y + 1, status_render.cursor_x + 1 },
-                    ) catch unreachable;
-                    defer xm.allocator.free(cursor);
-                    buf.appendSlice(xm.allocator, cursor) catch unreachable;
-                } else if (body.cursor_visible) {
-                    const cursor = std.fmt.allocPrint(
-                        xm.allocator,
-                        "\x1b[{d};{d}H\x1b[?25h",
-                        .{ body.cursor_y + 1, body.cursor_x + 1 },
-                    ) catch unreachable;
-                    defer xm.allocator.free(cursor);
-                    buf.appendSlice(xm.allocator, cursor) catch unreachable;
-                }
-            }
+            buf.appendSlice(xm.allocator, bytes) catch unreachable;
             _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
         }
     }
+
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
     const title = if (wp.screen.title) |pane_title| pane_title else wl_name(wp.window);
     const title_changed = blk: {
         if (title.len == 0) break :blk cl.title != null;
@@ -842,4 +911,62 @@ test "server_client_lock sends lock message and unlock restores redraw state" {
     try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
     try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW != 0);
+}
+
+test "build_client_draw_payload keeps multi-pane status-only redraw off the full-clear body path" {
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-status-only", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-status-only") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const left = win_mod.window_add_pane(w, null, 3, 2);
+    const right = win_mod.window_add_pane(w, null, 3, 2);
+    left.xoff = 0;
+    left.yoff = 0;
+    right.xoff = 3;
+    right.yoff = 0;
+    w.active = right;
+
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 6, .sy = 3 };
+
+    const status_only = build_client_draw_payload(&client, T.CLIENT_REDRAWSTATUS) orelse unreachable;
+    defer xm.allocator.free(status_only);
+    try std.testing.expect(status_only.len != 0);
+    try std.testing.expect(std.mem.indexOf(u8, status_only, "\x1b[H\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_only, "L1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_only, "R1") == null);
+
+    const full_window = build_client_draw_payload(&client, T.CLIENT_REDRAWWINDOW) orelse unreachable;
+    defer xm.allocator.free(full_window);
+    try std.testing.expect(std.mem.indexOf(u8, full_window, "\x1b[H\x1b[2J") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full_window, "L1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full_window, "R1") != null);
 }

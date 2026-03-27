@@ -52,11 +52,11 @@ pub fn server_redraw_session_group(s: *T.Session) void {
 }
 
 pub fn server_status_session(s: *T.Session) void {
-    srv.server_redraw_session(s);
+    srv.server_status_session(s);
 }
 
 pub fn server_status_window(w: *T.Window) void {
-    srv.server_redraw_window(w);
+    srv.server_status_window(w);
 }
 
 pub fn server_lock_session(s: *T.Session) void {

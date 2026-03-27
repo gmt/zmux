@@ -61,11 +61,42 @@ pub fn status_at_line(c: *T.Client) i32 {
     return @intCast(c.tty.sy - lines);
 }
 
+pub fn status_prompt_line_at(c: *T.Client) u32 {
+    const lines = resize_mod.status_line_size(c);
+    if (lines == 0) return 0;
+    const s = c.session orelse return 0;
+    const raw_line = @max(opts.options_get_number(s.options, "message-line"), 0);
+    return @min(@as(u32, @intCast(raw_line)), lines - 1);
+}
+
+pub fn status_get_range(c: *T.Client, x: u32, y: u32) ?*const T.StyleRange {
+    if (y >= c.status.entries.len) return null;
+    for (c.status.entries[y].ranges.items) |*range| {
+        if (x >= range.start and x < range.end) return range;
+    }
+    return null;
+}
+
+pub fn status_free(c: *T.Client) void {
+    for (&c.status.entries) |*entry| {
+        if (entry.expanded) |old| xm.allocator.free(old);
+        entry.expanded = null;
+        entry.ranges.deinit(xm.allocator);
+        entry.ranges = .{};
+    }
+}
+
 pub fn render(c: *T.Client) RenderResult {
-    if (c.tty.sx == 0 or c.tty.sy == 0) return .{};
+    if (c.tty.sx == 0 or c.tty.sy == 0) {
+        clear_status_entries_from(c, 0);
+        return .{};
+    }
 
     const rows = overlay_rows(c);
-    if (rows == 0) return .{};
+    if (rows == 0) {
+        clear_status_entries_from(c, 0);
+        return .{};
+    }
 
     const overlay_start = overlay_start_row(c, rows);
     const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
@@ -115,7 +146,10 @@ fn format_context(c: *T.Client) format_mod.FormatContext {
 }
 
 fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
-    const s = c.session orelse return;
+    const s = c.session orelse {
+        clear_status_entries_from(c, 0);
+        return;
+    };
 
     var base_gc = T.grid_default_cell;
     style_mod.style_apply(&base_gc, s.options, "status-style", null);
@@ -129,7 +163,10 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
         fill_row(screen, row, &base_gc);
     }
 
-    if (resize_mod.status_line_size(c) == 0) return;
+    if (resize_mod.status_line_size(c) == 0) {
+        clear_status_entries_from(c, 0);
+        return;
+    }
 
     var ctx = format_context(c);
     const formats = opts.options_get_array(s.options, "status-format");
@@ -139,12 +176,16 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
     while (row < rows) : (row += 1) {
         const row_index: usize = @intCast(row);
         if (row_index >= formats.len) break;
+        const entry = &c.status.entries[row_index];
         style_mod.style_apply(&left_gc, s.options, "status-style", null);
         const expanded = format_mod.format_expand(xm.allocator, formats[row_index], &ctx);
         defer xm.allocator.free(expanded.text);
+        replace_cached_status_entry(entry, expanded.text);
+        entry.ranges.clearRetainingCapacity();
         screen_write.cursor_to(&swctx, row, 0);
-        format_draw.format_draw(&swctx, &left_gc, screen.grid.sx, expanded.text);
+        format_draw.format_draw_ranges(&swctx, &left_gc, screen.grid.sx, expanded.text, &entry.ranges);
     }
+    clear_status_entries_from(c, row);
 }
 
 fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResult) void {
@@ -241,8 +282,7 @@ fn message_area(c: *T.Client, rows: u32) Area {
         };
     }
 
-    const raw_line = @max(opts.options_get_number(s.options, "message-line"), 0);
-    const line: u32 = @min(@as(u32, @intCast(raw_line)), rows - 1);
+    const line: u32 = if (resize_mod.status_line_size(c) == 0) 0 else @min(status_prompt_line_at(c), rows - 1);
     return .{ .x = x, .width = width, .line = line };
 }
 
@@ -286,6 +326,24 @@ fn fill_area(screen: *T.Screen, area: Area, gc: *const T.GridCell, fill_bg: i32)
     var col: u32 = 0;
     while (col < area.width) : (col += 1) {
         screen_write.putCell(&ctx, &fill_gc);
+    }
+}
+
+fn replace_cached_status_entry(entry: *T.StatusLineEntry, expanded: []const u8) void {
+    if (entry.expanded) |old| xm.allocator.free(old);
+    entry.expanded = xm.xstrdup(expanded);
+}
+
+fn clear_cached_status_entry(entry: *T.StatusLineEntry) void {
+    if (entry.expanded) |old| xm.allocator.free(old);
+    entry.expanded = null;
+    entry.ranges.clearRetainingCapacity();
+}
+
+fn clear_status_entries_from(c: *T.Client, start: usize) void {
+    var idx = start;
+    while (idx < c.status.entries.len) : (idx += 1) {
+        clear_cached_status_entry(&c.status.entries[idx]);
     }
 }
 
@@ -376,4 +434,57 @@ test "status render draws reduced status line and utf8 prompt overlay" {
     try std.testing.expect(std.mem.indexOf(u8, prompt.payload, "Name ") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt.payload, "🙂") != null);
     try std.testing.expect(prompt.cursor_visible);
+}
+
+test "status persists translated ranges for hit-test consumers" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_array(session_opts, "status-format", &.{"#[range=user|hit]foo#[norange default]"});
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "range", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(8, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 8, 4);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 8, .sy = 5 };
+
+    const rendered = render(&client);
+    defer if (rendered.payload.len != 0) xm.allocator.free(rendered.payload);
+
+    const range = status_get_range(&client, 1, 0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(T.StyleRangeType.user, range.type);
+    try std.testing.expectEqual(@as(u32, 0), range.start);
+    try std.testing.expectEqual(@as(u32, 3), range.end);
+    try std.testing.expectEqualStrings("hit", std.mem.sliceTo(&range.string, 0));
 }

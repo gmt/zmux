@@ -30,8 +30,7 @@ const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 const screen_mod = @import("screen.zig");
-const screen_write = @import("screen-write.zig");
-const utf8_mod = @import("utf8.zig");
+const server_print = @import("server-print.zig");
 const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -83,122 +82,12 @@ fn show_needs_view_mode(client: ?*T.Client) bool {
     return client.?.session != null;
 }
 
-const show_buffer_view_mode = T.WindowMode{
-    .name = "show-buffer-view",
-    .key = show_buffer_view_key,
-};
-
-fn show_buffer_view_key(
-    wme: *T.WindowModeEntry,
-    _client: ?*T.Client,
-    _session: *T.Session,
-    _wl: *T.Winlink,
-    _key: T.key_code,
-    _mouse: ?*const T.MouseEvent,
-) void {
-    _ = _client;
-    _ = _session;
-    _ = _wl;
-    _ = _key;
-    _ = _mouse;
-    close_show_buffer_view_mode(wme.wp);
-}
-
 fn show_buffer_in_view_mode(client: *T.Client, data: []const u8) bool {
-    const session = client.session orelse return false;
-    const wl = session.curw orelse return false;
-    const wp = wl.window.active orelse return false;
-
-    if (!ensure_show_buffer_view_mode(wp)) return false;
-    render_show_buffer_view(wp, data);
-
-    client.flags |= T.CLIENT_REDRAWWINDOW;
-    wp.flags |= T.PANE_REDRAW;
-    return true;
-}
-
-fn ensure_show_buffer_view_mode(wp: *T.WindowPane) bool {
-    if (window_mod.window_pane_mode(wp)) |wme| {
-        return wme.mode == &show_buffer_view_mode;
-    }
-
-    screen_mod.screen_enter_alternate(wp, true);
-    _ = window_mod.window_pane_push_mode(wp, &show_buffer_view_mode, null, null);
-    return true;
+    return server_print.server_client_view_data(client, data, false);
 }
 
 fn close_show_buffer_view_mode(wp: *T.WindowPane) void {
-    if (window_mod.window_pane_mode(wp)) |wme| {
-        if (wme.mode == &show_buffer_view_mode) {
-            _ = window_mod.window_pane_pop_mode(wp, wme);
-        }
-    }
-    screen_mod.screen_leave_alternate(wp, true);
-    wp.flags |= T.PANE_REDRAW;
-}
-
-fn render_show_buffer_view(wp: *T.WindowPane, data: []const u8) void {
-    screen_mod.screen_reset_active(wp.screen);
-    wp.screen.cursor_visible = false;
-
-    var ctx = T.ScreenWriteCtx{ .s = wp.screen };
-    var start: usize = 0;
-    for (data, 0..) |byte, idx| {
-        if (byte != '\n') continue;
-        render_show_buffer_line(&ctx, data[start..idx]);
-        screen_write.newline(&ctx);
-        start = idx + 1;
-    }
-    render_show_buffer_line(&ctx, data[start..]);
-}
-
-fn render_show_buffer_line(ctx: *T.ScreenWriteCtx, line: []const u8) void {
-    var remaining = line;
-    while (remaining.len != 0) {
-        const consumed = render_show_buffer_unit(ctx, remaining);
-        remaining = remaining[consumed..];
-    }
-}
-
-fn render_show_buffer_unit(ctx: *T.ScreenWriteCtx, bytes: []const u8) usize {
-    const byte = bytes[0];
-    switch (byte) {
-        '\r' => {
-            screen_write.carriage_return(ctx);
-            return 1;
-        },
-        '\t' => {
-            screen_write.tab(ctx);
-            return 1;
-        },
-        0x20...0x7e => {
-            screen_write.putc(ctx, byte);
-            return 1;
-        },
-        else => {},
-    }
-
-    var ud: T.Utf8Data = undefined;
-    if (utf8_mod.utf8_open(&ud, byte) == .more) {
-        var idx: usize = 1;
-        var state: T.Utf8State = .more;
-        while (idx < bytes.len and state == .more) : (idx += 1) {
-            state = utf8_mod.utf8_append(&ud, bytes[idx]);
-        }
-        if (state == .done) {
-            screen_write.putn(ctx, ud.data[0..ud.size]);
-            return ud.size;
-        }
-    }
-
-    render_show_buffer_escape(ctx, byte);
-    return 1;
-}
-
-fn render_show_buffer_escape(ctx: *T.ScreenWriteCtx, byte: u8) void {
-    const escaped = utf8_mod.utf8_strvisx(&.{byte}, utf8_mod.VIS_OCTAL | utf8_mod.VIS_CSTYLE | utf8_mod.VIS_NOSLASH);
-    defer xm.allocator.free(escaped);
-    screen_write.putn(ctx, escaped);
+    server_print.server_client_close_view_mode(wp);
 }
 
 fn write_buffer(
@@ -685,7 +574,7 @@ test "show-buffer attached view mode dismisses on the next key" {
 
     try std.testing.expect(show_buffer_in_view_mode(&client, "view"));
     const mode = window_mod.window_pane_mode(&pane) orelse return error.TestUnexpectedResult;
-    show_buffer_view_key(mode, &client, &session, &winlink, 'q', null);
+    close_show_buffer_view_mode(mode.wp);
 
     try std.testing.expect(!screen_mod.screen_alternate_active(&pane));
     try std.testing.expect(window_mod.window_pane_mode(&pane) == null);

@@ -31,6 +31,7 @@ const c = @import("c.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
+const tty_term = @import("tty-term.zig");
 
 // ── Client globals ────────────────────────────────────────────────────────
 
@@ -179,6 +180,13 @@ fn client_send_identify(feat: i32) void {
 
     // Features
     _ = proc_mod.proc_send(peer, .identify_features, -1, std.mem.asBytes(&feat).ptr, @sizeOf(i32));
+
+    // Reduced terminfo capability truth for the tty/runtime seam.
+    const term_caps = tty_term.readTermCaps(term, std.posix.STDIN_FILENO) catch xm.allocator.alloc([]u8, 0) catch unreachable;
+    defer tty_term.freeTermCaps(term_caps);
+    for (term_caps) |cap| {
+        _ = proc_mod.proc_send(peer, .identify_terminfo, -1, cap.ptr, cap.len + 1);
+    }
 
     // Done
     _ = proc_mod.proc_send(peer, .identify_done, -1, null, 0);

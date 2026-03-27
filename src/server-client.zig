@@ -110,6 +110,10 @@ pub fn server_client_lost(cl: *T.Client) void {
     if (cl.cwd) |cwd| xm.allocator.free(@constCast(cwd));
     if (cl.name) |name| xm.allocator.free(@constCast(name));
     if (cl.term_name) |term_name| xm.allocator.free(term_name);
+    if (cl.term_caps) |caps| {
+        for (caps) |cap| xm.allocator.free(cap);
+        xm.allocator.free(caps);
+    }
     if (cl.ttyname) |ttyname| xm.allocator.free(ttyname);
     if (cl.title) |title| xm.allocator.free(title);
     if (cl.path) |path| xm.allocator.free(path);
@@ -232,6 +236,20 @@ fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_ty
                 cl.term_name = xm.xstrdup(term);
             }
         },
+        .identify_terminfo => {
+            if (data_len > 0) {
+                const cap = data[0 .. data_len - 1];
+                if (cl.term_caps) |old| {
+                    const resized = xm.allocator.realloc(old, old.len + 1) catch unreachable;
+                    resized[old.len] = xm.xstrdup(cap);
+                    cl.term_caps = resized;
+                } else {
+                    const caps = xm.allocator.alloc([]u8, 1) catch unreachable;
+                    caps[0] = xm.xstrdup(cap);
+                    cl.term_caps = caps;
+                }
+            }
+        },
         .identify_ttyname => {
             if (data_len > 0) {
                 const ttyname = data[0 .. data_len - 1];
@@ -277,6 +295,8 @@ fn server_client_finalize_identify(cl: *T.Client) void {
         if (cl.term_name) |old| xm.allocator.free(old);
         cl.term_name = xm.xstrdup("unknown");
     }
+    if (cl.term_caps == null)
+        cl.term_caps = xm.allocator.alloc([]u8, 0) catch unreachable;
     if (cl.name) |old| {
         xm.allocator.free(@constCast(old));
         cl.name = null;
@@ -586,10 +606,18 @@ fn canUseCachedPaneDraw(w: *T.Window, wp: *T.WindowPane) bool {
 
 fn redraw_needs_body(redraw_flags: u64) bool {
     return (redraw_flags & (T.CLIENT_REDRAWWINDOW |
-        T.CLIENT_REDRAWBORDERS |
         T.CLIENT_REDRAWPANES |
-        T.CLIENT_REDRAWOVERLAY |
-        T.CLIENT_REDRAWSCROLLBARS)) != 0;
+        T.CLIENT_REDRAWOVERLAY)) != 0;
+}
+
+fn redraw_needs_borders(redraw_flags: u64, w: *T.Window) bool {
+    return (redraw_flags & T.CLIENT_REDRAWBORDERS) != 0 or
+        ((redraw_flags & T.CLIENT_REDRAWWINDOW) != 0 and visiblePaneCount(w) > 1);
+}
+
+fn redraw_needs_scrollbars(redraw_flags: u64, body_draw: bool) bool {
+    if (body_draw) return false;
+    return (redraw_flags & T.CLIENT_REDRAWSCROLLBARS) != 0;
 }
 
 fn redraw_needs_status(redraw_flags: u64, body_draw: bool, overlay_rows: u32) bool {
@@ -639,6 +667,8 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     if (tty_sx == 0) return null;
 
     const body_needs_draw = redraw_needs_body(redraw_flags);
+    const border_needs_draw = redraw_needs_borders(redraw_flags, wl.window);
+    const scrollbar_needs_draw = redraw_needs_scrollbars(redraw_flags, body_needs_draw);
     const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
 
     var body = BodyRenderResult{};
@@ -669,6 +699,18 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     }
     defer if (body.payload.len != 0) xm.allocator.free(body.payload);
 
+    const border_payload = if (border_needs_draw and pane_area_sy != 0)
+        tty_draw.tty_draw_render_borders(&cl.tty, wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null
+    else
+        &[_]u8{};
+    defer if (border_payload.len != 0) xm.allocator.free(border_payload);
+
+    const scrollbar_payload = if (scrollbar_needs_draw and pane_area_sy != 0)
+        tty_draw.tty_draw_render_scrollbars(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null
+    else
+        &[_]u8{};
+    defer if (scrollbar_payload.len != 0) xm.allocator.free(scrollbar_payload);
+
     const status_render = if (status_needs_draw) status.render(cl) else status.RenderResult{};
     defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
@@ -676,32 +718,37 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     defer mode_payload.deinit(xm.allocator);
     tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return null;
 
-    if (mode_payload.items.len == 0 and body.payload.len == 0 and status_render.payload.len == 0) return null;
+    if (mode_payload.items.len == 0 and body.payload.len == 0 and border_payload.len == 0 and scrollbar_payload.len == 0 and status_render.payload.len == 0) return null;
 
     var buf: std.ArrayList(u8) = .{};
     errdefer buf.deinit(xm.allocator);
     buf.appendSlice(xm.allocator, mode_payload.items) catch return null;
     buf.appendSlice(xm.allocator, body.payload) catch return null;
+    buf.appendSlice(xm.allocator, scrollbar_payload) catch return null;
+    buf.appendSlice(xm.allocator, border_payload) catch return null;
     if (status_render.payload.len != 0) {
         buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
         buf.appendSlice(xm.allocator, status_render.payload) catch return null;
-        if (status_render.cursor_visible) {
-            const cursor = std.fmt.allocPrint(
-                xm.allocator,
-                "\x1b[{d};{d}H\x1b[?25h",
-                .{ status_render.cursor_y + 1, status_render.cursor_x + 1 },
-            ) catch return null;
-            defer xm.allocator.free(cursor);
-            buf.appendSlice(xm.allocator, cursor) catch return null;
-        } else if (body.cursor_visible) {
-            const cursor = std.fmt.allocPrint(
-                xm.allocator,
-                "\x1b[{d};{d}H\x1b[?25h",
-                .{ body.cursor_y + 1, body.cursor_x + 1 },
-            ) catch return null;
-            defer xm.allocator.free(cursor);
-            buf.appendSlice(xm.allocator, cursor) catch return null;
-        }
+    }
+
+    if (status_render.cursor_visible) {
+        const cursor = std.fmt.allocPrint(
+            xm.allocator,
+            "\x1b[{d};{d}H\x1b[?25h",
+            .{ status_render.cursor_y + 1, status_render.cursor_x + 1 },
+        ) catch return null;
+        defer xm.allocator.free(cursor);
+        buf.appendSlice(xm.allocator, cursor) catch return null;
+    } else if (body.cursor_visible) {
+        const cursor = std.fmt.allocPrint(
+            xm.allocator,
+            "\x1b[{d};{d}H\x1b[?25h",
+            .{ body.cursor_y + 1, body.cursor_x + 1 },
+        ) catch return null;
+        defer xm.allocator.free(cursor);
+        buf.appendSlice(xm.allocator, cursor) catch return null;
+    } else if (body.payload.len != 0 or border_payload.len != 0 or scrollbar_payload.len != 0 or status_render.payload.len != 0) {
+        buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
     }
 
     return buf.toOwnedSlice(xm.allocator) catch return null;
@@ -976,4 +1023,108 @@ test "build_client_draw_payload keeps multi-pane status-only redraw off the full
     try std.testing.expect(std.mem.indexOf(u8, full_window, "\x1b[H\x1b[2J") != null);
     try std.testing.expect(std.mem.indexOf(u8, full_window, "L1") != null);
     try std.testing.expect(std.mem.indexOf(u8, full_window, "R1") != null);
+}
+
+test "build_client_draw_payload keeps border-only redraw off the full-clear body path" {
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-borders-only", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-borders-only") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const left = win_mod.window_add_pane(w, null, 3, 2);
+    const right = win_mod.window_add_pane(w, null, 3, 2);
+    left.xoff = 0;
+    left.yoff = 0;
+    right.xoff = 3;
+    right.yoff = 0;
+    w.active = right;
+
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 6, .sy = 2 };
+
+    const borders_only = build_client_draw_payload(&client, T.CLIENT_REDRAWBORDERS) orelse unreachable;
+    defer xm.allocator.free(borders_only);
+    try std.testing.expect(borders_only.len != 0);
+    try std.testing.expect(std.mem.indexOf(u8, borders_only, "\x1b[H\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, borders_only, "L1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, borders_only, "R1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, borders_only, "\x1b[1;4H") != null);
+}
+
+test "build_client_draw_payload keeps scrollbar-only redraw off the full-clear body path" {
+    const screen_write = @import("screen-write.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-scrollbars-only", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-scrollbars-only") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(4, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const wp = win_mod.window_add_pane(w, null, 4, 4);
+    w.active = wp;
+    opts.options_set_number(wp.options, "pane-scrollbars", T.PANE_SCROLLBARS_ALWAYS);
+    opts.options_set_string(wp.options, false, "pane-scrollbars-style", "fg=blue,pad=1");
+    win_mod.window_pane_options_changed(wp, "pane-scrollbars-style");
+    wp.base.grid.hsize = 4;
+
+    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = &wp.base };
+    screen_write.putn(&ctx, "abcd");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = win_mod.window_pane_total_width(wp), .sy = 4 };
+
+    const scrollbars_only = build_client_draw_payload(&client, T.CLIENT_REDRAWSCROLLBARS) orelse unreachable;
+    defer xm.allocator.free(scrollbars_only);
+    try std.testing.expect(scrollbars_only.len != 0);
+    try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "\x1b[H\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "abcd") == null);
+    try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "\x1b[0;34m ") != null);
 }

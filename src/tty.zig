@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const proc_mod = @import("proc.zig");
 const tty_features = @import("tty-features.zig");
+const tty_term = @import("tty-term.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -78,9 +79,17 @@ pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     if (title.len == 0) return;
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
     if (!tty_features.supportsTty(tty, .title)) return;
-    const sequence = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
-    defer xm.allocator.free(sequence);
-    tty_write(tty, sequence);
+
+    const sequence = if (tty_term.stringCapability(tty, "tsl")) |tsl|
+        blk: {
+            const fsl = tty_term.stringCapability(tty, "fsl") orelse break :blk null;
+            break :blk std.fmt.allocPrint(xm.allocator, "{s}{s}{s}", .{ tsl, title, fsl }) catch return;
+        }
+    else
+        std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
+    if (sequence == null) return;
+    defer xm.allocator.free(sequence.?);
+    tty_write(tty, sequence.?);
 }
 
 pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !void {
@@ -190,11 +199,16 @@ test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negot
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
 
+    var caps = [_][]u8{
+        @constCast("kmous=\x1b[M"),
+        @constCast("Enbp=\x1b[?2004h"),
+        @constCast("Dsbp=\x1b[?2004l"),
+    };
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
-        .term_name = @constCast("xterm-256color"),
+        .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
 
@@ -222,7 +236,7 @@ test "tty_append_mode_update suppresses unsupported outer modes on reduced dumb 
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
-        .term_name = @constCast("dumb"),
+        .term_caps = &.{},
     };
     tty_init(&cl.tty, &cl);
 
@@ -244,7 +258,7 @@ test "tty_set_title honours the reduced title capability seam" {
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
-        .term_name = @constCast("dumb"),
+        .term_caps = &.{},
     };
     tty_init(&cl.tty, &cl);
     cl.tty.flags |= @as(i32, @intCast(T.TTY_STARTED));

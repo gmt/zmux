@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_display = @import("cmd-display-message.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const utf8 = @import("utf8.zig");
 
 pub const PromptType = enum(u8) {
     command = 0,
@@ -46,8 +47,10 @@ pub const PromptFreeCb = *const fn (?*anyopaque) void;
 
 const PromptState = struct {
     prompt_string: []u8,
-    input: std.ArrayList(u8) = .{},
-    last_input: []u8,
+    input: utf8.CellBuffer = .{},
+    input_view: []u8,
+    last_input: utf8.CellBuffer = .{},
+    cursor: usize = 0,
     flags: u32,
     prompt_type: PromptType,
     inputcb: PromptInputCb,
@@ -113,11 +116,26 @@ fn expand_input(fs: ?*const T.CmdFindState, input: []const u8, flags: u32) []u8 
 }
 
 fn state_current_input(state: *const PromptState) []const u8 {
-    return state.input.items;
+    return state.input_view;
 }
 
 fn state_copy_input(state: *const PromptState) []u8 {
-    return xm.xstrdup(state_current_input(state));
+    return state.input.toOwnedString();
+}
+
+fn refresh_input_view(state: *PromptState) void {
+    xm.allocator.free(state.input_view);
+    state.input_view = state.input.toOwnedString();
+}
+
+fn set_prompt_input(state: *PromptState, bytes: []const u8) void {
+    state.input.setString(bytes);
+    state.cursor = state.input.len();
+    refresh_input_view(state);
+}
+
+fn set_prompt_last_input(state: *PromptState, bytes: []const u8) void {
+    state.last_input.setString(bytes);
 }
 
 fn prompt_state_free(state: *PromptState) void {
@@ -125,8 +143,9 @@ fn prompt_state_free(state: *PromptState) void {
         if (state.data != null) freecb(state.data);
     }
     xm.allocator.free(state.prompt_string);
-    xm.allocator.free(state.last_input);
-    state.input.deinit(xm.allocator);
+    xm.allocator.free(state.input_view);
+    state.input.deinit();
+    state.last_input.deinit();
     xm.allocator.destroy(state);
 }
 
@@ -152,16 +171,15 @@ fn prompt_changed(c: *T.Client, state: *PromptState, prefix: u8) void {
     _ = state.inputcb(c, state.data, owned, false);
 }
 
-fn append_prompt_bytes(state: *PromptState, bytes: []const u8) void {
-    state.input.appendSlice(xm.allocator, bytes) catch unreachable;
+fn insert_prompt_bytes(state: *PromptState, bytes: []const u8) void {
+    const insert_at = @min(state.cursor, state.input.len());
+    state.cursor = insert_at + state.input.insertBytes(insert_at, bytes);
+    refresh_input_view(state);
 }
 
-fn pop_last_codepoint(state: *PromptState) bool {
-    if (state.input.items.len == 0) return false;
-
-    var idx = state.input.items.len - 1;
-    while (idx > 0 and (state.input.items[idx] & 0xc0) == 0x80) : (idx -= 1) {}
-    state.input.shrinkRetainingCapacity(idx);
+fn delete_prompt_before_cursor(state: *PromptState) bool {
+    if (!state.input.deleteBefore(&state.cursor)) return false;
+    refresh_input_view(state);
     return true;
 }
 
@@ -170,19 +188,18 @@ fn append_event(state: *PromptState, event: *const T.key_event) bool {
 
     if (key <= 0x7f) {
         if (key < 0x20 or key == 0x7f or event.len == 0) return false;
-        append_prompt_bytes(state, event.data[0..event.len]);
+        insert_prompt_bytes(state, event.data[0..event.len]);
         return true;
     }
 
     if (T.keycIsUnicode(event.key)) {
         if (event.len != 0) {
-            append_prompt_bytes(state, event.data[0..event.len]);
+            insert_prompt_bytes(state, event.data[0..event.len]);
             return true;
         }
-
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(@intCast(key), &buf) catch return false;
-        append_prompt_bytes(state, buf[0..len]);
+        const codepoint = std.math.cast(u21, key) orelse return false;
+        const glyph = utf8.Glyph.fromCodepoint(codepoint) orelse return false;
+        insert_prompt_bytes(state, glyph.bytes());
         return true;
     }
 
@@ -298,15 +315,18 @@ pub fn status_prompt_set(
     const state = xm.allocator.create(PromptState) catch unreachable;
     state.* = .{
         .prompt_string = xm.xstrdup(msg),
-        .last_input = expanded_input,
+        .input_view = xm.xstrdup(""),
         .flags = flags,
         .prompt_type = prompt_type,
         .inputcb = inputcb,
         .freecb = freecb,
         .data = data,
     };
-    if (flags & PROMPT_INCREMENTAL == 0)
-        state.input.appendSlice(xm.allocator, expanded_input) catch unreachable;
+    set_prompt_last_input(state, expanded_input);
+    if (flags & PROMPT_INCREMENTAL == 0) {
+        set_prompt_input(state, expanded_input);
+    }
+    xm.allocator.free(expanded_input);
 
     prompt_states.put(state_key(c), state) catch unreachable;
     c.flags |= T.CLIENT_REDRAWSTATUS;
@@ -321,11 +341,8 @@ pub fn status_prompt_update(c: *T.Client, msg: []const u8, input: ?[]const u8) v
     xm.allocator.free(state.prompt_string);
     state.prompt_string = xm.xstrdup(msg);
 
-    xm.allocator.free(state.last_input);
-    state.last_input = xm.xstrdup(input orelse "");
-
-    state.input.clearRetainingCapacity();
-    state.input.appendSlice(xm.allocator, input orelse "") catch unreachable;
+    set_prompt_last_input(state, input orelse "");
+    set_prompt_input(state, input orelse "");
     c.flags |= T.CLIENT_REDRAWSTATUS;
 }
 
@@ -348,7 +365,7 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
     if (state.flags & PROMPT_NUMERIC != 0) {
         if (masked >= '0' and masked <= '9') {
             const digit = [_]u8{@intCast(masked)};
-            append_prompt_bytes(state, &digit);
+            insert_prompt_bytes(state, &digit);
             prompt_changed(c, state, '=');
             return true;
         }
@@ -384,7 +401,7 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
             prompt_finish(c, state, null, true);
             return true;
         }
-        if (pop_last_codepoint(state)) prompt_changed(c, state, '=');
+        if (delete_prompt_before_cursor(state)) prompt_changed(c, state, '=');
         return true;
     }
 
@@ -425,4 +442,110 @@ test "status-prompt history keeps type-local entries and respects the limit" {
     try std.testing.expectEqual(@as(usize, 0), status_prompt_history_count(.command));
     try std.testing.expectEqual(@as(usize, 1), status_prompt_history_count(.search));
     status_prompt_history_clear(null);
+}
+
+const PromptCapture = struct {
+    last: ?[]u8 = null,
+    done: bool = false,
+};
+
+fn capture_prompt_input(_: *T.Client, data: ?*anyopaque, text: ?[]const u8, done: bool) i32 {
+    const capture: *PromptCapture = @ptrCast(@alignCast(data orelse return 1));
+    if (capture.last) |last| xm.allocator.free(last);
+    capture.last = if (text) |value| xm.xstrdup(value) else null;
+    capture.done = done;
+    return 1;
+}
+
+fn free_prompt_capture(data: ?*anyopaque) void {
+    const capture: *PromptCapture = @ptrCast(@alignCast(data orelse return));
+    if (capture.last) |last| xm.allocator.free(last);
+    xm.allocator.destroy(capture);
+}
+
+test "status-prompt stores multibyte input through the shared cell buffer" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        null,
+        capture_prompt_input,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt_clear(&client);
+
+    var event: T.key_event = .{
+        .key = key_string.key_string_lookup_string("🙂"),
+        .len = "🙂".len,
+    };
+    @memcpy(event.data[0..event.len], "🙂");
+    try std.testing.expect(status_prompt_handle_key(&client, &event));
+    try std.testing.expectEqualStrings("🙂", status_prompt_input(&client).?);
+
+    event = .{
+        .key = T.KEYC_BSPACE,
+        .data = std.mem.zeroes([16]u8),
+        .len = 1,
+    };
+    event.data[0] = 0x7f;
+    try std.testing.expect(status_prompt_handle_key(&client, &event));
+    try std.testing.expectEqualStrings("", status_prompt_input(&client).?);
+}
+
+test "status-prompt enter callback sees reconstructed utf8 text" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        "é",
+        capture_prompt_input,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt_clear(&client);
+
+    var event: T.key_event = .{
+        .key = T.C0_CR,
+        .data = std.mem.zeroes([16]u8),
+        .len = 1,
+    };
+    event.data[0] = '\r';
+    try std.testing.expect(status_prompt_handle_key(&client, &event));
+    try std.testing.expect(capture.done);
+    try std.testing.expectEqualStrings("é", capture.last.?);
 }

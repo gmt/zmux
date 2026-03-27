@@ -388,6 +388,83 @@ pub const Decoder = struct {
     }
 };
 
+pub const CellBuffer = struct {
+    cells: std.ArrayList(T.Utf8Data) = .{},
+
+    pub fn deinit(self: *CellBuffer) void {
+        self.cells.deinit(xm.allocator);
+    }
+
+    pub fn clear(self: *CellBuffer) void {
+        self.cells.clearRetainingCapacity();
+    }
+
+    pub fn len(self: *const CellBuffer) usize {
+        return self.cells.items.len;
+    }
+
+    pub fn setString(self: *CellBuffer, bytes: []const u8) void {
+        self.clear();
+        _ = self.insertBytes(0, bytes);
+    }
+
+    pub fn appendGlyph(self: *CellBuffer, glyph: *const Glyph) void {
+        self.cells.append(xm.allocator, glyph.data) catch unreachable;
+    }
+
+    pub fn insertGlyph(self: *CellBuffer, index: usize, glyph: *const Glyph) void {
+        self.cells.insert(xm.allocator, @min(index, self.cells.items.len), glyph.data) catch unreachable;
+    }
+
+    pub fn insertBytes(self: *CellBuffer, index: usize, bytes: []const u8) usize {
+        var decoder = Decoder.init();
+        var insert_at = @min(index, self.cells.items.len);
+        var pos: usize = 0;
+        var inserted: usize = 0;
+
+        while (pos < bytes.len) {
+            switch (decoder.feed(bytes[pos..])) {
+                .glyph => |step| {
+                    self.insertGlyph(insert_at, &step.glyph);
+                    insert_at += 1;
+                    inserted += 1;
+                    pos += step.consumed;
+                },
+                .invalid, .need_more => {
+                    const glyph = Glyph.fromAscii(bytes[pos]);
+                    self.insertGlyph(insert_at, &glyph);
+                    insert_at += 1;
+                    inserted += 1;
+                    pos += 1;
+                    decoder.reset();
+                },
+            }
+        }
+
+        return inserted;
+    }
+
+    pub fn deleteBefore(self: *CellBuffer, cursor: *usize) bool {
+        if (cursor.* == 0 or self.cells.items.len == 0) return false;
+        const remove_at = @min(cursor.* - 1, self.cells.items.len - 1);
+        _ = self.cells.orderedRemove(remove_at);
+        cursor.* = remove_at;
+        return true;
+    }
+
+    pub fn toOwnedString(self: *const CellBuffer) []u8 {
+        var out: std.ArrayList(u8) = .{};
+        self.appendToBytes(&out);
+        return out.toOwnedSlice(xm.allocator) catch unreachable;
+    }
+
+    pub fn appendToBytes(self: *const CellBuffer, out: *std.ArrayList(u8)) void {
+        for (self.cells.items) |cell| {
+            out.appendSlice(xm.allocator, cell.data[0..cell.size]) catch unreachable;
+        }
+    }
+};
+
 pub fn displayWidth(bytes: []const u8) u32 {
     return WidthPolicy.shared().displayWidth(bytes);
 }
@@ -1174,6 +1251,29 @@ test "utf8 decoder buffers multibyte input and leaves retry bytes unconsumed" {
         },
         else => return error.ExpectedRetriedAsciiGlyph,
     }
+}
+
+test "utf8 cell buffer stores decoded display cells and falls back bytewise on invalid input" {
+    resetUtf8StateForTests();
+
+    var buffer: CellBuffer = .{};
+    defer buffer.deinit();
+
+    buffer.setString("A🙂");
+    try std.testing.expectEqual(@as(usize, 2), buffer.len());
+    const rendered = buffer.toOwnedString();
+    defer xm.allocator.free(rendered);
+    try std.testing.expectEqualStrings("A🙂", rendered);
+
+    const inserted = buffer.insertBytes(1, &.{ 0xc3, '(' });
+    try std.testing.expectEqual(@as(usize, 2), inserted);
+
+    var cursor = buffer.len();
+    try std.testing.expect(buffer.deleteBefore(&cursor));
+
+    const fallback = buffer.toOwnedString();
+    defer xm.allocator.free(fallback);
+    try std.testing.expectEqualSlices(u8, &.{ 'A', 0xc3, 0xf0, 0x9f, 0x99, 0x82 }, fallback);
 }
 
 test "utf8 width policy and display helpers share the tmux width surface" {

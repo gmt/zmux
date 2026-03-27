@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_display = @import("cmd-display-message.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const server = @import("server.zig");
 const status_runtime = @import("status-runtime.zig");
 const utf8 = @import("utf8.zig");
 
@@ -177,8 +178,12 @@ fn prompt_finish(c: *T.Client, state: *PromptState, text: ?[]const u8, done: boo
     if (rc == 0) status_prompt_clear(c);
 }
 
+fn request_status_redraw(c: *T.Client) void {
+    server.server_status_client(c);
+}
+
 fn prompt_changed(c: *T.Client, state: *PromptState, prefix: u8) void {
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    request_status_redraw(c);
     if (state.flags & PROMPT_INCREMENTAL == 0) return;
 
     const text = state_copy_input(state);
@@ -252,7 +257,7 @@ fn enter_command_mode(c: *T.Client, state: *PromptState) void {
     state.mode = .command;
     if (state.cursor != 0) state.cursor -= 1;
     state.quote_next = false;
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    request_status_redraw(c);
 }
 
 fn enter_entry_mode(c: *T.Client, state: *PromptState) void {
@@ -260,14 +265,14 @@ fn enter_entry_mode(c: *T.Client, state: *PromptState) void {
     state.mode = .entry;
     if (state.input.len() != 0 and state.cursor < state.input.len()) state.cursor += 1;
     state.quote_next = false;
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    request_status_redraw(c);
 }
 
 fn enter_entry_mode_in_place(c: *T.Client, state: *PromptState) void {
     if (state.mode == .entry) return;
     state.mode = .entry;
     state.quote_next = false;
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    request_status_redraw(c);
 }
 
 fn insert_prompt_data(state: *PromptState, data: *const T.Utf8Data) void {
@@ -611,19 +616,19 @@ fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.ke
     switch (event.key) {
         T.KEYC_BSPACE => {
             if (state.cursor > 0) state.cursor -= 1;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'A' => {
             state.cursor = size;
             enter_entry_mode_in_place(c, state);
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'I' => {
             state.cursor = 0;
             enter_entry_mode_in_place(c, state);
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'C' => {
@@ -642,7 +647,7 @@ fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.ke
             if (command_mode_cursor_right(state)) {}
             enter_entry_mode_in_place(c, state);
             if (size != 0 and state.cursor < state.input.len()) state.cursor += 1;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'S' => {
@@ -653,25 +658,25 @@ fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.ke
         },
         'i' => {
             enter_entry_mode_in_place(c, state);
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         T.C0_ESC => return true,
         '$' => {
             state.cursor = size;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         '0', '^' => {
             state.cursor = 0;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'D' => {
             if (command_mode_delete_to_end(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'X' => {
@@ -680,56 +685,56 @@ fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.ke
                 if (delete_prompt_at_cursor(state))
                     prompt_changed(c, state, '=')
                 else
-                    c.flags |= T.CLIENT_REDRAWSTATUS;
+                    request_status_redraw(c);
             } else {
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             }
             return true;
         },
         'b' => {
             _ = prompt_backward_word(state, prompt_separators(c));
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'B' => {
             _ = prompt_backward_word(state, "");
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'd' => {
             if (delete_prompt_range(state, 0, state.input.len()))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'e' => {
             _ = prompt_end_word(state, prompt_separators(c));
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'E' => {
             _ = prompt_end_word(state, "");
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'w' => {
             _ = prompt_forward_word(state, prompt_separators(c));
             if (state.cursor == state.input.len() and state.cursor != 0) state.cursor -= 1;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'W' => {
             _ = prompt_forward_word(state, "");
             if (state.cursor == state.input.len() and state.cursor != 0) state.cursor -= 1;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'p' => {
             if (yank_saved_prompt(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'q' => {
@@ -740,32 +745,32 @@ fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.ke
             if (command_mode_delete_current(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         T.KEYC_DOWN, 'j' => {
             if (history_down(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             if (state.input.len() != 0 and state.cursor == state.input.len()) state.cursor -= 1;
             return true;
         },
         T.KEYC_LEFT, 'h' => {
             if (state.cursor > 0) state.cursor -= 1;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         T.KEYC_RIGHT, 'l' => {
             _ = command_mode_cursor_right(state);
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         T.KEYC_UP, 'k' => {
             if (history_up(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             if (state.input.len() != 0 and state.cursor == state.input.len()) state.cursor -= 1;
             return true;
         },
@@ -936,7 +941,7 @@ pub fn status_prompt_update(c: *T.Client, msg: []const u8, input: ?[]const u8) v
     set_prompt_input(state, input orelse "");
     state.history_index = 0;
     state.quote_next = false;
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    request_status_redraw(c);
 }
 
 pub fn status_prompt_clear(c: *T.Client) void {
@@ -973,7 +978,7 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         if (append_quoted_key(state, event))
             prompt_changed(c, state, '=')
         else
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
         return true;
     }
 
@@ -999,21 +1004,21 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         T.KEYC_LEFT, 'b' | T.KEYC_CTRL => {
             if (state.cursor > 0) {
                 state.cursor -= 1;
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             }
             return true;
         },
         T.KEYC_RIGHT, 'f' | T.KEYC_CTRL => {
             if (state.cursor < state.input.len()) {
                 state.cursor += 1;
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             }
             return true;
         },
         T.KEYC_HOME, 'a' | T.KEYC_CTRL => {
             if (state.cursor != 0) {
                 state.cursor = 0;
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             }
             return true;
         },
@@ -1021,7 +1026,7 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
             const size = state.input.len();
             if (state.cursor != size) {
                 state.cursor = size;
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             }
             return true;
         },
@@ -1029,42 +1034,42 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
             if (replace_prompt_complete(c, state, null))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         T.KEYC_DC, 'd' | T.KEYC_CTRL => {
             if (delete_prompt_at_cursor(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         T.KEYC_UP, 'p' | T.KEYC_CTRL => {
             if (history_up(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         T.KEYC_DOWN, 'n' | T.KEYC_CTRL => {
             if (history_down(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'u' | T.KEYC_CTRL => {
             if (delete_prompt_range(state, 0, state.cursor))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'k' | T.KEYC_CTRL => {
             if (delete_prompt_range(state, state.cursor, state.input.len()))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'r' | T.KEYC_CTRL => {
@@ -1095,38 +1100,38 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         },
         'v' | T.KEYC_CTRL => {
             state.quote_next = true;
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         'w' | T.KEYC_CTRL => {
             if (delete_prompt_word_before_cursor(state, prompt_separators(c)))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         'y' | T.KEYC_CTRL => {
             if (yank_saved_prompt(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         't' | T.KEYC_CTRL => {
             if (transpose_prompt_cells(state))
                 prompt_changed(c, state, '=')
             else
-                c.flags |= T.CLIENT_REDRAWSTATUS;
+                request_status_redraw(c);
             return true;
         },
         T.KEYC_LEFT | T.KEYC_CTRL, 'b' | T.KEYC_META => {
             _ = prompt_backward_word(state, prompt_separators(c));
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         T.KEYC_RIGHT | T.KEYC_CTRL, 'f' | T.KEYC_META => {
             _ = prompt_forward_word(state, prompt_separators(c));
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
             return true;
         },
         else => {},
@@ -1154,7 +1159,7 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         if (delete_prompt_before_cursor(state))
             prompt_changed(c, state, '=')
         else
-            c.flags |= T.CLIENT_REDRAWSTATUS;
+            request_status_redraw(c);
         return true;
     }
 
@@ -1388,6 +1393,44 @@ test "status-prompt supports cursor edits, history traversal, completion, and re
     defer xm.allocator.free(render_state.input_visible);
     try std.testing.expectEqualStrings("cde", render_state.input_visible);
     try std.testing.expectEqual(@as(u32, 2), render_state.cursor_column);
+}
+
+test "status-prompt cursor edits stay on the shared status-only redraw seam" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        "abc",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt_clear(&client);
+
+    client.flags = 0;
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_LEFT, ""));
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWBORDERS == 0);
 }
 
 test "status-prompt vi command mode and quote-next render through the shared cell buffer" {

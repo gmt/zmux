@@ -330,7 +330,7 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const cmd_list = cmd_mod.cmd_parse_from_argv_with_cause(argv.items, cl, &cause) catch {
         defer if (cause) |msg| xm.allocator.free(msg);
         log.log_warn("client {*} parse error: {s}", .{ cl, cause orelse "parse error" });
-        cmdq_mod.cmdq_write_client(cl, 2, "{s}", .{cause orelse "parse error"});
+        status_runtime.present_client_message(cl, cause orelse "parse error");
         if (cl.peer) |peer| {
             const retval: i32 = 1;
             _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
@@ -559,7 +559,8 @@ fn server_client_draw(cl: *T.Client) void {
     const wl = s.curw orelse return;
     const wp = wl.window.active orelse return;
     win_mod.window_pane_update_scrollbar_geometry(wp);
-    const sx = if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx);
+    const pane_width = win_mod.window_pane_total_width(wp);
+    const sx = if (cl.tty.sx == 0) pane_width else @min(cl.tty.sx, pane_width);
     const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
     if (sx == 0 or sy == 0) return;
     const pane_payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, status.pane_row_offset(cl)) catch return;
@@ -567,12 +568,17 @@ fn server_client_draw(cl: *T.Client) void {
     const status_render = status.render(cl);
     defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
-    if (pane_payload.len != 0 or status_render.payload.len != 0) {
+    var mode_payload: std.ArrayList(u8) = .{};
+    defer mode_payload.deinit(xm.allocator);
+    tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return;
+
+    if (mode_payload.items.len != 0 or pane_payload.len != 0 or status_render.payload.len != 0) {
         if (cl.peer) |peer| {
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(xm.allocator);
             const stream: i32 = 1;
             buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+            buf.appendSlice(xm.allocator, mode_payload.items) catch unreachable;
             buf.appendSlice(xm.allocator, pane_payload) catch unreachable;
             if (status_render.payload.len != 0) {
                 buf.appendSlice(xm.allocator, "\x1b[?25l") catch unreachable;

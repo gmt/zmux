@@ -220,6 +220,186 @@ pub const VIS_GLOB: u32 = 0x100;
 pub const VIS_DQ: u32 = 0x200;
 pub const VIS_ALL: u32 = 0x400;
 
+pub const DisplayAlignment = enum {
+    left,
+    right,
+};
+
+pub const Glyph = struct {
+    data: T.Utf8Data,
+
+    pub fn fromData(ud: *const T.Utf8Data) Glyph {
+        return .{ .data = ud.* };
+    }
+
+    pub fn fromAscii(ch: u8) Glyph {
+        var ud: T.Utf8Data = undefined;
+        utf8_set(&ud, ch);
+        return .{ .data = ud };
+    }
+
+    pub fn fromCompact(uc: T.utf8_char) Glyph {
+        var ud: T.Utf8Data = undefined;
+        utf8_to_data(uc, &ud);
+        return .{ .data = ud };
+    }
+
+    pub fn fromCodepoint(cp: u21) ?Glyph {
+        var ud = std.mem.zeroes(T.Utf8Data);
+        const size = std.unicode.utf8Encode(cp, ud.data[0..]) catch return null;
+        ud.size = @intCast(size);
+        ud.have = ud.size;
+
+        var resolved_width: u8 = 0;
+        if (utf8Width(&ud, &resolved_width) != .done) return null;
+        ud.width = resolved_width;
+        return .{ .data = ud };
+    }
+
+    pub fn payload(self: *const Glyph) *const T.Utf8Data {
+        return &self.data;
+    }
+
+    pub fn bytes(self: *const Glyph) []const u8 {
+        return self.data.bytes();
+    }
+
+    pub fn width(self: *const Glyph) u8 {
+        return self.data.width;
+    }
+
+    pub fn compact(self: *const Glyph) ?T.utf8_char {
+        var uc: T.utf8_char = 0;
+        return if (utf8_from_data(&self.data, &uc) == .done) uc else null;
+    }
+
+    pub fn shouldCombineWith(self: *const Glyph, add: *const Glyph) bool {
+        return utf8_should_combine(&self.data, &add.data);
+    }
+};
+
+pub const CellPayload = Glyph;
+
+pub const WidthPolicy = struct {
+    pub fn shared() WidthPolicy {
+        return .{};
+    }
+
+    pub fn glyphWidth(_: WidthPolicy, glyph: *const Glyph) u8 {
+        return glyph.width();
+    }
+
+    pub fn codepointWidth(_: WidthPolicy, cp: u21) ?u8 {
+        const glyph = Glyph.fromCodepoint(cp) orelse return null;
+        return glyph.width();
+    }
+
+    pub fn displayWidth(_: WidthPolicy, bytes: []const u8) u32 {
+        return utf8_cstrwidth(bytes);
+    }
+
+    pub fn trim(_: WidthPolicy, bytes: []const u8, alignment: DisplayAlignment, width: u32) []u8 {
+        return switch (alignment) {
+            .left => utf8_trim_left(bytes, width),
+            .right => utf8_trim_right(bytes, width),
+        };
+    }
+
+    pub fn pad(_: WidthPolicy, bytes: []const u8, alignment: DisplayAlignment, width: u32) []u8 {
+        return switch (alignment) {
+            .left => utf8_padcstr(bytes, width),
+            .right => utf8_rpadcstr(bytes, width),
+        };
+    }
+};
+
+pub const DecodeStep = union(enum) {
+    need_more: usize,
+    glyph: struct {
+        glyph: Glyph,
+        consumed: usize,
+    },
+    invalid: usize,
+};
+
+pub const Decoder = struct {
+    pending: T.Utf8Data = std.mem.zeroes(T.Utf8Data),
+
+    pub fn init() Decoder {
+        return .{};
+    }
+
+    pub fn reset(self: *Decoder) void {
+        self.pending = std.mem.zeroes(T.Utf8Data);
+    }
+
+    pub fn hasPending(self: *const Decoder) bool {
+        return self.pending.have != 0;
+    }
+
+    pub fn feed(self: *Decoder, bytes: []const u8) DecodeStep {
+        if (bytes.len == 0) return .{ .need_more = 0 };
+
+        var consumed: usize = 0;
+        if (!self.hasPending()) {
+            const ch = bytes[0];
+            if (ch < 0x80) {
+                return .{
+                    .glyph = .{
+                        .glyph = Glyph.fromAscii(ch),
+                        .consumed = 1,
+                    },
+                };
+            }
+
+            if (utf8_open(&self.pending, ch) != .more) {
+                return .{ .invalid = 1 };
+            }
+            consumed = 1;
+        }
+
+        while (consumed < bytes.len) {
+            if (self.pending.have != 0 and (bytes[consumed] & 0xc0) != 0x80) {
+                self.reset();
+                return .{ .invalid = consumed };
+            }
+
+            switch (utf8_append(&self.pending, bytes[consumed])) {
+                .more => consumed += 1,
+                .done => {
+                    const glyph = Glyph.fromData(&self.pending);
+                    consumed += 1;
+                    self.reset();
+                    return .{
+                        .glyph = .{
+                            .glyph = glyph,
+                            .consumed = consumed,
+                        },
+                    };
+                },
+                .@"error" => {
+                    self.reset();
+                    return .{ .invalid = consumed };
+                },
+            }
+        }
+
+        return .{ .need_more = consumed };
+    }
+};
+
+pub fn displayWidth(bytes: []const u8) u32 {
+    return WidthPolicy.shared().displayWidth(bytes);
+}
+
+pub fn trimDisplay(bytes: []const u8, alignment: DisplayAlignment, width: u32) []u8 {
+    return WidthPolicy.shared().trim(bytes, alignment, width);
+}
+
+pub fn padDisplay(bytes: []const u8, alignment: DisplayAlignment, width: u32) []u8 {
+    return WidthPolicy.shared().pad(bytes, alignment, width);
+}
+
 pub fn utf8_update_width_cache() void {
     resetWidthCache();
     for (opts.options_get_array(opts.global_options, "codepoint-widths")) |entry| {
@@ -932,6 +1112,92 @@ fn free_options_for_utf8_tests() void {
     opts.options_free(opts.global_w_options);
     opts.options_free(opts.global_s_options);
     opts.options_free(opts.global_options);
+}
+
+test "utf8 consumer surface exposes glyph and cell payload helpers" {
+    resetUtf8StateForTests();
+
+    const glyph = Glyph.fromCodepoint(0x1f642) orelse return error.ExpectedGlyph;
+    try std.testing.expectEqualStrings("🙂", glyph.bytes());
+    try std.testing.expectEqual(@as(u8, 2), glyph.width());
+
+    const compact = glyph.compact() orelse return error.ExpectedCompactGlyph;
+    const roundtrip = Glyph.fromCompact(compact);
+    try std.testing.expectEqualStrings("🙂", roundtrip.bytes());
+
+    const cell = T.GridCell.fromPayload(glyph.payload());
+    try std.testing.expectEqualStrings("🙂", cell.payload().bytes());
+    try std.testing.expect(!cell.isPadding());
+}
+
+test "utf8 decoder buffers multibyte input and leaves retry bytes unconsumed" {
+    resetUtf8StateForTests();
+
+    var decoder = Decoder.init();
+    switch (decoder.feed("A")) {
+        .glyph => |step| {
+            try std.testing.expectEqual(@as(usize, 1), step.consumed);
+            try std.testing.expectEqualStrings("A", step.glyph.bytes());
+        },
+        else => return error.ExpectedAsciiGlyph,
+    }
+
+    switch (decoder.feed(&.{0xc3})) {
+        .need_more => |consumed| try std.testing.expectEqual(@as(usize, 1), consumed),
+        else => return error.ExpectedMultibytePending,
+    }
+    try std.testing.expect(decoder.hasPending());
+
+    switch (decoder.feed(&.{0xa9})) {
+        .glyph => |step| {
+            try std.testing.expectEqual(@as(usize, 1), step.consumed);
+            try std.testing.expectEqualStrings("é", step.glyph.bytes());
+        },
+        else => return error.ExpectedCompletedGlyph,
+    }
+    try std.testing.expect(!decoder.hasPending());
+
+    switch (decoder.feed(&.{0xe2})) {
+        .need_more => |consumed| try std.testing.expectEqual(@as(usize, 1), consumed),
+        else => return error.ExpectedSecondPendingSequence,
+    }
+    switch (decoder.feed("(")) {
+        .invalid => |consumed| try std.testing.expectEqual(@as(usize, 0), consumed),
+        else => return error.ExpectedRetryBoundary,
+    }
+    try std.testing.expect(!decoder.hasPending());
+
+    switch (decoder.feed("(")) {
+        .glyph => |step| {
+            try std.testing.expectEqual(@as(usize, 1), step.consumed);
+            try std.testing.expectEqualStrings("(", step.glyph.bytes());
+        },
+        else => return error.ExpectedRetriedAsciiGlyph,
+    }
+}
+
+test "utf8 width policy and display helpers share the tmux width surface" {
+    resetUtf8StateForTests();
+
+    const policy = WidthPolicy.shared();
+    try std.testing.expectEqual(@as(u32, 3), policy.displayWidth("a🙂"));
+    try std.testing.expectEqual(@as(?u8, 2), policy.codepointWidth(0x1f642));
+
+    const left = trimDisplay("a🙂bc", .left, 3);
+    defer xm.allocator.free(left);
+    try std.testing.expectEqualStrings("a🙂", left);
+
+    const right = trimDisplay("a🙂bc", .right, 3);
+    defer xm.allocator.free(right);
+    try std.testing.expectEqualStrings("bc", right);
+
+    const padded = padDisplay("x🙂", .left, 4);
+    defer xm.allocator.free(padded);
+    try std.testing.expectEqualStrings("x🙂 ", padded);
+
+    const rpad = policy.pad("x🙂", .right, 4);
+    defer xm.allocator.free(rpad);
+    try std.testing.expectEqualStrings(" x🙂", rpad);
 }
 
 test "utf8_set and utf8_copy handle single-byte data" {

@@ -30,6 +30,7 @@ const opts = @import("options.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
 const tty_mod = @import("tty.zig");
@@ -89,6 +90,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
+    cmd_display_panes.clear_overlay(cl);
     status_prompt.status_prompt_clear(cl);
     status_runtime.status_message_clear(cl);
     status_runtime.status_cleanup(cl);
@@ -741,6 +743,7 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const border_needs_draw = redraw_needs_borders(redraw_flags, wl.window);
     const scrollbar_needs_draw = redraw_needs_scrollbars(redraw_flags, body_needs_draw);
     const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
+    const overlay_active = cmd_display_panes.overlay_active(cl);
 
     var body = BodyRenderResult{};
     if (full_body_needs_draw and pane_area_sy != 0) {
@@ -799,6 +802,13 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
         &[_]u8{};
     defer if (scrollbar_payload.len != 0) xm.allocator.free(scrollbar_payload);
 
+    const overlay_payload = if (overlay_active and pane_area_sy != 0 and
+        (body_needs_draw or border_needs_draw or scrollbar_needs_draw or (redraw_flags & T.CLIENT_REDRAWOVERLAY) != 0))
+        (cmd_display_panes.render_overlay_payload(cl, tty_sx, pane_area_sy, pane_row_offset) catch return null)
+    else
+        null;
+    defer if (overlay_payload) |payload| xm.allocator.free(payload);
+
     const status_render = if (status_needs_draw) status.render(cl) else status.RenderResult{};
     defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
@@ -806,7 +816,7 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     defer mode_payload.deinit(xm.allocator);
     tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return null;
 
-    if (mode_payload.items.len == 0 and body.payload.len == 0 and border_payload.len == 0 and scrollbar_payload.len == 0 and status_render.payload.len == 0) return null;
+    if (mode_payload.items.len == 0 and body.payload.len == 0 and border_payload.len == 0 and scrollbar_payload.len == 0 and status_render.payload.len == 0 and overlay_payload == null) return null;
 
     var buf: std.ArrayList(u8) = .{};
     errdefer buf.deinit(xm.allocator);
@@ -814,12 +824,16 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     buf.appendSlice(xm.allocator, body.payload) catch return null;
     buf.appendSlice(xm.allocator, scrollbar_payload) catch return null;
     buf.appendSlice(xm.allocator, border_payload) catch return null;
+    if (overlay_payload) |payload| buf.appendSlice(xm.allocator, payload) catch return null;
     if (status_render.payload.len != 0) {
         buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
         buf.appendSlice(xm.allocator, status_render.payload) catch return null;
     }
 
-    if (status_render.cursor_visible) {
+    if (overlay_active) {
+        if (body.payload.len != 0 or border_payload.len != 0 or scrollbar_payload.len != 0 or status_render.payload.len != 0 or overlay_payload != null)
+            buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
+    } else if (status_render.cursor_visible) {
         const cursor = std.fmt.allocPrint(
             xm.allocator,
             "\x1b[{d};{d}H\x1b[?25h",

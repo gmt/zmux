@@ -73,6 +73,9 @@ pub fn client_outer_tty_mode(cl: *const T.Client) i32 {
         }
     }
 
+    if (options_mod.options_get_number(session.options, "focus-events") != 0)
+        mode |= T.MODE_FOCUSON;
+
     if (options_mod.options_get_number(session.options, "mouse") == 0) return mode;
 
     for (window.panes.items) |pane| {
@@ -596,6 +599,9 @@ test "client_outer_tty_mode follows tmux-style button versus all-motion negotiat
     opts.options_set_number(s.options, "focus-follows-mouse", 1);
     wp.base.mode &= ~@as(i32, T.MODE_MOUSE_ALL);
     try std.testing.expectEqual(@as(i32, T.MODE_MOUSE_ALL), client_outer_tty_mode(&client) & T.ALL_MOUSE_MODES);
+
+    opts.options_set_number(s.options, "focus-events", 1);
+    try std.testing.expect((client_outer_tty_mode(&client) & T.MODE_FOCUSON) != 0);
 }
 
 test "translate_client_mouse_event maps pane hits onto pane targets" {

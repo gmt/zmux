@@ -39,6 +39,23 @@ pub const Job = struct {
     state: JobState = .running,
 };
 
+pub const ShellRunOptions = struct {
+    cwd: []const u8,
+    merge_stderr: bool = false,
+    capture_output: bool = false,
+};
+
+pub const ShellRunResult = struct {
+    output: std.ArrayList(u8) = .{},
+    retcode: i32 = 1,
+    signal_code: ?u32 = null,
+    spawn_failed: bool = false,
+
+    pub fn deinit(self: *ShellRunResult) void {
+        self.output.deinit(xm.allocator);
+    }
+};
+
 var jobs: std.ArrayListUnmanaged(*Job) = .{};
 var jobs_lock: std.Thread.Mutex = .{};
 
@@ -74,6 +91,81 @@ pub fn job_closed(job: *Job) void {
     jobs_lock.lock();
     defer jobs_lock.unlock();
     job.state = .closed;
+}
+
+fn shellExitStatus(term: std.process.Child.Term) struct {
+    retcode: i32,
+    signal_code: ?u32,
+} {
+    return switch (term) {
+        .Exited => |code| .{ .retcode = code, .signal_code = null },
+        .Signal => |signal_code| .{
+            .retcode = @as(i32, @intCast(signal_code)) + 128,
+            .signal_code = signal_code,
+        },
+        else => .{ .retcode = 1, .signal_code = null },
+    };
+}
+
+pub fn job_run_shell_command(job: ?*Job, shell_command: []const u8, options: ShellRunOptions) ShellRunResult {
+    var result = ShellRunResult{};
+
+    const command_to_run = if (options.merge_stderr)
+        xm.xasprintf("exec 2>&1; {s}", .{shell_command})
+    else
+        xm.xstrdup(shell_command);
+    defer xm.allocator.free(command_to_run);
+
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", command_to_run }, xm.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = if (options.capture_output) .Pipe else .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.cwd = options.cwd;
+
+    child.spawn() catch {
+        result.spawn_failed = true;
+        if (job) |registered| job_finished(registered, 1);
+        return result;
+    };
+
+    const stdout_fd = if (options.capture_output) fd: {
+        const stdout_pipe = child.stdout orelse {
+            result.spawn_failed = true;
+            if (job) |registered| job_finished(registered, 1);
+            _ = child.wait() catch {};
+            return result;
+        };
+        break :fd stdout_pipe.handle;
+    } else -1;
+
+    if (job) |registered| job_started(registered, @intCast(child.id), stdout_fd);
+
+    if (options.capture_output) {
+        const stdout_pipe = child.stdout.?;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const amt = stdout_pipe.read(&buf) catch {
+                result.spawn_failed = true;
+                if (job) |registered| job_finished(registered, 1);
+                _ = child.wait() catch {};
+                return result;
+            };
+            if (amt == 0) break;
+            result.output.appendSlice(xm.allocator, buf[0..amt]) catch unreachable;
+        }
+    }
+
+    const term = child.wait() catch {
+        result.spawn_failed = true;
+        if (job) |registered| job_finished(registered, 1);
+        return result;
+    };
+    const status = shellExitStatus(term);
+    result.retcode = status.retcode;
+    result.signal_code = status.signal_code;
+
+    if (job) |registered| job_finished(registered, result.retcode);
+    return result;
 }
 
 pub fn job_still_running() bool {
@@ -151,4 +243,22 @@ test "job registry renders reduced tmux-style summaries" {
 
     job_free(first);
     job_free(second);
+}
+
+test "job shared shell runner captures stdout and merged stderr" {
+    defer job_reset_all();
+
+    const job = job_register("printf 'out'; printf 'err' >&2", 0);
+    defer job_free(job);
+
+    var result = job_run_shell_command(job, "printf 'out'; printf 'err' >&2", .{
+        .cwd = "/",
+        .merge_stderr = true,
+        .capture_output = true,
+    });
+    defer result.deinit();
+
+    try std.testing.expect(!result.spawn_failed);
+    try std.testing.expectEqual(@as(i32, 0), result.retcode);
+    try std.testing.expectEqualStrings("outerr", result.output.items);
 }

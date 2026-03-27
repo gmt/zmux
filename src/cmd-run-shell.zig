@@ -59,7 +59,6 @@ const RunShellState = struct {
     thread: ?std.Thread = null,
     output: std.ArrayList(u8) = .{},
     show_stderr: bool = false,
-    spawned: bool = false,
     spawn_failed: bool = false,
     retcode: i32 = 0,
     signal_code: ?u32 = null,
@@ -324,63 +323,16 @@ fn notifyCompletion(state: *RunShellState) void {
 fn shellThreadMain(state: *RunShellState) void {
     defer notifyCompletion(state);
 
-    const command_to_run = if (state.show_stderr)
-        xm.xasprintf("exec 2>&1; {s}", .{state.shell_command.?})
-    else
-        xm.xstrdup(state.shell_command.?);
-    defer xm.allocator.free(command_to_run);
-
-    var child = std.process.Child.init(&.{ "/bin/sh", "-c", command_to_run }, xm.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.cwd = state.cwd;
-
-    child.spawn() catch {
-        state.spawn_failed = true;
-        if (state.job) |job| job_mod.job_finished(job, 1);
-        return;
-    };
-    state.spawned = true;
-
-    const stdout_pipe = child.stdout orelse {
-        state.spawn_failed = true;
-        if (state.job) |job| job_mod.job_finished(job, 1);
-        _ = child.wait() catch {};
-        return;
-    };
-    if (state.job) |job| job_mod.job_started(job, @intCast(child.id), stdout_pipe.handle);
-
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const amt = stdout_pipe.read(&buf) catch {
-            state.spawn_failed = true;
-            if (state.job) |job| job_mod.job_finished(job, 1);
-            _ = child.wait() catch {};
-            return;
-        };
-        if (amt == 0) break;
-        state.output.appendSlice(xm.allocator, buf[0..amt]) catch unreachable;
-    }
-
-    const term = child.wait() catch {
-        state.spawn_failed = true;
-        if (state.job) |job| job_mod.job_finished(job, 1);
-        return;
-    };
-    switch (term) {
-        .Exited => |code| {
-            state.retcode = code;
-        },
-        .Signal => |signal_code| {
-            state.signal_code = signal_code;
-            state.retcode = @as(i32, @intCast(signal_code)) + 128;
-        },
-        else => {
-            state.retcode = 1;
-        },
-    }
-    if (state.job) |job| job_mod.job_finished(job, state.retcode);
+    var result = job_mod.job_run_shell_command(state.job, state.shell_command.?, .{
+        .cwd = state.cwd,
+        .merge_stderr = state.show_stderr,
+        .capture_output = true,
+    });
+    state.output = result.output;
+    result.output = .{};
+    state.spawn_failed = result.spawn_failed;
+    state.retcode = result.retcode;
+    state.signal_code = result.signal_code;
 }
 
 fn armCompletionEvent(state: *RunShellState) bool {

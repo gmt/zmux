@@ -25,6 +25,7 @@ const c = @import("c.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const server = @import("server.zig");
+const server_print = @import("server-print.zig");
 const xm = @import("xmalloc.zig");
 
 pub fn status_push_screen(client: *T.Client) void {
@@ -72,7 +73,7 @@ pub fn status_message_set_text(
     status_message_set_owned(client, delay, ignore_styles, ignore_keys, no_freeze, xm.xstrdup(text));
 }
 
-fn status_message_set_owned(
+pub fn status_message_set_owned(
     client: *T.Client,
     delay: i32,
     ignore_styles: bool,
@@ -100,6 +101,27 @@ fn status_message_set_owned(
     if (!no_freeze) client.tty.flags |= @intCast(T.TTY_FREEZE);
     client.tty.flags |= @intCast(T.TTY_NOCURSOR);
     client.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
+pub fn present_client_message(client: ?*T.Client, text: []const u8) void {
+    if (client) |cl| {
+        if (cl.session != null and (cl.flags & T.CLIENT_CONTROL) == 0) {
+            const message = xm.xstrdup(text);
+            if (message.len != 0) message[0] = std.ascii.toUpper(message[0]);
+            status_message_set_owned(cl, -1, true, false, false, message);
+            return;
+        }
+
+        server.server_add_message("{s} message: {s}", .{ cl.name orelse "client", text });
+        const line = xm.xasprintf("{s}\n", .{text});
+        defer xm.allocator.free(line);
+        server_print.server_client_write_stream(cl, 2, line);
+        return;
+    }
+
+    const line = xm.xasprintf("{s}\n", .{text});
+    defer xm.allocator.free(line);
+    server_print.server_client_write_stream(null, 2, line);
 }
 
 pub fn status_message_clear(client: *T.Client) void {

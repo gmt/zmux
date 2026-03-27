@@ -48,6 +48,11 @@ pub const STATUS_LINES_LIMIT: u32 = 5;
 pub const PANE_SCROLLBARS_DEFAULT_PADDING: i32 = 0;
 pub const PANE_SCROLLBARS_DEFAULT_WIDTH: i32 = 1;
 pub const PANE_SCROLLBARS_CHARACTER: u8 = ' ';
+pub const PANE_SCROLLBARS_OFF: u32 = 0;
+pub const PANE_SCROLLBARS_MODAL: u32 = 1;
+pub const PANE_SCROLLBARS_ALWAYS: u32 = 2;
+pub const PANE_SCROLLBARS_RIGHT: u32 = 0;
+pub const PANE_SCROLLBARS_LEFT: u32 = 1;
 
 // ── Key codes ─────────────────────────────────────────────────────────────
 
@@ -682,6 +687,9 @@ pub const Tty = struct {
     mouse_last_x: u32 = 0,
     mouse_last_y: u32 = 0,
     mouse_last_b: u32 = 0,
+    mouse_drag_flag: u32 = 0,
+    mouse_scrolling_flag: bool = false,
+    mouse_slider_mpos: i32 = -1,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────
@@ -764,6 +772,8 @@ pub const WindowPane = struct {
     // Colour palette
     palette: ColourPalette = .{},
     scrollbar_style: Style = .{},
+    sb_slider_y: u32 = 0,
+    sb_slider_h: u32 = 0,
 
     // Pipe (pipe-pane)
     pipe_fd: i32 = -1,
@@ -987,6 +997,12 @@ pub const ClientExitReason = enum {
     message_provided,
 };
 
+pub const MouseClickState = enum {
+    none,
+    double_pending,
+    triple_pending,
+};
+
 pub const StatusLine = struct {
     screen: Screen,
     active: ?*Screen = null,
@@ -1070,6 +1086,7 @@ pub const Client = struct {
     stdin_pending: std.ArrayList(u8) = .{},
     key_table_name: ?[]u8 = null,
     escape_timer: ?*c.libevent.event = null,
+    click_timer: ?*c.libevent.event = null,
     message_timer: ?*c.libevent.event = null,
 
     flags: u64 = 0,
@@ -1083,6 +1100,11 @@ pub const Client = struct {
     message_string: ?[]u8 = null,
     message_ignore_keys: bool = false,
     message_ignore_styles: bool = false,
+    click_event: MouseEvent = .{},
+    click_button: u32 = 0,
+    click_target: ?KeyMouseTarget = null,
+    click_wp: i32 = -1,
+    click_state: MouseClickState = .none,
 };
 
 // ── IPC proc layer ────────────────────────────────────────────────────────

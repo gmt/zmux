@@ -27,6 +27,7 @@ const opts_mod = @import("options.zig");
 const options_table = @import("options-table.zig");
 const sess_mod = @import("session.zig");
 const status_prompt = @import("status-prompt.zig");
+const status_runtime = @import("status-runtime.zig");
 
 const PromptStep = struct {
     prompt: []u8,
@@ -365,7 +366,7 @@ fn parse_expanded_command(c: *T.Client, item: ?*cmdq.CmdqItem, expanded: []const
             if (item) |it|
                 cmdq.cmdq_error(it, "{s}", .{err})
             else
-                cmdq.cmdq_write_client(c, 2, "{s}", .{err});
+                status_runtime.present_client_message(c, err);
             return null;
         },
     }

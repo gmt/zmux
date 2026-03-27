@@ -30,6 +30,7 @@ const opts = @import("options.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const server_client_mod = @import("server-client.zig");
+const status_prompt = @import("status-prompt.zig");
 
 pub fn server_redraw_session(s: *T.Session) void {
     srv.server_redraw_session(s);
@@ -167,6 +168,8 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
     sess.session_update_activity(s, now);
+
+    if (status_prompt.status_prompt_handle_key(cl, event)) return true;
 
     const current_table = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");

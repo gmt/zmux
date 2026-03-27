@@ -217,6 +217,39 @@ pub fn tty_draw_render_window(
     return result;
 }
 
+pub fn tty_draw_render_dirty_panes(
+    w: *T.Window,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    for (w.panes.items) |wp| {
+        if (!window_mod.window_pane_visible(wp)) continue;
+        if (wp.flags & T.PANE_REDRAW == 0) continue;
+
+        const bounds = window_mod.window_pane_draw_bounds(wp);
+        if (bounds.xoff >= sx_limit or bounds.yoff >= sy_limit) continue;
+
+        const draw_width = @min(bounds.sx, sx_limit - bounds.xoff);
+        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
+        const screen = screen_mod.screen_current(wp);
+        const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
+
+        for (0..draw_height) |row_idx| {
+            const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), draw_width, scrollbar);
+            defer xm.allocator.free(rendered);
+
+            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, bounds.xoff + 1);
+            try out.appendSlice(xm.allocator, rendered);
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
 pub fn tty_draw_render_borders(
     tty: ?*const T.Tty,
     w: *T.Window,

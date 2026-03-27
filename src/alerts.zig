@@ -36,6 +36,7 @@ const sess = @import("session.zig");
 const notify = @import("notify.zig");
 const proc_mod = @import("proc.zig");
 const client_registry = @import("client-registry.zig");
+const server = @import("server.zig");
 const status_runtime = @import("status-runtime.zig");
 
 var alerts_fired = false;
@@ -309,13 +310,7 @@ fn send_bell(cl: *T.Client) void {
 }
 
 fn mark_session_redraw(s: *T.Session) void {
-    for (client_registry.clients.items) |cl| {
-        if ((cl.flags & T.CLIENT_ATTACHED) == 0)
-            continue;
-        if (cl.session != s)
-            continue;
-        cl.flags |= T.CLIENT_REDRAWWINDOW;
-    }
+    server.server_status_session(s);
 }
 
 export fn alerts_timer_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
@@ -457,4 +452,56 @@ test "alerts_clear_session clears window and winlink alert flags" {
     try std.testing.expectEqual(@as(u32, 0), w.flags & T.WINDOW_ALERTFLAGS);
     try std.testing.expectEqual(@as(u32, 0), wl.flags & T.WINLINK_ALERTFLAGS);
     try std.testing.expectEqual(@as(u32, 0), s.flags & T.SESSION_ALERTED);
+}
+
+test "alerts queue keeps winlink alert fallout on shared status redraw" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const env_mod = @import("environ.zig");
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "alerts-status-redraw", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const current_window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const alert_window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const current = sess.session_attach(s, current_window, -1, &cause).?;
+    const alerted = sess.session_attach(s, alert_window, -1, &cause).?;
+    s.curw = current;
+    s.attached = 1;
+    opts.options_set_number(alert_window.options, "monitor-activity", 1);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .name = "alerts-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+        .flags = T.CLIENT_ATTACHED,
+    };
+    try client_registry.clients.append(xm.allocator, &client);
+
+    alerts_queue(alert_window, T.WINDOW_ACTIVITY);
+
+    try std.testing.expect(alerted.flags & T.WINLINK_ACTIVITY != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
 }

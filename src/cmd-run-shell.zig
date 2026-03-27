@@ -25,6 +25,7 @@ const xm = @import("xmalloc.zig");
 const client_registry = @import("client-registry.zig");
 const cmd_display = @import("cmd-display-message.zig");
 const cmd_find = @import("cmd-find.zig");
+const job_mod = @import("job.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
@@ -52,6 +53,7 @@ const RunShellState = struct {
     target_pane_id: ?u32 = null,
     timer_event: ?*c.libevent.event = null,
     completion_event: ?*c.libevent.event = null,
+    job: ?*job_mod.Job = null,
     pipe_read: std.posix.fd_t = -1,
     pipe_write: std.posix.fd_t = -1,
     thread: ?std.Thread = null,
@@ -75,6 +77,7 @@ fn freeState(state: *RunShellState) void {
     }
     if (state.pipe_read >= 0) std.posix.close(state.pipe_read);
     if (state.pipe_write >= 0) std.posix.close(state.pipe_write);
+    if (state.job) |job| job_mod.job_free(job);
     if (state.shell_command) |text| xm.allocator.free(text);
     if (state.command_text) |text| xm.allocator.free(text);
     xm.allocator.free(state.cwd);
@@ -335,20 +338,24 @@ fn shellThreadMain(state: *RunShellState) void {
 
     child.spawn() catch {
         state.spawn_failed = true;
+        if (state.job) |job| job_mod.job_finished(job, 1);
         return;
     };
     state.spawned = true;
 
     const stdout_pipe = child.stdout orelse {
         state.spawn_failed = true;
+        if (state.job) |job| job_mod.job_finished(job, 1);
         _ = child.wait() catch {};
         return;
     };
+    if (state.job) |job| job_mod.job_started(job, @intCast(child.id), stdout_pipe.handle);
 
     var buf: [4096]u8 = undefined;
     while (true) {
         const amt = stdout_pipe.read(&buf) catch {
             state.spawn_failed = true;
+            if (state.job) |job| job_mod.job_finished(job, 1);
             _ = child.wait() catch {};
             return;
         };
@@ -358,6 +365,7 @@ fn shellThreadMain(state: *RunShellState) void {
 
     const term = child.wait() catch {
         state.spawn_failed = true;
+        if (state.job) |job| job_mod.job_finished(job, 1);
         return;
     };
     switch (term) {
@@ -372,6 +380,7 @@ fn shellThreadMain(state: *RunShellState) void {
             state.retcode = 1;
         },
     }
+    if (state.job) |job| job_mod.job_finished(job, state.retcode);
 }
 
 fn armCompletionEvent(state: *RunShellState) bool {
@@ -514,6 +523,7 @@ fn exec(self: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         const expanded = cmd_display.expand_format(xm.allocator, text, &target);
         defer xm.allocator.free(expanded);
         state.shell_command = xm.xstrdup(expanded);
+        state.job = job_mod.job_register(state.shell_command.?, if (wait) 0 else job_mod.JOB_NOWAIT);
     }
 
     if (!armTimer(state, delay)) {
@@ -844,6 +854,48 @@ test "run-shell -bC preserves quoted semicolons inside delayed commands" {
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
     try waitForQueueProgress(null, 1);
     try std.testing.expectEqualStrings("semi;colon", setup.window.name);
+}
+
+test "run-shell registers the shared reduced job summary while work is active" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+    defer job_mod.job_reset_all();
+
+    var setup = testSetup("run-shell-job-summary");
+    defer testTeardown(&setup);
+
+    try appendCommand(&setup.client, &.{
+        "run-shell",
+        "sleep 0.2",
+    });
+
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+
+    var saw_summary = false;
+    for (0..50) |_| {
+        pumpAsyncNonblock();
+        const rendered = job_mod.job_render_summary(std.testing.allocator);
+        defer std.testing.allocator.free(rendered);
+        if (std.mem.indexOf(u8, rendered, "sleep 0.2") != null) {
+            saw_summary = true;
+            break;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(saw_summary);
+
+    var cleared_summary = false;
+    for (0..100) |_| {
+        pumpAsyncNonblock();
+        const rendered = job_mod.job_render_summary(std.testing.allocator);
+        defer std.testing.allocator.free(rendered);
+        if (rendered.len == 0) {
+            cleared_summary = true;
+            break;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(cleared_summary);
 }
 
 test "run-shell -b without a client falls back to the best session pane" {

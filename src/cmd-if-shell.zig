@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const client_registry = @import("client-registry.zig");
 const cmd_display = @import("cmd-display-message.zig");
+const job_mod = @import("job.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
@@ -37,6 +38,7 @@ const IfShellState = struct {
     else_command: ?[]u8 = null,
     shell_command: []u8,
     cwd: []u8,
+    job: ?*job_mod.Job = null,
     pipe_read: std.posix.fd_t = -1,
     pipe_write: std.posix.fd_t = -1,
     event: ?*c.libevent.event = null,
@@ -53,6 +55,7 @@ fn freeState(state: *IfShellState) void {
     }
     if (state.pipe_read >= 0) std.posix.close(state.pipe_read);
     if (state.pipe_write >= 0) std.posix.close(state.pipe_write);
+    if (state.job) |job| job_mod.job_free(job);
     xm.allocator.free(state.if_command);
     if (state.else_command) |else_command| xm.allocator.free(else_command);
     xm.allocator.free(state.shell_command);
@@ -168,17 +171,28 @@ fn shellThreadMain(state: *IfShellState) void {
 
     child.spawn() catch {
         state.spawn_failed = true;
+        if (state.job) |job| job_mod.job_finished(job, 1);
         return;
     };
+    if (state.job) |job| job_mod.job_started(job, @intCast(child.id), -1);
 
     const term = child.wait() catch {
         state.success = false;
+        if (state.job) |job| job_mod.job_finished(job, 1);
         return;
     };
     state.success = switch (term) {
         .Exited => |code| code == 0,
         else => false,
     };
+    if (state.job) |job| {
+        const status = switch (term) {
+            .Exited => |code| @as(i32, @intCast(code)),
+            .Signal => |signal_code| @as(i32, @intCast(signal_code)) + 128,
+            else => 1,
+        };
+        job_mod.job_finished(job, status);
+    }
 }
 
 export fn cmd_if_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {
@@ -247,6 +261,7 @@ fn exec(self: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .shell_command = xm.xstrdup(shell_command),
         .cwd = xm.xstrdup(server_client_mod.server_client_get_cwd(cmdq.cmdq_get_client(item), target.s)),
     };
+    state.job = job_mod.job_register(state.shell_command, if (args.has('b')) job_mod.JOB_NOWAIT else 0);
 
     if (!startShellCommand(state)) {
         freeState(state);

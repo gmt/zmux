@@ -267,6 +267,7 @@ pub fn server_start(
 
     server_proc = proc_mod.proc_start("server");
     proc_mod.proc_set_signals(server_proc.?, server_signal);
+    job_mod.job_enable_server_reaper(true);
 
     // Initialise global state
     server_reset_message_log();
@@ -341,11 +342,12 @@ export fn server_signal(signo: c_int) void {
 }
 
 fn server_child_signal() void {
-    // Reap all exited children
     while (true) {
-        const pid = std.c.waitpid(-1, null, std.posix.W.NOHANG);
+        var status: i32 = 0;
+        const pid = std.c.waitpid(-1, &status, std.posix.W.NOHANG | std.posix.W.UNTRACED);
         if (pid <= 0) break;
         log.log_debug("child {d} exited", .{pid});
+        job_mod.job_check_died(@intCast(pid), status);
     }
 }
 

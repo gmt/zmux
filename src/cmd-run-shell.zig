@@ -192,12 +192,6 @@ fn currentPaneForClient(client: ?*T.Client) ?*T.WindowPane {
     return wl.window.active;
 }
 
-fn anyPane() ?*T.WindowPane {
-    var it = window_mod.all_window_panes.valueIterator();
-    if (it.next()) |pane| return pane.*;
-    return null;
-}
-
 fn ensureRunShellViewMode(wp: *T.WindowPane) bool {
     if (window_mod.window_pane_mode(wp)) |wme| {
         return wme.mode == &run_shell_view_mode;
@@ -312,7 +306,7 @@ fn deliverOutput(state: *RunShellState) void {
             return;
         }
         const queue_client = findQueueClient(state.queue_client_id);
-        target_pane = currentPaneForClient(queue_client) orelse anyPane();
+        target_pane = currentPaneForClient(queue_client) orelse cmd_find.cmd_find_best_pane(T.CMD_FIND_QUIET);
     }
 
     if (target_pane) |pane| {
@@ -629,6 +623,12 @@ const TestSetup = struct {
     client: T.Client,
 };
 
+const SessionPaneSetup = struct {
+    session: *T.Session,
+    window: *T.Window,
+    pane: *T.WindowPane,
+};
+
 fn testSetup(name: []const u8) TestSetup {
     const env_mod = @import("environ.zig");
     const opts = @import("options.zig");
@@ -686,6 +686,30 @@ fn testTeardown(setup: *TestSetup) void {
     opts.options_free(opts.global_w_options);
 }
 
+fn addSessionPane(name: []const u8) SessionPaneSetup {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    const session = session_mod.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = session_mod.session_attach(session, window, -1, &cause).?;
+    const pane = window_mod.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+    session.curw = wl;
+
+    return .{
+        .session = session,
+        .window = window,
+        .pane = pane,
+    };
+}
+
+fn removeSessionPane(setup: *SessionPaneSetup) void {
+    if (session_mod.session_find(setup.session.name)) |_| session_mod.session_destroy(setup.session, false, "test");
+    window_mod.window_remove_ref(setup.window, "test");
+}
+
 fn installEventBase() ?*c.libevent.event_base {
     const os_mod = @import("os/linux.zig");
     const old_base = proc_mod.libevent;
@@ -707,6 +731,15 @@ fn appendCommand(client: ?*T.Client, argv: []const []const u8) !void {
 
 fn pumpAsyncNonblock() void {
     _ = c.libevent.event_loop(c.libevent.EVLOOP_NONBLOCK);
+}
+
+fn waitForAlternateScreen(wp: *T.WindowPane) !void {
+    for (0..200) |_| {
+        pumpAsyncNonblock();
+        if (screen_mod.screen_alternate_active(wp)) return;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    return error.TestExpectedEqual;
 }
 
 fn waitForQueueProgress(client: ?*T.Client, expected: u32) !void {
@@ -875,4 +908,52 @@ test "run-shell -bC preserves the original target context for delayed commands" 
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
     try waitForQueueProgress(null, 1);
     try std.testing.expectEqualStrings("queued-from-run-shell", setup.window.name);
+}
+
+test "run-shell -bC preserves quoted semicolons inside delayed commands" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var setup = testSetup("run-shell-quoted-semicolon");
+    defer testTeardown(&setup);
+
+    try appendCommand(&setup.client, &.{
+        "run-shell",
+        "-bC",
+        "rename-window -t #{session_name}:#{window_index} 'semi;colon'",
+    });
+
+    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
+    try waitForQueueProgress(null, 1);
+    try std.testing.expectEqualStrings("semi;colon", setup.window.name);
+}
+
+test "run-shell -b without a client falls back to the best session pane" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var first = testSetup("run-shell-no-client-first");
+    defer testTeardown(&first);
+    defer if (window_mod.window_pane_mode(first.pane)) |_| closeRunShellViewMode(first.pane);
+
+    var second = addSessionPane("run-shell-no-client-second");
+    defer removeSessionPane(&second);
+    defer if (window_mod.window_pane_mode(second.pane)) |_| closeRunShellViewMode(second.pane);
+
+    first.session.activity_time = 100;
+    second.session.activity_time = 200;
+
+    try appendCommand(null, &.{
+        "run-shell",
+        "-b",
+        "printf 'best-pane'",
+    });
+
+    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(null));
+    try waitForAlternateScreen(second.pane);
+    try std.testing.expect(!screen_mod.screen_alternate_active(first.pane));
+
+    const line = try gridRowString(second.pane.screen.grid, 0);
+    defer xm.allocator.free(line);
+    try std.testing.expectEqualStrings("best-pane", line);
 }

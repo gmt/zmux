@@ -279,16 +279,25 @@ pub fn cmd_parse_from_string(
     pi: *T.CmdParseInput,
 ) T.CmdParseResult {
     _ = pi;
-    // Split on semicolons
     var list = xm.allocator.create(CmdList) catch unreachable;
     list.* = .{};
 
-    var it = std.mem.tokenizeScalar(u8, input, ';');
-    while (it.next()) |part| {
-        const trimmed = std.mem.trim(u8, part, " \t\n");
-        if (trimmed.len == 0) continue;
+    var commands = split_commands(xm.allocator, input) catch |err| {
+        const msg = switch (err) {
+            ParseError.UnterminatedQuote => xm.xstrdup("unterminated quote"),
+            else => xm.xstrdup("parse error"),
+        };
+        cmd_list_free(list);
+        return .{
+            .status = .@"error",
+            .@"error" = msg,
+        };
+    };
+    defer free_split_command_words(&commands);
+
+    for (commands.items) |part| {
         // Tokenise into argv, preserving quoted segments.
-        var argv = split_command_words(xm.allocator, trimmed) catch |err| {
+        var argv = split_command_words(xm.allocator, part) catch |err| {
             const msg = switch (err) {
                 ParseError.UnterminatedQuote => xm.xstrdup("unterminated quote"),
                 else => xm.xstrdup("parse error"),
@@ -318,6 +327,74 @@ pub fn cmd_parse_from_string(
     }
 
     return .{ .status = .success, .cmdlist = @ptrCast(list) };
+}
+
+fn split_commands(
+    alloc: std.mem.Allocator,
+    input: []const u8,
+) ParseError!std.ArrayList([]u8) {
+    var commands: std.ArrayList([]u8) = .{};
+    errdefer free_split_command_words(&commands);
+
+    var current: std.ArrayList(u8) = .{};
+    defer current.deinit(alloc);
+
+    const QuoteState = enum { none, single, double };
+    var state: QuoteState = .none;
+    var escaped = false;
+
+    for (input) |ch| {
+        if (escaped) {
+            current.append(alloc, ch) catch unreachable;
+            escaped = false;
+            continue;
+        }
+
+        switch (state) {
+            .none => switch (ch) {
+                ';', '\n' => {
+                    const trimmed = std.mem.trim(u8, current.items, " \t\r\n");
+                    if (trimmed.len != 0)
+                        commands.append(alloc, alloc.dupe(u8, trimmed) catch unreachable) catch unreachable;
+                    current.clearRetainingCapacity();
+                },
+                '\'' => {
+                    state = .single;
+                    current.append(alloc, ch) catch unreachable;
+                },
+                '"' => {
+                    state = .double;
+                    current.append(alloc, ch) catch unreachable;
+                },
+                '\\' => {
+                    escaped = true;
+                    current.append(alloc, ch) catch unreachable;
+                },
+                else => current.append(alloc, ch) catch unreachable,
+            },
+            .single => {
+                current.append(alloc, ch) catch unreachable;
+                if (ch == '\'') state = .none;
+            },
+            .double => {
+                current.append(alloc, ch) catch unreachable;
+                if (ch == '"') {
+                    state = .none;
+                } else if (ch == '\\') {
+                    escaped = true;
+                }
+            },
+        }
+    }
+
+    if (escaped or state != .none) {
+        return ParseError.UnterminatedQuote;
+    }
+
+    const trimmed = std.mem.trim(u8, current.items, " \t\r\n");
+    if (trimmed.len != 0)
+        commands.append(alloc, alloc.dupe(u8, trimmed) catch unreachable) catch unreachable;
+    return commands;
 }
 
 pub fn split_command_words(

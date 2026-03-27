@@ -289,6 +289,12 @@ fn cmd_find_from_nothing(fs: *T.CmdFindState, flags: u32) bool {
     return cmd_find_valid_state(fs);
 }
 
+pub fn cmd_find_best_pane(flags: u32) ?*T.WindowPane {
+    var fs: T.CmdFindState = .{};
+    if (!cmd_find_from_nothing(&fs, flags)) return null;
+    return fs.wp;
+}
+
 fn select_best_session(flags: u32) ?*T.Session {
     var best: ?*T.Session = null;
     var sessions = sess.sessions.valueIterator();

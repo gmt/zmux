@@ -598,6 +598,25 @@ per-pane/status/overlay redraw matrix, border and scrollbar work still lives
 on separate reduced primitives, and the rest of the runtime still lacks tmux's
 pan/subscription/report/control-window refresh surface.
 
+The next checkpoint down is now also landed in narrower alert and shared
+view-mode redraw fidelity form:
+
+- `src/alerts.zig` now routes winlink-alert fallout back through the shared
+  `server_status_session` seam instead of forcing attached clients onto
+  `CLIENT_REDRAWWINDOW` when only status indicators changed
+- `src/server-print.zig` now lets shared pane-targeted view-mode writes rely
+  on the existing `server_redraw_pane` plus `PANE_REDRAW` path instead of
+  widening that producer back to a full-window redraw flag after the lower
+  pane seam already exists
+
+That landing narrows another honest part of the broader redraw/runtime gap:
+alert flag propagation and shared view-mode output now stay on the smaller
+status-only and pane-only seams that the current redraw stack can already
+honor. Keep it partial because the overall redraw matrix is still far smaller
+than tmux's `status.c` plus `server-client.c` surface, the reduced print seam
+still stops well short of the full `server_client_print` + `file.c` +
+`window-copy` runtime, and broader producer coverage is still open.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:

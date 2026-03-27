@@ -49,32 +49,32 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "mode screen capture not supported yet", .{});
         return .@"error";
     }
-    if (args.has('P')) {
-        cmdq.cmdq_error(item, "pending input capture not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('T')) {
         cmdq.cmdq_error(item, "incomplete-line preservation not supported yet", .{});
         return .@"error";
     }
 
-    const target_grid = if (args.has('a')) blk: {
-        if (!screen_mod.screen_alternate_active(wp)) {
-            cmdq.cmdq_error(item, "no alternate screen", .{});
-            return .@"error";
-        }
-        break :blk wp.base.grid;
-    } else screen_mod.screen_current(wp).grid;
+    const buf = if (args.has('P'))
+        capture_pending(wp, args.has('C'))
+    else blk: {
+        const target_grid = if (args.has('a')) alt: {
+            if (!screen_mod.screen_alternate_active(wp)) {
+                cmdq.cmdq_error(item, "no alternate screen", .{});
+                return .@"error";
+            }
+            break :alt wp.base.grid;
+        } else screen_mod.screen_current(wp).grid;
 
-    const buf = capture_grid(
-        target_grid,
-        args.get('S'),
-        args.get('E'),
-        args.has('J'),
-        args.has('N'),
-        args.has('C'),
-        item,
-    ) orelse return .@"error";
+        break :blk capture_grid(
+            target_grid,
+            args.get('S'),
+            args.get('E'),
+            args.has('J'),
+            args.has('N'),
+            args.has('C'),
+            item,
+        ) orelse return .@"error";
+    };
 
     if (args.has('p')) {
         defer xm.allocator.free(buf);
@@ -99,6 +99,31 @@ fn clear_history(wp: *T.WindowPane, clear_hyperlinks: bool) void {
     }
     grid_mod.grid_clear_history(wp.base.grid);
     if (clear_hyperlinks) screen_mod.screen_reset_hyperlinks(screen_mod.screen_current(wp));
+}
+
+fn capture_pending(wp: *T.WindowPane, escape_sequences: bool) []u8 {
+    if (wp.input_pending.items.len == 0) return xm.xstrdup("");
+    if (!escape_sequences) return xm.allocator.dupe(u8, wp.input_pending.items) catch unreachable;
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    for (wp.input_pending.items) |byte| {
+        if (byte >= ' ' and byte != '\\') {
+            out.append(xm.allocator, byte) catch unreachable;
+            continue;
+        }
+
+        const escaped = [_]u8{
+            '\\',
+            @as(u8, '0') + ((byte >> 6) & 0x7),
+            @as(u8, '0') + ((byte >> 3) & 0x7),
+            @as(u8, '0') + (byte & 0x7),
+        };
+        out.appendSlice(xm.allocator, &escaped) catch unreachable;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn capture_grid(
@@ -319,6 +344,80 @@ test "capture-pane helper preserves combined and wide utf8 grid payloads" {
     defer xm.allocator.free(captured);
 
     try std.testing.expectEqualStrings("é🙂\n", captured);
+}
+
+test "capture-pane helper captures pending pane input bytes" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "capture-pane-pending", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("capture-pane-pending") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const wp = wl.window.active.?;
+
+    try wp.input_pending.appendSlice(xm.allocator, "abc");
+
+    const captured = capture_pending(wp, false);
+    defer xm.allocator.free(captured);
+    try std.testing.expectEqualStrings("abc", captured);
+}
+
+test "capture-pane helper octal-escapes pending pane input with -C" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "capture-pane-pending-escaped", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("capture-pane-pending-escaped") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const wp = wl.window.active.?;
+
+    try wp.input_pending.appendSlice(xm.allocator, &[_]u8{ 0x01, '\\', 'A', 0x7f });
+
+    const captured = capture_pending(wp, true);
+    defer xm.allocator.free(captured);
+    try std.testing.expectEqualStrings("\\001\\134A\x7f", captured);
 }
 
 test "clear-history helper drops history, resets modes, and clears current screen hyperlinks" {

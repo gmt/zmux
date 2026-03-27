@@ -92,7 +92,7 @@ that truth still stops before the live grid/write path.
 | combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks, and `src/screen-write.zig` now calls that layer during live pane writes | the reduced writer still lacks fuller tmux `screen_write_cell` side effects, so combined-cell reachability exists for live writes but is not yet the full reopen gate |
 | cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model, and live pane writes now materially store through that path | most readers and prompt/status consumers still have not adopted the same shared cell payload model end to end |
 | live screen-write integration | `src/screen-write.zig` now owns `putGlyph`, `putCell`, and `putBytes`, and `src/input.zig` feeds printable terminal bytes through that shared path so live pane writes preserve decoded width, padding, and combine consequences | this is still a reduced `screen_write_cell` seam: insert-mode parity, selected-cell styling, tty draw collection, tab-cell treatment, and non-input consumer adoption are still missing |
-| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, shared cell writes, and a persisted per-client status-range cache that shared hit-test consumers can query; `src/server-print.zig` now gives `cmdq` and attached show-buffer consumers one reduced shared attached-output/view-mode seam instead of isolated local writers and now also owns a shared control-client `%message` emission seam; `src/status-prompt.zig` now owns cursor-aware prompt editing, vi prompt command mode, and quote-next/control rendering over that shared cell buffer; `src/status-runtime.zig` now owns the reduced shared saved-screen/message-timer lifetime seam and logs shared status messages into `server.message_log`; `src/cmd-queue.zig` now routes reduced command logging plus attached/detached command output through the same shared message-log/write-side seam; `src/server-fn.zig` now clears active status messages on the attached key path before pane input; `src/alerts.zig` now routes visual alert messages through that shared message runtime; `src/cmd-display-message.zig` now routes the primary `display-message` producer through the shared formatter, attached status runtime, shared `-p` print seam, and control-client `%message` path instead of bypassing the stack; `src/mouse-runtime.zig` now gives attached input plus queued `{mouse}` consumers one reduced shared session/window/pane hit-test and target-resolution seam instead of separate local pane-id shims; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, the remaining status/message runtime gaps are now the rest of the multiline/runtime surface plus broader producer coverage beyond alerts/cmdq/display-message, and the new mouse/runtime seam is still reduced relative to tmux `server-client.c` because border/scrollbar hit-testing, click-sequence/drag-end semantics, and pane mouse encoding are not all ported yet |
+| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, shared cell writes, and a persisted per-client status-range cache that shared hit-test consumers can query; `src/server-print.zig` now gives `cmdq` and attached show-buffer consumers one reduced shared attached-output/view-mode seam instead of isolated local writers and now also owns a shared control-client `%message` emission seam; `src/status-prompt.zig` now owns cursor-aware prompt editing, vi prompt command mode, and quote-next/control rendering over that shared cell buffer; `src/status-runtime.zig` now owns the reduced shared saved-screen/message-timer lifetime seam, logs shared status messages into `server.message_log`, and now also owns the shared attached-client message-presentation seam that async `if-shell`/`run-shell`/`cmd-command-prompt` parse or spawn errors reuse instead of writing locally; `src/cmd-queue.zig` now routes reduced command logging plus attached/detached command output through the same shared message-log/write-side seam; `src/server-fn.zig` now clears active status messages on the attached key path before pane input and now also applies `focus-follows-mouse` after shared target resolution instead of inventing a local mouse path; `src/alerts.zig` now routes visual alert messages through that shared message runtime; `src/cmd-display-message.zig` now routes the primary `display-message` producer through the shared formatter, attached status runtime, shared `-p` print seam, and control-client `%message` path instead of bypassing the stack; `src/window.zig` now gives mouse/runtime consumers one shared full-size pane geometry plus pane/border hit-test helper layer; `src/mouse-runtime.zig` now gives attached input plus queued `{mouse}` consumers one reduced shared session/window/pane hit-test and target-resolution seam, including click-sequence and drag-end translation over that lower layer, instead of separate local pane-id shims; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, the remaining status/message runtime gaps are now the rest of the multiline/runtime surface plus broader producer coverage beyond alerts/cmdq/display-message and the attached async shell/prompt error family, and the new mouse/runtime seam is still reduced relative to tmux `server-client.c` because scrollbar hit-testing still depends on slider geometry from the draw/runtime path, while the outer tty mouse-mode runtime and coordinate-rich pane mouse encoder are not ported yet |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
@@ -297,24 +297,33 @@ follow-through form:
 - `src/input-keys.zig` now decodes old-style and SGR mouse escape sequences
   into shared `MouseEvent` payloads with per-client last-position/button
   tracking instead of leaving attached mouse input opaque above the decoder
+- `src/window.zig` now owns the shared full-size pane geometry and pane versus
+  border hit-test helpers that the mouse/runtime consumers share instead of
+  recomputing pane extents locally
 - `src/mouse-runtime.zig` now owns the reduced attached mouse target
   normalization seam: raw mouse events are translated through persisted
-  status-row ranges plus live pane hit testing into shared
-  session/window/pane ids and targeted mouse keys
+  status-row ranges plus shared pane or border hit testing into shared
+  session/window/pane ids and targeted mouse keys, and the same seam now also
+  owns click-sequence state plus drag-end translation instead of leaving that
+  runtime in `server-fn` callers
+- `src/server-client.zig` now owns only the click-timer arm or dispatch
+  plumbing for that lower seam instead of growing another mouse classifier
 - `src/server-fn.zig` now routes raw attached pane mouse through that shared
-  seam into active pane-mode callbacks and shared mouse key bindings instead
-  of leaking raw escape bytes into pane input
+  seam into active pane-mode callbacks and shared mouse key bindings and now
+  also applies `focus-follows-mouse` after shared target resolution instead of
+  leaking raw escape bytes into pane input
 - `src/cmd-find.zig` and `src/cmd-send-keys.zig` now resolve `{mouse}` and
   queued mouse targets through the same shared session/window/pane helpers
   rather than maintaining separate pane-id-only shims
 
 That landing makes cached status ranges and active pane-mode mouse handlers
-materially reachable from the attached input path, but it is still not a
-reopen gate for `status.c` or `server-client.c`: double/triple click timing,
-drag-end semantics, border/scrollbar hit testing, outer tty mouse-mode
-runtime, and the coordinate-rich pane mouse encoder are still missing, so the
-shared mouse seam deliberately drops unbound pane mouse instead of pretending
-that plain pane forwarding is real.
+materially reachable from the attached input path and closes the old
+double-click timing, drag-end, and border-target gaps, but it is still not a
+reopen gate for `status.c` or `server-client.c`: scrollbar hit testing is
+still reduced until slider geometry is populated by the draw/runtime path, the
+outer tty mouse-mode runtime is still missing, and the coordinate-rich pane
+mouse encoder is still missing, so the shared mouse seam deliberately drops
+unbound pane mouse instead of pretending that plain pane forwarding is real.
 
 ### Lower layers: what the top layer sits on
 

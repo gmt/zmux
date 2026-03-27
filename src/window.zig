@@ -58,6 +58,20 @@ pub fn window_pane_cmp(a: *T.WindowPane, b: *T.WindowPane) std.math.Order {
     return std.math.order(a.id, b.id);
 }
 
+pub const PaneHitRegion = enum {
+    pane,
+    border,
+    scrollbar_up,
+    scrollbar_slider,
+    scrollbar_down,
+};
+
+pub const PaneHit = struct {
+    pane: *T.WindowPane,
+    region: PaneHitRegion,
+    slider_mpos: i32 = -1,
+};
+
 // ── Window creation / destruction ─────────────────────────────────────────
 
 pub fn window_create(sx: u32, sy: u32, _xpixel: u32, _ypixel: u32) *T.Window {
@@ -535,6 +549,81 @@ pub fn window_pane_visible(wp: *T.WindowPane) bool {
     return wp == wp.window.active;
 }
 
+pub fn window_pane_show_scrollbar(wp: *T.WindowPane) bool {
+    if (screen_mod.screen_alternate_active(wp)) return false;
+
+    return switch (@as(u32, @intCast(opts.options_get_number(wp.options, "pane-scrollbars")))) {
+        T.PANE_SCROLLBARS_ALWAYS => true,
+        T.PANE_SCROLLBARS_MODAL => window_pane_mode(wp) != null,
+        else => false,
+    };
+}
+
+pub fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
+    for (w.panes.items) |pane| {
+        if (!window_pane_visible(pane)) continue;
+        const full = pane_full_size_offset(pane);
+        if (x < full.xoff or x > full.xoff + full.sx) continue;
+        if (y < full.yoff or y > full.yoff + full.sy) continue;
+        return pane;
+    }
+    return null;
+}
+
+pub fn window_hit_test(w: *T.Window, x: u32, y: u32) ?PaneHit {
+    const candidate = window_get_active_at(w, x, y);
+    if (candidate) |pane| {
+        if (x >= pane.xoff and x < pane.xoff + pane.sx and y >= pane.yoff and y < pane.yoff + pane.sy) {
+            return .{ .pane = pane, .region = .pane };
+        }
+
+        if (window_pane_show_scrollbar(pane) and pane.sb_slider_h != 0) {
+            const sb_w: u32 = @intCast(@max(pane.scrollbar_style.width, 0));
+            const sb_pad: u32 = @intCast(@max(pane.scrollbar_style.pad, 0));
+            const sb_pos: u32 = @intCast(opts.options_get_number(pane.options, "pane-scrollbars-position"));
+
+            const scroll_start = if (sb_pos == T.PANE_SCROLLBARS_LEFT)
+                pane.xoff -| (sb_pad + sb_w)
+            else
+                pane.xoff + pane.sx + sb_pad;
+            const scroll_end = scroll_start + sb_w;
+
+            if (x >= scroll_start and x < scroll_end) {
+                const slider_top = pane.yoff + pane.sb_slider_y;
+                const slider_bottom = slider_top + pane.sb_slider_h - 1;
+                if (y < slider_top)
+                    return .{ .pane = pane, .region = .scrollbar_up };
+                if (y <= slider_bottom)
+                    return .{
+                        .pane = pane,
+                        .region = .scrollbar_slider,
+                        .slider_mpos = @intCast(y - slider_top),
+                    };
+                return .{ .pane = pane, .region = .scrollbar_down };
+            }
+        }
+    }
+
+    if (w.flags & T.WINDOW_ZOOMED != 0) return null;
+
+    for (w.panes.items) |pane| {
+        if (!window_pane_visible(pane)) continue;
+        const full = pane_full_size_offset(pane);
+        const right_border = full.xoff + full.sx;
+
+        if (x == right_border and pane.yoff <= y + 1 and pane.yoff + pane.sy >= y)
+            return .{ .pane = pane, .region = .border };
+        if (y == pane.yoff + pane.sy and pane.xoff <= x + 1 and pane.xoff + pane.sx >= x)
+            return .{ .pane = pane, .region = .border };
+    }
+
+    if (candidate) |pane| {
+        return .{ .pane = pane, .region = .pane };
+    }
+
+    return null;
+}
+
 pub fn window_pane_synchronize_key_bytes(wp: *T.WindowPane, key: T.key_code, bytes: []const u8) void {
     if (bytes.len == 0) return;
     if (T.keycIsMouse(key)) return;
@@ -599,10 +688,16 @@ const PaneFullSize = struct {
 };
 
 fn pane_full_size_offset(wp: *T.WindowPane) PaneFullSize {
+    const sb_total: u32 = if (window_pane_show_scrollbar(wp))
+        @intCast(@max(wp.scrollbar_style.width, 0) + @max(wp.scrollbar_style.pad, 0))
+    else
+        0;
+    const sb_pos: u32 = @intCast(opts.options_get_number(wp.options, "pane-scrollbars-position"));
+
     return .{
-        .xoff = wp.xoff,
+        .xoff = if (sb_pos == T.PANE_SCROLLBARS_LEFT) wp.xoff -| sb_total else wp.xoff,
         .yoff = wp.yoff,
-        .sx = wp.sx,
+        .sx = wp.sx + sb_total,
         .sy = wp.sy,
     };
 }

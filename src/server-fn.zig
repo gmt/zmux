@@ -204,8 +204,12 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
 
     if (status_prompt.status_prompt_handle_key(cl, event)) return true;
 
-    if (event.key == T.KEYC_MOUSE) {
-        if (!mouse_runtime.translate_client_mouse_event(cl, event)) return true;
+    if (event.key == T.KEYC_MOUSE or event.key == T.KEYC_DOUBLECLICK) {
+        if (!mouse_runtime.translate_client_mouse_event(cl, event)) {
+            server_client_mod.server_client_refresh_click_timer(cl);
+            return true;
+        }
+        server_client_mod.server_client_refresh_click_timer(cl);
         if (cmd_find.cmd_find_from_mouse(&mouse_find_state, &event.m, 0)) {
             binding_find_state = &mouse_find_state;
             target_session = mouse_find_state.s orelse s;
@@ -214,6 +218,16 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         }
 
         if (mouse_runtime.key_target(event.key)) |target| {
+            const base = mouse_runtime.key_base(event.key) orelse T.KEYC_UNKNOWN;
+            if (base == T.KEYC_MOUSEMOVE and target == .pane and target_wp != target_wl.window.active and
+                opts.options_get_number(target_session.options, "focus-follows-mouse") != 0)
+            {
+                if (win.window_set_active_pane(target_wl.window, target_wp, true)) {
+                    srv.server_redraw_window(target_wl.window);
+                    server_status_window(target_wl.window);
+                }
+            }
+
             if (target == .pane) {
                 if (win.window_pane_mode(target_wp)) |wme| {
                     if (wme.mode.key) |mode_key| {

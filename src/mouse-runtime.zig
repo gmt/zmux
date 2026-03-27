@@ -27,12 +27,23 @@ const status_mod = @import("status.zig");
 const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
-const RawType = enum {
+const EventType = enum {
     move,
     down,
     up,
     drag,
     wheel,
+    second,
+    double,
+    triple,
+};
+
+const EffectiveEvent = struct {
+    kind: EventType,
+    x: u32,
+    y: u32,
+    buttons: u32,
+    ignore: bool = false,
 };
 
 const ResolvedTarget = struct {
@@ -41,6 +52,7 @@ const ResolvedTarget = struct {
     w: *T.Window,
     wp: ?*T.WindowPane = null,
     target: T.KeyMouseTarget,
+    slider_mpos: i32 = -1,
 };
 
 pub fn key_target(key: T.key_code) ?T.KeyMouseTarget {
@@ -49,6 +61,24 @@ pub fn key_target(key: T.key_code) ?T.KeyMouseTarget {
     if (masked < T.KEYC_MOUSEMOVE) return null;
     const offset = masked - T.KEYC_MOUSEMOVE;
     return @enumFromInt(offset % T.KEYC_MOUSE_TARGET_COUNT);
+}
+
+pub fn key_base(key: T.key_code) ?T.key_code {
+    const target = key_target(key) orelse return null;
+    return (key & T.KEYC_MASK_KEY) - @intFromEnum(target);
+}
+
+pub fn click_timeout_event(cl: *T.Client) ?T.key_event {
+    defer clearClickState(cl);
+
+    if (cl.click_state != .triple_pending) return null;
+
+    var event = T.key_event{
+        .key = T.KEYC_DOUBLECLICK,
+        .m = cl.click_event,
+    };
+    event.m.ignore = true;
+    return event;
 }
 
 pub fn cmd_mouse_window(m: *const T.MouseEvent, session_out: ?*?*T.Session) ?*T.Winlink {
@@ -90,57 +120,112 @@ pub fn cmd_mouse_pane(
 }
 
 pub fn translate_client_mouse_event(cl: *T.Client, event: *T.key_event) bool {
-    if (event.key != T.KEYC_MOUSE) return true;
+    if (event.key != T.KEYC_MOUSE and event.key != T.KEYC_DOUBLECLICK) return true;
 
-    const raw_type = classify_raw_event(&event.m) orelse return false;
-    const button_bits = button_bits_for(raw_type, &event.m) orelse return false;
-    const resolved = resolve_target(cl, &event.m) orelse return false;
-    const family = key_family_for(raw_type, T.mouseButtons(button_bits)) orelse return false;
+    const effective = classify_raw_event(cl, event) orelse return false;
+    var resolved = resolve_target(cl, effective.x, effective.y, &event.m) orelse {
+        if (effective.kind != .drag and effective.kind != .wheel and effective.kind != .double and effective.kind != .triple and
+            cl.tty.mouse_drag_flag != 0)
+        {
+            clearDragState(cl);
+        }
+        return false;
+    };
+    var kind = effective.kind;
+    const button_bits = effective.buttons;
+    const buttons = T.mouseButtons(button_bits);
 
-    var translated = T.keycMouse(family, resolved.target);
-    if (button_bits & T.MOUSE_MASK_META != 0) translated |= T.KEYC_META;
-    if (button_bits & T.MOUSE_MASK_CTRL != 0) translated |= T.KEYC_CTRL;
-    if (button_bits & T.MOUSE_MASK_SHIFT != 0) translated |= T.KEYC_SHIFT;
+    if (kind != .drag and kind != .wheel and kind != .double and kind != .triple and cl.tty.mouse_drag_flag != 0) {
+        if (cl.tty.mouse_scrolling_flag) resolved.target = .scrollbar_slider;
+        const family = drag_end_family(cl.tty.mouse_drag_flag - 1) orelse {
+            clearDragState(cl);
+            return false;
+        };
+        clearDragState(cl);
+        finish_translation(event, family, resolved.target, resolved, effective.ignore, button_bits);
+        return true;
+    }
 
-    event.key = translated;
-    event.m.valid = true;
-    event.m.key = translated;
-    event.m.s = @intCast(resolved.s.id);
-    event.m.w = @intCast(resolved.w.id);
-    event.m.wp = if (resolved.wp) |pane| @intCast(pane.id) else -1;
+    if (kind == .down or kind == .second or kind == .triple) {
+        update_click_state(cl, &kind, button_bits, resolved.target, event.m.wp, &event.m);
+    }
+
+    if (kind == .drag and cl.tty.mouse_scrolling_flag) {
+        resolved.target = .scrollbar_slider;
+    }
+
+    const family = key_family_for(kind, buttons, resolved.target) orelse return false;
+
+    if (kind == .drag) {
+        cl.tty.mouse_drag_flag = buttons + 1;
+        if (!cl.tty.mouse_scrolling_flag and resolved.target == .scrollbar_slider) {
+            cl.tty.mouse_scrolling_flag = true;
+            cl.tty.mouse_slider_mpos = resolved.slider_mpos;
+            if (event.m.statusat == 0) {
+                cl.tty.mouse_slider_mpos += @intCast(event.m.statuslines);
+            }
+        }
+    }
+
+    finish_translation(event, family, resolved.target, resolved, effective.ignore, button_bits);
     return true;
 }
 
-fn classify_raw_event(m: *const T.MouseEvent) ?RawType {
-    if (T.mouseWheel(m.b)) return .wheel;
-    if (T.mouseRelease(m.b)) return .up;
-    if (T.mouseDrag(m.b)) return .drag;
-    if (m.sgr_type == 'm' and T.mouseWheel(m.sgr_b)) return null;
-    return .down;
-}
+fn classify_raw_event(cl: *const T.Client, event: *const T.key_event) ?EffectiveEvent {
+    const m = &event.m;
 
-fn button_bits_for(raw_type: RawType, m: *const T.MouseEvent) ?u32 {
-    return switch (raw_type) {
-        .down, .drag, .wheel => m.b,
-        .up => if (m.sgr_type == 'm') m.sgr_b else m.lb,
-        .move => m.b,
+    if (event.key == T.KEYC_DOUBLECLICK) {
+        return .{
+            .kind = .double,
+            .x = m.x,
+            .y = m.y,
+            .buttons = m.b,
+            .ignore = true,
+        };
+    }
+
+    if ((m.sgr_type != ' ' and T.mouseDrag(m.sgr_b) and T.mouseRelease(m.sgr_b)) or
+        (m.sgr_type == ' ' and T.mouseDrag(m.b) and T.mouseRelease(m.b) and T.mouseRelease(m.lb)))
+    {
+        return .{ .kind = .move, .x = m.x, .y = m.y, .buttons = 0 };
+    }
+
+    if (T.mouseDrag(m.b)) {
+        if (cl.tty.mouse_drag_flag != 0) {
+            if (m.x == m.lx and m.y == m.ly) return null;
+            return .{ .kind = .drag, .x = m.x, .y = m.y, .buttons = m.b };
+        }
+        return .{ .kind = .drag, .x = m.lx, .y = m.ly, .buttons = m.lb };
+    }
+
+    if (T.mouseWheel(m.b)) return .{ .kind = .wheel, .x = m.x, .y = m.y, .buttons = m.b };
+    if (T.mouseRelease(m.b)) {
+        return .{
+            .kind = .up,
+            .x = m.x,
+            .y = m.y,
+            .buttons = if (m.sgr_type == 'm') m.sgr_b else m.lb,
+        };
+    }
+
+    return .{
+        .kind = switch (cl.click_state) {
+            .none => .down,
+            .double_pending => .second,
+            .triple_pending => .triple,
+        },
+        .x = m.x,
+        .y = m.y,
+        .buttons = m.b,
     };
 }
 
-fn key_family_for(raw_type: RawType, buttons: u32) ?T.key_code {
-    return switch (raw_type) {
-        .move => T.KEYC_MOUSEMOVE,
-        .drag => button_family(buttons, .{
-            .one = T.KEYC_MOUSEDRAG1,
-            .two = T.KEYC_MOUSEDRAG2,
-            .three = T.KEYC_MOUSEDRAG3,
-            .six = T.KEYC_MOUSEDRAG6,
-            .seven = T.KEYC_MOUSEDRAG7,
-            .eight = T.KEYC_MOUSEDRAG8,
-            .nine = T.KEYC_MOUSEDRAG9,
-            .ten = T.KEYC_MOUSEDRAG10,
-            .eleven = T.KEYC_MOUSEDRAG11,
-        }),
+fn key_family_for(kind: EventType, buttons: u32, target: T.KeyMouseTarget) ?T.key_code {
+    return switch (kind) {
+        .move => switch (target) {
+            .scrollbar_up, .scrollbar_slider, .scrollbar_down => null,
+            else => T.KEYC_MOUSEMOVE,
+        },
         .down => button_family(buttons, .{
             .one = T.KEYC_MOUSEDOWN1,
             .two = T.KEYC_MOUSEDOWN2,
@@ -163,11 +248,55 @@ fn key_family_for(raw_type: RawType, buttons: u32) ?T.key_code {
             .ten = T.KEYC_MOUSEUP10,
             .eleven = T.KEYC_MOUSEUP11,
         }),
+        .drag => button_family(buttons, .{
+            .one = T.KEYC_MOUSEDRAG1,
+            .two = T.KEYC_MOUSEDRAG2,
+            .three = T.KEYC_MOUSEDRAG3,
+            .six = T.KEYC_MOUSEDRAG6,
+            .seven = T.KEYC_MOUSEDRAG7,
+            .eight = T.KEYC_MOUSEDRAG8,
+            .nine = T.KEYC_MOUSEDRAG9,
+            .ten = T.KEYC_MOUSEDRAG10,
+            .eleven = T.KEYC_MOUSEDRAG11,
+        }),
         .wheel => switch (buttons) {
             T.MOUSE_WHEEL_UP => T.KEYC_WHEELUP,
             T.MOUSE_WHEEL_DOWN => T.KEYC_WHEELDOWN,
             else => null,
         },
+        .second => button_family(buttons, .{
+            .one = T.KEYC_SECONDCLICK1,
+            .two = T.KEYC_SECONDCLICK2,
+            .three = T.KEYC_SECONDCLICK3,
+            .six = T.KEYC_SECONDCLICK6,
+            .seven = T.KEYC_SECONDCLICK7,
+            .eight = T.KEYC_SECONDCLICK8,
+            .nine = T.KEYC_SECONDCLICK9,
+            .ten = T.KEYC_SECONDCLICK10,
+            .eleven = T.KEYC_SECONDCLICK11,
+        }),
+        .double => button_family(buttons, .{
+            .one = T.KEYC_DOUBLECLICK1,
+            .two = T.KEYC_DOUBLECLICK2,
+            .three = T.KEYC_DOUBLECLICK3,
+            .six = T.KEYC_DOUBLECLICK6,
+            .seven = T.KEYC_DOUBLECLICK7,
+            .eight = T.KEYC_DOUBLECLICK8,
+            .nine = T.KEYC_DOUBLECLICK9,
+            .ten = T.KEYC_DOUBLECLICK10,
+            .eleven = T.KEYC_DOUBLECLICK11,
+        }),
+        .triple => button_family(buttons, .{
+            .one = T.KEYC_TRIPLECLICK1,
+            .two = T.KEYC_TRIPLECLICK2,
+            .three = T.KEYC_TRIPLECLICK3,
+            .six = T.KEYC_TRIPLECLICK6,
+            .seven = T.KEYC_TRIPLECLICK7,
+            .eight = T.KEYC_TRIPLECLICK8,
+            .nine = T.KEYC_TRIPLECLICK9,
+            .ten = T.KEYC_TRIPLECLICK10,
+            .eleven = T.KEYC_TRIPLECLICK11,
+        }),
     };
 }
 
@@ -186,7 +315,21 @@ fn button_family(buttons: u32, families: anytype) ?T.key_code {
     };
 }
 
-fn resolve_target(cl: *T.Client, m: *T.MouseEvent) ?ResolvedTarget {
+fn drag_end_family(buttons: u32) ?T.key_code {
+    return button_family(buttons, .{
+        .one = T.KEYC_MOUSEDRAGEND1,
+        .two = T.KEYC_MOUSEDRAGEND2,
+        .three = T.KEYC_MOUSEDRAGEND3,
+        .six = T.KEYC_MOUSEDRAGEND6,
+        .seven = T.KEYC_MOUSEDRAGEND7,
+        .eight = T.KEYC_MOUSEDRAGEND8,
+        .nine = T.KEYC_MOUSEDRAGEND9,
+        .ten = T.KEYC_MOUSEDRAGEND10,
+        .eleven = T.KEYC_MOUSEDRAGEND11,
+    });
+}
+
+fn resolve_target(cl: *T.Client, x: u32, y: u32, m: *T.MouseEvent) ?ResolvedTarget {
     const s = cl.session orelse return null;
     const wl = s.curw orelse return null;
     const w = wl.window;
@@ -199,9 +342,9 @@ fn resolve_target(cl: *T.Client, m: *T.MouseEvent) ?ResolvedTarget {
     m.statusat = status_mod.status_at_line(cl);
     m.statuslines = resize_mod.status_line_size(cl);
 
-    if (m.statusat != -1 and m.y >= @as(u32, @intCast(m.statusat)) and m.y < @as(u32, @intCast(m.statusat)) + m.statuslines) {
-        const row = m.y - @as(u32, @intCast(m.statusat));
-        if (status_mod.status_get_range(cl, m.x, row)) |range| {
+    if (m.statusat != -1 and y >= @as(u32, @intCast(m.statusat)) and y < @as(u32, @intCast(m.statusat)) + m.statuslines) {
+        const row = y - @as(u32, @intCast(m.statusat));
+        if (status_mod.status_get_range(cl, x, row)) |range| {
             switch (range.type) {
                 .none => return null,
                 .left => return .{ .s = s, .wl = wl, .w = w, .target = .status_left },
@@ -230,20 +373,93 @@ fn resolve_target(cl: *T.Client, m: *T.MouseEvent) ?ResolvedTarget {
         return .{ .s = s, .wl = wl, .w = w, .wp = w.active, .target = .status_default };
     }
 
-    const pane_y = if (m.statusat == 0 and m.y >= m.statuslines) m.y - m.statuslines else m.y;
-    const pane = window_get_active_at(w, m.x, pane_y) orelse return null;
+    const pane_y = if (m.statusat == 0 and y >= m.statuslines) y - m.statuslines else y;
+    const hit = window_mod.window_hit_test(w, x, pane_y) orelse return null;
     m.w = @intCast(w.id);
-    m.wp = @intCast(pane.id);
-    return .{ .s = s, .wl = wl, .w = w, .wp = pane, .target = .pane };
+    m.wp = @intCast(hit.pane.id);
+    return switch (hit.region) {
+        .pane => .{ .s = s, .wl = wl, .w = w, .wp = hit.pane, .target = .pane },
+        .border => .{ .s = s, .wl = wl, .w = w, .wp = hit.pane, .target = .border },
+        .scrollbar_up => .{ .s = s, .wl = wl, .w = w, .wp = hit.pane, .target = .scrollbar_up },
+        .scrollbar_slider => .{
+            .s = s,
+            .wl = wl,
+            .w = w,
+            .wp = hit.pane,
+            .target = .scrollbar_slider,
+            .slider_mpos = hit.slider_mpos,
+        },
+        .scrollbar_down => .{ .s = s, .wl = wl, .w = w, .wp = hit.pane, .target = .scrollbar_down },
+    };
 }
 
-fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
-    for (w.panes.items) |pane| {
-        if (x < pane.xoff or x >= pane.xoff + pane.sx) continue;
-        if (y < pane.yoff or y >= pane.yoff + pane.sy) continue;
-        return pane;
+fn finish_translation(
+    event: *T.key_event,
+    family: T.key_code,
+    target: T.KeyMouseTarget,
+    resolved: ResolvedTarget,
+    ignore: bool,
+    button_bits: u32,
+) void {
+    var translated = T.keycMouse(family, target);
+    if (button_bits & T.MOUSE_MASK_META != 0) translated |= T.KEYC_META;
+    if (button_bits & T.MOUSE_MASK_CTRL != 0) translated |= T.KEYC_CTRL;
+    if (button_bits & T.MOUSE_MASK_SHIFT != 0) translated |= T.KEYC_SHIFT;
+
+    event.key = translated;
+    event.m.valid = true;
+    event.m.ignore = ignore;
+    event.m.key = translated;
+    event.m.s = @intCast(resolved.s.id);
+    event.m.w = @intCast(resolved.w.id);
+    event.m.wp = if (resolved.wp) |pane| @intCast(pane.id) else -1;
+}
+
+fn update_click_state(
+    cl: *T.Client,
+    kind: *EventType,
+    button_bits: u32,
+    target: T.KeyMouseTarget,
+    wp: i32,
+    m: *const T.MouseEvent,
+) void {
+    if (kind.* != .down and
+        (button_bits != cl.click_button or cl.click_target == null or cl.click_target.? != target or cl.click_wp != wp))
+    {
+        kind.* = .down;
     }
-    return null;
+
+    switch (kind.*) {
+        .down => {
+            cl.click_state = .double_pending;
+            cl.click_event = m.*;
+            cl.click_button = button_bits;
+            cl.click_target = target;
+            cl.click_wp = wp;
+        },
+        .second => {
+            cl.click_state = .triple_pending;
+            cl.click_event = m.*;
+            cl.click_button = button_bits;
+            cl.click_target = target;
+            cl.click_wp = wp;
+        },
+        .triple => clearClickState(cl),
+        else => {},
+    }
+}
+
+fn clearClickState(cl: *T.Client) void {
+    cl.click_state = .none;
+    cl.click_button = 0;
+    cl.click_target = null;
+    cl.click_wp = -1;
+}
+
+fn clearDragState(cl: *T.Client) void {
+    cl.tty.mouse_drag_flag = 0;
+    cl.tty.mouse_scrolling_flag = false;
+    cl.tty.mouse_slider_mpos = -1;
 }
 
 test "translate_client_mouse_event maps status pane ranges onto shared status targets" {
@@ -345,4 +561,171 @@ test "translate_client_mouse_event maps pane hits onto pane targets" {
     try std.testing.expect(translate_client_mouse_event(&client, &event));
     try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), event.key);
     try std.testing.expectEqual(@as(i32, @intCast(wp.id)), event.m.wp);
+}
+
+test "translate_client_mouse_event maps border hits onto shared border targets" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "mouse-border", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(9, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const left = window_mod.window_add_pane(w, null, 4, 3);
+    left.xoff = 0;
+    left.yoff = 0;
+    const right = window_mod.window_add_pane(w, null, 4, 3);
+    right.xoff = 5;
+    right.yoff = 0;
+    w.active = left;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 9, .sy = 3 };
+
+    var event = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    event.m = .{ .x = 4, .y = 1, .b = T.MOUSE_BUTTON_1 };
+
+    try std.testing.expect(translate_client_mouse_event(&client, &event));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .border), event.key);
+    try std.testing.expectEqual(@as(i32, @intCast(left.id)), event.m.wp);
+}
+
+test "mouse click timeout promotes second click to a translated double click" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "mouse-double", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(10, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 10, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 10, .sy = 3 };
+
+    var first = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    first.m = .{ .x = 1, .y = 1, .b = T.MOUSE_BUTTON_1 };
+    try std.testing.expect(translate_client_mouse_event(&client, &first));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), first.key);
+    try std.testing.expectEqual(T.MouseClickState.double_pending, client.click_state);
+
+    var second = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    second.m = .{ .x = 1, .y = 1, .b = T.MOUSE_BUTTON_1 };
+    try std.testing.expect(translate_client_mouse_event(&client, &second));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_SECONDCLICK1, .pane), second.key);
+    try std.testing.expectEqual(T.MouseClickState.triple_pending, client.click_state);
+
+    var timed = click_timeout_event(&client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(T.KEYC_DOUBLECLICK, timed.key);
+    try std.testing.expectEqual(@as(i32, @intCast(wp.id)), timed.m.wp);
+    try std.testing.expectEqual(T.MouseClickState.none, client.click_state);
+
+    try std.testing.expect(translate_client_mouse_event(&client, &timed));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_DOUBLECLICK1, .pane), timed.key);
+}
+
+test "translate_client_mouse_event emits drag-end keys when a drag stops" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "mouse-drag-end", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(10, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 10, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 10, .sy = 3 };
+
+    var drag = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    drag.m = .{
+        .x = 3,
+        .y = 1,
+        .lx = 2,
+        .ly = 1,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = T.MOUSE_BUTTON_1 | T.MOUSE_MASK_DRAG,
+    };
+    try std.testing.expect(translate_client_mouse_event(&client, &drag));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDRAG1, .pane), drag.key);
+    try std.testing.expectEqual(T.MOUSE_BUTTON_1 + 1, client.tty.mouse_drag_flag);
+
+    var release = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    release.m = .{
+        .x = 3,
+        .y = 1,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = 3,
+    };
+    try std.testing.expect(translate_client_mouse_event(&client, &release));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDRAGEND1, .pane), release.key);
+    try std.testing.expectEqual(@as(u32, 0), client.tty.mouse_drag_flag);
 }

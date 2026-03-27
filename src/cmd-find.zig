@@ -975,16 +975,7 @@ fn window_find_string(w: *T.Window, target: []const u8) ?*T.WindowPane {
         y = bottom;
     } else return null;
 
-    return window_get_active_at(w, x, y);
-}
-
-fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
-    for (w.panes.items) |pane| {
-        if (x < pane.xoff or x >= pane.xoff + pane.sx) continue;
-        if (y < pane.yoff or y >= pane.yoff + pane.sy) continue;
-        return pane;
-    }
-    return null;
+    return win_mod.window_get_active_at(w, x, y);
 }
 
 fn fnmatch_matches(pattern: []const u8, text: []const u8) bool {

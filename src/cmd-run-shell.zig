@@ -33,6 +33,7 @@ const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server_client_mod = @import("server-client.zig");
 const session_mod = @import("session.zig");
+const status_runtime = @import("status-runtime.zig");
 const utf8_mod = @import("utf8.zig");
 const window_mod = @import("window.zig");
 
@@ -323,10 +324,7 @@ fn commandParseError(item: ?*cmdq.CmdqItem, queue_client_id: ?u32, err: []const 
         return;
     }
 
-    const message = xm.xstrdup(err);
-    defer xm.allocator.free(message);
-    if (message.len != 0) message[0] = std.ascii.toUpper(message[0]);
-    cmdq.cmdq_write_client(findQueueClient(queue_client_id), 2, "{s}", .{message});
+    status_runtime.present_client_message(findQueueClient(queue_client_id), err);
 }
 
 fn runQueuedCommands(state: *RunShellState) void {
@@ -395,7 +393,9 @@ fn completeShellCommand(state: *RunShellState) void {
             cmdq.cmdq_error(item, "failed to run command: {s}", .{state.shell_command.?});
             cmdq.cmdq_continue(item);
         } else {
-            cmdq.cmdq_write_client(findQueueClient(state.queue_client_id), 2, "failed to run command: {s}", .{state.shell_command.?});
+            const message = xm.xasprintf("failed to run command: {s}", .{state.shell_command.?});
+            defer xm.allocator.free(message);
+            status_runtime.present_client_message(findQueueClient(state.queue_client_id), message);
         }
         freeState(state);
         return;
@@ -556,7 +556,9 @@ export fn cmd_run_shell_timer_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque)
             cmdq.cmdq_error(item, "failed to run command: {s}", .{state.shell_command.?});
             cmdq.cmdq_continue(item);
         } else {
-            cmdq.cmdq_write_client(findQueueClient(state.queue_client_id), 2, "failed to run command: {s}", .{state.shell_command.?});
+            const message = xm.xasprintf("failed to run command: {s}", .{state.shell_command.?});
+            defer xm.allocator.free(message);
+            status_runtime.present_client_message(findQueueClient(state.queue_client_id), message);
         }
         freeState(state);
     }

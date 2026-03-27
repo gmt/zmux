@@ -328,6 +328,13 @@ pub const Utf8State = enum(u32) {
     @"error",
 };
 
+pub const HangulJamoState = enum(u8) {
+    not_hanguljamo,
+    choseong,
+    composable,
+    not_composable,
+};
+
 // ── Colour / attributes ───────────────────────────────────────────────────
 
 pub const COLOUR_FLAG_256: u32 = 0x01000000;

@@ -28,15 +28,8 @@ const style_mod = @import("style.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
-pub const DrawRange = struct {
-    type: T.StyleRangeType,
-    argument: u32 = 0,
-    string: [16]u8 = std.mem.zeroes([16]u8),
-    start: u32,
-    end: u32,
-};
-
-pub const DrawRanges = std.ArrayList(DrawRange);
+pub const DrawRange = T.StyleRange;
+pub const DrawRanges = T.StyleRanges;
 
 const Segment = enum(usize) {
     left,
@@ -49,7 +42,11 @@ const Segment = enum(usize) {
     after,
 };
 
-const segment_count = @typeInfo(Segment).Enum.fields.len;
+const segment_count = @typeInfo(Segment).@"enum".fields.len;
+
+fn segmentIndex(comptime segment: Segment) usize {
+    return @intFromEnum(segment);
+}
 
 const InternalRange = struct {
     segment: Segment,
@@ -235,20 +232,20 @@ pub fn format_draw_ranges(
                         list_align = sy.@"align";
                     }
                     if (focus_start != -1 and focus_end == -1) {
-                        focus_end = @intCast(segmentWidth(screens[@intFromEnum(.list)]));
+                        focus_end = @intCast(segmentWidth(screens[segmentIndex(.list)]));
                     }
                     current = .list;
                 },
                 .focus => {
                     if (list_state == 0 and focus_start == -1) {
-                        focus_start = @intCast(segmentWidth(screens[@intFromEnum(.list)]));
+                        focus_start = @intCast(segmentWidth(screens[segmentIndex(.list)]));
                     }
                 },
                 .off => {
                     if (list_state == 0) {
                         active_range = null;
                         if (focus_start != -1 and focus_end == -1) {
-                            focus_end = @intCast(segmentWidth(screens[@intFromEnum(.list)]));
+                            focus_end = @intCast(segmentWidth(screens[segmentIndex(.list)]));
                         }
                         align_map[@intFromEnum(list_align)] = .after;
                         if (list_align == .left) {
@@ -259,7 +256,7 @@ pub fn format_draw_ranges(
                     current = align_map[@intFromEnum(sy.@"align")];
                 },
                 .left_marker => {
-                    if (list_state == 0 and segmentWidth(screens[@intFromEnum(.list_left)]) == 0) {
+                    if (list_state == 0 and segmentWidth(screens[segmentIndex(.list_left)]) == 0) {
                         active_range = null;
                         if (focus_start != -1 and focus_end == -1) {
                             focus_start = -1;
@@ -269,7 +266,7 @@ pub fn format_draw_ranges(
                     }
                 },
                 .right_marker => {
-                    if (list_state == 0 and segmentWidth(screens[@intFromEnum(.list_right)]) == 0) {
+                    if (list_state == 0 and segmentWidth(screens[segmentIndex(.list_right)]) == 0) {
                         active_range = null;
                         if (focus_start != -1 and focus_end == -1) {
                             focus_start = -1;
@@ -309,10 +306,10 @@ fn drawWithoutList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    var width_left = segmentWidth(screens[@intFromEnum(.left)]);
-    var width_centre = segmentWidth(screens[@intFromEnum(.centre)]);
-    var width_right = segmentWidth(screens[@intFromEnum(.right)]);
-    var width_abs_centre = segmentWidth(screens[@intFromEnum(.absolute_centre)]);
+    var width_left = segmentWidth(screens[segmentIndex(.left)]);
+    var width_centre = segmentWidth(screens[segmentIndex(.centre)]);
+    var width_right = segmentWidth(screens[segmentIndex(.right)]);
+    var width_abs_centre = segmentWidth(screens[segmentIndex(.absolute_centre)]);
 
     while (width_left + width_centre + width_right > available) {
         if (width_centre > 0)
@@ -323,29 +320,29 @@ fn drawWithoutList(
             width_left -= 1;
     }
 
-    copySegment(ctx, target_x, target_y, screens[@intFromEnum(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
+    copySegment(ctx, target_x, target_y, screens[segmentIndex(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.right)],
+        screens[segmentIndex(.right)],
         internal_ranges,
         ranges,
         .right,
         available - width_right,
-        segmentWidth(screens[@intFromEnum(.right)]) - width_right,
+        segmentWidth(screens[segmentIndex(.right)]) - width_right,
         width_right,
     );
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.centre)],
+        screens[segmentIndex(.centre)],
         internal_ranges,
         ranges,
         .centre,
         width_left + ((available - width_right) - width_left) / 2 - width_centre / 2,
-        segmentWidth(screens[@intFromEnum(.centre)]) / 2 - width_centre / 2,
+        segmentWidth(screens[segmentIndex(.centre)]) / 2 - width_centre / 2,
         width_centre,
     );
     if (width_abs_centre > available) width_abs_centre = available;
@@ -353,7 +350,7 @@ fn drawWithoutList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.absolute_centre)],
+        screens[segmentIndex(.absolute_centre)],
         internal_ranges,
         ranges,
         .absolute_centre,
@@ -374,12 +371,12 @@ fn drawWithLeftList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    var width_left = segmentWidth(screens[@intFromEnum(.left)]);
-    var width_centre = segmentWidth(screens[@intFromEnum(.centre)]);
-    var width_right = segmentWidth(screens[@intFromEnum(.right)]);
-    var width_abs_centre = segmentWidth(screens[@intFromEnum(.absolute_centre)]);
-    var width_list = segmentWidth(screens[@intFromEnum(.list)]);
-    var width_after = segmentWidth(screens[@intFromEnum(.after)]);
+    var width_left = segmentWidth(screens[segmentIndex(.left)]);
+    var width_centre = segmentWidth(screens[segmentIndex(.centre)]);
+    var width_right = segmentWidth(screens[segmentIndex(.right)]);
+    var width_abs_centre = segmentWidth(screens[segmentIndex(.absolute_centre)]);
+    var width_list = segmentWidth(screens[segmentIndex(.list)]);
+    var width_after = segmentWidth(screens[segmentIndex(.after)]);
 
     while (width_left + width_centre + width_right + width_list + width_after > available) {
         if (width_centre > 0)
@@ -395,29 +392,29 @@ fn drawWithLeftList(
     }
 
     if (width_list == 0) {
-        appendScreen(screens[@intFromEnum(.left)], screens[@intFromEnum(.after)], width_after);
+        appendScreen(screens[segmentIndex(.left)], screens[segmentIndex(.after)], width_after);
         drawWithoutList(ctx, target_x, target_y, available, screens, internal_ranges, ranges);
         return;
     }
 
-    copySegment(ctx, target_x, target_y, screens[@intFromEnum(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
+    copySegment(ctx, target_x, target_y, screens[segmentIndex(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.right)],
+        screens[segmentIndex(.right)],
         internal_ranges,
         ranges,
         .right,
         available - width_right,
-        segmentWidth(screens[@intFromEnum(.right)]) - width_right,
+        segmentWidth(screens[segmentIndex(.right)]) - width_right,
         width_right,
     );
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.after)],
+        screens[segmentIndex(.after)],
         internal_ranges,
         ranges,
         .after,
@@ -429,12 +426,12 @@ fn drawWithLeftList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.centre)],
+        screens[segmentIndex(.centre)],
         internal_ranges,
         ranges,
         .centre,
         width_left + width_list + width_after + ((available - width_right) - (width_left + width_list + width_after)) / 2 - width_centre / 2,
-        segmentWidth(screens[@intFromEnum(.centre)]) / 2 - width_centre / 2,
+        segmentWidth(screens[segmentIndex(.centre)]) / 2 - width_centre / 2,
         width_centre,
     );
 
@@ -462,7 +459,7 @@ fn drawWithLeftList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.absolute_centre)],
+        screens[segmentIndex(.absolute_centre)],
         internal_ranges,
         ranges,
         .absolute_centre,
@@ -483,12 +480,12 @@ fn drawWithCentreList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    var width_left = segmentWidth(screens[@intFromEnum(.left)]);
-    var width_centre = segmentWidth(screens[@intFromEnum(.centre)]);
-    var width_right = segmentWidth(screens[@intFromEnum(.right)]);
-    var width_abs_centre = segmentWidth(screens[@intFromEnum(.absolute_centre)]);
-    var width_list = segmentWidth(screens[@intFromEnum(.list)]);
-    var width_after = segmentWidth(screens[@intFromEnum(.after)]);
+    var width_left = segmentWidth(screens[segmentIndex(.left)]);
+    var width_centre = segmentWidth(screens[segmentIndex(.centre)]);
+    var width_right = segmentWidth(screens[segmentIndex(.right)]);
+    var width_abs_centre = segmentWidth(screens[segmentIndex(.absolute_centre)]);
+    var width_list = segmentWidth(screens[segmentIndex(.list)]);
+    var width_after = segmentWidth(screens[segmentIndex(.after)]);
 
     while (width_left + width_centre + width_right + width_list + width_after > available) {
         if (width_list > 0)
@@ -504,22 +501,22 @@ fn drawWithCentreList(
     }
 
     if (width_list == 0) {
-        appendScreen(screens[@intFromEnum(.centre)], screens[@intFromEnum(.after)], width_after);
+        appendScreen(screens[segmentIndex(.centre)], screens[segmentIndex(.after)], width_after);
         drawWithoutList(ctx, target_x, target_y, available, screens, internal_ranges, ranges);
         return;
     }
 
-    copySegment(ctx, target_x, target_y, screens[@intFromEnum(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
+    copySegment(ctx, target_x, target_y, screens[segmentIndex(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.right)],
+        screens[segmentIndex(.right)],
         internal_ranges,
         ranges,
         .right,
         available - width_right,
-        segmentWidth(screens[@intFromEnum(.right)]) - width_right,
+        segmentWidth(screens[segmentIndex(.right)]) - width_right,
         width_right,
     );
 
@@ -528,7 +525,7 @@ fn drawWithCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.centre)],
+        screens[segmentIndex(.centre)],
         internal_ranges,
         ranges,
         .centre,
@@ -540,7 +537,7 @@ fn drawWithCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.after)],
+        screens[segmentIndex(.after)],
         internal_ranges,
         ranges,
         .after,
@@ -552,7 +549,7 @@ fn drawWithCentreList(
     var list_focus_start = focus_start;
     var list_focus_end = focus_end;
     if (list_focus_start == -1 or list_focus_end == -1) {
-        const middle_focus: i32 = @intCast(segmentWidth(screens[@intFromEnum(.list)]) / 2);
+        const middle_focus: i32 = @intCast(segmentWidth(screens[segmentIndex(.list)]) / 2);
         list_focus_start = middle_focus;
         list_focus_end = middle_focus;
     }
@@ -574,7 +571,7 @@ fn drawWithCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.absolute_centre)],
+        screens[segmentIndex(.absolute_centre)],
         internal_ranges,
         ranges,
         .absolute_centre,
@@ -595,12 +592,12 @@ fn drawWithRightList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    var width_left = segmentWidth(screens[@intFromEnum(.left)]);
-    var width_centre = segmentWidth(screens[@intFromEnum(.centre)]);
-    var width_right = segmentWidth(screens[@intFromEnum(.right)]);
-    var width_abs_centre = segmentWidth(screens[@intFromEnum(.absolute_centre)]);
-    var width_list = segmentWidth(screens[@intFromEnum(.list)]);
-    var width_after = segmentWidth(screens[@intFromEnum(.after)]);
+    var width_left = segmentWidth(screens[segmentIndex(.left)]);
+    var width_centre = segmentWidth(screens[segmentIndex(.centre)]);
+    var width_right = segmentWidth(screens[segmentIndex(.right)]);
+    var width_abs_centre = segmentWidth(screens[segmentIndex(.absolute_centre)]);
+    var width_list = segmentWidth(screens[segmentIndex(.list)]);
+    var width_after = segmentWidth(screens[segmentIndex(.after)]);
 
     while (width_left + width_centre + width_right + width_list + width_after > available) {
         if (width_centre > 0)
@@ -616,29 +613,29 @@ fn drawWithRightList(
     }
 
     if (width_list == 0) {
-        appendScreen(screens[@intFromEnum(.right)], screens[@intFromEnum(.after)], width_after);
+        appendScreen(screens[segmentIndex(.right)], screens[segmentIndex(.after)], width_after);
         drawWithoutList(ctx, target_x, target_y, available, screens, internal_ranges, ranges);
         return;
     }
 
-    copySegment(ctx, target_x, target_y, screens[@intFromEnum(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
+    copySegment(ctx, target_x, target_y, screens[segmentIndex(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.after)],
+        screens[segmentIndex(.after)],
         internal_ranges,
         ranges,
         .after,
         available - width_after,
-        segmentWidth(screens[@intFromEnum(.after)]) - width_after,
+        segmentWidth(screens[segmentIndex(.after)]) - width_after,
         width_after,
     );
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.right)],
+        screens[segmentIndex(.right)],
         internal_ranges,
         ranges,
         .right,
@@ -650,12 +647,12 @@ fn drawWithRightList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.centre)],
+        screens[segmentIndex(.centre)],
         internal_ranges,
         ranges,
         .centre,
         width_left + ((available - width_right - width_list - width_after) - width_left) / 2 - width_centre / 2,
-        segmentWidth(screens[@intFromEnum(.centre)]) / 2 - width_centre / 2,
+        segmentWidth(screens[segmentIndex(.centre)]) / 2 - width_centre / 2,
         width_centre,
     );
 
@@ -683,7 +680,7 @@ fn drawWithRightList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.absolute_centre)],
+        screens[segmentIndex(.absolute_centre)],
         internal_ranges,
         ranges,
         .absolute_centre,
@@ -704,12 +701,12 @@ fn drawWithAbsoluteCentreList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    var width_left = segmentWidth(screens[@intFromEnum(.left)]);
-    var width_centre = segmentWidth(screens[@intFromEnum(.centre)]);
-    var width_right = segmentWidth(screens[@intFromEnum(.right)]);
-    var width_abs_centre = segmentWidth(screens[@intFromEnum(.absolute_centre)]);
-    var width_list = segmentWidth(screens[@intFromEnum(.list)]);
-    var width_after = segmentWidth(screens[@intFromEnum(.after)]);
+    var width_left = segmentWidth(screens[segmentIndex(.left)]);
+    var width_centre = segmentWidth(screens[segmentIndex(.centre)]);
+    var width_right = segmentWidth(screens[segmentIndex(.right)]);
+    var width_abs_centre = segmentWidth(screens[segmentIndex(.absolute_centre)]);
+    var width_list = segmentWidth(screens[segmentIndex(.list)]);
+    var width_after = segmentWidth(screens[segmentIndex(.after)]);
 
     while (width_left + width_centre + width_right > available) {
         if (width_centre > 0)
@@ -728,17 +725,17 @@ fn drawWithAbsoluteCentreList(
             width_abs_centre -= 1;
     }
 
-    copySegment(ctx, target_x, target_y, screens[@intFromEnum(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
+    copySegment(ctx, target_x, target_y, screens[segmentIndex(.left)], internal_ranges, ranges, .left, 0, 0, width_left);
     copySegment(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.right)],
+        screens[segmentIndex(.right)],
         internal_ranges,
         ranges,
         .right,
         available - width_right,
-        segmentWidth(screens[@intFromEnum(.right)]) - width_right,
+        segmentWidth(screens[segmentIndex(.right)]) - width_right,
         width_right,
     );
 
@@ -747,7 +744,7 @@ fn drawWithAbsoluteCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.centre)],
+        screens[segmentIndex(.centre)],
         internal_ranges,
         ranges,
         .centre,
@@ -759,7 +756,7 @@ fn drawWithAbsoluteCentreList(
     var list_focus_start = focus_start;
     var list_focus_end = focus_end;
     if (list_focus_start == -1 or list_focus_end == -1) {
-        const middle_focus: i32 = @intCast(segmentWidth(screens[@intFromEnum(.list)]) / 2);
+        const middle_focus: i32 = @intCast(segmentWidth(screens[segmentIndex(.list)]) / 2);
         list_focus_start = middle_focus;
         list_focus_end = middle_focus;
     }
@@ -769,7 +766,7 @@ fn drawWithAbsoluteCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.absolute_centre)],
+        screens[segmentIndex(.absolute_centre)],
         internal_ranges,
         ranges,
         .absolute_centre,
@@ -795,7 +792,7 @@ fn drawWithAbsoluteCentreList(
         ctx,
         target_x,
         target_y,
-        screens[@intFromEnum(.after)],
+        screens[segmentIndex(.after)],
         internal_ranges,
         ranges,
         .after,
@@ -817,9 +814,9 @@ fn copyList(
     internal_ranges: []const InternalRange,
     ranges: ?*DrawRanges,
 ) void {
-    const list = screens[@intFromEnum(.list)];
-    const list_left = screens[@intFromEnum(.list_left)];
-    const list_right = screens[@intFromEnum(.list_right)];
+    const list = screens[segmentIndex(.list)];
+    const list_left = screens[segmentIndex(.list_left)];
+    const list_right = screens[segmentIndex(.list_right)];
 
     if (width >= segmentWidth(list)) {
         copySegment(ctx, target_x, target_y, list, internal_ranges, ranges, .list, offset, 0, segmentWidth(list));

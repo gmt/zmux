@@ -1,0 +1,282 @@
+// Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
+//
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+// IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+// OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//
+// Ported in part from tmux/server-client.c.
+// Original copyright:
+//   Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
+//   ISC licence - same terms as above.
+
+//! server-print.zig - shared reduced command-output/view-mode helpers.
+
+const std = @import("std");
+const T = @import("types.zig");
+const proc_mod = @import("proc.zig");
+const grid_mod = @import("grid.zig");
+const screen_mod = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
+const utf8 = @import("utf8.zig");
+const window_mod = @import("window.zig");
+const xm = @import("xmalloc.zig");
+
+const server_print_view_mode = T.WindowMode{
+    .name = "server-print-view",
+    .key = server_print_view_key,
+};
+
+pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const u8) void {
+    if (client) |cl| {
+        if (cl.peer) |peer| {
+            var buf: std.ArrayList(u8) = .{};
+            defer buf.deinit(xm.allocator);
+            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
+            buf.appendSlice(xm.allocator, data) catch unreachable;
+            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+            return;
+        }
+    }
+
+    const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
+    _ = file.writeAll(data) catch {};
+}
+
+pub fn server_client_print(client: ?*T.Client, parse: bool, data: []const u8) void {
+    if (client) |cl| {
+        if (cl.session != null and (cl.flags & T.CLIENT_CONTROL) == 0) {
+            if (server_client_view_data(cl, data, parse)) return;
+        }
+    }
+
+    if (!parse or data.len == 0 or data[data.len - 1] == '\n') {
+        server_client_write_stream(client, 1, data);
+        return;
+    }
+
+    var line: std.ArrayList(u8) = .{};
+    defer line.deinit(xm.allocator);
+    line.appendSlice(xm.allocator, data) catch unreachable;
+    line.append(xm.allocator, '\n') catch unreachable;
+    server_client_write_stream(client, 1, line.items);
+}
+
+pub fn server_client_view_data(client: *T.Client, data: []const u8, parse: bool) bool {
+    const session = client.session orelse return false;
+    const wl = session.curw orelse return false;
+    const wp = wl.window.active orelse return false;
+
+    if (!ensure_view_mode(wp)) return false;
+    render_view_data(wp, data, parse);
+
+    client.flags |= T.CLIENT_REDRAWWINDOW;
+    wp.flags |= T.PANE_REDRAW;
+    return true;
+}
+
+pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
+    if (window_mod.window_pane_mode(wp)) |wme| {
+        if (wme.mode == &server_print_view_mode) {
+            _ = window_mod.window_pane_pop_mode(wp, wme);
+        }
+    }
+    screen_mod.screen_leave_alternate(wp, true);
+    wp.flags |= T.PANE_REDRAW;
+}
+
+fn ensure_view_mode(wp: *T.WindowPane) bool {
+    if (window_mod.window_pane_mode(wp)) |wme| {
+        return wme.mode == &server_print_view_mode;
+    }
+
+    screen_mod.screen_enter_alternate(wp, true);
+    _ = window_mod.window_pane_push_mode(wp, &server_print_view_mode, null, null);
+    return true;
+}
+
+fn render_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) void {
+    if (!parse) screen_mod.screen_reset_active(wp.screen);
+    wp.screen.cursor_visible = false;
+
+    var ctx = T.ScreenWriteCtx{ .s = wp.screen };
+    if (parse) {
+        screen_write.putn(&ctx, data);
+        if (data.len != 0 and data[data.len - 1] != '\n') {
+            screen_write.newline(&ctx);
+        }
+        return;
+    }
+
+    var start: usize = 0;
+    for (data, 0..) |byte, idx| {
+        if (byte != '\n') continue;
+        render_raw_line(&ctx, data[start..idx]);
+        screen_write.newline(&ctx);
+        start = idx + 1;
+    }
+    render_raw_line(&ctx, data[start..]);
+}
+
+fn render_raw_line(ctx: *T.ScreenWriteCtx, line: []const u8) void {
+    var remaining = line;
+    while (remaining.len != 0) {
+        const consumed = render_raw_unit(ctx, remaining);
+        remaining = remaining[consumed..];
+    }
+}
+
+fn render_raw_unit(ctx: *T.ScreenWriteCtx, bytes: []const u8) usize {
+    const byte = bytes[0];
+    switch (byte) {
+        '\r' => {
+            screen_write.carriage_return(ctx);
+            return 1;
+        },
+        '\t' => {
+            screen_write.tab(ctx);
+            return 1;
+        },
+        0x20...0x7e => {
+            screen_write.putc(ctx, byte);
+            return 1;
+        },
+        else => {},
+    }
+
+    var ud: T.Utf8Data = undefined;
+    if (utf8.utf8_open(&ud, byte) == .more) {
+        var idx: usize = 1;
+        var state: T.Utf8State = .more;
+        while (idx < bytes.len and state == .more) : (idx += 1) {
+            state = utf8.utf8_append(&ud, bytes[idx]);
+        }
+        if (state == .done) {
+            screen_write.putn(ctx, ud.data[0..ud.size]);
+            return ud.size;
+        }
+    }
+
+    render_raw_escape(ctx, byte);
+    return 1;
+}
+
+fn render_raw_escape(ctx: *T.ScreenWriteCtx, byte: u8) void {
+    const escaped = utf8.utf8_strvisx(&.{byte}, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_NOSLASH);
+    defer xm.allocator.free(escaped);
+    screen_write.putn(ctx, escaped);
+}
+
+fn server_print_view_key(
+    wme: *T.WindowModeEntry,
+    _client: ?*T.Client,
+    _session: *T.Session,
+    _wl: *T.Winlink,
+    _key: T.key_code,
+    _mouse: ?*const T.MouseEvent,
+) void {
+    _ = _client;
+    _ = _session;
+    _ = _wl;
+    _ = _key;
+    _ = _mouse;
+    server_client_close_view_mode(wme.wp);
+}
+
+test "server_client_print appends parsed output in the shared view mode" {
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("server-print");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(10, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(10, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 1,
+        .name = window_name,
+        .sx = 10,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 2,
+        .window = &window,
+        .options = undefined,
+        .sx = 10,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| server_client_close_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 0,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+
+    server_client_print(&client, true, "alpha");
+    server_client_print(&client, true, "beta");
+
+    try std.testing.expect(screen_mod.screen_alternate_active(&pane));
+
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    const second_row = try grid_row_string(pane.screen.grid, 1);
+    defer xm.allocator.free(second_row);
+    try std.testing.expectEqualStrings("alpha", first_row);
+    try std.testing.expectEqualStrings("beta", second_row);
+}
+
+fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
+    const used = grid_mod.line_used(gd, row);
+    const out = try xm.allocator.alloc(u8, used);
+    errdefer xm.allocator.free(out);
+
+    for (0..used) |idx| {
+        out[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
+    }
+    return out;
+}

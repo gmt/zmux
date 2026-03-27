@@ -26,7 +26,11 @@ const log = @import("log.zig");
 const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const client_registry = @import("client-registry.zig");
-const proc_mod = @import("proc.zig");
+const cfg_mod = @import("cfg.zig");
+const key_string = @import("key-string.zig");
+const server = @import("server.zig");
+const server_print = @import("server-print.zig");
+const status_runtime = @import("status-runtime.zig");
 
 const CMDQ_FIRED: u32 = 0x1;
 const CMDQ_WAITING: u32 = 0x2;
@@ -151,6 +155,7 @@ fn remove_group(item: *CmdqItem) void {
 }
 
 fn fire_command(item: *CmdqItem) T.CmdRetval {
+    if (cfg_mod.cfg_finished) cmdq_add_message(item);
     return cmd_mod.cmd_execute(item.cmd.?, item);
 }
 
@@ -474,53 +479,81 @@ fn cmdq_find_client(item: *CmdqItem, explicit: ?[]const u8, quiet: bool) ?*T.Cli
     return null;
 }
 
+fn cmdq_add_message(item: *CmdqItem) void {
+    const cmd = item.cmd orelse return;
+    const printed_args = args_mod.args_print(cmd_mod.cmd_get_args(cmd));
+    defer xm.allocator.free(printed_args);
+
+    const command_text = if (printed_args.len == 0)
+        xm.xstrdup(cmd.entry.name)
+    else
+        xm.xasprintf("{s} {s}", .{ cmd.entry.name, printed_args });
+    defer xm.allocator.free(command_text);
+
+    if (item.client) |cl| {
+        if (cl.session != null and item.state.event.key != T.KEYC_NONE) {
+            server.server_add_message(
+                "{s} key {s}: {s}",
+                .{ cl.name orelse "client", key_string.key_string_lookup_key(item.state.event.key, 0), command_text },
+            );
+            return;
+        }
+
+        server.server_add_message("{s} command: {s}", .{ cl.name orelse "client", command_text });
+        return;
+    }
+
+    server.server_add_message("command: {s}", .{command_text});
+}
+
 pub fn cmdq_error(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void {
     log.log_warn(fmt, args);
-    cmdq_write_client(item.client, 2, fmt, args);
+    const msg = xm.xasprintf(fmt, args);
+    defer xm.allocator.free(msg);
+
+    if (item.client) |cl| {
+        if (cl.session == null or (cl.flags & T.CLIENT_CONTROL) != 0) {
+            server.server_add_message("{s} message: {s}", .{ cl.name orelse "client", msg });
+            const line = xm.xasprintf("{s}\n", .{msg});
+            defer xm.allocator.free(line);
+            server_print.server_client_write_stream(cl, 2, line);
+            cl.retval = 1;
+            return;
+        }
+
+        if (msg.len != 0) msg[0] = std.ascii.toUpper(msg[0]);
+        status_runtime.status_message_set_text(cl, -1, true, false, false, msg);
+        return;
+    }
+
+    const line = xm.xasprintf("{s}\n", .{msg});
+    defer xm.allocator.free(line);
+    server_print.server_client_write_stream(null, 2, line);
 }
 
 pub fn cmdq_print(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void {
-    cmdq_write_client(item.client, 1, fmt, args);
+    const msg = xm.xasprintf(fmt, args);
+    defer xm.allocator.free(msg);
+    server_print.server_client_print(item.client, true, msg);
 }
 
 pub fn cmdq_print_data(item: *CmdqItem, data: []const u8) void {
-    cmdq_write_client_data(item.client, 1, data);
+    server_print.server_client_print(item.client, true, data);
 }
 
 pub fn cmdq_write_client(cl: ?*T.Client, stream: i32, comptime fmt: []const u8, args: anytype) void {
     const msg = xm.xasprintf(fmt, args);
     defer xm.allocator.free(msg);
 
-    if (cl) |c_ptr| {
-        if (c_ptr.peer) |peer| {
-            var buf: std.ArrayList(u8) = .{};
-            defer buf.deinit(xm.allocator);
-            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, msg) catch unreachable;
-            buf.append(xm.allocator, '\n') catch unreachable;
-            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
-            return;
-        }
-    }
-    const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
-    _ = file.writeAll(msg) catch {};
-    _ = file.writeAll("\n") catch {};
+    var line: std.ArrayList(u8) = .{};
+    defer line.deinit(xm.allocator);
+    line.appendSlice(xm.allocator, msg) catch unreachable;
+    line.append(xm.allocator, '\n') catch unreachable;
+    server_print.server_client_write_stream(cl, stream, line.items);
 }
 
 pub fn cmdq_write_client_data(cl: ?*T.Client, stream: i32, data: []const u8) void {
-    if (cl) |c_ptr| {
-        if (c_ptr.peer) |peer| {
-            var buf: std.ArrayList(u8) = .{};
-            defer buf.deinit(xm.allocator);
-            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, data) catch unreachable;
-            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
-            return;
-        }
-    }
-
-    const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
-    _ = file.writeAll(data) catch {};
+    server_print.server_client_write_stream(cl, stream, data);
 }
 
 test "cmdq_append_event preserves the triggering key for queued commands" {
@@ -601,4 +634,58 @@ test "cmdq waiting items block later entries until continued" {
     try std.testing.expectEqual(@as(u32, 1), cmdq_next(null));
     try std.testing.expectEqual(@as(u32, 1), callbacks.waited);
     try std.testing.expectEqual(@as(u32, 1), callbacks.ran_after);
+}
+
+test "cmdq logs command execution into the shared message log once config is finished" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+
+    const logged = struct {
+        fn exec(_: *cmd_mod.Cmd, _: *CmdqItem) T.CmdRetval {
+            return .normal;
+        }
+    };
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    const old_cfg_finished = cfg_mod.cfg_finished;
+    cfg_mod.cfg_finished = true;
+    defer cfg_mod.cfg_finished = old_cfg_finished;
+
+    const entry = cmd_mod.CmdEntry{
+        .name = "cmdq-test-log",
+        .exec = logged.exec,
+    };
+
+    var cause: ?[]u8 = null;
+    const parsed_args = try args_mod.args_parse(xm.allocator, &.{ "one", "two" }, "", 0, -1, &cause);
+
+    const list = xm.allocator.create(cmd_mod.CmdList) catch unreachable;
+    list.* = .{};
+
+    const cmd = xm.allocator.create(cmd_mod.Cmd) catch unreachable;
+    cmd.* = .{
+        .entry = &entry,
+        .args = parsed_args,
+    };
+    list.append(cmd);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = "logger",
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    cl.tty.client = &cl;
+
+    cmdq_append(&cl, list);
+    try std.testing.expectEqual(@as(u32, 1), cmdq_next(&cl));
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("logger command: cmdq-test-log one two", server.message_log.items[0].msg);
 }

@@ -567,6 +567,9 @@ pub const Tty = struct {
     flags: i32 = 0,
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,
+    acs: [256][2]u8 = [_][2]u8{[_]u8{ 0, 0 }} ** 256,
+    u8_cap_present: bool = false,
+    u8_cap: i32 = 0,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────

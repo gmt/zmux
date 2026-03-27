@@ -20,6 +20,8 @@
 //! grid.zig – shared grid allocation and cell helpers.
 
 const std = @import("std");
+const colour = @import("colour.zig");
+const hyperlinks = @import("hyperlinks.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
@@ -29,6 +31,10 @@ const WHITESPACE = "\t ";
 pub const StringCellsOptions = struct {
     trim_trailing_spaces: bool = false,
     escape_sequences: bool = false,
+    with_sequences: bool = false,
+    include_empty_cells: bool = false,
+    screen: ?*T.Screen = null,
+    last_cell: ?*T.GridCell = null,
 };
 
 pub fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
@@ -210,20 +216,38 @@ pub fn line_length(gd: *T.Grid, row: u32) u32 {
 pub fn string_cells(gd: *T.Grid, row: u32, width: u32, options: StringCellsOptions) []u8 {
     if (row >= gd.linedata.len or width == 0) return xm.xstrdup("");
 
-    const used = if (options.trim_trailing_spaces)
-        @min(line_length(gd, row), width)
+    const line = &gd.linedata[row];
+    const used = if (options.include_empty_cells)
+        @min(width, gd.sx)
     else
-        @min(width, gd.sx);
+        @min(width, line.cellused);
 
     var out: std.ArrayList(u8) = .{};
     errdefer out.deinit(xm.allocator);
+    var local_last = T.grid_default_cell;
+    const last_cell = options.last_cell orelse &local_last;
+    var has_link = false;
 
     var col: u32 = 0;
     while (col < used) : (col += 1) {
         var gc: T.GridCell = undefined;
         get_cell(gd, row, col, &gc);
         if (gc.isPadding()) continue;
-        append_rendered_cell(&out, &gc, options.escape_sequences);
+
+        if (options.with_sequences) {
+            append_rendered_sequence(&out, last_cell, &gc, options.escape_sequences, options.screen, &has_link);
+            last_cell.* = gc;
+        }
+        append_rendered_cell_payload(&out, &gc, options.escape_sequences);
+    }
+
+    if (has_link) {
+        append_hyperlink(&out, "", "", options.escape_sequences);
+    }
+    if (options.trim_trailing_spaces) {
+        while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+            _ = out.pop();
+        }
     }
 
     return out.toOwnedSlice(xm.allocator) catch unreachable;
@@ -542,23 +566,249 @@ fn free_line_storage(line: *T.GridLine) void {
     line.* = .{};
 }
 
-fn append_rendered_cell(out: *std.ArrayList(u8), gc: *const T.GridCell, escape_sequences: bool) void {
-    const bytes = if (gc.payload().isEmpty()) " " else gc.payload().bytes();
-    if (!escape_sequences) {
-        out.appendSlice(xm.allocator, bytes) catch unreachable;
+fn append_rendered_cell_payload(out: *std.ArrayList(u8), gc: *const T.GridCell, escape_sequences: bool) void {
+    if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
+        out.append(xm.allocator, '\t') catch unreachable;
         return;
     }
 
-    for (bytes) |ch| {
-        if ((ch >= ' ' and ch <= '~') and ch != '\\') {
-            out.append(xm.allocator, ch) catch unreachable;
-            continue;
-        }
-
-        var octal: [4]u8 = undefined;
-        const rendered = std.fmt.bufPrint(&octal, "\\{o:0>3}", .{ch}) catch unreachable;
-        out.appendSlice(xm.allocator, rendered) catch unreachable;
+    const bytes = gc.payload().bytes();
+    if (escape_sequences and bytes.len == 1 and bytes[0] == '\\') {
+        out.appendSlice(xm.allocator, "\\\\") catch unreachable;
+        return;
     }
+
+    out.appendSlice(xm.allocator, bytes) catch unreachable;
+}
+
+fn append_rendered_sequence(
+    out: *std.ArrayList(u8),
+    lastgc: *const T.GridCell,
+    gc: *const T.GridCell,
+    escape_sequences: bool,
+    screen: ?*T.Screen,
+    has_link: *bool,
+) void {
+    var attrs: [128]i32 = undefined;
+    var attr_len: usize = 0;
+    var last_attr = lastgc.attr;
+
+    const attr_pairs = [_]struct { mask: u16, code: i32 }{
+        .{ .mask = T.GRID_ATTR_BRIGHT, .code = 1 },
+        .{ .mask = T.GRID_ATTR_DIM, .code = 2 },
+        .{ .mask = T.GRID_ATTR_ITALICS, .code = 3 },
+        .{ .mask = T.GRID_ATTR_UNDERSCORE, .code = 4 },
+        .{ .mask = T.GRID_ATTR_BLINK, .code = 5 },
+        .{ .mask = T.GRID_ATTR_REVERSE, .code = 7 },
+        .{ .mask = T.GRID_ATTR_HIDDEN, .code = 8 },
+        .{ .mask = T.GRID_ATTR_STRIKETHROUGH, .code = 9 },
+        .{ .mask = T.GRID_ATTR_UNDERSCORE_2, .code = 42 },
+        .{ .mask = T.GRID_ATTR_UNDERSCORE_3, .code = 43 },
+        .{ .mask = T.GRID_ATTR_UNDERSCORE_4, .code = 44 },
+        .{ .mask = T.GRID_ATTR_UNDERSCORE_5, .code = 45 },
+        .{ .mask = T.GRID_ATTR_OVERLINE, .code = 53 },
+    };
+
+    for (attr_pairs) |entry| {
+        if (((gc.attr & entry.mask) == 0 and (last_attr & entry.mask) != 0) or
+            (lastgc.us != 8 and gc.us == 8))
+        {
+            attrs[attr_len] = 0;
+            attr_len += 1;
+            last_attr &= T.GRID_ATTR_CHARSET;
+            break;
+        }
+    }
+    for (attr_pairs) |entry| {
+        if ((gc.attr & entry.mask) != 0 and (last_attr & entry.mask) == 0) {
+            attrs[attr_len] = entry.code;
+            attr_len += 1;
+        }
+    }
+
+    if (attr_len > 0) {
+        append_sgr_codes(out, attrs[0..attr_len], escape_sequences, true);
+    }
+
+    append_changed_colour_codes(out, attr_len > 0 and attrs[0] == 0, gc, lastgc, .fg, escape_sequences);
+    append_changed_colour_codes(out, attr_len > 0 and attrs[0] == 0, gc, lastgc, .bg, escape_sequences);
+    append_changed_colour_codes(out, attr_len > 0 and attrs[0] == 0, gc, lastgc, .us, escape_sequences);
+
+    if ((gc.attr & T.GRID_ATTR_CHARSET) != 0 and (last_attr & T.GRID_ATTR_CHARSET) == 0) {
+        append_control_byte(out, escape_sequences, 0x0e);
+    }
+    if ((gc.attr & T.GRID_ATTR_CHARSET) == 0 and (last_attr & T.GRID_ATTR_CHARSET) != 0) {
+        append_control_byte(out, escape_sequences, 0x0f);
+    }
+
+    if (screen) |sc| {
+        if (sc.hyperlinks) |hl| {
+            if (lastgc.link != gc.link) {
+                var uri: []const u8 = undefined;
+                var id: []const u8 = undefined;
+                if (hyperlinks.hyperlinks_get(hl, gc.link, &uri, &id, null)) {
+                    append_hyperlink(out, id, uri, escape_sequences);
+                    has_link.* = true;
+                } else if (has_link.*) {
+                    append_hyperlink(out, "", "", escape_sequences);
+                    has_link.* = false;
+                }
+            }
+        }
+    }
+}
+
+const ColourField = enum { fg, bg, us };
+
+fn append_changed_colour_codes(
+    out: *std.ArrayList(u8),
+    reset_started: bool,
+    gc: *const T.GridCell,
+    lastgc: *const T.GridCell,
+    comptime field: ColourField,
+    escape_sequences: bool,
+) void {
+    var newc: [8]i32 = undefined;
+    var oldc: [8]i32 = undefined;
+    const nnew = colour_codes(gc, field, &newc);
+    if (nnew == 0) return;
+    const nold = colour_codes(lastgc, field, &oldc);
+    if (!reset_started and nnew == nold and std.mem.eql(i32, newc[0..nnew], oldc[0..nold])) return;
+    if (reset_started and ((field == .fg and newc[0] == 39) or (field == .bg and newc[0] == 49))) return;
+    append_sgr_codes(out, newc[0..nnew], escape_sequences, false);
+}
+
+fn colour_codes(gc: *const T.GridCell, comptime field: ColourField, values: *[8]i32) usize {
+    const colour_value = switch (field) {
+        .fg => gc.fg,
+        .bg => gc.bg,
+        .us => gc.us,
+    };
+
+    var len: usize = 0;
+    if (colour_value & T.COLOUR_FLAG_256 != 0) {
+        values[len] = switch (field) {
+            .fg => 38,
+            .bg => 48,
+            .us => 58,
+        };
+        len += 1;
+        values[len] = 5;
+        len += 1;
+        values[len] = colour_value & 0xff;
+        len += 1;
+        return len;
+    }
+    if (colour_value & T.COLOUR_FLAG_RGB != 0) {
+        var r: u8 = undefined;
+        var g: u8 = undefined;
+        var b: u8 = undefined;
+        colour.colour_split_rgb(colour_value, &r, &g, &b);
+        values[len] = switch (field) {
+            .fg => 38,
+            .bg => 48,
+            .us => 58,
+        };
+        len += 1;
+        values[len] = 2;
+        len += 1;
+        values[len] = r;
+        len += 1;
+        values[len] = g;
+        len += 1;
+        values[len] = b;
+        len += 1;
+        return len;
+    }
+
+    switch (field) {
+        .fg => switch (colour_value) {
+            0...7 => {
+                values[0] = colour_value + 30;
+                return 1;
+            },
+            8 => {
+                values[0] = 39;
+                return 1;
+            },
+            90...97 => {
+                values[0] = colour_value;
+                return 1;
+            },
+            else => return 0,
+        },
+        .bg => switch (colour_value) {
+            0...7 => {
+                values[0] = colour_value + 40;
+                return 1;
+            },
+            8 => {
+                values[0] = 49;
+                return 1;
+            },
+            90...97 => {
+                values[0] = colour_value + 10;
+                return 1;
+            },
+            else => return 0,
+        },
+        .us => return 0,
+    }
+}
+
+fn append_sgr_codes(out: *std.ArrayList(u8), codes: []const i32, escape_sequences: bool, use_colon_notation: bool) void {
+    if (codes.len == 0) return;
+    append_escape_prefix(out, escape_sequences, "[");
+    for (codes, 0..) |code, idx| {
+        var buf: [32]u8 = undefined;
+        const rendered = if (!use_colon_notation or code < 10)
+            std.fmt.bufPrint(&buf, "{d}", .{code}) catch unreachable
+        else
+            std.fmt.bufPrint(&buf, "{d}:{d}", .{ @divTrunc(code, 10), @mod(code, 10) }) catch unreachable;
+        out.appendSlice(xm.allocator, rendered) catch unreachable;
+        if (idx + 1 < codes.len) out.append(xm.allocator, ';') catch unreachable;
+    }
+    out.append(xm.allocator, 'm') catch unreachable;
+}
+
+fn append_hyperlink(out: *std.ArrayList(u8), id: []const u8, uri: []const u8, escape_sequences: bool) void {
+    append_escape_prefix(out, escape_sequences, "]8;");
+    if (id.len != 0) {
+        out.appendSlice(xm.allocator, "id=") catch unreachable;
+        out.appendSlice(xm.allocator, id) catch unreachable;
+        out.append(xm.allocator, ';') catch unreachable;
+    } else {
+        out.append(xm.allocator, ';') catch unreachable;
+    }
+    out.appendSlice(xm.allocator, uri) catch unreachable;
+    append_st(out, escape_sequences);
+}
+
+fn append_escape_prefix(out: *std.ArrayList(u8), escape_sequences: bool, suffix: []const u8) void {
+    if (escape_sequences)
+        out.appendSlice(xm.allocator, "\\033") catch unreachable
+    else
+        out.append(xm.allocator, 0x1b) catch unreachable;
+    out.appendSlice(xm.allocator, suffix) catch unreachable;
+}
+
+fn append_st(out: *std.ArrayList(u8), escape_sequences: bool) void {
+    if (escape_sequences) {
+        out.appendSlice(xm.allocator, "\\033\\\\") catch unreachable;
+        return;
+    }
+    out.append(xm.allocator, 0x1b) catch unreachable;
+    out.append(xm.allocator, '\\') catch unreachable;
+}
+
+fn append_control_byte(out: *std.ArrayList(u8), escape_sequences: bool, byte: u8) void {
+    if (escape_sequences) {
+        var octal: [4]u8 = undefined;
+        const rendered = std.fmt.bufPrint(&octal, "\\{o:0>3}", .{byte}) catch unreachable;
+        out.appendSlice(xm.allocator, rendered) catch unreachable;
+        return;
+    }
+    out.append(xm.allocator, byte) catch unreachable;
 }
 
 fn cleared_entry() T.GridCellEntry {
@@ -575,8 +825,8 @@ fn cleared_entry() T.GridCellEntry {
     };
 }
 
-fn colour_is_default(colour: i32) bool {
-    return colour == 8 or colour == 9;
+fn colour_is_default(colour_value: i32) bool {
+    return colour_value == 8 or colour_value == 9;
 }
 
 fn grow_slice(comptime Elem: type, current: []Elem, new_len: usize) []Elem {
@@ -812,6 +1062,46 @@ test "grid string_cells preserves utf8 payloads while skipping padding cells" {
     defer xm.allocator.free(rendered);
 
     try std.testing.expectEqualStrings("é🙂!", rendered);
+}
+
+test "grid string_cells emits tmux-style sgr state transitions" {
+    const gd = grid_create(2, 1, 0);
+    defer grid_free(gd);
+
+    var styled = T.grid_default_cell;
+    styled.fg = 1;
+    styled.attr = T.GRID_ATTR_BRIGHT;
+    utf8.utf8_set(&styled.data, 'A');
+    set_cell(gd, 0, 0, &styled);
+    set_ascii(gd, 0, 1, 'B');
+
+    const rendered = string_cells(gd, 0, gd.sx, .{ .with_sequences = true });
+    defer xm.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("\x1b[1m\x1b[31mA\x1b[0mB", rendered);
+}
+
+test "grid string_cells escapes emitted sequences and hyperlinks" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(1, 1, 0);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var linked = T.grid_default_cell;
+    utf8.utf8_set(&linked.data, 'X');
+    linked.link = hyperlinks.hyperlinks_put(s.hyperlinks.?, "https://example.com", "pane");
+    set_cell(s.grid, 0, 0, &linked);
+
+    const rendered = string_cells(s.grid, 0, s.grid.sx, .{
+        .with_sequences = true,
+        .escape_sequences = true,
+        .screen = s,
+    });
+    defer xm.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("\\033]8;id=pane;https://example.com\\033\\\\X\\033]8;;\\033\\\\", rendered);
 }
 
 test "grid overwriting an extended slot with ascii preserves readable content" {

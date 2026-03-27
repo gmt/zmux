@@ -28,6 +28,7 @@ const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const sort_mod = @import("sort.zig");
+const status_runtime = @import("status-runtime.zig");
 const utf8 = @import("utf8.zig");
 const format_mod = @import("format.zig");
 const cmd_render = @import("cmd-render.zig");
@@ -87,13 +88,18 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const prefix = get_prefix_string(args);
     defer xm.allocator.free(prefix);
+    const target_client = cmdq.cmdq_get_target_client(@ptrCast(item)) orelse cmdq.cmdq_get_client(item);
 
     const count = if (args.has('1') and bindings.len > 1) @as(usize, 1) else bindings.len;
     const key_width = max_key_width(bindings[0..count]);
     for (bindings[0..count]) |binding| {
         const line = require_binding_line(item, binding, template, mode, prefix, key_width) orelse return .@"error";
         defer xm.allocator.free(line);
-        cmdq.cmdq_print(item, "{s}", .{line});
+        if (((args.has('1') and target_client != null) or count == 1) and target_client != null) {
+            status_runtime.status_message_set_text(target_client.?, -1, true, false, false, line);
+        } else if (line.len != 0) {
+            cmdq.cmdq_print(item, "{s}", .{line});
+        }
     }
     return .normal;
 }
@@ -293,4 +299,44 @@ test "list-keys command honors table selection single key and prefix override" {
     const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", utf8.utf8_cstrwidth("C-b")).?;
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("ZZ C-b prefix-note", line);
+}
+
+test "list-keys -1 shows a single binding through the shared status runtime" {
+    const env_mod = @import("environ.zig");
+
+    key_bindings.key_bindings_init();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    key_bindings.key_bindings_add("unit-list-keys", T.KEYC_F1, "show note", false, null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty.client = &client;
+    defer if (client.message_string) |_| status_runtime.status_message_clear(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-1", "-N", "-P", "", "-T", "unit-list-keys", "F1" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &client,
+        .target_client = &client,
+        .cmdlist = &list,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("F1 show note", client.message_string.?);
 }

@@ -559,6 +559,36 @@ pub fn window_pane_show_scrollbar(wp: *T.WindowPane) bool {
     };
 }
 
+pub fn window_pane_update_scrollbar_geometry(wp: *T.WindowPane) void {
+    wp.sb_slider_y = 0;
+    wp.sb_slider_h = 0;
+
+    if (!window_pane_show_scrollbar(wp) or wp.sy == 0) return;
+
+    const screen = screen_mod.screen_current(wp);
+    const sb_h = wp.sy;
+    const total_height = screen.grid.sy + screen.grid.hsize;
+    if (total_height == 0) return;
+
+    const view = @as(f64, @floatFromInt(sb_h));
+    const total = @as(f64, @floatFromInt(total_height));
+    var slider_h: u32 = @intFromFloat(view * (view / total));
+    if (slider_h < 1) slider_h = 1;
+
+    var slider_y: u32 = sb_h - slider_h;
+    if (window_pane_mode(wp) != null and screen.grid.hscrolled != 0) {
+        const scrolled = @as(f64, @floatFromInt(screen.grid.hscrolled));
+        slider_y = @min(
+            sb_h - 1,
+            @as(u32, @intFromFloat(@as(f64, @floatFromInt(sb_h + 1)) * (scrolled / total))),
+        );
+    }
+    if (slider_y >= sb_h) slider_y = sb_h - 1;
+
+    wp.sb_slider_y = slider_y;
+    wp.sb_slider_h = slider_h;
+}
+
 pub fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
     for (w.panes.items) |pane| {
         if (!window_pane_visible(pane)) continue;
@@ -573,6 +603,7 @@ pub fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
 pub fn window_hit_test(w: *T.Window, x: u32, y: u32) ?PaneHit {
     const candidate = window_get_active_at(w, x, y);
     if (candidate) |pane| {
+        window_pane_update_scrollbar_geometry(pane);
         if (x >= pane.xoff and x < pane.xoff + pane.sx and y >= pane.yoff and y < pane.yoff + pane.sy) {
             return .{ .pane = pane, .region = .pane };
         }
@@ -755,6 +786,41 @@ test "window panes inherit from their window options and refresh cached pane sta
     window_pane_options_changed(wp, "pane-colours");
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x01, 0x02, 0x03), colour_mod.colour_palette_get(&wp.palette, 1));
     try std.testing.expectEqual(@as(i32, 91), colour_mod.colour_palette_get(&wp.palette, 2));
+}
+
+test "window_hit_test derives scrollbar regions from shared pane geometry" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(4, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = window_add_pane(w, null, 4, 4);
+    w.active = wp;
+    opts.options_set_number(wp.options, "pane-scrollbars", T.PANE_SCROLLBARS_ALWAYS);
+    wp.base.grid.hsize = 12;
+
+    const upper = window_hit_test(w, wp.xoff + wp.sx, wp.yoff).?;
+    try std.testing.expectEqual(PaneHitRegion.scrollbar_up, upper.region);
+
+    const slider = window_hit_test(w, wp.xoff + wp.sx, wp.yoff + wp.sy - 1).?;
+    try std.testing.expectEqual(PaneHitRegion.scrollbar_slider, slider.region);
+    try std.testing.expectEqual(@as(i32, 0), slider.slider_mpos);
+    try std.testing.expectEqual(@as(u32, 1), wp.sb_slider_h);
+    try std.testing.expectEqual(@as(u32, wp.sy - 1), wp.sb_slider_y);
 }
 
 test "window_set_active_pane tracks last pane history and detach prunes it" {

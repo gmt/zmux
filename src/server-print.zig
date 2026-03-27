@@ -85,9 +85,7 @@ pub fn server_client_view_data(client: *T.Client, data: []const u8, parse: bool)
     const wl = session.curw orelse return false;
     const wp = wl.window.active orelse return false;
 
-    if (!server_pane_view_data(wp, data, parse)) return false;
-    client.flags |= T.CLIENT_REDRAWWINDOW;
-    return true;
+    return server_pane_view_data(wp, data, parse);
 }
 
 pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) bool {
@@ -278,6 +276,8 @@ test "server_client_print appends parsed output in the shared view mode" {
     server_client_print(&client, true, "beta");
 
     try std.testing.expect(screen_mod.screen_alternate_active(&pane));
+    try std.testing.expect(pane.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
 
     const first_row = try grid_row_string(pane.screen.grid, 0);
     defer xm.allocator.free(first_row);

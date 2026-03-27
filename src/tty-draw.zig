@@ -20,6 +20,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const grid_mod = @import("grid.zig");
+const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 const screen_mod = @import("screen.zig");
 
@@ -28,6 +29,11 @@ pub fn tty_draw_invalidate(cache: *T.ClientPaneCache) void {
     cache.pane_id = null;
     cache.sx = 0;
     cache.sy = 0;
+    cache.scrollbar_left = false;
+    cache.scrollbar_width = 0;
+    cache.scrollbar_pad = 0;
+    cache.scrollbar_slider_y = 0;
+    cache.scrollbar_slider_h = 0;
     cache.cursor_x = 0;
     cache.cursor_y = 0;
     cache.cursor_visible = true;
@@ -58,13 +64,19 @@ pub fn tty_draw_pane_offset(
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
     const screen = screen_mod.screen_current(wp);
+    const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
     var update_started = false;
 
     const full_redraw =
         !cache.valid or
         cache.pane_id != wp.id or
         cache.sx != sx or
-        cache.sy != sy;
+        cache.sy != sy or
+        cache.scrollbar_left != (scrollbar != null and scrollbar.?.left) or
+        cache.scrollbar_width != (if (scrollbar) |layout| layout.width else 0) or
+        cache.scrollbar_pad != (if (scrollbar) |layout| layout.pad else 0) or
+        cache.scrollbar_slider_y != (if (scrollbar) |layout| layout.slider_y else 0) or
+        cache.scrollbar_slider_h != (if (scrollbar) |layout| layout.slider_h else 0);
 
     if (full_redraw) {
         try begin_update(&out, &update_started);
@@ -73,6 +85,11 @@ pub fn tty_draw_pane_offset(
         cache.pane_id = wp.id;
         cache.sx = sx;
         cache.sy = sy;
+        cache.scrollbar_left = scrollbar != null and scrollbar.?.left;
+        cache.scrollbar_width = if (scrollbar) |layout| layout.width else 0;
+        cache.scrollbar_pad = if (scrollbar) |layout| layout.pad else 0;
+        cache.scrollbar_slider_y = if (scrollbar) |layout| layout.slider_y else 0;
+        cache.scrollbar_slider_h = if (scrollbar) |layout| layout.slider_h else 0;
         cache.valid = true;
     }
 
@@ -88,7 +105,7 @@ pub fn tty_draw_pane_offset(
     }
 
     for (0..row_count) |row_idx| {
-        const rendered = try render_row(screen.grid, @intCast(row_idx), sx);
+        const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), sx, scrollbar);
         defer xm.allocator.free(rendered);
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
@@ -104,8 +121,12 @@ pub fn tty_draw_pane_offset(
         }
     }
 
+    const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
+        @min(sx, scrollbar.?.width + scrollbar.?.pad)
+    else
+        0;
     const cursor_y = @min(screen.cy, sy - 1);
-    const cursor_x = @min(screen.cx, sx - 1);
+    const cursor_x = @min(cursor_prefix + screen.cx, sx - 1);
     const cursor_changed = full_redraw or
         cache.cursor_x != cursor_x or
         cache.cursor_y != cursor_y or
@@ -149,40 +170,113 @@ fn begin_update(out: *std.ArrayList(u8), started: *bool) !void {
     started.* = true;
 }
 
-fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(xm.allocator);
-
-    var last_style = CellStyle{};
-    var have_style = false;
-
-    for (0..sx) |col_idx| {
-        var cell: T.GridCell = undefined;
-        grid_mod.get_cell(gd, row, @intCast(col_idx), &cell);
-        if (cell.isPadding()) continue;
-
-        const style = style_of(cell);
-        if (!have_style or !std.meta.eql(style, last_style)) {
-            const sgr = try style_to_sgr(style);
-            defer xm.allocator.free(sgr);
-            try out.appendSlice(xm.allocator, sgr);
-            last_style = style;
-            have_style = true;
-        }
-        const bytes = if (cell.payload().isEmpty()) " " else cell.payload().bytes();
-        try out.appendSlice(xm.allocator, bytes);
-    }
-
-    if (have_style and !style_is_default(last_style))
-        try out.appendSlice(xm.allocator, "\x1b[0m");
-    return out.toOwnedSlice(xm.allocator);
-}
-
 const CellStyle = struct {
     attr: u16 = 0,
     fg: i32 = 0,
     bg: i32 = 0,
 };
+
+const RowRenderer = struct {
+    out: std.ArrayList(u8) = .{},
+    last_style: CellStyle = .{},
+    have_style: bool = false,
+
+    fn deinit(self: *RowRenderer) void {
+        self.out.deinit(xm.allocator);
+    }
+
+    fn appendCell(self: *RowRenderer, cell: *const T.GridCell) !void {
+        const style = style_of(cell.*);
+        if (!self.have_style or !std.meta.eql(style, self.last_style)) {
+            const sgr = try style_to_sgr(style);
+            defer xm.allocator.free(sgr);
+            try self.out.appendSlice(xm.allocator, sgr);
+            self.last_style = style;
+            self.have_style = true;
+        }
+
+        const bytes = if (cell.payload().isEmpty()) " " else cell.payload().bytes();
+        try self.out.appendSlice(xm.allocator, bytes);
+    }
+
+    fn finish(self: *RowRenderer) ![]u8 {
+        if (self.have_style and !style_is_default(self.last_style))
+            try self.out.appendSlice(xm.allocator, "\x1b[0m");
+        return self.out.toOwnedSlice(xm.allocator);
+    }
+};
+
+fn render_pane_row(
+    wp: *T.WindowPane,
+    gd: *T.Grid,
+    row: u32,
+    sx: u32,
+    scrollbar: ?window_mod.ScrollbarLayout,
+) ![]u8 {
+    if (scrollbar == null) return render_text_row(gd, row, sx);
+
+    const layout = scrollbar.?;
+    const extra = layout.width + layout.pad;
+    var renderer = RowRenderer{};
+    errdefer renderer.deinit();
+
+    if (layout.left) {
+        try append_scrollbar_segment(&renderer, wp, row, @min(sx, extra), true, layout);
+        if (sx > extra) try append_text_cells(&renderer, gd, row, sx - extra);
+    } else {
+        const text_width = if (sx > extra) sx - extra else 0;
+        if (text_width != 0) try append_text_cells(&renderer, gd, row, text_width);
+        if (sx > text_width) try append_scrollbar_segment(&renderer, wp, row, sx - text_width, false, layout);
+    }
+
+    return renderer.finish();
+}
+
+fn render_text_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
+    var renderer = RowRenderer{};
+    errdefer renderer.deinit();
+    try append_text_cells(&renderer, gd, row, sx);
+    return renderer.finish();
+}
+
+fn append_text_cells(renderer: *RowRenderer, gd: *T.Grid, row: u32, sx: u32) !void {
+    for (0..sx) |col_idx| {
+        var cell: T.GridCell = undefined;
+        grid_mod.get_cell(gd, row, @intCast(col_idx), &cell);
+        if (cell.isPadding()) continue;
+        try renderer.appendCell(&cell);
+    }
+}
+
+fn append_scrollbar_segment(
+    renderer: *RowRenderer,
+    wp: *T.WindowPane,
+    row: u32,
+    count: u32,
+    left: bool,
+    layout: window_mod.ScrollbarLayout,
+) !void {
+    var gc = wp.scrollbar_style.gc;
+    var slider_gc = gc;
+    slider_gc.fg = gc.bg;
+    slider_gc.bg = gc.fg;
+
+    var idx: u32 = 0;
+    while (idx < count) : (idx += 1) {
+        const is_pad = if (left) idx >= layout.width else idx < layout.pad;
+        if (is_pad) {
+            try renderer.appendCell(&T.grid_default_cell);
+            continue;
+        }
+
+        const on_slider = row >= layout.slider_y and row < layout.slider_y + layout.slider_h;
+        try renderer.appendCell(if (on_slider) &slider_gc else &gc);
+    }
+}
+
+fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
+    return render_text_row(gd, row, sx);
+}
 
 fn style_of(cell: T.GridCell) CellStyle {
     return .{
@@ -392,4 +486,48 @@ test "tty_draw_pane preserves stored utf8 glyph bytes" {
     const draw = try tty_draw_pane(&cache, wp, 4, 1);
     defer xm.allocator.free(draw);
     try std.testing.expect(std.mem.indexOf(u8, draw, "🙂x") != null);
+}
+
+test "tty_draw_pane renders attached right scrollbar columns from shared window geometry" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const screen_write = @import("screen-write.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 4);
+    w.active = wp;
+    opts.options_set_number(wp.options, "pane-scrollbars", T.PANE_SCROLLBARS_ALWAYS);
+    opts.options_set_string(wp.options, false, "pane-scrollbars-style", "fg=blue,pad=1");
+    win.window_pane_options_changed(wp, "pane-scrollbars-style");
+    wp.base.grid.hsize = 4;
+
+    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = &wp.base };
+    screen_write.putn(&ctx, "abcd");
+
+    var cache = T.ClientPaneCache{};
+    defer tty_draw_free(&cache);
+
+    const draw = try tty_draw_pane(&cache, wp, win.window_pane_total_width(wp), 4);
+    defer xm.allocator.free(draw);
+
+    try std.testing.expect(std.mem.indexOf(u8, draw, "abcd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[0;34m ") != null);
 }

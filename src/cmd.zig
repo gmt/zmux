@@ -164,6 +164,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_set_option.entry_window,
     &cmd_show_options.entry,
     &cmd_show_options.entry_window,
+    &cmd_show_options.entry_hooks,
     &cmd_rename_window.entry,
     &cmd_rename_session.entry,
     &cmd_kill_window.entry,

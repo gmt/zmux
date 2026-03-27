@@ -43,6 +43,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
         return .@"error";
     }
+    if (oe != null and oe.?.is_hook) {
+        if (args.has('q')) return .normal;
+        cmdq.cmdq_error(item, "hook options not supported yet", .{});
+        return .@"error";
+    }
 
     const target = cmd_opts.resolve_target(item, args, cmd.entry == &entry_window) orelse return .@"error";
     if (!cmd_opts.option_allowed(oe, target.kind)) {
@@ -217,6 +222,27 @@ test "set-option -p stores pane local custom options and updates consumers" {
     defer cmd_mod.cmd_free(set_palette);
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_palette, &item));
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x02, 0x03, 0x04), colour_mod.colour_palette_get(&wp.palette, 1));
+}
+
+test "set-option rejects hook options until hook commands land" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options", "display-message hi" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
 }
 
 test "set-option -w -U clears pane local overrides before unsetting window options" {

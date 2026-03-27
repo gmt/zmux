@@ -21,9 +21,11 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const c_import = @import("c.zig");
 const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
 const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
 const resize_mod = @import("resize.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -78,6 +80,11 @@ pub fn status_get_range(c: *T.Client, x: u32, y: u32) ?*const T.StyleRange {
 }
 
 pub fn status_free(c: *T.Client) void {
+    if (c.status.timer) |ev| {
+        _ = c_import.libevent.event_del(ev);
+        c_import.libevent.event_free(ev);
+        c.status.timer = null;
+    }
     for (&c.status.entries) |*entry| {
         if (entry.expanded) |old| xm.allocator.free(old);
         entry.expanded = null;
@@ -86,7 +93,16 @@ pub fn status_free(c: *T.Client) void {
     }
 }
 
+pub fn status_timer_start(c: *T.Client) void {
+    status_timer_rearm(c, true);
+}
+
+pub fn status_timer_update(c: *T.Client) void {
+    status_timer_rearm(c, false);
+}
+
 pub fn render(c: *T.Client) RenderResult {
+    status_timer_update(c);
     if (c.tty.sx == 0 or c.tty.sy == 0) {
         clear_status_entries_from(c, 0);
         return .{};
@@ -117,6 +133,56 @@ pub fn render(c: *T.Client) RenderResult {
     result.payload = tty_draw.tty_draw_render_screen(screen, c.tty.sx, rows, overlay_start) catch unreachable;
     if (result.cursor_visible) result.cursor_y += overlay_start;
     return result;
+}
+
+fn status_timer_rearm(c: *T.Client, fire_now: bool) void {
+    if (c.status.timer) |ev| _ = c_import.libevent.event_del(ev);
+
+    const s = c.session orelse return;
+    if (opts.options_get_number(s.options, "status") == 0) return;
+
+    if (fire_now) {
+        status_timer_callback(-1, 0, c);
+        return;
+    }
+
+    arm_status_timer(c, opts.options_get_number(s.options, "status-interval"));
+}
+
+fn arm_status_timer(c: *T.Client, delay_seconds: i64) void {
+    if (delay_seconds <= 0) return;
+
+    if (c.status.timer == null) {
+        const base = proc_mod.libevent orelse return;
+        c.status.timer = c_import.libevent.event_new(
+            base,
+            -1,
+            @intCast(c_import.libevent.EV_TIMEOUT),
+            status_timer_callback,
+            c,
+        );
+    }
+
+    if (c.status.timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = @intCast(delay_seconds),
+            .usec = 0,
+        };
+        _ = c_import.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+export fn status_timer_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const client: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    if (client.status.timer) |ev| _ = c_import.libevent.event_del(ev);
+
+    const session = client.session orelse return;
+    if (client.message_string == null and !status_prompt.status_prompt_active(client))
+        client.flags |= T.CLIENT_REDRAWSTATUS;
+
+    arm_status_timer(client, opts.options_get_number(session.options, "status-interval"));
 }
 
 pub fn overlay_rows(c: *T.Client) u32 {
@@ -548,4 +614,78 @@ test "status message overlay respects multiline status rows and message-line" {
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "overlay row") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "bottom row") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "middle row") == null);
+}
+
+test "status timer reuses the shared redraw seam and suppresses overlay churn" {
+    const env_mod = @import("environ.zig");
+    const os_mod = @import("os/linux.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    const old_base = proc_mod.libevent;
+    proc_mod.libevent = os_mod.osdep_event_init();
+    defer {
+        if (proc_mod.libevent) |base| c_import.libevent.event_base_free(base);
+        proc_mod.libevent = old_base;
+    }
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_number(session_opts, "status", 1);
+    opts.options_set_number(session_opts, "status-interval", 15);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "timer", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(10, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 10, 2);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 10, .sy = 3 };
+
+    status_timer_start(&client);
+    try std.testing.expect(client.status.timer != null);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+
+    client.flags = 0;
+    client.message_string = xm.xstrdup("overlay busy");
+    defer {
+        if (client.message_string) |message| xm.allocator.free(message);
+        client.message_string = null;
+    }
+
+    status_timer_callback(-1, 0, &client);
+    try std.testing.expect(client.status.timer != null);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS == 0);
+
+    xm.allocator.free(client.message_string.?);
+    client.message_string = null;
+
+    status_timer_callback(-1, 0, &client);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
 }

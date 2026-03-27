@@ -48,11 +48,15 @@ pub fn server_redraw_session(s: *T.Session) void {
 }
 
 pub fn server_redraw_session_group(s: *T.Session) void {
-    srv.server_redraw_session(s);
+    srv.server_redraw_session_group(s);
 }
 
 pub fn server_status_session(s: *T.Session) void {
     srv.server_status_session(s);
+}
+
+pub fn server_status_session_group(s: *T.Session) void {
+    srv.server_status_session_group(s);
 }
 
 pub fn server_status_window(w: *T.Window) void {

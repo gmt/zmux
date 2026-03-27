@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_display = @import("cmd-display-message.zig");
 const key_string = @import("key-string.zig");
+const opts = @import("options.zig");
 
 pub const PromptType = enum(u8) {
     command = 0,
@@ -56,11 +57,44 @@ const PromptState = struct {
 
 var prompt_states: std.AutoHashMap(usize, *PromptState) = undefined;
 var prompt_states_init = false;
+const prompt_type_count: usize = @intFromEnum(PromptType.window_target) + 1;
+var prompt_histories: [prompt_type_count]std.ArrayList([]u8) = undefined;
+var prompt_histories_init = false;
 
 fn ensure_init() void {
     if (prompt_states_init) return;
     prompt_states = std.AutoHashMap(usize, *PromptState).init(xm.allocator);
     prompt_states_init = true;
+}
+
+fn prompt_type_index(prompt_type: PromptType) usize {
+    return switch (prompt_type) {
+        .command, .search, .target, .window_target => @intFromEnum(prompt_type),
+        .invalid => unreachable,
+    };
+}
+
+fn ensure_histories_init() void {
+    if (prompt_histories_init) return;
+    for (&prompt_histories) |*history| history.* = .{};
+    prompt_histories_init = true;
+}
+
+fn prompt_history(prompt_type: PromptType) *std.ArrayList([]u8) {
+    ensure_histories_init();
+    return &prompt_histories[prompt_type_index(prompt_type)];
+}
+
+fn prompt_history_limit() usize {
+    const raw = opts.options_get_number(opts.global_options, "prompt-history-limit");
+    return @intCast(@max(raw, 0));
+}
+
+fn prompt_history_drop_front(history: *std.ArrayList([]u8), count: usize) void {
+    for (0..count) |_| {
+        const removed = history.orderedRemove(0);
+        xm.allocator.free(removed);
+    }
 }
 
 fn state_key(c: *T.Client) usize {
@@ -169,6 +203,47 @@ fn single_prompt_text(key: T.key_code, buf: *[4]u8) ?[]const u8 {
 
     buf[0] = @intCast(key & if (key & T.KEYC_CTRL != 0) @as(T.key_code, 0x1f) else T.KEYC_MASK_KEY);
     return buf[0..1];
+}
+
+pub fn status_prompt_history_add(line: []const u8, prompt_type: PromptType) void {
+    const history = prompt_history(prompt_type);
+    const oldsize = history.items.len;
+    const is_new = oldsize == 0 or !std.mem.eql(u8, history.items[oldsize - 1], line);
+    const limit = prompt_history_limit();
+
+    if (limit > oldsize) {
+        if (!is_new) return;
+    } else {
+        const desired = oldsize + @intFromBool(is_new);
+        const freecount = @min(oldsize, desired -| limit);
+        if (freecount == 0) return;
+        prompt_history_drop_front(history, freecount);
+    }
+
+    if (is_new and limit > 0)
+        history.append(xm.allocator, xm.xstrdup(line)) catch unreachable;
+}
+
+pub fn status_prompt_history_clear(prompt_type: ?PromptType) void {
+    ensure_histories_init();
+    if (prompt_type) |kind| {
+        const history = prompt_history(kind);
+        prompt_history_drop_front(history, history.items.len);
+        return;
+    }
+
+    for (&prompt_histories) |*history|
+        prompt_history_drop_front(history, history.items.len);
+}
+
+pub fn status_prompt_history_count(prompt_type: PromptType) usize {
+    return prompt_history(prompt_type).items.len;
+}
+
+pub fn status_prompt_history_item(prompt_type: PromptType, index: usize) ?[]const u8 {
+    const history = prompt_history(prompt_type);
+    if (index >= history.items.len) return null;
+    return history.items[index];
 }
 
 pub fn status_prompt_type(name: []const u8) PromptType {
@@ -293,6 +368,8 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
     if (masked == T.C0_CR or masked == T.C0_LF or masked == T.KEYC_KP_ENTER) {
         const text = state_copy_input(state);
         defer xm.allocator.free(text);
+        if (text.len != 0)
+            status_prompt_history_add(text, state.prompt_type);
         prompt_finish(c, state, text, true);
         return true;
     }
@@ -322,4 +399,30 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
 
     prompt_changed(c, state, '=');
     return true;
+}
+
+test "status-prompt history keeps type-local entries and respects the limit" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    status_prompt_history_clear(null);
+
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_set_number(opts.global_options, "prompt-history-limit", 2);
+
+    status_prompt_history_add("one", .command);
+    status_prompt_history_add("one", .command);
+    status_prompt_history_add("search-1", .search);
+    status_prompt_history_add("two", .command);
+    status_prompt_history_add("three", .command);
+
+    try std.testing.expectEqual(@as(usize, 2), status_prompt_history_count(.command));
+    try std.testing.expectEqualStrings("two", status_prompt_history_item(.command, 0).?);
+    try std.testing.expectEqualStrings("three", status_prompt_history_item(.command, 1).?);
+    try std.testing.expectEqual(@as(usize, 1), status_prompt_history_count(.search));
+    try std.testing.expectEqualStrings("search-1", status_prompt_history_item(.search, 0).?);
+
+    status_prompt_history_clear(.command);
+    try std.testing.expectEqual(@as(usize, 0), status_prompt_history_count(.command));
+    try std.testing.expectEqual(@as(usize, 1), status_prompt_history_count(.search));
+    status_prompt_history_clear(null);
 }

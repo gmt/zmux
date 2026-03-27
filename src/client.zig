@@ -26,6 +26,7 @@ const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
 const protocol = @import("zmux-protocol.zig");
+const file_write_mod = @import("file-write.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
@@ -213,16 +214,24 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             proc_mod.proc_exit(client_proc.?);
         },
         .write => {
-            // Server sent output text for us to print (stream_id:i32 + text)
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
-            if (data_len > @sizeOf(i32) and imsg_msg.data != null) {
-                const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
-                const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
+            if (data_len <= @sizeOf(i32) or imsg_msg.data == null) return;
+
+            const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+            const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
+            if (stream.* <= 2) {
                 const text = raw[@sizeOf(i32)..data_len];
                 const file = if (stream.* == 2) std.fs.File.stderr() else std.fs.File.stdout();
                 _ = file.writeAll(text) catch {};
+                return;
             }
+            file_write_mod.client_handle_write_data(imsg_msg);
         },
+        .write_open => {
+            const peer = client_peer orelse return;
+            file_write_mod.client_handle_write_open(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
+        },
+        .write_close => file_write_mod.client_handle_write_close(imsg_msg),
         .exited => {
             proc_mod.proc_exit(client_proc.?);
         },
@@ -235,6 +244,13 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
                 client_enter_attached_mode();
                 client_send_resize();
             }
+        },
+        .lock => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (data_len == 0 or imsg_msg.data == null) return;
+            const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+            if (raw[data_len - 1] != 0) return;
+            client_handle_lock_command(raw[0 .. data_len - 1]);
         },
         else => {},
     }
@@ -357,6 +373,21 @@ fn client_disable_stdin_event() void {
     }
 }
 
+fn client_handle_lock_command(cmd: []const u8) void {
+    const was_attached = client_attached;
+    if (client_attached or client_raw_tty) client_leave_attached_mode();
+
+    const cmd_z = xm.xm_dupeZ(cmd);
+    defer xm.allocator.free(cmd_z);
+    _ = std.c.system(cmd_z.ptr);
+
+    if (was_attached) {
+        client_enter_attached_mode();
+        client_send_resize();
+    }
+    if (client_peer) |peer| _ = proc_mod.proc_send(peer, .unlock, -1, null, 0);
+}
+
 export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     _ = _events;
     _ = _arg;
@@ -415,8 +446,8 @@ pub fn client_main(
         start_server = true;
     } else {
         // Parse to see if the command requests server start
-    var argv_slice: std.ArrayList([]const u8) = .{};
-    defer argv_slice.deinit(xm.allocator);
+        var argv_slice: std.ArrayList([]const u8) = .{};
+        defer argv_slice.deinit(xm.allocator);
         var i: usize = 0;
         while (i < @as(usize, @intCast(argc))) : (i += 1) {
             argv_slice.append(xm.allocator, std.mem.span(argv[i])) catch unreachable;
@@ -476,6 +507,7 @@ pub fn client_main(
 
     // Run the event loop until done
     proc_mod.proc_loop(client_proc.?, null);
+    file_write_mod.client_cleanup();
     if (client_attached or client_raw_tty) {
         client_leave_attached_mode();
     }
@@ -498,4 +530,58 @@ export fn client_signal(signo: c_int) void {
         },
         else => {},
     }
+}
+
+fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+test "client lock command runs shell command then sends unlock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+    const marker_path = try std.fmt.allocPrint(xm.allocator, "{s}/lock-ran.txt", .{cwd});
+    defer xm.allocator.free(marker_path);
+    const command = try std.fmt.allocPrint(xm.allocator, "printf locked > '{s}'", .{marker_path});
+    defer xm.allocator.free(command);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-lock-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    client_attached = false;
+    client_raw_tty = false;
+    client_have_saved_tio = false;
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+        client_proc = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    client_handle_lock_command(command);
+
+    const marker = try std.fs.cwd().readFileAlloc(xm.allocator, marker_path, 64);
+    defer xm.allocator.free(marker);
+    try std.testing.expectEqualStrings("locked", marker);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.unlock))), c.imsg.imsg_get_type(&imsg_msg));
 }

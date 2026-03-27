@@ -32,7 +32,6 @@ const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const win_mod = @import("window.zig");
-const sess_mod = @import("session.zig");
 const tty_mod = @import("tty.zig");
 const tty_draw = @import("tty-draw.zig");
 const input_keys = @import("input-keys.zig");
@@ -215,6 +214,57 @@ pub fn server_client_unlock(cl: *T.Client) void {
     tty_mod.tty_start_tty(&cl.tty);
     server_client_force_redraw(cl);
     resize_mod.recalculate_sizes();
+}
+
+pub fn server_client_detach(cl: *T.Client, msg_type: protocol.MsgType) void {
+    const s = cl.session orelse return;
+
+    if (s.attached > 0) s.attached -= 1;
+    cl.last_session = s;
+    cl.session = null;
+    cl.flags &= ~@as(u64, T.CLIENT_ATTACHED);
+    cl.exit_reason = switch (msg_type) {
+        .detachkill => .detached_hup,
+        else => .detached,
+    };
+
+    if (cl.exit_session) |old| xm.allocator.free(old);
+    cl.exit_session = xm.xstrdup(s.name);
+
+    notify.notify_client("client-detached", cl);
+    if (cl.peer) |peer| {
+        _ = proc_mod.proc_send(peer, msg_type, -1, cl.exit_session.?.ptr, cl.exit_session.?.len + 1);
+    } else {
+        cl.flags |= T.CLIENT_EXIT;
+    }
+}
+
+fn server_client_exec_shell(s: ?*T.Session) []const u8 {
+    const shell = if (s) |session|
+        opts.options_get_string(session.options, "default-shell")
+    else
+        opts.options_get_string(opts.global_s_options, "default-shell");
+
+    if (shell.len == 0 or shell[0] != '/') return "/bin/sh";
+    std.fs.accessAbsolute(shell, .{}) catch return "/bin/sh";
+    return shell;
+}
+
+pub fn server_client_exec(cl: *T.Client, cmd: []const u8) void {
+    if (cmd.len == 0) return;
+
+    const shell = server_client_exec_shell(cl.session);
+    var payload = std.ArrayList(u8){};
+    defer payload.deinit(xm.allocator);
+
+    payload.appendSlice(xm.allocator, cmd) catch unreachable;
+    payload.append(xm.allocator, 0) catch unreachable;
+    payload.appendSlice(xm.allocator, shell) catch unreachable;
+    payload.append(xm.allocator, 0) catch unreachable;
+
+    if (cl.peer) |peer| {
+        _ = proc_mod.proc_send(peer, .exec, -1, payload.items.ptr, payload.items.len);
+    }
 }
 
 fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_type: protocol.MsgType) void {
@@ -1005,6 +1055,157 @@ test "server_client_lock sends lock message and unlock restores redraw state" {
     try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
     try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW != 0);
+}
+
+test "server_client_detach sends detachkill payload and clears session state" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-detach-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session = T.Session{
+        .id = 1,
+        .name = @constCast("detach-test"),
+        .cwd = "/tmp",
+        .options = &options,
+        .environ = &session_env,
+        .attached = 1,
+    };
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = &session,
+    };
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        if (client.exit_session) |name| xm.allocator.free(name);
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    server_client_detach(&client, .detachkill);
+    try std.testing.expect(client.session == null);
+    try std.testing.expect(client.flags & T.CLIENT_ATTACHED == 0);
+    try std.testing.expectEqual(T.ClientExitReason.detached_hup, client.exit_reason);
+    try std.testing.expectEqualStrings("detach-test", client.exit_session.?);
+    try std.testing.expectEqual(@as(u32, 0), session.attached);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.detachkill))), c.imsg.imsg_get_type(&imsg_msg));
+    const data_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqualStrings("detach-test", payload[0 .. payload.len - 1]);
+}
+
+test "server_client_exec sends command and shell payload" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-exec-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    opts.options_set_string(&options, false, "default-shell", "/bin/sh");
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session = T.Session{
+        .id = 1,
+        .name = @constCast("exec-test"),
+        .cwd = "/tmp",
+        .options = &options,
+        .environ = &session_env,
+    };
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+    };
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    server_client_exec(&client, "printf exec");
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exec))), c.imsg.imsg_get_type(&imsg_msg));
+    const data_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqualStrings("printf exec", payload[0.."printf exec".len]);
+    try std.testing.expectEqual(@as(u8, 0), payload["printf exec".len]);
+    try std.testing.expectEqualStrings("/bin/sh", payload["printf exec".len + 1 .. payload.len - 1]);
 }
 
 test "build_client_draw_payload keeps multi-pane status-only redraw off the full-clear body path" {

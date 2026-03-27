@@ -26,6 +26,7 @@ const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const server = @import("server.zig");
 const server_print = @import("server-print.zig");
+const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
 pub fn status_push_screen(client: *T.Client) void {
@@ -113,7 +114,14 @@ pub fn present_client_message(client: ?*T.Client, text: []const u8) void {
         }
 
         server.server_add_message("{s} message: {s}", .{ cl.name orelse "client", text });
-        const line = xm.xasprintf("{s}\n", .{text});
+        const printable = printableDetachedMessage(cl, text);
+        defer if (printable.free_slice) |slice| xm.allocator.free(slice);
+        if ((cl.flags & T.CLIENT_CONTROL) != 0) {
+            server_print.server_client_control_message(cl, printable.text);
+            return;
+        }
+
+        const line = xm.xasprintf("{s}\n", .{printable.text});
         defer xm.allocator.free(line);
         server_print.server_client_write_stream(cl, 2, line);
         return;
@@ -122,6 +130,21 @@ pub fn present_client_message(client: ?*T.Client, text: []const u8) void {
     const line = xm.xasprintf("{s}\n", .{text});
     defer xm.allocator.free(line);
     server_print.server_client_write_stream(null, 2, line);
+}
+
+const PrintableMessage = struct {
+    text: []const u8,
+    free_slice: ?[]u8 = null,
+};
+
+fn printableDetachedMessage(client: *const T.Client, text: []const u8) PrintableMessage {
+    if ((client.flags & T.CLIENT_UTF8) != 0) return .{ .text = text };
+
+    const sanitized = utf8.utf8_sanitize(text);
+    return .{
+        .text = sanitized,
+        .free_slice = sanitized,
+    };
 }
 
 pub fn status_message_clear(client: *T.Client) void {
@@ -257,4 +280,74 @@ test "status runtime arms and clears a timed message overlay" {
     try std.testing.expect(client.message_string == null);
     try std.testing.expectEqual(@as(u32, 0), client.status.references);
     status_cleanup(&client);
+}
+
+test "present_client_message routes control clients through the shared %message seam" {
+    const env_mod = @import("environ.zig");
+    const protocol = @import("zmux-protocol.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "status-runtime-control-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = "control-client",
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    client.tty.client = &client;
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    present_client_message(&client, "parse error");
+
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("control-client message: parse error", server.message_log.items[0].msg);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    const stream: *const i32 = @ptrCast(@alignCast(payload.ptr));
+    try std.testing.expectEqual(@as(i32, 1), stream.*);
+    try std.testing.expectEqualStrings("%message parse error\n", payload[@sizeOf(i32)..]);
+}
+
+fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+    _ = _imsg;
+    _ = _arg;
 }

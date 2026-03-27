@@ -24,6 +24,13 @@ const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 const screen_mod = @import("screen.zig");
 
+pub const WindowRenderResult = struct {
+    payload: []u8 = &.{},
+    cursor_visible: bool = false,
+    cursor_x: u32 = 0,
+    cursor_y: u32 = 0,
+};
+
 pub fn tty_draw_invalidate(cache: *T.ClientPaneCache) void {
     free_rows(cache);
     cache.pane_id = null;
@@ -147,6 +154,65 @@ pub fn tty_draw_pane_offset(
     return out.toOwnedSlice(xm.allocator);
 }
 
+pub fn tty_draw_render_window(
+    w: *T.Window,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) !WindowRenderResult {
+    var result = WindowRenderResult{};
+    if (sx_limit == 0 or sy_limit == 0) return result;
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    try out.appendSlice(xm.allocator, "\x1b[?25l\x1b[H\x1b[2J");
+
+    for (w.panes.items) |wp| {
+        if (!window_mod.window_pane_visible(wp)) continue;
+
+        const bounds = window_mod.window_pane_draw_bounds(wp);
+        if (bounds.xoff >= sx_limit or bounds.yoff >= sy_limit) continue;
+
+        const draw_width = @min(bounds.sx, sx_limit - bounds.xoff);
+        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
+        const screen = screen_mod.screen_current(wp);
+        const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
+
+        for (0..draw_height) |row_idx| {
+            const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), draw_width, scrollbar);
+            defer xm.allocator.free(rendered);
+
+            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, bounds.xoff + 1);
+            try out.appendSlice(xm.allocator, rendered);
+        }
+    }
+
+    if (w.active) |active| {
+        const bounds = window_mod.window_pane_draw_bounds(active);
+        const screen = screen_mod.screen_current(active);
+        if (screen.cursor_visible and screen.cx < active.sx and screen.cy < active.sy) {
+            const scrollbar = window_mod.window_pane_scrollbar_layout(active);
+            const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
+                @min(bounds.sx, scrollbar.?.width + scrollbar.?.pad)
+            else
+                0;
+            const cursor_x = bounds.xoff + cursor_prefix + screen.cx;
+            const cursor_y = bounds.yoff + screen.cy;
+            if (cursor_x < sx_limit and cursor_y < sy_limit) {
+                result.cursor_visible = true;
+                result.cursor_x = cursor_x;
+                result.cursor_y = row_offset + cursor_y;
+                try append_move(&out, result.cursor_y + 1, result.cursor_x + 1);
+                try out.appendSlice(xm.allocator, "\x1b[?25h");
+            }
+        }
+    }
+
+    result.payload = try out.toOwnedSlice(xm.allocator);
+    return result;
+}
+
 pub fn tty_draw_render_screen(screen: *T.Screen, sx: u32, sy: u32, row_offset: u32) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -154,9 +220,7 @@ pub fn tty_draw_render_screen(screen: *T.Screen, sx: u32, sy: u32, row_offset: u
     for (0..sy) |row_idx| {
         const rendered = try render_row(screen.grid, @intCast(row_idx), sx);
         defer xm.allocator.free(rendered);
-        const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};1H", .{row_offset + row_idx + 1});
-        defer xm.allocator.free(move);
-        try out.appendSlice(xm.allocator, move);
+        try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, 1);
         try out.appendSlice(xm.allocator, rendered);
         try out.appendSlice(xm.allocator, "\x1b[K");
     }
@@ -168,6 +232,12 @@ fn begin_update(out: *std.ArrayList(u8), started: *bool) !void {
     if (started.*) return;
     try out.appendSlice(xm.allocator, "\x1b[?25l");
     started.* = true;
+}
+
+fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
+    const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ row, col });
+    defer xm.allocator.free(move);
+    try out.appendSlice(xm.allocator, move);
 }
 
 const CellStyle = struct {
@@ -486,6 +556,59 @@ test "tty_draw_pane preserves stored utf8 glyph bytes" {
     const draw = try tty_draw_pane(&cache, wp, 4, 1);
     defer xm.allocator.free(draw);
     try std.testing.expect(std.mem.indexOf(u8, draw, "🙂x") != null);
+}
+
+test "tty_draw_render_window paints multiple visible panes at shared offsets" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const left = win.window_add_pane(w, null, 3, 2);
+    const right = win.window_add_pane(w, null, 3, 2);
+    w.active = right;
+
+    left.xoff = 0;
+    left.yoff = 0;
+    right.xoff = 3;
+    right.yoff = 0;
+
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
+
+    const rendered = try tty_draw_render_window(w, 6, 2, 0);
+    defer xm.allocator.free(rendered.payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[H\x1b[2J") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[1;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[1;4H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[2;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[2;4H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "L1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "R1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "L2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "R2") != null);
+    try std.testing.expect(rendered.cursor_visible);
+    try std.testing.expectEqual(@as(u32, 5), rendered.cursor_x);
+    try std.testing.expectEqual(@as(u32, 1), rendered.cursor_y);
 }
 
 test "tty_draw_pane renders attached right scrollbar columns from shared window geometry" {

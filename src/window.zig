@@ -184,7 +184,7 @@ pub fn window_get_last_pane(w: *T.Window) ?*T.WindowPane {
 pub fn window_pane_find_up(wp: *T.WindowPane) ?*T.WindowPane {
     const w = wp.window;
     const status = opts.options_get_number(w.options, "pane-border-status");
-    const current = pane_full_size_offset(wp);
+    const current = window_pane_draw_bounds(wp);
 
     var edge = current.yoff;
     if (status == T.PANE_STATUS_TOP) {
@@ -201,7 +201,7 @@ pub fn window_pane_find_up(wp: *T.WindowPane) ?*T.WindowPane {
     var best: ?*T.WindowPane = null;
     for (w.panes.items) |next| {
         if (next == wp) continue;
-        const candidate = pane_full_size_offset(next);
+        const candidate = window_pane_draw_bounds(next);
         if (candidate.yoff + candidate.sy + 1 != edge) continue;
 
         const cand_end = pane_range_end(candidate.xoff, candidate.sx);
@@ -214,7 +214,7 @@ pub fn window_pane_find_up(wp: *T.WindowPane) ?*T.WindowPane {
 pub fn window_pane_find_down(wp: *T.WindowPane) ?*T.WindowPane {
     const w = wp.window;
     const status = opts.options_get_number(w.options, "pane-border-status");
-    const current = pane_full_size_offset(wp);
+    const current = window_pane_draw_bounds(wp);
 
     var edge = current.yoff + current.sy + 1;
     if (status == T.PANE_STATUS_TOP) {
@@ -231,7 +231,7 @@ pub fn window_pane_find_down(wp: *T.WindowPane) ?*T.WindowPane {
     var best: ?*T.WindowPane = null;
     for (w.panes.items) |next| {
         if (next == wp) continue;
-        const candidate = pane_full_size_offset(next);
+        const candidate = window_pane_draw_bounds(next);
         if (candidate.yoff != edge) continue;
 
         const cand_end = pane_range_end(candidate.xoff, candidate.sx);
@@ -243,7 +243,7 @@ pub fn window_pane_find_down(wp: *T.WindowPane) ?*T.WindowPane {
 
 pub fn window_pane_find_left(wp: *T.WindowPane) ?*T.WindowPane {
     const w = wp.window;
-    const current = pane_full_size_offset(wp);
+    const current = window_pane_draw_bounds(wp);
 
     var edge = current.xoff;
     if (edge == 0) edge = w.sx + 1;
@@ -254,7 +254,7 @@ pub fn window_pane_find_left(wp: *T.WindowPane) ?*T.WindowPane {
     var best: ?*T.WindowPane = null;
     for (w.panes.items) |next| {
         if (next == wp) continue;
-        const candidate = pane_full_size_offset(next);
+        const candidate = window_pane_draw_bounds(next);
         if (candidate.xoff + candidate.sx + 1 != edge) continue;
 
         const cand_end = pane_range_end(candidate.yoff, candidate.sy);
@@ -266,7 +266,7 @@ pub fn window_pane_find_left(wp: *T.WindowPane) ?*T.WindowPane {
 
 pub fn window_pane_find_right(wp: *T.WindowPane) ?*T.WindowPane {
     const w = wp.window;
-    const current = pane_full_size_offset(wp);
+    const current = window_pane_draw_bounds(wp);
 
     var edge = current.xoff + current.sx + 1;
     if (edge >= w.sx) edge = 0;
@@ -277,7 +277,7 @@ pub fn window_pane_find_right(wp: *T.WindowPane) ?*T.WindowPane {
     var best: ?*T.WindowPane = null;
     for (w.panes.items) |next| {
         if (next == wp) continue;
-        const candidate = pane_full_size_offset(next);
+        const candidate = window_pane_draw_bounds(next);
         if (candidate.xoff != edge) continue;
 
         const cand_end = pane_range_end(candidate.yoff, candidate.sy);
@@ -618,7 +618,7 @@ pub fn window_pane_total_width(wp: *T.WindowPane) u32 {
 pub fn window_get_active_at(w: *T.Window, x: u32, y: u32) ?*T.WindowPane {
     for (w.panes.items) |pane| {
         if (!window_pane_visible(pane)) continue;
-        const full = pane_full_size_offset(pane);
+        const full = window_pane_draw_bounds(pane);
         if (x < full.xoff or x > full.xoff + full.sx) continue;
         if (y < full.yoff or y > full.yoff + full.sy) continue;
         return pane;
@@ -661,7 +661,7 @@ pub fn window_hit_test(w: *T.Window, x: u32, y: u32) ?PaneHit {
 
     for (w.panes.items) |pane| {
         if (!window_pane_visible(pane)) continue;
-        const full = pane_full_size_offset(pane);
+        const full = window_pane_draw_bounds(pane);
         const right_border = full.xoff + full.sx;
 
         if (x == right_border and pane.yoff <= y + 1 and pane.yoff + pane.sy >= y)
@@ -733,14 +733,14 @@ fn remove_last_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
     }
 }
 
-const PaneFullSize = struct {
+pub const PaneDrawBounds = struct {
     xoff: u32,
     yoff: u32,
     sx: u32,
     sy: u32,
 };
 
-fn pane_full_size_offset(wp: *T.WindowPane) PaneFullSize {
+pub fn window_pane_draw_bounds(wp: *T.WindowPane) PaneDrawBounds {
     const layout = window_pane_scrollbar_layout(wp);
     const sb_total: u32 = if (layout) |sb| sb.width + sb.pad else 0;
 

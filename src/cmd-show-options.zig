@@ -26,10 +26,6 @@ const cmd_opts = @import("cmd-options.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('A')) {
-        cmdq.cmdq_error(item, "-A not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('H')) {
         cmdq.cmdq_error(item, "-H not supported yet", .{});
         return .@"error";
@@ -55,12 +51,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    const lines = cmd_opts.collect_lines(target, name, args.has('v'));
+    const lines = cmd_opts.collect_lines(target, name, args.has('v'), args.has('A'));
     defer free_lines(lines);
     if (name != null and lines.len == 0) {
-        if (args.has('q')) return .normal;
-        cmdq.cmdq_error(item, "invalid option: {s}", .{name.?});
-        return .@"error";
+        if (cmd_opts.is_custom_option(name.?)) {
+            if (args.has('q')) return .normal;
+            cmdq.cmdq_error(item, "invalid option: {s}", .{name.?});
+            return .@"error";
+        }
+        return .normal;
     }
 
     for (lines) |line| cmdq.cmdq_print(item, "{s}", .{line});

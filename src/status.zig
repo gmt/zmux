@@ -28,6 +28,7 @@ const resize_mod = @import("resize.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status_prompt = @import("status-prompt.zig");
+const status_runtime = @import("status-runtime.zig");
 const style_mod = @import("style.zig");
 const tty_draw = @import("tty-draw.zig");
 const xm = @import("xmalloc.zig");
@@ -90,7 +91,7 @@ pub fn render(c: *T.Client) RenderResult {
 fn overlay_rows(c: *T.Client) u32 {
     const lines = resize_mod.status_line_size(c);
     if (lines != 0) return lines;
-    return if (status_prompt.status_prompt_active(c) or c.message_string != null) 1 else 0;
+    return if (status_prompt.status_prompt_active(c) or status_runtime.status_message_active(c)) 1 else 0;
 }
 
 fn overlay_start_row(c: *T.Client, rows: u32) u32 {
@@ -151,14 +152,16 @@ fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResu
     const message = status_prompt.status_prompt_message(c) orelse return;
     const area = message_area(c, rows);
     if (area.width == 0) return;
+    const command_prompt = status_prompt.status_prompt_command_mode(c);
 
     var prompt_gc = T.grid_default_cell;
-    style_mod.style_apply(&prompt_gc, s.options, "message-style", null);
-    fill_area(screen, area, &prompt_gc, message_fill_colour(s.options));
+    const style_name = if (command_prompt) "message-command-style" else "message-style";
+    style_mod.style_apply(&prompt_gc, s.options, style_name, null);
+    fill_area(screen, area, &prompt_gc, message_fill_colour(s.options, style_name));
 
     var ctx = format_context(c);
     ctx.message_text = message;
-    ctx.command_prompt = false;
+    ctx.command_prompt = command_prompt;
 
     const fmt = opts.options_get_string(s.options, "message-format");
     const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
@@ -193,14 +196,19 @@ fn render_message(screen: *T.Screen, c: *T.Client, rows: u32, message: []const u
 
     var message_gc = T.grid_default_cell;
     style_mod.style_apply(&message_gc, s.options, "message-style", null);
-    fill_area(screen, area, &message_gc, message_fill_colour(s.options));
+    fill_area(screen, area, &message_gc, message_fill_colour(s.options, "message-style"));
 
     var ctx = format_context(c);
-    ctx.message_text = message;
+    const display_message = if (status_runtime.status_message_ignore_styles(c))
+        escape_message_hashes(message)
+    else
+        xm.xstrdup(message);
+    defer xm.allocator.free(display_message);
+    ctx.message_text = display_message;
     ctx.command_prompt = false;
 
     const fmt = opts.options_get_string(s.options, "message-format");
-    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
+    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(display_message);
     defer xm.allocator.free(expanded);
 
     var swctx = T.ScreenWriteCtx{ .s = screen };
@@ -238,12 +246,27 @@ fn message_area(c: *T.Client, rows: u32) Area {
     return .{ .x = x, .width = width, .line = line };
 }
 
-fn message_fill_colour(oo: *T.Options) i32 {
-    if (style_mod.style_from_option(oo, "message-style")) |sy| {
+fn message_fill_colour(oo: *T.Options, style_name: []const u8) i32 {
+    if (style_mod.style_from_option(oo, style_name)) |sy| {
         if (sy.fill != 8) return sy.fill;
         return sy.gc.bg;
     }
     return T.grid_default_cell.bg;
+}
+
+fn escape_message_hashes(message: []const u8) []u8 {
+    var count: usize = 0;
+    for (message) |ch| {
+        if (ch == '#') count += 1;
+    }
+
+    var out: std.ArrayList(u8) = .{};
+    out.ensureTotalCapacity(xm.allocator, message.len + count) catch unreachable;
+    for (message) |ch| {
+        if (ch == '#') out.appendAssumeCapacity('#');
+        out.appendAssumeCapacity(ch);
+    }
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn fill_row(screen: *T.Screen, row: u32, gc: *const T.GridCell) void {

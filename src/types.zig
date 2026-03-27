@@ -1000,6 +1000,7 @@ pub const Client = struct {
     stdin_pending: std.ArrayList(u8) = .{},
     key_table_name: ?[]u8 = null,
     escape_timer: ?*c.libevent.event = null,
+    message_timer: ?*c.libevent.event = null,
 
     flags: u64 = 0,
     session: ?*Session = null,
@@ -1010,6 +1011,8 @@ pub const Client = struct {
     exit_session: ?[]u8 = null,
 
     message_string: ?[]u8 = null,
+    message_ignore_keys: bool = false,
+    message_ignore_styles: bool = false,
 };
 
 // ── IPC proc layer ────────────────────────────────────────────────────────

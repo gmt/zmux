@@ -450,7 +450,7 @@ pub fn cmdq_running(cl: ?*T.Client) ?*CmdqItem {
 
 pub fn cmdq_resolve_target_client(item: *CmdqItem, cmd: *cmd_mod.Cmd) ?*T.Client {
     const flags = cmd.entry.flags;
-    if (flags & (T.CMD_CLIENT_CFLAG | T.CMD_CLIENT_TFLAG) == 0) return null;
+    if (flags & (T.CMD_CLIENT_CFLAG | T.CMD_CLIENT_TFLAG) == 0) return item.target_client;
 
     const args = cmd_mod.cmd_get_args(cmd);
     const explicit = if (flags & T.CMD_CLIENT_CFLAG != 0) args.get('c') else args.get('t');

@@ -32,11 +32,6 @@ const utf8 = @import("utf8.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('o')) {
-        cmdq.cmdq_error(item, "-o not supported yet", .{});
-        return .@"error";
-    }
-
     const option_name = args.value_at(0) orelse {
         cmdq.cmdq_error(item, "invalid option", .{});
         return .@"error";
@@ -53,6 +48,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (!cmd_opts.option_allowed(oe, target.kind)) {
         if (args.has('q')) return .normal;
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
+        return .@"error";
+    }
+
+    if (!args.has('u') and args.has('o') and option_is_set_locally(target.options, option_name)) {
+        if (args.has('q')) return .normal;
+        cmdq.cmdq_error(item, "already set: {s}", .{option_name});
         return .@"error";
     }
 
@@ -93,6 +94,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
     apply_target_side_effects(target, option_name);
     return .normal;
+}
+
+fn option_is_set_locally(oo: *T.Options, name: []const u8) bool {
+    return opts.options_get_only(oo, name) != null;
 }
 
 fn unset_option(target: cmd_opts.ResolvedTarget, name: []const u8, oe: ?*const T.OptionsTableEntry) void {
@@ -272,4 +277,118 @@ test "set-option -w -U clears pane local overrides before unsetting window optio
     try std.testing.expect(opts.options_get_only(pane_with_override.options, "pane-scrollbars-style") == null);
     try std.testing.expectEqual(@as(i32, 2), pane_with_override.scrollbar_style.pad);
     try std.testing.expectEqual(@as(i32, 2), inherited_pane.scrollbar_style.pad);
+}
+
+test "set-option -o allows the first local override and rejects a second write" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+    const server = @import("server.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_string(opts.global_s_options, false, "status-left", "global left");
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "set-option-o", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &attach_cause).?;
+    const wp = win.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    s.curw = sess.winlink_find_by_window(&s.windows, w).?;
+
+    var cause: ?[]u8 = null;
+    const first = try cmd_mod.cmd_parse_one(&.{ "set-option", "-o", "status-left", "local left" }, null, &cause);
+    defer cmd_mod.cmd_free(first);
+    const second = try cmd_mod.cmd_parse_one(&.{ "set-option", "-o", "status-left", "second left" }, null, &cause);
+    defer cmd_mod.cmd_free(second);
+
+    var list: cmd_mod.CmdList = .{};
+    var state = cmdq.CmdqState{
+        .current = .{
+            .s = s,
+            .wl = s.curw,
+            .idx = s.curw.?.idx,
+            .w = w,
+            .wp = wp,
+        },
+    };
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list, .state = &state };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(first, &item));
+    try std.testing.expectEqualStrings("local left", opts.options_get_string(s.options, "status-left"));
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(second, &item));
+    try std.testing.expectEqualStrings("local left", opts.options_get_string(s.options, "status-left"));
+}
+
+test "set-option -qo leaves an existing local value untouched" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+    const server = @import("server.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "set-option-qo", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &attach_cause).?;
+    const wp = win.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    s.curw = sess.winlink_find_by_window(&s.windows, w).?;
+    opts.options_set_string(s.options, false, "status-left", "present");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-q", "-o", "status-left", "ignored" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var state = cmdq.CmdqState{
+        .current = .{
+            .s = s,
+            .wl = s.curw,
+            .idx = s.curw.?.idx,
+            .w = w,
+            .wp = wp,
+        },
+    };
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list, .state = &state };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("present", opts.options_get_string(s.options, "status-left"));
+    try std.testing.expectEqual(@as(usize, 0), server.message_log.items.len);
 }

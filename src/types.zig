@@ -1007,6 +1007,7 @@ pub const StatusLine = struct {
     screen: Screen,
     active: ?*Screen = null,
     references: u32 = 0,
+    timer: ?*c.libevent.event = null,
     style: GridCell = std.mem.zeroes(GridCell),
     entries: [STATUS_LINES_LIMIT]StatusLineEntry = [_]StatusLineEntry{.{}} ** STATUS_LINES_LIMIT,
 };

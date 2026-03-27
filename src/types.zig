@@ -778,6 +778,7 @@ pub const WindowPane = struct {
     // Pipe (pipe-pane)
     pipe_fd: i32 = -1,
     pipe_pid: std.posix.pid_t = -1,
+    pipe_event: ?*c.libevent.event = null,
 };
 
 // ── Window ────────────────────────────────────────────────────────────────

@@ -68,6 +68,7 @@ const cmd_new_session = @import("cmd-new-session.zig");
 const cmd_attach_session = @import("cmd-attach-session.zig");
 const cmd_kill_session = @import("cmd-kill-session.zig");
 const cmd_kill_server = @import("cmd-kill-server.zig");
+const cmd_lock_server = @import("cmd-lock-server.zig");
 const cmd_server_access = @import("cmd-server-access.zig");
 const cmd_switch_client = @import("cmd-switch-client.zig");
 const cmd_refresh_client = @import("cmd-refresh-client.zig");
@@ -129,6 +130,9 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_attach_session.entry_detach,
     &cmd_kill_session.entry,
     &cmd_kill_server.entry,
+    &cmd_lock_server.entry,
+    &cmd_lock_server.entry_session,
+    &cmd_lock_server.entry_client,
     &cmd_server_access.entry,
     &cmd_switch_client.entry,
     &cmd_refresh_client.entry,

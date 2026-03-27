@@ -41,10 +41,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (args.has('e')) {
-        cmdq.cmdq_error(item, "escape-sequence capture not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('M')) {
         cmdq.cmdq_error(item, "mode screen capture not supported yet", .{});
         return .@"error";
@@ -57,20 +53,21 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const buf = if (args.has('P'))
         capture_pending(wp, args.has('C'))
     else blk: {
-        const target_grid = if (args.has('a')) alt: {
+        const target_screen = if (args.has('a')) alt: {
             if (!screen_mod.screen_alternate_active(wp)) {
                 cmdq.cmdq_error(item, "no alternate screen", .{});
                 return .@"error";
             }
-            break :alt wp.base.grid;
-        } else screen_mod.screen_current(wp).grid;
+            break :alt &wp.base;
+        } else screen_mod.screen_current(wp);
 
         break :blk capture_grid(
-            target_grid,
+            target_screen,
             args.get('S'),
             args.get('E'),
             args.has('J'),
             args.has('N'),
+            args.has('e'),
             args.has('C'),
             item,
         ) orelse return .@"error";
@@ -127,14 +124,16 @@ fn capture_pending(wp: *T.WindowPane, escape_sequences: bool) []u8 {
 }
 
 fn capture_grid(
-    gd: *T.Grid,
+    s: *T.Screen,
     start_raw: ?[]const u8,
     end_raw: ?[]const u8,
     join_lines: bool,
     keep_spaces: bool,
+    with_sequences: bool,
     escape_sequences: bool,
     item: *cmdq.CmdqItem,
 ) ?[]u8 {
+    const gd = s.grid;
     if (gd.sy == 0) return xm.xstrdup("");
 
     var top = parse_bound(start_raw, gd.sy, true, item) orelse return null;
@@ -143,10 +142,11 @@ fn capture_grid(
 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
+    var last_cell = T.grid_default_cell;
 
     var row = top;
     while (row <= bottom) : (row += 1) {
-        const line = render_grid_line(gd, row, keep_spaces, escape_sequences);
+        const line = render_grid_line(s, row, join_lines, keep_spaces, with_sequences, escape_sequences, &last_cell);
         defer xm.allocator.free(line);
         out.appendSlice(xm.allocator, line) catch unreachable;
         if (!join_lines or row == bottom) out.append(xm.allocator, '\n') catch unreachable;
@@ -166,17 +166,29 @@ fn parse_bound(raw: ?[]const u8, sy: u32, is_start: bool, item: *cmdq.CmdqItem) 
     return @min(@as(u32, @intCast(parsed)), sy - 1);
 }
 
-fn render_grid_line(gd: *T.Grid, row: u32, keep_spaces: bool, escape_sequences: bool) []u8 {
-    return grid_mod.string_cells(gd, row, gd.sx, .{
+fn render_grid_line(
+    s: *T.Screen,
+    row: u32,
+    join_lines: bool,
+    keep_spaces: bool,
+    with_sequences: bool,
+    escape_sequences: bool,
+    last_cell: *T.GridCell,
+) []u8 {
+    return grid_mod.string_cells(s.grid, row, s.grid.sx, .{
         .trim_trailing_spaces = !keep_spaces,
+        .include_empty_cells = !join_lines,
         .escape_sequences = escape_sequences,
+        .with_sequences = with_sequences,
+        .screen = s,
+        .last_cell = last_cell,
     });
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "capture-pane",
     .alias = "capturep",
-    .usage = "[-CJNpq] [-b buffer-name] [-E end-line] [-S start-line] [-t target-pane]",
+    .usage = "[-aCeJMNpPqT] [-b buffer-name] [-E end-line] [-S start-line] [-t target-pane]",
     .template = "ab:CeE:JMNpPqS:Tt:",
     .lower = 0,
     .upper = 0,
@@ -238,12 +250,12 @@ test "capture-pane helper captures current grid lines and trims spaces by defaul
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const captured = capture_grid(wp.base.grid, null, null, false, false, false, &item).?;
+    const captured = capture_grid(&wp.base, null, null, false, false, false, false, &item).?;
     defer xm.allocator.free(captured);
     try std.testing.expectEqualStrings("hello\nworld\n", captured[0..12]);
 }
 
-test "capture-pane helper supports line bounds and octal escapes" {
+test "capture-pane helper supports line bounds and sequence escaping" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
@@ -278,9 +290,9 @@ test "capture-pane helper supports line bounds and octal escapes" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const captured = capture_grid(wp.base.grid, "1", "1", false, false, true, &item).?;
+    const captured = capture_grid(&wp.base, "1", "1", false, false, false, true, &item).?;
     defer xm.allocator.free(captured);
-    try std.testing.expectEqualStrings("\\134x\n", captured);
+    try std.testing.expectEqualStrings("\\\\x\n", captured);
 }
 
 test "capture-pane helper can target saved primary grid while alternate screen is active" {
@@ -319,11 +331,11 @@ test "capture-pane helper can target saved primary grid while alternate screen i
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const visible = capture_grid(screen_mod.screen_current(wp).grid, "0", "2", false, false, false, &item).?;
+    const visible = capture_grid(screen_mod.screen_current(wp), "0", "2", false, false, false, false, &item).?;
     defer xm.allocator.free(visible);
     try std.testing.expectEqualStrings("ALT\n\n\n", visible);
 
-    const primary = capture_grid(wp.base.grid, "0", "2", false, false, false, &item).?;
+    const primary = capture_grid(&wp.base, "0", "2", false, false, false, false, &item).?;
     defer xm.allocator.free(primary);
     try std.testing.expectEqualStrings("main\n\n\n", primary);
 }
@@ -340,7 +352,7 @@ test "capture-pane helper preserves combined and wide utf8 grid payloads" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    const captured = capture_grid(screen.grid, "0", "0", false, false, false, &item).?;
+    const captured = capture_grid(screen, "0", "0", false, false, false, false, &item).?;
     defer xm.allocator.free(captured);
 
     try std.testing.expectEqualStrings("é🙂\n", captured);
@@ -464,4 +476,27 @@ test "clear-history helper drops history, resets modes, and clears current scree
     try std.testing.expectEqual(@as(u32, 0), wp.base.grid.hscrolled);
     try std.testing.expectEqual(@as(usize, 0), wp.modes.items.len);
     try std.testing.expect(!hyperlinks.hyperlinks_get(wp.base.hyperlinks.?, first, null, null, null));
+}
+test "capture-pane helper preserves sgr state and hyperlinks with -e" {
+    const screen = screen_mod.screen_init(2, 1, 0);
+    defer {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+    }
+
+    var styled = T.grid_default_cell;
+    styled.fg = 1;
+    styled.attr = T.GRID_ATTR_BRIGHT;
+    styled.link = @import("hyperlinks.zig").hyperlinks_put(screen.hyperlinks.?, "https://example.com", "pane");
+    styled.data = T.grid_default_cell.data;
+    styled.data.data[0] = 'A';
+    grid_mod.set_cell(screen.grid, 0, 0, &styled);
+    grid_mod.set_ascii(screen.grid, 0, 1, 'B');
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    const captured = capture_grid(screen, "0", "0", false, false, true, false, &item).?;
+    defer xm.allocator.free(captured);
+
+    try std.testing.expectEqualStrings("\x1b[1m\x1b[31m\x1b]8;id=pane;https://example.com\x1b\\A\x1b[0m\x1b]8;;\x1b\\B\n", captured);
 }

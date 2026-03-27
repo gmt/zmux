@@ -29,6 +29,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const c = @import("c.zig");
+const file_mod = @import("file.zig");
 const xm = @import("xmalloc.zig");
 const opts = @import("options.zig");
 const win = @import("window.zig");
@@ -302,11 +303,7 @@ fn alerts_set_message(wl: *T.Winlink, comptime typ: []const u8, option: []const 
 
 fn send_bell(cl: *T.Client) void {
     const peer = cl.peer orelse return;
-    var payload: [@sizeOf(i32) + 1]u8 = undefined;
-    const stream: i32 = 1;
-    @memcpy(payload[0..@sizeOf(i32)], std.mem.asBytes(&stream));
-    payload[@sizeOf(i32)] = 0x07;
-    _ = proc_mod.proc_send(peer, .write, -1, payload[0..].ptr, payload.len);
+    _ = file_mod.sendPeerStream(peer, 1, &.{0x07});
 }
 
 fn mark_session_redraw(s: *T.Session) void {

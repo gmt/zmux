@@ -21,8 +21,8 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const file_mod = @import("file.zig");
 const xm = @import("xmalloc.zig");
-const proc_mod = @import("proc.zig");
 const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
 
@@ -80,13 +80,10 @@ pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
     if (!tty_features.supportsTty(tty, .title)) return;
 
-    const sequence = if (tty_term.stringCapability(tty, "tsl")) |tsl|
-        blk: {
-            const fsl = tty_term.stringCapability(tty, "fsl") orelse break :blk null;
-            break :blk std.fmt.allocPrint(xm.allocator, "{s}{s}{s}", .{ tsl, title, fsl }) catch return;
-        }
-    else
-        std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
+    const sequence = if (tty_term.stringCapability(tty, "tsl")) |tsl| blk: {
+        const fsl = tty_term.stringCapability(tty, "fsl") orelse break :blk null;
+        break :blk std.fmt.allocPrint(xm.allocator, "{s}{s}{s}", .{ tsl, title, fsl }) catch return;
+    } else std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
     if (sequence == null) return;
     defer xm.allocator.free(sequence.?);
     tty_write(tty, sequence.?);
@@ -164,13 +161,7 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
     const peer = tty.client.peer orelse return;
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(xm.allocator);
-
-    const stream: i32 = 1;
-    buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch return;
-    buf.appendSlice(xm.allocator, payload) catch return;
-    _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+    _ = file_mod.sendPeerStream(peer, 1, payload);
 }
 
 test "tty_open starts reduced tty lifecycle" {

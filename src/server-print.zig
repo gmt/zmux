@@ -34,6 +34,7 @@ const xm = @import("xmalloc.zig");
 const server_print_view_mode = T.WindowMode{
     .name = "server-print-view",
     .key = server_print_view_key,
+    .get_screen = server_print_view_get_screen,
 };
 
 const DirectPrintData = struct {
@@ -172,6 +173,10 @@ fn server_print_view_key(
     _ = _key;
     _ = _mouse;
     server_client_close_view_mode(wme.wp);
+}
+
+fn server_print_view_get_screen(wme: *T.WindowModeEntry) *T.Screen {
+    return wme.wp.screen;
 }
 
 fn clearClientRedrawFlags(client: *T.Client) void {

@@ -27,6 +27,7 @@ const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
 const job_mod = @import("job.zig");
 const server = @import("server.zig");
+const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
 
 const SHOW_MESSAGES_TEMPLATE = "#{t/p:message_time}: #{message_text}";
@@ -130,15 +131,32 @@ fn render_terminal_report(alloc: std.mem.Allocator, clients: []const *T.Client, 
             if (client != target) continue;
         }
         if (terminal_index != 0) out.append(alloc, '\n') catch unreachable;
-        out.writer(alloc).print(
-            "Terminal {d}: {s} for {s}, features=0x{x}:",
-            .{
-                terminal_index,
-                client.term_name orelse "unknown",
-                client.name orelse "client",
-                @as(u32, @bitCast(client.term_features)),
-            },
-        ) catch unreachable;
+        const effective_features = tty_features.effectiveFeatures(client) orelse client.term_features;
+        const feature_names = tty_features.featureString(alloc, effective_features);
+        defer alloc.free(feature_names);
+
+        if (feature_names.len != 0) {
+            out.writer(alloc).print(
+                "Terminal {d}: {s} for {s}, features=0x{x} ({s}):",
+                .{
+                    terminal_index,
+                    client.term_name orelse "unknown",
+                    client.name orelse "client",
+                    @as(u32, @bitCast(effective_features)),
+                    feature_names,
+                },
+            ) catch unreachable;
+        } else {
+            out.writer(alloc).print(
+                "Terminal {d}: {s} for {s}, features=0x{x}:",
+                .{
+                    terminal_index,
+                    client.term_name orelse "unknown",
+                    client.name orelse "client",
+                    @as(u32, @bitCast(effective_features)),
+                },
+            ) catch unreachable;
+        }
         out.append(alloc, '\n') catch unreachable;
 
         if (client.term_caps) |caps| {
@@ -191,6 +209,8 @@ test "show-messages renders reduced terminal capability reports from shared tty-
     var caps = [_][]u8{
         @constCast("U8=1"),
         @constCast("kmous=\x1b[M"),
+        @constCast("tsl=\x1b]0;"),
+        @constCast("fsl=\x07"),
     };
     var client = T.Client{
         .name = "tty-client",
@@ -198,7 +218,7 @@ test "show-messages renders reduced terminal capability reports from shared tty-
         .tty = undefined,
         .status = .{ .screen = undefined },
         .term_name = try std.testing.allocator.dupe(u8, "xterm-256color"),
-        .term_features = 0x21,
+        .term_features = tty_features.featureBit(.bpaste),
         .term_caps = caps[0..],
     };
     defer std.testing.allocator.free(client.term_name.?);
@@ -207,9 +227,11 @@ test "show-messages renders reduced terminal capability reports from shared tty-
     const rendered = render_terminal_report(xm.allocator, &.{&client}, null);
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings(
-        "Terminal 0: xterm-256color for tty-client, features=0x21:\n" ++
+        "Terminal 0: xterm-256color for tty-client, features=0x40402 (bpaste,mouse,title):\n" ++
             "   0: U8: (number) 1\n" ++
-            "   1: kmous: (string) \\x1B[M\n",
+            "   1: kmous: (string) \\x1B[M\n" ++
+            "   2: tsl: (string) \\x1B]0;\n" ++
+            "   3: fsl: (string) \\x07\n",
         rendered,
     );
 }

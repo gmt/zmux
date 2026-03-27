@@ -103,9 +103,10 @@ replacing the ASCII-only storage/write seam in `src/grid.zig`,
 `src/screen-write.zig`, and `src/input.zig`, then pulling prompt/status
 consumers onto that shared cell model.
 
-The seal matrix below stays conservative on purpose: seeded lower-layer helpers
-do not count as green until the row works end-to-end through storage,
-screen-write, and the relevant consumer adapters.
+The seal matrix below stays conservative on purpose: lower-layer truth does not
+reopen anything by itself. A row is only sealed when the future shared
+consumer-facing surface exists and the row stays truthful all the way through
+storage, live write-path integration, and the final adapter or tty seam.
 
 ## Target stack
 
@@ -168,19 +169,37 @@ later.
 
 ## Seal matrix
 
-This matrix is the anti-demon seal. If a row is not materially green, do not
-solve that consumer with a local hack.
+This matrix is the anti-demon seal. If a row is not sealed, do not solve that
+consumer with a local hack.
 
-| behavior row | decode / convert | width policy | combine policy | glyph / cell storage | grid / screen-write | consumer adapter |
-|---|---|---|---|---|---|---|
-| decode byte stream into Unicode key or glyph candidates | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| compute width with cache and `codepoint-widths` overrides | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| store one display glyph in one grid cell | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| write/render cells through the live `screen-write` path | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| trim, pad, and search by display cells | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| edit prompt/history/status text by display cells | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| choose ACS versus UTF-8 output honestly | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+Legend:
+
+- `Y`: this layer already serves the row truthfully today
+- `B`: this layer is a live blocker or collapse point today
+- `-`: this row does not materially depend on that layer
+
+The next slice still has to define the named top-of-stack façade
+(`utf8.Decoder`, `utf8.WidthPolicy`, `utf8.Glyph`, and friends). Until that
+surface exists, every row below remains open even when lower layers already say
+`Y`.
+
+| behavior row | decode / convert | width policy | combine policy | glyph / cell storage | grid / screen-write | consumer adapter | current seal |
+|---|---|---|---|---|---|---|---|
+| decode byte stream into Unicode key or glyph candidates | `Y` | `-` | `-` | `Y` | `-` | `Y` | open: shared façade is still unnamed, so only the attached-key path can rely on it |
+| compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: width truth exists for strings, but the live grid/write path still drops it |
+| append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `B` | `-` | open: combine logic is ported below, but `screen-write` never calls it and there is no padding-cell path yet |
+| store one display glyph in one grid cell | `-` | `-` | `-` | `B` | `-` | `-` | open: `GridCell` describes tmux's payload, but `grid.zig` still stores compact ASCII-only entries |
+| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `B` | `B` | `-` | open: the write path is still `putc`/`putn` over `set_ascii`/`ascii_at` |
+| trim, pad, and search by display cells | `Y` | `Y` | `-` | `B` | `-` | `Y` | open: string trim/pad is shared, but grid-cell search and comparison still have no truthful substrate |
+| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `B` | `-` | `B` | open: prompt/status editing still operates on raw UTF-8 byte buffers instead of shared cell payloads |
+| choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
+
+The current read of the matrix is deliberately blunt:
+
+- rows 1 through 3 are seeded below but not sealed because the shared façade
+  and live write path are still open
+- rows 4 through 7 are blocked by the ASCII-first grid and prompt/storage seam
+- row 8 is a truthful reduced helper, not yet the full tty output policy layer
 
 The foundation tranche is finished enough to reopen UTF-8-sensitive parity work
 only when the relevant rows are substantively checked off in code and tests,

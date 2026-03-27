@@ -44,8 +44,57 @@ pub const Feature = enum(u5) {
     usstyle,
 };
 
+const FeatureSpec = struct {
+    name: []const u8,
+    feature: Feature,
+};
+
+const feature_specs = [_]FeatureSpec{
+    .{ .name = "256", .feature = .@"256" },
+    .{ .name = "bpaste", .feature = .bpaste },
+    .{ .name = "ccolour", .feature = .ccolour },
+    .{ .name = "clipboard", .feature = .clipboard },
+    .{ .name = "hyperlinks", .feature = .hyperlinks },
+    .{ .name = "cstyle", .feature = .cstyle },
+    .{ .name = "extkeys", .feature = .extkeys },
+    .{ .name = "focus", .feature = .focus },
+    .{ .name = "ignorefkeys", .feature = .ignorefkeys },
+    .{ .name = "margins", .feature = .margins },
+    .{ .name = "mouse", .feature = .mouse },
+    .{ .name = "osc7", .feature = .osc7 },
+    .{ .name = "overline", .feature = .overline },
+    .{ .name = "rectfill", .feature = .rectfill },
+    .{ .name = "rgb", .feature = .rgb },
+    .{ .name = "sixel", .feature = .sixel },
+    .{ .name = "strikethrough", .feature = .strikethrough },
+    .{ .name = "sync", .feature = .sync },
+    .{ .name = "title", .feature = .title },
+    .{ .name = "usstyle", .feature = .usstyle },
+};
+
 pub fn featureBit(feature: Feature) i32 {
     return @as(i32, 1) << @as(std.math.Log2Int(i32), @intCast(@intFromEnum(feature)));
+}
+
+pub fn addFeatures(bits: *i32, spec: []const u8, separators: []const u8) void {
+    var it = std.mem.splitAny(u8, spec, separators);
+    while (it.next()) |token| {
+        const feature = featureByName(token) orelse break;
+        bits.* |= featureBit(feature);
+    }
+}
+
+pub fn featureString(alloc: std.mem.Allocator, bits: i32) []u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(alloc);
+
+    for (feature_specs) |spec| {
+        if ((bits & featureBit(spec.feature)) == 0) continue;
+        if (out.items.len != 0) out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, spec.name) catch unreachable;
+    }
+
+    return out.toOwnedSlice(alloc) catch unreachable;
 }
 
 pub fn supportsClient(cl: *const T.Client, feature: Feature) bool {
@@ -80,10 +129,38 @@ fn inferredFeatures(cl: *const T.Client) i32 {
     return features;
 }
 
+fn featureByName(name: []const u8) ?Feature {
+    for (feature_specs) |spec| {
+        if (std.ascii.eqlIgnoreCase(spec.name, name))
+            return spec.feature;
+    }
+    return null;
+}
+
 fn mask(features: []const Feature) i32 {
     var value: i32 = 0;
     for (features) |feature| value |= featureBit(feature);
     return value;
+}
+
+test "tty_features parses tmux-style feature lists into explicit bits" {
+    var features: i32 = 0;
+    addFeatures(&features, "bpaste,focus:RGB,title", ":,");
+
+    try std.testing.expectEqual(
+        mask(&.{ .bpaste, .focus, .rgb, .title }),
+        features,
+    );
+}
+
+test "tty_features renders enabled feature names in tmux order" {
+    const rendered = featureString(
+        std.testing.allocator,
+        mask(&.{ .@"256", .bpaste, .title }),
+    );
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("256,bpaste,title", rendered);
 }
 
 test "loaded reduced terminfo drives outer tty feature truth" {

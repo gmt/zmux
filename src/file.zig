@@ -26,9 +26,12 @@ const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const file_path_mod = @import("file-path.zig");
+const file_read_mod = @import("file-read.zig");
 const file_write_mod = @import("file-write.zig");
 
 pub const ResolvedPath = file_path_mod.ResolvedPath;
+pub const ReadDoneCallback = file_read_mod.ReadDoneCallback;
+pub const RemoteReadStart = file_read_mod.StartResult;
 
 const max_stream_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(i32);
 
@@ -43,6 +46,10 @@ pub fn formatPathFromClient(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: 
 
 pub fn resolvePath(client: ?*T.Client, raw_path: []const u8) ResolvedPath {
     return file_path_mod.resolve_path(client, raw_path);
+}
+
+pub fn shouldUseRemotePathIO(client: ?*T.Client) bool {
+    return client != null and client.?.peer != null and (client.?.flags & T.CLIENT_ATTACHED) == 0;
 }
 
 pub fn strerror(errno_value: c_int) []const u8 {
@@ -159,12 +166,36 @@ pub fn writeResolvedPath(
     return .normal;
 }
 
+pub fn startRemoteRead(client: *T.Client, path: []const u8, callback: ReadDoneCallback, cbdata: ?*anyopaque) RemoteReadStart {
+    return file_read_mod.start_remote_read(client, path, callback, cbdata);
+}
+
+pub fn handleReadData(imsg_msg: *c.imsg.imsg) void {
+    file_read_mod.handle_read_data(imsg_msg);
+}
+
+pub fn handleReadDone(imsg_msg: *c.imsg.imsg) void {
+    file_read_mod.handle_read_done(imsg_msg);
+}
+
 pub fn handleWriteReady(imsg_msg: *c.imsg.imsg) void {
     file_write_mod.handle_write_ready(imsg_msg);
 }
 
+pub fn failPendingReadsForClient(client: *T.Client) void {
+    file_read_mod.fail_pending_reads_for_client(client);
+}
+
 pub fn failPendingWritesForClient(client: *T.Client) void {
     file_write_mod.fail_pending_writes_for_client(client);
+}
+
+pub fn clientHandleReadOpen(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_streams: bool, close_received: bool) void {
+    file_read_mod.client_handle_read_open(peer, imsg_msg, allow_streams, close_received);
+}
+
+pub fn clientHandleReadCancel(imsg_msg: *c.imsg.imsg) void {
+    file_read_mod.client_handle_read_cancel(imsg_msg);
 }
 
 pub fn clientHandleWriteOpen(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_streams: bool, close_received: bool) void {
@@ -180,10 +211,12 @@ pub fn clientHandleWriteClose(imsg_msg: *c.imsg.imsg) void {
 }
 
 pub fn resetForTests() void {
+    file_read_mod.reset_for_tests();
     file_write_mod.reset_for_tests();
 }
 
 pub fn clientCleanup() void {
+    file_read_mod.client_cleanup();
     file_write_mod.client_cleanup();
 }
 

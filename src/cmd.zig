@@ -79,6 +79,7 @@ const cmd_list_buffers = @import("cmd-list-buffers.zig");
 const cmd_display_message = @import("cmd-display-message.zig");
 const cmd_command_prompt = @import("cmd-command-prompt.zig");
 const cmd_confirm_before = @import("cmd-confirm-before.zig");
+const cmd_show_prompt_history = @import("cmd-show-prompt-history.zig");
 const cmd_if_shell = @import("cmd-if-shell.zig");
 const cmd_run_shell = @import("cmd-run-shell.zig");
 const cmd_start_server = @import("cmd-start-server.zig");
@@ -139,6 +140,8 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_display_message.entry,
     &cmd_command_prompt.entry,
     &cmd_confirm_before.entry,
+    &cmd_show_prompt_history.entry,
+    &cmd_show_prompt_history.entry_clear,
     &cmd_if_shell.entry,
     &cmd_run_shell.entry,
     &cmd_start_server.entry,

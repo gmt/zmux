@@ -521,6 +521,29 @@ updates, no streaming job buffers, no `file.c`-backed print or read runtime
 under those jobs, and the broader status/message producer family plus redraw
 matrix follow-through are still open.
 
+The next checkpoint down is now also landed in reduced targeted
+`refresh-client` redraw form:
+
+- `src/server.zig` now exposes a shared `server_status_client` invalidation
+  helper beside the existing session and window status seams instead of
+  forcing single-client status refreshes back into command-local flag writes
+- `src/cmd-refresh-client.zig` now routes plain refresh and `-S` through the
+  shared full-redraw and status-only invalidation seams for the target client
+  instead of a current-client-only local redraw shortcut
+- `src/cmd-refresh-client.zig` now keeps the supported control-client `-C`
+  path explicit and narrow: simple `XxY` or `X,Y` sizes resize the target
+  control client through the shared tty/runtime path, while pane offsets,
+  subscriptions, clipboard queries, flag twiddles, reports, and window-
+  specific control sizes stay honestly unsupported until the lower runtime
+  exists
+
+That landing narrows another honest part of the broader redraw/runtime gap:
+single-client full redraw and status-only refresh now sit on the same shared
+invalidations as the wider runtime instead of reopening a command-local path.
+Keep it partial because tmux's pan-mode, subscription, clipboard, report, and
+per-control-window size surface are still missing, and the redraw matrix is
+still far smaller than tmux's full per-pane/status/overlay machinery.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:

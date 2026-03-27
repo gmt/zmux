@@ -802,12 +802,7 @@ fn server_client_draw(cl: *T.Client, redraw_flags: u64) void {
 
     if (payload) |bytes| {
         if (cl.peer) |peer| {
-            var buf: std.ArrayList(u8) = .{};
-            defer buf.deinit(xm.allocator);
-            const stream: i32 = 1;
-            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, bytes) catch unreachable;
-            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+            _ = file_mod.sendPeerStream(peer, 1, bytes);
         }
     }
 

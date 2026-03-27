@@ -52,11 +52,8 @@ const RunShellState = struct {
     cwd: []u8,
     target_pane_id: ?u32 = null,
     timer_event: ?*c.libevent.event = null,
-    completion_event: ?*c.libevent.event = null,
+    async_shell: ?*job_mod.AsyncShell = null,
     job: ?*job_mod.Job = null,
-    pipe_read: std.posix.fd_t = -1,
-    pipe_write: std.posix.fd_t = -1,
-    thread: ?std.Thread = null,
     output: std.ArrayList(u8) = .{},
     show_stderr: bool = false,
     spawn_failed: bool = false,
@@ -65,17 +62,11 @@ const RunShellState = struct {
 };
 
 fn freeState(state: *RunShellState) void {
-    if (state.thread) |thread| thread.join();
     if (state.timer_event) |ev| {
         _ = c.libevent.event_del(ev);
         c.libevent.event_free(ev);
     }
-    if (state.completion_event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-    }
-    if (state.pipe_read >= 0) std.posix.close(state.pipe_read);
-    if (state.pipe_write >= 0) std.posix.close(state.pipe_write);
+    if (state.async_shell) |async_shell| job_mod.async_shell_free(async_shell);
     if (state.job) |job| job_mod.job_free(job);
     if (state.shell_command) |text| xm.allocator.free(text);
     if (state.command_text) |text| xm.allocator.free(text);
@@ -313,50 +304,19 @@ fn completeShellCommand(state: *RunShellState) void {
     freeState(state);
 }
 
-fn notifyCompletion(state: *RunShellState) void {
-    if (state.pipe_write < 0) return;
-    _ = std.posix.write(state.pipe_write, &[1]u8{1}) catch {};
-    std.posix.close(state.pipe_write);
-    state.pipe_write = -1;
-}
-
-fn shellThreadMain(state: *RunShellState) void {
-    defer notifyCompletion(state);
-
-    var result = job_mod.job_run_shell_command(state.job, state.shell_command.?, .{
-        .cwd = state.cwd,
-        .merge_stderr = state.show_stderr,
-        .capture_output = true,
-    });
-    state.output = result.output;
-    result.output = .{};
-    state.spawn_failed = result.spawn_failed;
-    state.retcode = result.retcode;
-    state.signal_code = result.signal_code;
-}
-
-fn armCompletionEvent(state: *RunShellState) bool {
-    const base = proc_mod.libevent orelse return false;
-    const pipe_fds = std.posix.pipe() catch return false;
-    state.pipe_read = pipe_fds[0];
-    state.pipe_write = pipe_fds[1];
-
-    state.completion_event = c.libevent.event_new(
-        base,
-        state.pipe_read,
-        @intCast(c.libevent.EV_READ),
-        cmd_run_shell_event_cb,
+fn startShellCommand(state: *RunShellState) bool {
+    state.async_shell = job_mod.async_shell_start(
+        state.job,
+        state.shell_command.?,
+        .{
+            .cwd = state.cwd,
+            .merge_stderr = state.show_stderr,
+            .capture_output = true,
+        },
+        cmd_run_shell_async_complete,
         state,
     );
-    if (state.completion_event == null) return false;
-    if (c.libevent.event_add(state.completion_event.?, null) != 0) return false;
-    return true;
-}
-
-fn startShellCommand(state: *RunShellState) bool {
-    if (!armCompletionEvent(state)) return false;
-    state.thread = std.Thread.spawn(.{}, shellThreadMain, .{state}) catch return false;
-    return true;
+    return state.async_shell != null;
 }
 
 fn parseDelay(text: []const u8) ?f64 {
@@ -423,23 +383,13 @@ export fn cmd_run_shell_timer_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque)
     }
 }
 
-export fn cmd_run_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {
-    _ = _events;
+fn cmd_run_shell_async_complete(async_shell: *job_mod.AsyncShell, arg: ?*anyopaque) void {
     const state: *RunShellState = @ptrCast(@alignCast(arg orelse return));
-
-    var discard: [16]u8 = undefined;
-    _ = std.posix.read(fd, &discard) catch {};
-
-    if (state.completion_event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-        state.completion_event = null;
-    }
-    if (state.pipe_read >= 0) {
-        std.posix.close(state.pipe_read);
-        state.pipe_read = -1;
-    }
-
+    state.output = async_shell.result.output;
+    async_shell.result.output = .{};
+    state.spawn_failed = async_shell.result.spawn_failed;
+    state.retcode = async_shell.result.retcode;
+    state.signal_code = async_shell.result.signal_code;
     completeShellCommand(state);
 }
 

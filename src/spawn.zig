@@ -82,7 +82,6 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
     }
 
     if (s.curw == null) s.curw = wl;
-    sess.session_group_synchronize_from(s);
 
     return wl;
 }

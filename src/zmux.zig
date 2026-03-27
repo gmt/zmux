@@ -37,6 +37,8 @@ const cfg_mod = @import("cfg.zig");
 const os_mod = @import("os/linux.zig");
 const c = @import("c.zig");
 
+pub const tty_acs = @import("tty-acs.zig");
+
 // ── Usage ────────────────────────────────────────────────────────────────
 
 fn usage(to_stderr: bool) void {

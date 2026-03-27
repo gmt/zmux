@@ -26,6 +26,7 @@ const cmd_find = @import("cmd-find.zig");
 const paste_mod = @import("paste.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -136,29 +137,10 @@ fn parse_bound(raw: ?[]const u8, sy: u32, is_start: bool, item: *cmdq.CmdqItem) 
 }
 
 fn render_grid_line(gd: *T.Grid, row: u32, keep_spaces: bool, escape_sequences: bool) []u8 {
-    if (row >= gd.linedata.len) return xm.xstrdup("");
-    const used = if (keep_spaces) gd.sx else grid_mod.line_length(gd, row);
-    const raw = xm.allocator.alloc(u8, used) catch unreachable;
-    defer xm.allocator.free(raw);
-
-    for (0..used) |idx| {
-        raw[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
-    }
-
-    if (!escape_sequences) return xm.allocator.dupe(u8, raw[0..used]) catch unreachable;
-
-    var escaped: std.ArrayList(u8) = .{};
-    defer escaped.deinit(xm.allocator);
-    for (raw[0..used]) |ch| {
-        if ((ch >= ' ' and ch <= '~') and ch != '\\') {
-            escaped.append(xm.allocator, ch) catch unreachable;
-        } else {
-            const tmp = std.fmt.allocPrint(xm.allocator, "\\{o:0>3}", .{ch}) catch unreachable;
-            defer xm.allocator.free(tmp);
-            escaped.appendSlice(xm.allocator, tmp) catch unreachable;
-        }
-    }
-    return escaped.toOwnedSlice(xm.allocator) catch unreachable;
+    return grid_mod.string_cells(gd, row, gd.sx, .{
+        .trim_trailing_spaces = !keep_spaces,
+        .escape_sequences = escape_sequences,
+    });
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -314,4 +296,22 @@ test "capture-pane helper can target saved primary grid while alternate screen i
     const primary = capture_grid(wp.base.grid, "0", "2", false, false, false, &item).?;
     defer xm.allocator.free(primary);
     try std.testing.expectEqualStrings("main\n\n\n", primary);
+}
+
+test "capture-pane helper preserves combined and wide utf8 grid payloads" {
+    const screen = screen_mod.screen_init(8, 1, 0);
+    defer {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = screen };
+    screen_write.putn(&ctx, "e\xcc\x81🙂");
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    const captured = capture_grid(screen.grid, "0", "0", false, false, false, &item).?;
+    defer xm.allocator.free(captured);
+
+    try std.testing.expectEqualStrings("é🙂\n", captured);
 }

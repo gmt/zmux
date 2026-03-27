@@ -1097,6 +1097,8 @@ pub const Client = struct {
     escape_timer: ?*c.libevent.event = null,
     click_timer: ?*c.libevent.event = null,
     message_timer: ?*c.libevent.event = null,
+    display_panes_timer: ?*c.libevent.event = null,
+    display_panes_data: ?*anyopaque = null,
 
     flags: u64 = 0,
     session: ?*Session = null,

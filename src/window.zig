@@ -295,6 +295,11 @@ pub fn window_pane_index(w: *T.Window, wp: *T.WindowPane) ?usize {
     return null;
 }
 
+pub fn window_pane_at_index(w: *T.Window, idx: usize) ?*T.WindowPane {
+    if (idx >= w.panes.items.len) return null;
+    return w.panes.items[idx];
+}
+
 pub fn window_forget_pane_history(w: *T.Window, wp: *T.WindowPane) void {
     remove_last_pane_reference(w, wp);
 }

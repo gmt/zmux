@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
+const utf8_combined = @import("utf8-combined.zig");
 const xm = @import("xmalloc.zig");
 
 const WChar = c.posix_sys.wchar_t;
@@ -298,6 +299,30 @@ pub fn utf8_fromwc(wc: WChar, ud: *T.Utf8Data) T.Utf8State {
     if (utf8Width(ud, &width) != .done) return .@"error";
     ud.width = width;
     return .done;
+}
+
+pub fn utf8_has_zwj(ud: *const T.Utf8Data) bool {
+    return utf8_combined.utf8_has_zwj(ud);
+}
+
+pub fn utf8_is_zwj(ud: *const T.Utf8Data) bool {
+    return utf8_combined.utf8_is_zwj(ud);
+}
+
+pub fn utf8_is_vs(ud: *const T.Utf8Data) bool {
+    return utf8_combined.utf8_is_vs(ud);
+}
+
+pub fn utf8_is_hangul_filler(ud: *const T.Utf8Data) bool {
+    return utf8_combined.utf8_is_hangul_filler(ud);
+}
+
+pub fn utf8_should_combine(with: *const T.Utf8Data, add: *const T.Utf8Data) bool {
+    return utf8_combined.utf8_should_combine(with, add);
+}
+
+pub fn hanguljamo_check_state(previous: *const T.Utf8Data, ud: *const T.Utf8Data) T.HangulJamoState {
+    return utf8_combined.hanguljamo_check_state(previous, ud);
 }
 
 pub fn utf8_open(ud: *T.Utf8Data, ch: u8) T.Utf8State {

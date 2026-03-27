@@ -75,11 +75,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.has('e')) {
         wp.flags &= ~T.PANE_INPUTOFF;
+        server_fn.server_redraw_window_borders(wl.window);
         server_fn.server_status_window(wl.window);
         return .normal;
     }
     if (args.has('d')) {
         wp.flags |= T.PANE_INPUTOFF;
+        server_fn.server_redraw_window_borders(wl.window);
         server_fn.server_status_window(wl.window);
         return .normal;
     }
@@ -89,6 +91,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         defer xm.allocator.free(expanded);
 
         if (screen.screen_set_title(wp.screen, expanded)) {
+            server_fn.server_redraw_window_borders(wl.window);
             server_fn.server_status_window(wl.window);
             notify.notify_pane("pane-title-changed", wp);
         }
@@ -150,7 +153,8 @@ fn set_pane_style(item: *cmdq.CmdqItem, wp: *T.WindowPane, raw: []const u8) bool
 
     opts.options_set_string(wp.options, false, "window-style", raw);
     opts.options_set_string(wp.options, false, "window-active-style", raw);
-    wp.flags |= T.PANE_REDRAW;
+    wp.flags |= T.PANE_REDRAW | T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
+    server_fn.server_redraw_window_borders(wp.window);
     server_fn.server_status_window(wp.window);
     return true;
 }

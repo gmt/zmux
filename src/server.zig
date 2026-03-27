@@ -390,6 +390,15 @@ pub fn server_redraw_window(w: *T.Window) void {
     }
 }
 
+pub fn server_redraw_window_borders(w: *T.Window) void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        const s = cl.session orelse continue;
+        if (s.curw == null or s.curw.?.window != w) continue;
+        cl.flags |= T.CLIENT_REDRAWBORDERS;
+    }
+}
+
 pub fn server_status_session(s: *T.Session) void {
     for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
@@ -493,4 +502,57 @@ test "server status helpers mark attached clients for status-only redraw" {
     try std.testing.expect(client3.flags & T.CLIENT_REDRAWSTATUS == 0);
     try std.testing.expect(client1.flags & T.CLIENT_REDRAWWINDOW == 0);
     try std.testing.expect(client2.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
+test "server border redraw helper only marks attached clients viewing the target window" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const s1 = sess.session_create(null, "server-border-session-1", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-border-session-1") != null) sess.session_destroy(s1, false, "test");
+    const s2 = sess.session_create(null, "server-border-session-2", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-border-session-2") != null) sess.session_destroy(s2, false, "test");
+
+    const w1 = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const w2 = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl1 = sess.session_attach(s1, w1, -1, &cause).?;
+    const wl2 = sess.session_attach(s2, w2, -1, &cause).?;
+    s1.curw = wl1;
+    s2.curw = wl2;
+
+    const env1 = env_mod.environ_create();
+    defer env_mod.environ_free(env1);
+    const env2 = env_mod.environ_create();
+    defer env_mod.environ_free(env2);
+    const env3 = env_mod.environ_create();
+    defer env_mod.environ_free(env3);
+
+    var client1 = T.Client{ .environ = env1, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = T.CLIENT_ATTACHED };
+    var client2 = T.Client{ .environ = env2, .tty = undefined, .status = .{ .screen = undefined }, .session = s2, .flags = T.CLIENT_ATTACHED };
+    var client3 = T.Client{ .environ = env3, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = 0 };
+    client_registry.clients.append(xm.allocator, &client1) catch unreachable;
+    client_registry.clients.append(xm.allocator, &client2) catch unreachable;
+    client_registry.clients.append(xm.allocator, &client3) catch unreachable;
+
+    server_redraw_window_borders(w1);
+
+    try std.testing.expect(client1.flags & T.CLIENT_REDRAWBORDERS != 0);
+    try std.testing.expect(client2.flags & T.CLIENT_REDRAWBORDERS == 0);
+    try std.testing.expect(client3.flags & T.CLIENT_REDRAWBORDERS == 0);
 }

@@ -54,6 +54,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     win.window_set_name(wl.window, new_name);
     opts.options_set_number(wl.window.options, "automatic-rename", 0);
+    server_fn.server_redraw_window_borders(wl.window);
     server_fn.server_status_window(wl.window);
     notify.notify_window("window-renamed", wl.window);
     return .normal;

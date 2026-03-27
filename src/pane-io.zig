@@ -15,7 +15,7 @@
 // Written for zmux by Greg Turner. This file is new zmux runtime work rather
 // than a direct port of a single tmux source file.
 
-//! pane-io.zig – libevent PTY readers feeding pane grids.
+//! pane-io.zig – libevent PTY and pipe readers feeding pane grids.
 
 const std = @import("std");
 const T = @import("types.zig");
@@ -39,11 +39,32 @@ pub fn pane_io_start(wp: *T.WindowPane) void {
     if (wp.event) |ev| _ = c.libevent.event_add(ev, null);
 }
 
+pub fn pane_pipe_start(wp: *T.WindowPane) void {
+    if (wp.pipe_fd < 0 or wp.pipe_event != null) return;
+    const base = proc_mod.libevent orelse return;
+    wp.pipe_event = c.libevent.event_new(
+        base,
+        wp.pipe_fd,
+        @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
+        pane_pipe_read_cb,
+        wp,
+    );
+    if (wp.pipe_event) |ev| _ = c.libevent.event_add(ev, null);
+}
+
 pub fn pane_io_stop(wp: *T.WindowPane) void {
     if (wp.event) |ev| {
         _ = c.libevent.event_del(ev);
         c.libevent.event_free(ev);
         wp.event = null;
+    }
+}
+
+fn pane_pipe_stop(wp: *T.WindowPane) void {
+    if (wp.pipe_event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        wp.pipe_event = null;
     }
 }
 
@@ -77,11 +98,46 @@ export fn pane_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
     }
 }
 
+export fn pane_pipe_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
+    _ = fd;
+    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
+    pane_pipe_read_ready(wp);
+}
+
 pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
+    pipe_bytes(wp, bytes);
+    pane_io_display(wp, bytes);
+}
+
+pub fn pane_io_display(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len != 0)
         alerts.alerts_queue(wp.window, T.WINDOW_ACTIVITY);
-    pipe_bytes(wp, bytes);
     input_mod.input_parse_screen(wp, bytes);
+}
+
+pub fn pane_pipe_read_ready(wp: *T.WindowPane) void {
+    if (wp.pipe_fd < 0) return;
+
+    var buf: [4096]u8 = undefined;
+    var needs_redraw = false;
+    while (true) {
+        const n = std.posix.read(wp.pipe_fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => {
+                pane_pipe_close(wp);
+                return;
+            },
+        };
+        if (n == 0) {
+            pane_pipe_close(wp);
+            return;
+        }
+        pane_io_display(wp, buf[0..n]);
+        needs_redraw = true;
+    }
+
+    if (needs_redraw)
+        server_mod.server_redraw_window(wp.window);
 }
 
 fn pipe_bytes(wp: *T.WindowPane, bytes: []const u8) void {
@@ -90,18 +146,19 @@ fn pipe_bytes(wp: *T.WindowPane, bytes: []const u8) void {
     var rest = bytes;
     while (rest.len > 0) {
         const written = std.posix.write(wp.pipe_fd, rest) catch {
-            close_pipe(wp);
+            pane_pipe_close(wp);
             return;
         };
         if (written == 0) {
-            close_pipe(wp);
+            pane_pipe_close(wp);
             return;
         }
         rest = rest[written..];
     }
 }
 
-fn close_pipe(wp: *T.WindowPane) void {
+pub fn pane_pipe_close(wp: *T.WindowPane) void {
+    pane_pipe_stop(wp);
     if (wp.pipe_fd >= 0) {
         std.posix.close(wp.pipe_fd);
         wp.pipe_fd = -1;
@@ -109,6 +166,7 @@ fn close_pipe(wp: *T.WindowPane) void {
     if (wp.pipe_pid > 0) {
         _ = std.c.kill(wp.pipe_pid, std.posix.SIG.HUP);
         _ = std.c.kill(wp.pipe_pid, std.posix.SIG.TERM);
+        _ = std.posix.waitpid(wp.pipe_pid, 0);
         wp.pipe_pid = -1;
     }
 }
@@ -209,4 +267,51 @@ test "pane_io_feed mirrors raw bytes into pane pipe fd" {
     try std.testing.expectEqualStrings("abc\r\n", buf[0..n]);
     std.posix.close(pipe_fds[1]);
     wp.pipe_fd = -1;
+}
+
+test "pane_io_display renders bytes without mirroring them into the pipe fd" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.pipe_fd = pipe_fds[1];
+    defer {
+        std.posix.close(pipe_fds[1]);
+        wp.pipe_fd = -1;
+    }
+
+    const flags = std.c.fcntl(pipe_fds[0], std.posix.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(flags >= 0);
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(pipe_fds[0], std.posix.F.SETFL, flags | O_NONBLOCK);
+
+    pane_io_display(wp, "xyz");
+
+    try std.testing.expectEqual(@as(u8, 'x'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'z'), grid.ascii_at(wp.base.grid, 0, 2));
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectError(error.WouldBlock, std.posix.read(pipe_fds[0], &buf));
 }

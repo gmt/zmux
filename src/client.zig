@@ -235,6 +235,11 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             }
             file_mod.clientHandleWriteData(imsg_msg);
         },
+        .read_open => {
+            const peer = client_peer orelse return;
+            file_mod.clientHandleReadOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
+        },
+        .read_cancel => file_mod.clientHandleReadCancel(imsg_msg),
         .write_open => {
             const peer = client_peer orelse return;
             file_mod.clientHandleWriteOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);

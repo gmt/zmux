@@ -381,6 +381,16 @@ pub fn server_redraw_session(s: *T.Session) void {
     }
 }
 
+pub fn server_redraw_session_group(s: *T.Session) void {
+    if (sess.session_group_contains(s)) |group| {
+        for (group.sessions.items) |member| {
+            server_redraw_session(member);
+        }
+        return;
+    }
+    server_redraw_session(s);
+}
+
 pub fn server_redraw_window(w: *T.Window) void {
     for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
@@ -418,6 +428,16 @@ pub fn server_status_session(s: *T.Session) void {
         if (cl.session != s) continue;
         cl.flags |= T.CLIENT_REDRAWSTATUS;
     }
+}
+
+pub fn server_status_session_group(s: *T.Session) void {
+    if (sess.session_group_contains(s)) |group| {
+        for (group.sessions.items) |member| {
+            server_status_session(member);
+        }
+        return;
+    }
+    server_status_session(s);
 }
 
 pub fn server_status_window(w: *T.Window) void {
@@ -515,6 +535,97 @@ test "server status helpers mark attached clients for status-only redraw" {
     try std.testing.expect(client3.flags & T.CLIENT_REDRAWSTATUS == 0);
     try std.testing.expect(client1.flags & T.CLIENT_REDRAWWINDOW == 0);
     try std.testing.expect(client2.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
+test "server session-group redraw and status helpers fan out across grouped sessions" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const leader = sess.session_create(null, "server-group-a", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-group-a") != null) sess.session_destroy(leader, false, "test");
+    const peer = sess.session_create(null, "server-group-b", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-group-b") != null) sess.session_destroy(peer, false, "test");
+    const outsider = sess.session_create(null, "server-group-c", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-group-c") != null) sess.session_destroy(outsider, false, "test");
+
+    const group = sess.session_group_new("server-group");
+    sess.session_group_add(group, leader);
+    sess.session_group_add(group, peer);
+
+    const shared_w = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const leader_wl = sess.session_attach(leader, shared_w, 0, &cause).?;
+    leader.curw = leader_wl;
+    sess.session_group_synchronize_from(leader);
+    peer.curw = sess.winlink_find_by_index(&peer.windows, leader_wl.idx).?;
+
+    const outsider_w = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    outsider.curw = sess.session_attach(outsider, outsider_w, 0, &cause).?;
+
+    var leader_client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = leader,
+    };
+    defer env_mod.environ_free(leader_client.environ);
+    leader_client.tty = .{ .client = &leader_client };
+
+    var peer_client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = peer,
+    };
+    defer env_mod.environ_free(peer_client.environ);
+    peer_client.tty = .{ .client = &peer_client };
+
+    var outsider_client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = outsider,
+    };
+    defer env_mod.environ_free(outsider_client.environ);
+    outsider_client.tty = .{ .client = &outsider_client };
+
+    client_registry.add(&leader_client);
+    client_registry.add(&peer_client);
+    client_registry.add(&outsider_client);
+
+    server_redraw_session_group(leader);
+    try std.testing.expect(leader_client.flags & T.CLIENT_REDRAW != 0);
+    try std.testing.expect(peer_client.flags & T.CLIENT_REDRAW != 0);
+    try std.testing.expect(outsider_client.flags & T.CLIENT_REDRAW == 0);
+
+    leader_client.flags = T.CLIENT_ATTACHED;
+    peer_client.flags = T.CLIENT_ATTACHED;
+    outsider_client.flags = T.CLIENT_ATTACHED;
+
+    server_status_session_group(leader);
+    try std.testing.expect(leader_client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(outsider_client.flags & T.CLIENT_REDRAWSTATUS == 0);
+    try std.testing.expect(leader_client.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWWINDOW == 0);
 }
 
 test "server border redraw helper only marks attached clients viewing the target window" {

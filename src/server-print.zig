@@ -27,6 +27,7 @@ const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const utf8 = @import("utf8.zig");
 const window_mod = @import("window.zig");
+const window_mode_runtime = @import("window-mode-runtime.zig");
 const server = @import("server.zig");
 const xm = @import("xmalloc.zig");
 
@@ -99,12 +100,11 @@ pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) b
 pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
     if (window_mod.window_pane_mode(wp)) |wme| {
         if (wme.mode == &server_print_view_mode) {
-            _ = window_mod.window_pane_pop_mode(wp, wme);
+            _ = window_mode_runtime.popMode(wp, wme);
         }
     }
     screen_mod.screen_leave_alternate(wp, true);
-    wp.flags |= T.PANE_REDRAW;
-    server.server_redraw_pane(wp);
+    window_mode_runtime.noteModeChange(wp);
 }
 
 fn ensure_view_mode(wp: *T.WindowPane) bool {
@@ -113,7 +113,7 @@ fn ensure_view_mode(wp: *T.WindowPane) bool {
     }
 
     screen_mod.screen_enter_alternate(wp, true);
-    _ = window_mod.window_pane_push_mode(wp, &server_print_view_mode, null, null);
+    _ = window_mode_runtime.pushMode(wp, &server_print_view_mode, null, null);
     return true;
 }
 
@@ -205,7 +205,12 @@ fn server_print_view_key(
     server_client_close_view_mode(wme.wp);
 }
 
+fn clearClientRedrawFlags(client: *T.Client) void {
+    client.flags &= ~@as(u64, T.CLIENT_REDRAW);
+}
+
 test "server_client_print appends parsed output in the shared view mode" {
+    const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
 
@@ -230,6 +235,7 @@ test "server_client_print appends parsed output in the shared view mode" {
         .options = undefined,
     };
     defer window.panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
 
     var pane = T.WindowPane{
         .id = 2,
@@ -262,6 +268,8 @@ test "server_client_print appends parsed output in the shared view mode" {
         .session = &session,
         .window = &window,
     };
+    try session.windows.put(0, &winlink);
+    try window.winlinks.append(xm.allocator, &winlink);
     session.curw = &winlink;
 
     var client = T.Client{
@@ -271,6 +279,11 @@ test "server_client_print appends parsed output in the shared view mode" {
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
+    client_registry.add(&client);
+    defer {
+        client_registry.remove(&client);
+        clearClientRedrawFlags(&client);
+    }
 
     server_client_print(&client, true, "alpha");
     server_client_print(&client, true, "beta");
@@ -278,6 +291,8 @@ test "server_client_print appends parsed output in the shared view mode" {
     try std.testing.expect(screen_mod.screen_alternate_active(&pane));
     try std.testing.expect(pane.flags & T.PANE_REDRAW != 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWBORDERS != 0);
 
     const first_row = try grid_row_string(pane.screen.grid, 0);
     defer xm.allocator.free(first_row);
@@ -285,6 +300,91 @@ test "server_client_print appends parsed output in the shared view mode" {
     defer xm.allocator.free(second_row);
     try std.testing.expectEqualStrings("alpha", first_row);
     try std.testing.expectEqualStrings("beta", second_row);
+}
+
+test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared runtime seam" {
+    const client_registry = @import("client-registry.zig");
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("server-print-close");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(10, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(10, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 11,
+        .name = window_name,
+        .sx = 10,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 12,
+        .window = &window,
+        .options = undefined,
+        .sx = 10,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 1,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    try session.windows.put(0, &winlink);
+    try window.winlinks.append(xm.allocator, &winlink);
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client_registry.add(&client);
+    defer client_registry.remove(&client);
+
+    try std.testing.expect(server_pane_view_data(&pane, "alpha", true));
+    clearClientRedrawFlags(&client);
+    pane.flags = 0;
+
+    server_client_close_view_mode(&pane);
+
+    try std.testing.expect(!screen_mod.screen_alternate_active(&pane));
+    try std.testing.expect(pane.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWBORDERS != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWPANES != 0);
 }
 
 fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {

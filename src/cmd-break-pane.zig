@@ -34,14 +34,6 @@ const BREAK_PANE_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('a')) {
-        cmdq.cmdq_error(item, "-a not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('b')) {
-        cmdq.cmdq_error(item, "-b not supported yet", .{});
-        return .@"error";
-    }
 
     var source: T.CmdFindState = .{};
     if (cmd_find.cmd_find_target(&source, item, args.get('s'), .pane, 0) != 0)
@@ -56,7 +48,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, T.CMD_FIND_WINDOW_INDEX) != 0)
         return .@"error";
     const dst_s = target.s orelse return .@"error";
-    const dst_idx: i32 = if (args.get('t') == null) -1 else target.idx;
+    var dst_idx: i32 = if (args.get('t') == null) -1 else target.idx;
+
+    const before = args.has('b');
+    if (args.has('a') or before) {
+        dst_idx = sess.winlink_shuffle_up(dst_s, target.wl orelse dst_s.curw, before);
+        if (dst_idx == -1) return .@"error";
+    }
 
     var result_wl: ?*T.Winlink = null;
     const result_wp = src_wp;
@@ -161,7 +159,7 @@ fn find_result_winlink(dst_s: *T.Session, w: *T.Window, explicit_idx: i32, exclu
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "break-pane",
     .alias = "breakp",
-    .usage = "[-dP] [-F format] [-n window-name] [-s src-pane] [-t dst-window]",
+    .usage = "[-abdP] [-F format] [-n window-name] [-s src-pane] [-t dst-window]",
     .template = "abdPF:n:s:t:",
     .lower = 0,
     .upper = 0,
@@ -303,12 +301,115 @@ test "break-pane location rendering uses session window and pane indexes" {
     try std.testing.expectEqualStrings("break-print:0.1", rendered);
 }
 
-test "break-pane rejects unsupported shuffle flags" {
+test "break-pane -a inserts after the target window when splitting a pane out" {
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "break-after", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-after") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    var split_ctx: T.SpawnContext = .{ .s = s, .wl = src_wl, .flags = T.SPAWN_EMPTY };
+    const moved = spawn.spawn_pane(&split_ctx, &cause).?;
+    var dst0_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl0 = spawn.spawn_window(&dst0_ctx, &cause).?;
+    var dst1_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl1 = spawn.spawn_window(&dst1_ctx, &cause).?;
+
+    const source_window = src_wl.window;
+    const existing0 = dst_wl0.window;
+    const existing1 = dst_wl1.window;
+
+    const pane_target = xm.xasprintf("%{d}", .{moved.id});
+    defer xm.allocator.free(pane_target);
+
     var parse_cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "break-pane", "-a" }, null, &parse_cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "break-pane", "-a", "-s", pane_target, "-t", "break-after:1" }, null, &parse_cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), source_window.panes.items.len);
+    try std.testing.expectEqual(source_window, sess.winlink_find_by_index(&s.windows, 0).?.window);
+    try std.testing.expectEqual(existing0, sess.winlink_find_by_index(&s.windows, 1).?.window);
+
+    const inserted = sess.winlink_find_by_index(&s.windows, 2).?;
+    try std.testing.expectEqual(moved, inserted.window.active.?);
+    try std.testing.expectEqual(inserted.window, moved.window);
+    try std.testing.expectEqual(existing1, sess.winlink_find_by_index(&s.windows, 3).?.window);
+}
+
+test "break-pane -b inserts before the target window when moving a single-pane window" {
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const src = sess.session_create(null, "break-before-src", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-before-src") != null) sess.session_destroy(src, false, "test");
+    const dst = sess.session_create(null, "break-before-dst", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-before-dst") != null) sess.session_destroy(dst, false, "test");
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = src, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    var dst0_ctx: T.SpawnContext = .{ .s = dst, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl0 = spawn.spawn_window(&dst0_ctx, &cause).?;
+    var dst1_ctx: T.SpawnContext = .{ .s = dst, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl1 = spawn.spawn_window(&dst1_ctx, &cause).?;
+    src.curw = src_wl;
+
+    const moved_window = src_wl.window;
+    const existing0 = dst_wl0.window;
+    const existing1 = dst_wl1.window;
+
+    const pane_target = xm.xasprintf("%{d}", .{src_wl.window.active.?.id});
+    defer xm.allocator.free(pane_target);
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "break-pane", "-b", "-s", pane_target, "-t", "break-before-dst:1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expect(sess.session_find("break-before-src") == null);
+    try std.testing.expectEqual(existing0, sess.winlink_find_by_index(&dst.windows, 0).?.window);
+    try std.testing.expectEqual(moved_window, sess.winlink_find_by_index(&dst.windows, 1).?.window);
+    try std.testing.expectEqual(existing1, sess.winlink_find_by_index(&dst.windows, 2).?.window);
 }

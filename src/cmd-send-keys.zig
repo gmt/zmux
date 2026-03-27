@@ -36,6 +36,7 @@ const screen_mod = @import("screen.zig");
 const server_fn = @import("server-fn.zig");
 const session_mod = @import("session.zig");
 const colour_mod = @import("colour.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -168,6 +169,16 @@ fn inject_mouse(item: *cmdq.CmdqItem, default_session: *T.Session, default_wl: *
 }
 
 fn resolve_mouse_target(mouse: *const T.MouseEvent, default_session: *T.Session, default_wl: *T.Winlink) ?MouseTarget {
+    var mouse_session: ?*T.Session = null;
+    var mouse_wl: ?*T.Winlink = null;
+    if (mouse_runtime.cmd_mouse_pane(mouse, &mouse_session, &mouse_wl)) |wp| {
+        return .{
+            .s = mouse_session.?,
+            .wl = mouse_wl.?,
+            .wp = wp,
+        };
+    }
+
     if (!mouse.valid or mouse.wp == -1) return null;
 
     const pane_id: u32 = std.math.cast(u32, mouse.wp) orelse return null;

@@ -103,8 +103,12 @@ const modifier_templates = [_]ModifierTemplate{
 };
 
 pub fn input_key_get(bytes: []const u8, event: *T.key_event) ?usize {
+    return input_key_get_client(null, bytes, event);
+}
+
+pub fn input_key_get_client(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len == 0) return null;
-    if (bytes[0] == 0x1b) return parse_escape(bytes, event);
+    if (bytes[0] == 0x1b) return parse_escape(client, bytes, event);
     return parse_plain(bytes, event);
 }
 
@@ -199,9 +203,9 @@ pub fn input_key_encode_screen(screen: *const T.Screen, key_in: T.key_code, buf:
     }
 }
 
-fn parse_escape(bytes: []const u8, event: *T.key_event) ?usize {
+fn parse_escape(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len == 1) return null;
-    if (bytes[1] == '[') return parse_csi(bytes, event);
+    if (bytes[1] == '[') return parse_csi(client, bytes, event);
     if (bytes[1] == 'O') return parse_ss3(bytes, event);
 
     var inner: T.key_event = .{};
@@ -243,8 +247,11 @@ fn parse_plain(bytes: []const u8, event: *T.key_event) ?usize {
     }
 }
 
-fn parse_csi(bytes: []const u8, event: *T.key_event) ?usize {
+fn parse_csi(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len < 3) return null;
+    if (bytes[2] == 'M' or bytes[2] == '<') {
+        return parse_mouse(if (client) |cl| &cl.tty else null, bytes, event);
+    }
 
     const final = bytes[2];
     switch (final) {
@@ -290,6 +297,92 @@ fn parse_ss3(bytes: []const u8, event: *T.key_event) ?usize {
         else => T.KEYC_UNKNOWN,
     };
     return fill_event(event, key, bytes[0..3]);
+}
+
+fn parse_mouse(tty: ?*T.Tty, bytes: []const u8, event: *T.key_event) ?usize {
+    if (bytes.len < 3 or bytes[0] != 0x1b or bytes[1] != '[') return null;
+
+    var idx: usize = 3;
+    var x: u32 = 0;
+    var y: u32 = 0;
+    var b: u32 = 0;
+    var sgr_b: u32 = 0;
+    var sgr_type: u8 = ' ';
+
+    if (bytes[2] == 'M') {
+        if (bytes.len < idx + 3) return null;
+        b = bytes[idx];
+        x = bytes[idx + 1];
+        y = bytes[idx + 2];
+        idx += 3;
+
+        if (b < 0x20 or x < 0x21 or y < 0x21) return ignore_event(event, idx);
+        b -= 0x20;
+        x -= 0x21;
+        y -= 0x21;
+    } else if (bytes[2] == '<') {
+        sgr_b = parse_mouse_number(bytes, &idx) orelse return null;
+        if (idx >= bytes.len or bytes[idx] != ';') return ignore_event(event, idx);
+        idx += 1;
+
+        x = parse_mouse_number(bytes, &idx) orelse return null;
+        if (idx >= bytes.len or bytes[idx] != ';') return ignore_event(event, idx);
+        idx += 1;
+
+        y = parse_mouse_number(bytes, &idx) orelse return null;
+        if (idx >= bytes.len) return null;
+        sgr_type = bytes[idx];
+        idx += 1;
+
+        if (sgr_type != 'M' and sgr_type != 'm') return ignore_event(event, idx);
+        if (x < 1 or y < 1) return ignore_event(event, idx);
+
+        x -= 1;
+        y -= 1;
+        b = sgr_b;
+        if (sgr_type == 'm') b = 3;
+        if (sgr_type == 'm' and T.mouseWheel(sgr_b)) return ignore_event(event, idx);
+    } else return null;
+
+    const last_x = if (tty) |t| t.mouse_last_x else 0;
+    const last_y = if (tty) |t| t.mouse_last_y else 0;
+    const last_b = if (tty) |t| t.mouse_last_b else 0;
+    if (tty) |t| {
+        t.mouse_last_x = x;
+        t.mouse_last_y = y;
+        t.mouse_last_b = b;
+    }
+
+    _ = fill_event(event, T.KEYC_MOUSE, bytes[0..idx]);
+    event.m = .{
+        .x = x,
+        .y = y,
+        .b = b,
+        .lx = last_x,
+        .ly = last_y,
+        .lb = last_b,
+        .sgr_type = sgr_type,
+        .sgr_b = sgr_b,
+    };
+    return idx;
+}
+
+fn parse_mouse_number(bytes: []const u8, idx: *usize) ?u32 {
+    var value: u32 = 0;
+    var saw_digit = false;
+    while (idx.* < bytes.len) : (idx.* += 1) {
+        const ch = bytes[idx.*];
+        if (ch < '0' or ch > '9') break;
+        saw_digit = true;
+        value = value * 10 + (ch - '0');
+    }
+    if (!saw_digit) return null;
+    return value;
+}
+
+fn ignore_event(event: *T.key_event, consumed: usize) usize {
+    event.* = .{};
+    return consumed;
 }
 
 fn fill_event(event: *T.key_event, key: T.key_code, bytes: []const u8) usize {
@@ -677,6 +770,42 @@ test "input_key_get handles meta and utf8 input" {
 
     try std.testing.expectEqual(@as(usize, 2), input_key_get("é", &event).?);
     try std.testing.expectEqual(key_string.key_string_lookup_string("é"), event.key);
+}
+
+test "input_key_get_client decodes mouse sequences and tracks the previous state" {
+    const env_mod = @import("environ.zig");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+
+    var event: T.key_event = .{};
+    const down = "\x1b[<0;3;4M";
+    try std.testing.expectEqual(down.len, input_key_get_client(&client, down, &event).?);
+    try std.testing.expectEqual(T.KEYC_MOUSE, event.key);
+    try std.testing.expectEqual(@as(u32, 2), event.m.x);
+    try std.testing.expectEqual(@as(u32, 3), event.m.y);
+    try std.testing.expectEqual(@as(u32, 0), event.m.b);
+    try std.testing.expectEqual(@as(u32, 0), event.m.lx);
+    try std.testing.expectEqual(@as(u32, 0), event.m.ly);
+    try std.testing.expectEqual(@as(u32, 0), event.m.lb);
+
+    var release: T.key_event = .{};
+    const up = "\x1b[<0;5;6m";
+    try std.testing.expectEqual(up.len, input_key_get_client(&client, up, &release).?);
+    try std.testing.expectEqual(T.KEYC_MOUSE, release.key);
+    try std.testing.expectEqual(@as(u32, 4), release.m.x);
+    try std.testing.expectEqual(@as(u32, 5), release.m.y);
+    try std.testing.expectEqual(@as(u32, 2), release.m.lx);
+    try std.testing.expectEqual(@as(u32, 3), release.m.ly);
+    try std.testing.expectEqual(@as(u32, 0), release.m.lb);
+    try std.testing.expectEqual(@as(u32, 3), release.m.b);
+    try std.testing.expectEqual(@as(u32, 0), release.m.sgr_b);
+    try std.testing.expectEqual(@as(u8, 'm'), release.m.sgr_type);
 }
 
 test "input_key_encode matches supported VT-style special keys" {

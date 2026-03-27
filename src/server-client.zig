@@ -401,9 +401,10 @@ fn server_client_process_stdin_pending(cl: *T.Client) void {
     var consumed: usize = 0;
     while (consumed < cl.stdin_pending.items.len) {
         var event: T.key_event = .{};
-        const used = input_keys.input_key_get(cl.stdin_pending.items[consumed..], &event) orelse break;
+        const used = input_keys.input_key_get_client(cl, cl.stdin_pending.items[consumed..], &event) orelse break;
         if (used == 0) break;
         consumed += used;
+        if (event.key == T.KEYC_NONE and event.len == 0) continue;
         _ = server_fn.server_client_handle_key(cl, &event);
     }
 

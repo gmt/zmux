@@ -163,36 +163,13 @@ fn shellThreadMain(state: *IfShellState) void {
         }
     }
 
-    var child = std.process.Child.init(&.{ "/bin/sh", "-c", state.shell_command }, xm.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.cwd = state.cwd;
+    var result = job_mod.job_run_shell_command(state.job, state.shell_command, .{
+        .cwd = state.cwd,
+    });
+    defer result.deinit();
 
-    child.spawn() catch {
-        state.spawn_failed = true;
-        if (state.job) |job| job_mod.job_finished(job, 1);
-        return;
-    };
-    if (state.job) |job| job_mod.job_started(job, @intCast(child.id), -1);
-
-    const term = child.wait() catch {
-        state.success = false;
-        if (state.job) |job| job_mod.job_finished(job, 1);
-        return;
-    };
-    state.success = switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-    if (state.job) |job| {
-        const status = switch (term) {
-            .Exited => |code| @as(i32, @intCast(code)),
-            .Signal => |signal_code| @as(i32, @intCast(signal_code)) + 128,
-            else => 1,
-        };
-        job_mod.job_finished(job, status);
-    }
+    state.spawn_failed = result.spawn_failed;
+    state.success = !result.spawn_failed and result.retcode == 0;
 }
 
 export fn cmd_if_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {

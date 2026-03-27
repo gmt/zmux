@@ -74,6 +74,22 @@ pub fn status_message_set_text(
     status_message_set_owned(client, delay, ignore_styles, ignore_keys, no_freeze, xm.xstrdup(text));
 }
 
+pub fn status_message_set_text_optional(
+    client: ?*T.Client,
+    delay: i32,
+    ignore_styles: bool,
+    ignore_keys: bool,
+    no_freeze: bool,
+    text: []const u8,
+) void {
+    if (client) |cl| {
+        status_message_set_text(cl, delay, ignore_styles, ignore_keys, no_freeze, text);
+        return;
+    }
+
+    server.server_add_message("message: {s}", .{text});
+}
+
 pub fn status_message_set_owned(
     client: *T.Client,
     delay: i32,
@@ -345,6 +361,19 @@ test "present_client_message routes control clients through the shared %message 
     const stream: *const i32 = @ptrCast(@alignCast(payload.ptr));
     try std.testing.expectEqual(@as(i32, 1), stream.*);
     try std.testing.expectEqualStrings("%message parse error\n", payload[@sizeOf(i32)..]);
+}
+
+test "optional status message helper logs null-client messages without reopening print fallbacks" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    status_message_set_text_optional(null, -1, true, false, false, "logged only");
+
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("message: logged only", server.message_log.items[0].msg);
 }
 
 fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {

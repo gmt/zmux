@@ -161,10 +161,15 @@ fn inject_mouse(item: *cmdq.CmdqItem, default_session: *T.Session, default_wl: *
             if (tc) |target_client|
                 mode_key(wme, target_client, target.s, target.wl, event.m.key & ~T.KEYC_MASK_FLAGS, &event.m);
         }
+        return .normal;
     }
 
-    // The reduced runtime can route queued mouse events to active pane modes,
-    // but it still lacks tmux's coordinate-rich pane-input mouse encoder.
+    if (target.wp.fd < 0 or target.wp.flags & T.PANE_INPUTOFF != 0) return .normal;
+
+    var mouse_buf: [40]u8 = undefined;
+    const bytes = input_keys.input_key_mouse_pane(target.wp, &event.m, &mouse_buf);
+    if (bytes.len == 0) return .normal;
+    pane_input.write_all(target.wp.fd, bytes, item) catch return .@"error";
     return .normal;
 }
 
@@ -1311,6 +1316,47 @@ test "send-keys -M routes mouse events through active mode keys" {
     try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
     std.posix.close(pipe_fds[1]);
     setup.wp.fd = -1;
+}
+
+test "send-keys -M encodes pane mouse bytes when no mode owns them" {
+    const setup = try test_session_with_empty_pane("send-mode-pane-bytes");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-mode-pane-bytes", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    defer {
+        if (setup.wp.fd >= 0) {
+            std.posix.close(setup.wp.fd);
+            setup.wp.fd = -1;
+        }
+    }
+    setup.wp.base.mode |= T.MODE_MOUSE_ALL | T.MODE_MOUSE_SGR;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-M", "-t", "send-mode-pane-bytes:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = null,
+        .cmdlist = &list,
+        .event = .{
+            .m = .{
+                .valid = true,
+                .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+                .wp = @intCast(setup.wp.id),
+                .x = 1,
+                .y = 1,
+                .b = T.MOUSE_BUTTON_1,
+                .sgr_type = 'M',
+                .sgr_b = T.MOUSE_BUTTON_1,
+            },
+        },
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var got: [64]u8 = undefined;
+    const nread = try std.posix.read(pipe_fds[0], &got);
+    try std.testing.expectEqualStrings("\x1b[<0;2;2M", got[0..nread]);
 }
 
 test "send-keys -X uses the active mode command and repeat prefix" {

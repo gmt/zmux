@@ -43,17 +43,26 @@ pub const PROMPT_QUOTENEXT: u32 = 0x40;
 pub const PROMPT_BSPACE_EXIT: u32 = 0x80;
 
 pub const PromptInputCb = *const fn (*T.Client, ?*anyopaque, ?[]const u8, bool) i32;
+pub const PromptCompleteCb = *const fn (*T.Client, ?*anyopaque, []const u8, usize) ?[]u8;
 pub const PromptFreeCb = *const fn (?*anyopaque) void;
+
+pub const PromptRenderState = struct {
+    input_visible: []u8,
+    cursor_column: u32,
+};
 
 const PromptState = struct {
     prompt_string: []u8,
     input: utf8.CellBuffer = .{},
     input_view: []u8,
     last_input: utf8.CellBuffer = .{},
+    saved_input: utf8.CellBuffer = .{},
     cursor: usize = 0,
+    history_index: usize = 0,
     flags: u32,
     prompt_type: PromptType,
     inputcb: PromptInputCb,
+    completecb: ?PromptCompleteCb,
     freecb: ?PromptFreeCb,
     data: ?*anyopaque,
 };
@@ -138,6 +147,10 @@ fn set_prompt_last_input(state: *PromptState, bytes: []const u8) void {
     state.last_input.setString(bytes);
 }
 
+fn set_prompt_saved_input(state: *PromptState, bytes: []const u8) void {
+    state.saved_input.setString(bytes);
+}
+
 fn prompt_state_free(state: *PromptState) void {
     if (state.freecb) |freecb| {
         if (state.data != null) freecb(state.data);
@@ -146,6 +159,7 @@ fn prompt_state_free(state: *PromptState) void {
     xm.allocator.free(state.input_view);
     state.input.deinit();
     state.last_input.deinit();
+    state.saved_input.deinit();
     xm.allocator.destroy(state);
 }
 
@@ -181,6 +195,183 @@ fn delete_prompt_before_cursor(state: *PromptState) bool {
     if (!state.input.deleteBefore(&state.cursor)) return false;
     refresh_input_view(state);
     return true;
+}
+
+fn delete_prompt_at_cursor(state: *PromptState) bool {
+    if (!state.input.deleteAt(state.cursor)) return false;
+    refresh_input_view(state);
+    return true;
+}
+
+fn delete_prompt_range(state: *PromptState, start: usize, end: usize) bool {
+    const remove_at = @min(start, state.input.len());
+    const removed = state.input.deleteRange(remove_at, end);
+    if (removed == 0) return false;
+    state.cursor = remove_at;
+    refresh_input_view(state);
+    return true;
+}
+
+fn replace_prompt_range(state: *PromptState, start: usize, end: usize, bytes: []const u8) bool {
+    const replace_at = @min(start, state.input.len());
+    const inserted = state.input.replaceRange(replace_at, end, bytes);
+    refresh_input_view(state);
+    state.cursor = replace_at + inserted;
+    return inserted != 0 or end > replace_at;
+}
+
+fn prompt_space(ud: *const T.Utf8Data) bool {
+    return ud.size == 1 and ud.width == 1 and ud.data[0] == ' ';
+}
+
+fn prompt_in_list(ws: []const u8, ud: *const T.Utf8Data) bool {
+    return ud.size == 1 and ud.width == 1 and std.mem.indexOfScalar(u8, ws, ud.data[0]) != null;
+}
+
+fn prompt_separators(c: *T.Client) []const u8 {
+    const session = c.session orelse return "";
+    return opts.options_get_string(session.options, "word-separators");
+}
+
+fn prompt_forward_word(state: *PromptState, separators: []const u8) bool {
+    const size = state.input.len();
+    var idx = @min(state.cursor, size);
+
+    while (idx != size and prompt_space(&state.input.cells.items[idx])) idx += 1;
+    if (idx == size) {
+        if (state.cursor == idx) return false;
+        state.cursor = idx;
+        return true;
+    }
+
+    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]) and
+        !prompt_space(&state.input.cells.items[idx]);
+    while (idx != size) {
+        idx += 1;
+        if (idx == size) break;
+        if (prompt_space(&state.input.cells.items[idx])) break;
+        if (word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx])) break;
+    }
+
+    if (state.cursor == idx) return false;
+    state.cursor = idx;
+    return true;
+}
+
+fn prompt_backward_word(state: *PromptState, separators: []const u8) bool {
+    var idx = @min(state.cursor, state.input.len());
+    if (idx == 0) return false;
+
+    while (idx != 0) {
+        idx -= 1;
+        if (!prompt_space(&state.input.cells.items[idx])) break;
+    }
+    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
+    while (idx != 0) {
+        idx -= 1;
+        if (prompt_space(&state.input.cells.items[idx]) or
+            word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx]))
+        {
+            idx += 1;
+            break;
+        }
+    }
+
+    if (state.cursor == idx) return false;
+    state.cursor = idx;
+    return true;
+}
+
+fn save_prompt_range(state: *PromptState, start: usize, end: usize) void {
+    const bytes = state.input.rangeToOwnedString(start, end);
+    defer xm.allocator.free(bytes);
+    set_prompt_saved_input(state, bytes);
+}
+
+fn delete_prompt_word_before_cursor(state: *PromptState, separators: []const u8) bool {
+    var idx = @min(state.cursor, state.input.len());
+    if (idx == 0) return false;
+
+    while (idx != 0) {
+        idx -= 1;
+        if (!prompt_space(&state.input.cells.items[idx])) break;
+    }
+    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
+    while (idx != 0) {
+        idx -= 1;
+        if (prompt_space(&state.input.cells.items[idx]) or
+            word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx]))
+        {
+            idx += 1;
+            break;
+        }
+    }
+
+    save_prompt_range(state, idx, state.cursor);
+    return delete_prompt_range(state, idx, state.cursor);
+}
+
+fn yank_saved_prompt(state: *PromptState) bool {
+    if (state.saved_input.len() == 0) return false;
+    const text = state.saved_input.toOwnedString();
+    defer xm.allocator.free(text);
+    insert_prompt_bytes(state, text);
+    return true;
+}
+
+fn transpose_prompt_cells(state: *PromptState) bool {
+    const size = state.input.len();
+    var idx = @min(state.cursor, size);
+    if (idx < size) idx += 1;
+    if (idx < 2) return false;
+
+    const left = idx - 2;
+    const right = idx - 1;
+    const tmp = state.input.cells.items[left];
+    state.input.cells.items[left] = state.input.cells.items[right];
+    state.input.cells.items[right] = tmp;
+    state.cursor = idx;
+    refresh_input_view(state);
+    return true;
+}
+
+fn history_up(state: *PromptState) bool {
+    const history = prompt_history(state.prompt_type);
+    if (history.items.len == 0 or state.history_index == history.items.len) return false;
+    state.history_index += 1;
+    set_prompt_input(state, history.items[history.items.len - state.history_index]);
+    return true;
+}
+
+fn history_down(state: *PromptState) bool {
+    const history = prompt_history(state.prompt_type);
+    if (history.items.len == 0 or state.history_index == 0) return false;
+    state.history_index -= 1;
+    if (state.history_index == 0)
+        set_prompt_input(state, "")
+    else
+        set_prompt_input(state, history.items[history.items.len - state.history_index]);
+    return true;
+}
+
+fn replace_prompt_complete(c: *T.Client, state: *PromptState, replacement: ?[]const u8) bool {
+    const completecb = state.completecb orelse return false;
+    const size = state.input.len();
+
+    var first = @min(state.cursor, size);
+    while (first > 0 and !prompt_space(&state.input.cells.items[first - 1])) first -= 1;
+
+    var last = @min(state.cursor, size);
+    while (last < size and !prompt_space(&state.input.cells.items[last])) last += 1;
+
+    const word = state.input.rangeToOwnedString(first, last);
+    defer xm.allocator.free(word);
+
+    const owned_completion = if (replacement == null) completecb(c, state.data, word, first) else null;
+    defer if (owned_completion) |value| xm.allocator.free(value);
+    const completed = replacement orelse owned_completion orelse return false;
+    if (std.mem.eql(u8, completed, word)) return false;
+    return replace_prompt_range(state, first, last, completed);
 }
 
 fn append_event(state: *PromptState, event: *const T.key_event) bool {
@@ -295,12 +486,28 @@ pub fn status_prompt_input(c: *T.Client) ?[]const u8 {
     return state_current_input(state);
 }
 
+pub fn status_prompt_render_state(c: *T.Client, available_width: u32) ?PromptRenderState {
+    const state = find_state(c) orelse return null;
+    const cursor_width = state.input.prefixDisplayWidth(state.cursor);
+
+    var offset: u32 = 0;
+    if (available_width != 0 and cursor_width >= available_width)
+        offset = (cursor_width - available_width) + 1;
+
+    const visible = state.input.windowString(offset, available_width);
+    return .{
+        .input_visible = visible,
+        .cursor_column = cursor_width - offset,
+    };
+}
+
 pub fn status_prompt_set(
     c: *T.Client,
     fs: ?*const T.CmdFindState,
     msg: []const u8,
     input: ?[]const u8,
     inputcb: PromptInputCb,
+    completecb: ?PromptCompleteCb,
     freecb: ?PromptFreeCb,
     data: ?*anyopaque,
     flags: u32,
@@ -319,6 +526,7 @@ pub fn status_prompt_set(
         .flags = flags,
         .prompt_type = prompt_type,
         .inputcb = inputcb,
+        .completecb = completecb,
         .freecb = freecb,
         .data = data,
     };
@@ -343,6 +551,7 @@ pub fn status_prompt_update(c: *T.Client, msg: []const u8, input: ?[]const u8) v
 
     set_prompt_last_input(state, input orelse "");
     set_prompt_input(state, input orelse "");
+    state.history_index = 0;
     c.flags |= T.CLIENT_REDRAWSTATUS;
 }
 
@@ -377,9 +586,115 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
 
     if (state.flags & PROMPT_SINGLE != 0) {
         var buf: [4]u8 = undefined;
-        const text = single_prompt_text(event.key, &buf) orelse return false;
+        const text = single_prompt_text(event.key, &buf) orelse return true;
         prompt_finish(c, state, text, true);
         return true;
+    }
+
+    switch (event.key) {
+        T.KEYC_LEFT, 'b' | T.KEYC_CTRL => {
+            if (state.cursor > 0) {
+                state.cursor -= 1;
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+            return true;
+        },
+        T.KEYC_RIGHT, 'f' | T.KEYC_CTRL => {
+            if (state.cursor < state.input.len()) {
+                state.cursor += 1;
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+            return true;
+        },
+        T.KEYC_HOME, 'a' | T.KEYC_CTRL => {
+            if (state.cursor != 0) {
+                state.cursor = 0;
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+            return true;
+        },
+        T.KEYC_END, 'e' | T.KEYC_CTRL => {
+            const size = state.input.len();
+            if (state.cursor != size) {
+                state.cursor = size;
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+            return true;
+        },
+        T.C0_HT => {
+            if (replace_prompt_complete(c, state, null))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_DC, 'd' | T.KEYC_CTRL => {
+            if (delete_prompt_at_cursor(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_UP, 'p' | T.KEYC_CTRL => {
+            if (history_up(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_DOWN, 'n' | T.KEYC_CTRL => {
+            if (history_down(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'u' | T.KEYC_CTRL => {
+            if (delete_prompt_range(state, 0, state.cursor))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'k' | T.KEYC_CTRL => {
+            if (delete_prompt_range(state, state.cursor, state.input.len()))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'w' | T.KEYC_CTRL => {
+            if (delete_prompt_word_before_cursor(state, prompt_separators(c)))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'y' | T.KEYC_CTRL => {
+            if (yank_saved_prompt(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        't' | T.KEYC_CTRL => {
+            if (transpose_prompt_cells(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_LEFT | T.KEYC_CTRL, 'b' | T.KEYC_META => {
+            _ = prompt_backward_word(state, prompt_separators(c));
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_RIGHT | T.KEYC_CTRL, 'f' | T.KEYC_META => {
+            _ = prompt_forward_word(state, prompt_separators(c));
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        else => {},
     }
 
     if (masked == T.C0_CR or masked == T.C0_LF or masked == T.KEYC_KP_ENTER) {
@@ -401,11 +716,14 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
             prompt_finish(c, state, null, true);
             return true;
         }
-        if (delete_prompt_before_cursor(state)) prompt_changed(c, state, '=');
+        if (delete_prompt_before_cursor(state))
+            prompt_changed(c, state, '=')
+        else
+            c.flags |= T.CLIENT_REDRAWSTATUS;
         return true;
     }
 
-    if (!append_event(state, event)) return false;
+    if (!append_event(state, event)) return true;
 
     if (state.flags & PROMPT_SINGLE != 0) {
         const text = state_copy_input(state);
@@ -463,6 +781,18 @@ fn free_prompt_capture(data: ?*anyopaque) void {
     xm.allocator.destroy(capture);
 }
 
+fn send_prompt_key(client: *T.Client, key: T.key_code, bytes: []const u8) bool {
+    var event = T.key_event{ .key = key, .len = bytes.len };
+    if (bytes.len != 0) @memcpy(event.data[0..bytes.len], bytes);
+    return status_prompt_handle_key(client, &event);
+}
+
+fn test_complete(_: *T.Client, _: ?*anyopaque, word: []const u8, offset: usize) ?[]u8 {
+    if (offset == 0 and std.mem.eql(u8, word, "ren"))
+        return xm.xstrdup("rename-window ");
+    return null;
+}
+
 test "status-prompt stores multibyte input through the shared cell buffer" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -485,6 +815,7 @@ test "status-prompt stores multibyte input through the shared cell buffer" {
         "Prompt ",
         null,
         capture_prompt_input,
+        null,
         free_prompt_capture,
         capture,
         0,
@@ -532,6 +863,7 @@ test "status-prompt enter callback sees reconstructed utf8 text" {
         "Prompt ",
         "é",
         capture_prompt_input,
+        null,
         free_prompt_capture,
         capture,
         0,
@@ -548,4 +880,77 @@ test "status-prompt enter callback sees reconstructed utf8 text" {
     try std.testing.expect(status_prompt_handle_key(&client, &event));
     try std.testing.expect(capture.done);
     try std.testing.expectEqualStrings("é", capture.last.?);
+}
+
+test "status-prompt supports cursor edits, history traversal, completion, and render windows" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_history_clear(null);
+    defer status_prompt_history_clear(null);
+    status_prompt_history_add("one", .command);
+    status_prompt_history_add("two", .command);
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        "abc",
+        capture_prompt_input,
+        test_complete,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt_clear(&client);
+
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_LEFT, ""));
+    try std.testing.expect(send_prompt_key(&client, 'X', "X"));
+    try std.testing.expectEqualStrings("abXc", status_prompt_input(&client).?);
+
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_DC, ""));
+    try std.testing.expectEqualStrings("abX", status_prompt_input(&client).?);
+
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_HOME, ""));
+    try std.testing.expect(send_prompt_key(&client, '>', ">"));
+    try std.testing.expectEqualStrings(">abX", status_prompt_input(&client).?);
+
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_END, ""));
+    try std.testing.expect(send_prompt_key(&client, T.C0_HT, "\t"));
+    try std.testing.expectEqualStrings(">abX", status_prompt_input(&client).?);
+
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_UP, ""));
+    try std.testing.expectEqualStrings("two", status_prompt_input(&client).?);
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_UP, ""));
+    try std.testing.expectEqualStrings("one", status_prompt_input(&client).?);
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_DOWN, ""));
+    try std.testing.expectEqualStrings("two", status_prompt_input(&client).?);
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_DOWN, ""));
+    try std.testing.expectEqualStrings("", status_prompt_input(&client).?);
+
+    status_prompt_update(&client, "Prompt ", "ren");
+    try std.testing.expect(send_prompt_key(&client, T.C0_HT, "\t"));
+    try std.testing.expectEqualStrings("rename-window ", status_prompt_input(&client).?);
+
+    status_prompt_update(&client, "Prompt ", "abcdef");
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_LEFT, ""));
+    try std.testing.expect(send_prompt_key(&client, T.KEYC_LEFT, ""));
+    const render_state = status_prompt_render_state(&client, 3).?;
+    defer xm.allocator.free(render_state.input_visible);
+    try std.testing.expectEqualStrings("cde", render_state.input_visible);
+    try std.testing.expectEqual(@as(u32, 2), render_state.cursor_column);
 }

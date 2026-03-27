@@ -30,7 +30,6 @@ const screen_write = @import("screen-write.zig");
 const status_prompt = @import("status-prompt.zig");
 const style_mod = @import("style.zig");
 const tty_draw = @import("tty-draw.zig");
-const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
 pub const RenderResult = struct {
@@ -150,7 +149,6 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
 fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResult) void {
     const s = c.session orelse return;
     const message = status_prompt.status_prompt_message(c) orelse return;
-    const input = status_prompt.status_prompt_input(c) orelse "";
     const area = message_area(c, rows);
     if (area.width == 0) return;
 
@@ -178,14 +176,13 @@ fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResu
         return;
     }
 
-    const input_visible = utf8.trimDisplay(input, .right, area.width - prefix_width);
-    defer xm.allocator.free(input_visible);
+    const render_state = status_prompt.status_prompt_render_state(c, area.width - prefix_width) orelse return;
+    defer xm.allocator.free(render_state.input_visible);
     screen_write.cursor_to(&swctx, area.line, area.x + prefix_width);
-    format_draw.format_draw(&swctx, &prompt_gc, area.width - prefix_width, input_visible);
+    format_draw.format_draw(&swctx, &prompt_gc, area.width - prefix_width, render_state.input_visible);
 
-    const input_width = utf8.displayWidth(input_visible);
     result.cursor_visible = true;
-    result.cursor_x = area.x + @min(prefix_width + input_width, area.width - 1);
+    result.cursor_x = area.x + @min(prefix_width + render_state.cursor_column, area.width - 1);
     result.cursor_y = area.line;
 }
 
@@ -343,6 +340,7 @@ test "status render draws reduced status line and utf8 prompt overlay" {
         "Name ",
         "🙂",
         capture_prompt_input,
+        null,
         free_prompt_capture,
         capture,
         0,

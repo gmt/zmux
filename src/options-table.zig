@@ -59,6 +59,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "terminal-overrides", .type = .array, .scope = S },
     .{ .name = "update-environment", .type = .array, .scope = S },
     .{ .name = "user-keys", .type = .array, .scope = S },
+    .{ .name = "variation-selector-always-wide", .type = .flag, .scope = S, .default_num = 1 },
     .{ .name = "visual-activity", .type = .choice, .scope = S, .default_num = 0, .choices = &.{ "off", "on", "both" } },
     .{ .name = "visual-bell", .type = .choice, .scope = S, .default_num = 0, .choices = &.{ "off", "on", "both" } },
     .{ .name = "visual-silence", .type = .choice, .scope = S, .default_num = 0, .choices = &.{ "off", "on", "both" } },

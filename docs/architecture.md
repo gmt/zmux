@@ -85,19 +85,20 @@ that truth still stops before the live grid/write path.
 
 | behavior / seam | already truthful today | still missing before reopen |
 |---|---|---|
-| byte decode into Unicode key candidates | `src/utf8.zig` already owns `utf8_open`, `utf8_append`, and `utf8_from_data`, and `src/input-keys.zig` already uses them for attached-key decode and encode | there is still no shared consumer-facing `utf8.Decoder` or glyph object, so other consumers can still drift back into local byte handling |
-| width policy and overrides | `src/utf8.zig` already owns width cache logic, `codepoint-widths`, `utf8_cstrwidth`, and the trim/pad helpers used by existing string consumers | the live grid/write path still does not preserve width consequences, so width truth currently stops at strings and key helpers |
-| combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks | `src/screen-write.zig` never calls that layer, so combined-cell behavior is still unreachable from live pane writes |
-| cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model | the live write path and most readers still only exercise ASCII compatibility shims, so storage truth exists below them but is not yet the shared end-to-end path |
-| live screen-write integration | `src/input.zig` already routes terminal parser events through shared `screen-write` entry points instead of writing directly into panes | those entry points are still byte-at-a-time `putc`/`putn` helpers over `grid.set_ascii`/`ascii_at`, so they collapse glyph semantics back to ASCII storage |
+| byte decode into Unicode key candidates | `src/utf8.zig` now owns the named `utf8.Decoder`/`utf8.Glyph` façade on top of `utf8_open`, `utf8_append`, and `utf8_from_data`, and `src/input.zig` plus `src/input-keys.zig` now materially use that shared decode model | prompt/status and the remaining display consumers still have not all adopted the same shared decode surface, so local byte handling can still creep back in above the writer |
+| width policy and overrides | `src/utf8.zig` already owns width cache logic, `codepoint-widths`, `utf8_cstrwidth`, and the trim/pad helpers used by existing string consumers, and live pane writes now preserve those width consequences through shared glyph writes | prompt/status/search/edit consumers still stop width truth from sealing end to end because they do not yet operate on shared display cells |
+| combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks, and `src/screen-write.zig` now calls that layer during live pane writes | the reduced writer still lacks fuller tmux `screen_write_cell` side effects, so combined-cell reachability exists for live writes but is not yet the full reopen gate |
+| cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model, and live pane writes now materially store through that path | most readers and prompt/status consumers still have not adopted the same shared cell payload model end to end |
+| live screen-write integration | `src/screen-write.zig` now owns `putGlyph`, `putCell`, and `putBytes`, and `src/input.zig` feeds printable terminal bytes through that shared path so live pane writes preserve decoded width, padding, and combine consequences | this is still a reduced `screen_write_cell` seam: insert-mode parity, selected-cell styling, tty draw collection, tab-cell treatment, and non-input consumer adoption are still missing |
 | consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables | `src/status-prompt.zig` still edits raw UTF-8 byte buffers, and there is no shared display-cell editing/search surface for prompt/status consumers yet |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
-finishing the remaining ASCII-only write/consumer seam in
-`src/screen-write.zig`, `src/input.zig`, and the prompt/status consumers now
-that `src/grid.zig` can already preserve truthful cell payloads underneath
-them.
+finishing the remaining reduced screen-write and prompt/status seam now that
+live pane writes no longer collapse back to ASCII storage: the current writer
+still lacks fuller tmux `screen_write_cell` side effects, and the
+prompt/status consumers still edit raw byte buffers instead of shared display
+cells.
 
 The seal matrix below stays conservative on purpose: lower-layer truth does not
 reopen anything by itself. A row is only sealed when the future shared
@@ -154,9 +155,22 @@ The next checkpoint down is now also landed in code:
   shims over that storage so the rest of the tree can keep moving while
   `screen-write` and higher consumers are rebuilt
 
-That storage landing removes the old ASCII-only grid format blocker, but it
-still does not seal the live write or consumer rows by itself because the main
-writers and readers have not adopted the richer path yet.
+That storage landing removed the old ASCII-only grid format blocker. The next
+checkpoint down is now also landed in reduced form:
+
+- `src/screen-write.zig` exports `putGlyph`, `putCell`, and `putBytes` over
+  the shared `utf8.Decoder`, combine helpers, and direct grid cell API so live
+  pane writes can preserve wide/padding/combined cells without dropping back
+  to ASCII shims
+- `src/input.zig` now feeds printable terminal runs through that shared writer
+  and keeps incomplete UTF-8 pending across parser calls instead of forcing the
+  live path back into byte-at-a-time writes
+
+That landing makes live pane writes materially depend on the shared glyph
+stack, but it is still reduced relative to tmux `screen_write_cell`: insert
+mode, selected-cell styling, tty write-list collection, and some edge
+conditions remain open, and prompt/status consumers still sit above the shared
+cell model.
 
 ### Lower layers: what the top layer sits on
 
@@ -211,10 +225,10 @@ seal only when callers actually ride that façade through truthful lower layers.
 | behavior row | decode / convert | width policy | combine policy | glyph / cell storage | grid / screen-write | consumer adapter | current seal |
 |---|---|---|---|---|---|---|---|
 | decode byte stream into Unicode key or glyph candidates | `Y` | `-` | `-` | `Y` | `-` | `Y` | open: `utf8.Decoder` now names the shared path, but only a narrow set of callers materially depend on it yet |
-| compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: width truth exists for strings, but the live grid/write path still drops it |
-| append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `B` | `-` | open: combine logic is ported below, but `screen-write` never calls it and there is no padding-cell path yet |
-| store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `B` | `-` | open: direct grid storage now preserves extended and padding cells, but no live writer or higher consumer materially depends on that path yet |
-| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `B` | `-` | open: the write path is still `putc`/`putn` over ASCII shims even though the grid can now preserve richer cells underneath |
+| compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `Y` | `Y` | open: width truth now reaches live pane writes, but prompt/status/search/edit consumers and fuller screen-write parity still stop the row from sealing end to end |
+| append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `Y` | `-` | open: combine logic now reaches live pane writes with padding-cell consequences, but the reduced writer still lacks fuller tmux side effects and higher consumer adoption |
+| store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `Y` | `-` | open: direct grid storage now has a real live writer, but there is still no broader shared reader/search/editor surface above it |
+| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `Y` | `-` | open: live pane writes now use `putGlyph`/`putBytes` over truthful storage and combine helpers, but the writer is still a reduced seam without tmux's fuller insert/selection/tty collection path |
 | trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the grid now has truthful cell equality/length substrate, but shared search/edit consumers still stay byte-oriented |
 | edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `B` | `-` | `B` | open: prompt/status editing still operates on raw UTF-8 byte buffers instead of shared cell payloads |
 | choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
@@ -223,13 +237,15 @@ The current read of the matrix is deliberately blunt:
 
 - row 1 now has a named shared façade, but it is not sealed until real caller
   adoption stops local byte handling from creeping back in
-- rows 2 and 3 are still unsealed because the live grid/write path collapses
-  width and combine truth before they reach stored cells
-- row 4's storage blocker is gone for direct grid callers, but it is not
-  sealed until a real writer and reader ride the shared path instead of the
-  compatibility shims
-- rows 5 through 7 are now blocked mainly by the ASCII live-write and
-  prompt/status consumer seams rather than the raw cell storage format itself
+- rows 2 through 5 now materially reach the live pane writer, but they remain
+  unsealed because the reduced writer still stops short of fuller tmux
+  `screen_write_cell` parity and the higher consumer rows have not adopted the
+  same shared cell model
+- row 4's raw storage blocker is gone and row 5's ASCII collapse is gone for
+  live pane writes; the remaining blockers are now fuller reader/editor
+  adoption and the reduced side effects around the writer
+- rows 6 and 7 are now blocked mainly by prompt/status consumer seams rather
+  than by the underlying grid storage format itself
 - row 8 is a truthful reduced helper, not yet the full tty output policy layer
 
 The foundation tranche is finished enough to reopen UTF-8-sensitive parity work
@@ -241,7 +257,8 @@ not just described here.
 1. Keep the shared consumer-facing façade stable and explicit while the lower
    layers move underneath it.
 2. Make grid/cell storage stop being ASCII-first.
-3. Make `screen-write` consume cell-width/combine semantics.
+3. Keep the reduced `screen-write` checkpoint honest while the remaining tmux
+   side effects are pulled down underneath it.
 4. Rewire prompt/status/format consumers onto the shared stack.
 5. Only then resume ordinary low-hanging work on files such as
    `format-draw.c`, `status.c`, `tty-keys.c`, and remaining `utf8.c` fallout.

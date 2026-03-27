@@ -34,10 +34,15 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
     var i: usize = 0;
     while (i < wp.input_pending.items.len) {
-        const ch = wp.input_pending.items[i];
-        if (ch != 0x1b) {
-            handle_plain(&ctx, ch);
-            i += 1;
+        if (wp.input_pending.items[i] != 0x1b) {
+            const start = i;
+            var end = i;
+            while (end < wp.input_pending.items.len and wp.input_pending.items[end] != 0x1b) : (end += 1) {}
+
+            const keep_incomplete_tail = end == wp.input_pending.items.len;
+            const consumed = handle_plain_bytes(&ctx, wp.input_pending.items[start..end], keep_incomplete_tail);
+            i += consumed;
+            if (consumed < end - start) break;
             continue;
         }
 
@@ -85,17 +90,39 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     }
 }
 
-fn handle_plain(ctx: *T.ScreenWriteCtx, ch: u8) void {
+fn handle_plain_bytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail: bool) usize {
+    var i: usize = 0;
+    var chunk_start: usize = 0;
+
+    while (i < bytes.len) {
+        const ch = bytes[i];
+        switch (ch) {
+            0x07, '\r', '\n', 0x08, '\t' => {
+                if (i > chunk_start) {
+                    _ = screen_write.putBytes(ctx, bytes[chunk_start..i], false);
+                }
+                handle_plain_control(ctx, ch);
+                i += 1;
+                chunk_start = i;
+            },
+            else => i += 1,
+        }
+    }
+
+    if (chunk_start < bytes.len) {
+        return chunk_start + screen_write.putBytes(ctx, bytes[chunk_start..], keep_incomplete_tail);
+    }
+    return i;
+}
+
+fn handle_plain_control(ctx: *T.ScreenWriteCtx, ch: u8) void {
     switch (ch) {
         0x07 => if (ctx.wp) |wp| alerts.alerts_queue(wp.window, T.WINDOW_BELL),
         '\r' => screen_write.carriage_return(ctx),
         '\n' => screen_write.newline(ctx),
         0x08 => screen_write.backspace(ctx),
         '\t' => screen_write.tab(ctx),
-        else => {
-            if (ch < ' ' and ch != 0x1b) return;
-            screen_write.putc(ctx, ch);
-        },
+        else => unreachable,
     }
 }
 
@@ -440,6 +467,44 @@ test "input keeps incomplete CSI pending across calls" {
     input_parse_screen(wp, ";2HZ");
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
     try std.testing.expectEqual(@as(u8, 'Z'), grid.ascii_at(wp.base.grid, 1, 1));
+}
+
+test "input keeps incomplete UTF-8 pending across calls" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 6, 2);
+    input_parse_screen(wp, "\xf0\x9f");
+    try std.testing.expectEqual(@as(usize, 2), wp.input_pending.items.len);
+
+    input_parse_screen(wp, "\x99\x82A");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+
+    var cell: T.GridCell = undefined;
+    grid.get_cell(wp.base.grid, 0, 0, &cell);
+    try std.testing.expectEqual(@as(u8, 2), cell.data.width);
+    grid.get_cell(wp.base.grid, 0, 1, &cell);
+    try std.testing.expect(cell.isPadding());
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 2));
 }
 
 test "input parses OSC pane title updates" {

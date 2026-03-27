@@ -22,23 +22,109 @@
 const std = @import("std");
 const T = @import("types.zig");
 const grid = @import("grid.zig");
+const opts = @import("options.zig");
+const utf8 = @import("utf8.zig");
 
 pub fn putc(ctx: *T.ScreenWriteCtx, ch: u8) void {
-    const s = ctx.s;
-    const gd = s.grid;
-    if (gd.sx == 0 or gd.sy == 0) return;
-
-    if (s.cx >= gd.sx) newline(ctx);
-    grid.set_ascii(gd, s.cy, s.cx, ch);
-    if (s.cx + 1 < gd.sx) {
-        s.cx += 1;
-    } else {
-        newline(ctx);
-    }
+    const glyph = utf8.Glyph.fromAscii(ch);
+    putGlyph(ctx, &glyph);
 }
 
 pub fn putn(ctx: *T.ScreenWriteCtx, bytes: []const u8) void {
-    for (bytes) |ch| putc(ctx, ch);
+    _ = putBytes(ctx, bytes, false);
+}
+
+pub fn putBytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail: bool) usize {
+    var decoder = utf8.Decoder.init();
+    var i: usize = 0;
+
+    while (i < bytes.len) {
+        const ch = bytes[i];
+        switch (ch) {
+            '\r' => {
+                carriage_return(ctx);
+                i += 1;
+                continue;
+            },
+            '\n' => {
+                newline(ctx);
+                i += 1;
+                continue;
+            },
+            '\t' => {
+                tab(ctx);
+                i += 1;
+                continue;
+            },
+            0x20...0x7e => {
+                putc(ctx, ch);
+                i += 1;
+                continue;
+            },
+            else => {},
+        }
+
+        if (ch < ' ' and ch != 0x1b) {
+            i += 1;
+            continue;
+        }
+
+        switch (decoder.feed(bytes[i..])) {
+            .glyph => |step| {
+                putGlyph(ctx, &step.glyph);
+                i += step.consumed;
+            },
+            .invalid => |consumed| {
+                if (consumed == 0) continue;
+                i += consumed;
+            },
+            .need_more => {
+                return if (keep_incomplete_tail) i else bytes.len;
+            },
+        }
+    }
+
+    return i;
+}
+
+pub fn putGlyph(ctx: *T.ScreenWriteCtx, glyph: *const utf8.Glyph) void {
+    var gc = T.GridCell.fromPayload(glyph.payload());
+    putCell(ctx, &gc);
+}
+
+pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+    if (gc.isPadding()) return;
+
+    if (combineCell(ctx, gc)) return;
+
+    const width: u32 = gc.data.width;
+    if (width == 0) return;
+
+    if ((s.mode & T.MODE_WRAP) == 0 and
+        width > 1 and
+        (width > gd.sx or (s.cx != gd.sx and s.cx > gd.sx - width)))
+        return;
+
+    if ((s.mode & T.MODE_WRAP) != 0 and s.cx > gd.sx - width) {
+        newline(ctx);
+    }
+
+    if (s.cx > gd.sx - width or s.cy >= gd.sy) return;
+
+    var current: T.GridCell = undefined;
+    grid.get_cell(gd, s.cy, s.cx, &current);
+    _ = overwriteCells(ctx, &current, width);
+
+    var xx = s.cx + 1;
+    while (xx < s.cx + width and xx < gd.sx) : (xx += 1) {
+        grid.set_padding(gd, s.cy, xx);
+    }
+
+    grid.set_cell(gd, s.cy, s.cx, gc);
+    advanceCursorAfterWrite(ctx, @intCast(width));
 }
 
 pub fn carriage_return(ctx: *T.ScreenWriteCtx) void {
@@ -102,7 +188,7 @@ pub fn erase_to_eol(ctx: *T.ScreenWriteCtx) void {
     grid.ensure_line_capacity(gd, ctx.s.cy);
     var col = ctx.s.cx;
     while (col < gd.sx) : (col += 1) {
-        grid.set_ascii(gd, ctx.s.cy, col, ' ');
+        grid.set_cell(gd, ctx.s.cy, col, &T.grid_default_cell);
     }
     const line = &gd.linedata[ctx.s.cy];
     line.cellused = @min(line.cellused, ctx.s.cx);
@@ -113,7 +199,7 @@ pub fn erase_to_bol(ctx: *T.ScreenWriteCtx) void {
     if (gd.sy == 0 or ctx.s.cy >= gd.sy) return;
     var col: u32 = 0;
     while (col <= ctx.s.cx and col < gd.sx) : (col += 1) {
-        grid.set_ascii(gd, ctx.s.cy, col, ' ');
+        grid.set_cell(gd, ctx.s.cy, col, &T.grid_default_cell);
     }
 }
 
@@ -159,11 +245,12 @@ pub fn insert_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
     var dest = gd.sx;
     while (dest > ctx.s.cx + n) {
         dest -= 1;
-        const from = grid.ascii_at(gd, ctx.s.cy, dest - n);
-        grid.set_ascii(gd, ctx.s.cy, dest, from);
+        var from: T.GridCell = undefined;
+        grid.get_cell(gd, ctx.s.cy, dest - n, &from);
+        grid.set_cell(gd, ctx.s.cy, dest, &from);
     }
     var col: u32 = 0;
-    while (col < n) : (col += 1) grid.set_ascii(gd, ctx.s.cy, ctx.s.cx + col, ' ');
+    while (col < n) : (col += 1) grid.set_cell(gd, ctx.s.cy, ctx.s.cx + col, &T.grid_default_cell);
 }
 
 pub fn delete_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
@@ -172,10 +259,11 @@ pub fn delete_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
     const n = @min(count, gd.sx - ctx.s.cx);
     var col = ctx.s.cx;
     while (col + n < gd.sx) : (col += 1) {
-        const from = grid.ascii_at(gd, ctx.s.cy, col + n);
-        grid.set_ascii(gd, ctx.s.cy, col, from);
+        var from: T.GridCell = undefined;
+        grid.get_cell(gd, ctx.s.cy, col + n, &from);
+        grid.set_cell(gd, ctx.s.cy, col, &from);
     }
-    while (col < gd.sx) : (col += 1) grid.set_ascii(gd, ctx.s.cy, col, ' ');
+    while (col < gd.sx) : (col += 1) grid.set_cell(gd, ctx.s.cy, col, &T.grid_default_cell);
 }
 
 pub fn erase_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
@@ -183,7 +271,7 @@ pub fn erase_characters(ctx: *T.ScreenWriteCtx, count: u32) void {
     if (gd.sy == 0 or gd.sx == 0 or ctx.s.cy >= gd.sy or ctx.s.cx >= gd.sx) return;
     const n = @min(count, gd.sx - ctx.s.cx);
     var col: u32 = 0;
-    while (col < n) : (col += 1) grid.set_ascii(gd, ctx.s.cy, ctx.s.cx + col, ' ');
+    while (col < n) : (col += 1) grid.set_cell(gd, ctx.s.cy, ctx.s.cx + col, &T.grid_default_cell);
 }
 
 pub fn insert_lines(ctx: *T.ScreenWriteCtx, count: u32) void {
@@ -224,6 +312,134 @@ pub fn save_cursor(ctx: *T.ScreenWriteCtx) void {
 pub fn restore_cursor(ctx: *T.ScreenWriteCtx) void {
     if (ctx.s.grid.sx != 0) ctx.s.cx = @min(ctx.s.saved_cx, ctx.s.grid.sx - 1) else ctx.s.cx = 0;
     if (ctx.s.grid.sy != 0) ctx.s.cy = @min(ctx.s.saved_cy, ctx.s.grid.sy - 1) else ctx.s.cy = 0;
+}
+
+fn advanceCursorAfterWrite(ctx: *T.ScreenWriteCtx, width: u8) void {
+    const gd = ctx.s.grid;
+    const cell_width: u32 = width;
+    if ((ctx.s.mode & T.MODE_WRAP) != 0) {
+        if (ctx.s.cx <= gd.sx - cell_width) {
+            ctx.s.cx += cell_width;
+        } else {
+            ctx.s.cx = gd.sx;
+        }
+        return;
+    }
+
+    if (ctx.s.cx + cell_width < gd.sx) {
+        ctx.s.cx += cell_width;
+    } else {
+        ctx.s.cx = gd.sx - 1;
+    }
+}
+
+fn combineCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) bool {
+    const s = ctx.s;
+    const gd = s.grid;
+    const ud = &gc.data;
+    var cx = s.cx;
+    const cy = s.cy;
+
+    if (utf8.utf8_is_hangul_filler(ud)) return true;
+
+    var force_wide = false;
+    var zero_width = false;
+    if (utf8.utf8_is_zwj(ud)) {
+        zero_width = true;
+    } else if (utf8.utf8_is_vs(ud)) {
+        zero_width = true;
+        force_wide = opts.options_get_number(opts.global_options, "variation-selector-always-wide") != 0;
+    } else if (ud.width == 0) {
+        zero_width = true;
+    }
+
+    if (ud.size < 2 or cx == 0) return zero_width;
+
+    var n: u32 = 1;
+    var last: T.GridCell = undefined;
+    grid.get_cell(gd, cy, cx - n, &last);
+    if (cx != 1 and last.isPadding()) {
+        n = 2;
+        grid.get_cell(gd, cy, cx - n, &last);
+    }
+    if (n != @as(u32, last.data.width) or last.isPadding()) return zero_width;
+
+    if (!zero_width) {
+        switch (utf8.hanguljamo_check_state(&last.data, ud)) {
+            .not_composable => return true,
+            .choseong => return false,
+            .composable => {},
+            .not_hanguljamo => {
+                if (utf8.utf8_should_combine(&last.data, ud) or utf8.utf8_should_combine(ud, &last.data)) {
+                    force_wide = true;
+                } else if (!utf8.utf8_has_zwj(&last.data)) {
+                    return false;
+                }
+            },
+        }
+    }
+
+    const last_size: usize = last.data.size;
+    const add_size: usize = ud.size;
+    if (last_size + add_size > T.UTF8_SIZE) return false;
+
+    @memcpy(last.data.data[last_size .. last_size + add_size], ud.data[0..ud.size]);
+    last.data.size += ud.size;
+    last.data.have = last.data.size;
+
+    if (last.data.width == 1 and force_wide) {
+        last.data.width = 2;
+        n = 2;
+        cx += 1;
+    } else {
+        force_wide = false;
+    }
+
+    grid.set_cell(gd, cy, cx - n, &last);
+    if (force_wide and cx > 0 and cx - 1 < gd.sx) {
+        grid.set_padding(gd, cy, cx - 1);
+    }
+    s.cx = cx;
+    return true;
+}
+
+fn overwriteCells(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell, width: u32) bool {
+    const s = ctx.s;
+    const gd = s.grid;
+    var done = false;
+
+    if (gc.isPadding()) {
+        var xx = s.cx;
+        while (xx > 0) {
+            var tmp_gc: T.GridCell = undefined;
+            grid.get_cell(gd, s.cy, xx, &tmp_gc);
+            if (!tmp_gc.isPadding()) break;
+            grid.set_cell(gd, s.cy, xx, &T.grid_default_cell);
+            xx -= 1;
+        }
+        grid.set_cell(gd, s.cy, xx, &T.grid_default_cell);
+        done = true;
+    }
+
+    if (width != 1 or gc.data.width != 1 or gc.isPadding()) {
+        var xx = s.cx + width - 1;
+        while (xx + 1 < gd.sx) {
+            xx += 1;
+            var tmp_gc: T.GridCell = undefined;
+            grid.get_cell(gd, s.cy, xx, &tmp_gc);
+            if (!tmp_gc.isPadding()) break;
+            if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
+                var blank = gc.*;
+                blank.data = T.grid_default_cell.data;
+                grid.set_cell(gd, s.cy, xx, &blank);
+            } else {
+                grid.set_cell(gd, s.cy, xx, &T.grid_default_cell);
+            }
+            done = true;
+        }
+    }
+
+    return done;
 }
 
 test "screen-write handles cursor movement and erase" {
@@ -272,5 +488,34 @@ test "screen-write supports insert delete and save restore cursor" {
     cursor_to(&ctx, 2, 4);
     restore_cursor(&ctx);
     try std.testing.expectEqual(@as(u32, 1), s.cy);
+    try std.testing.expectEqual(@as(u32, 2), s.cx);
+}
+
+test "screen-write stores wide glyphs and combines modifier cells" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 2, 100);
+    defer {
+        grid.grid_free(s.grid);
+        @import("xmalloc.zig").allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    putn(&ctx, "🙂");
+
+    var stored: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 0, &stored);
+    try std.testing.expectEqual(@as(u8, 2), stored.data.width);
+    grid.get_cell(s.grid, 0, 1, &stored);
+    try std.testing.expect(stored.isPadding());
+    try std.testing.expectEqual(@as(u32, 2), s.cx);
+
+    cursor_to(&ctx, 1, 0);
+    putn(&ctx, "👋");
+    putn(&ctx, "🏽");
+    grid.get_cell(s.grid, 1, 0, &stored);
+    try std.testing.expectEqual(@as(u8, 2), stored.data.width);
+    try std.testing.expectEqual(@as(u8, 8), stored.data.size);
+    grid.get_cell(s.grid, 1, 1, &stored);
+    try std.testing.expect(stored.isPadding());
     try std.testing.expectEqual(@as(u32, 2), s.cx);
 }

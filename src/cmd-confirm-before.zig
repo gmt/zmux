@@ -154,6 +154,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         prompt,
         null,
         prompt_callback,
+        null,
         prompt_free,
         state,
         status_prompt.PROMPT_SINGLE,

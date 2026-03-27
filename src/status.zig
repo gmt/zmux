@@ -488,3 +488,64 @@ test "status persists translated ranges for hit-test consumers" {
     try std.testing.expectEqual(@as(u32, 3), range.end);
     try std.testing.expectEqualStrings("hit", std.mem.sliceTo(&range.string, 0));
 }
+
+test "status message overlay respects multiline status rows and message-line" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_number(session_opts, "status", 3);
+    opts.options_set_number(session_opts, "message-line", 1);
+    opts.options_set_array(session_opts, "status-format", &.{ "top row", "middle row", "bottom row" });
+
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "multi", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+    resize_mod.status_update_cache(s);
+
+    const w = win_mod.window_create(20, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 20, .sy = 6 };
+
+    status_runtime.status_message_set_text(&client, 0, false, false, true, "overlay row");
+    const rendered = render(&client);
+    defer if (rendered.payload.len != 0) xm.allocator.free(rendered.payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[4;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[5;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[6;1H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "top row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "overlay row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "bottom row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "middle row") == null);
+}

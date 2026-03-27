@@ -24,6 +24,9 @@ future intent for reopening UTF-8-sensitive parity work.
   is still reduced relative to tmux `screen_write_cell`.
 - prompt, status, and message consumers already touch the shared path, but they
   do not yet all use one end-to-end display-cell model.
+- `src/status.zig` now also owns a shared per-client `status-interval` timer
+  seam so status redraw cadence stays under the shared status runtime instead of
+  depending on command-local refresh glue.
 
 ## Active Gap
 

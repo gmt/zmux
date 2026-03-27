@@ -620,12 +620,15 @@ fn gridRowString(grid: *T.Grid, row: u32) ![]u8 {
     });
 }
 
-test "run-shell writes output to stdout when no target pane is forced" {
+test "run-shell writes output to stdout for detached clients when no target pane is forced" {
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
     var setup = testSetup("run-shell-stdout");
     defer testTeardown(&setup);
+    setup.client.flags = 0;
+    setup.client.session = null;
+    setup.client.cwd = "/";
 
     const output = try captureStdout(&setup.client, struct {
         fn run(client: *T.Client) !void {
@@ -649,12 +652,15 @@ test "run-shell writes output to stdout when no target pane is forced" {
     try std.testing.expectEqualStrings("stdout-finished", setup.window.name);
 }
 
-test "run-shell -E forwards stderr into stdout output" {
+test "run-shell -E forwards stderr into detached stdout output" {
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
     var setup = testSetup("run-shell-stderr");
     defer testTeardown(&setup);
+    setup.client.flags = 0;
+    setup.client.session = null;
+    setup.client.cwd = "/";
 
     const output = try captureStdout(&setup.client, struct {
         fn run(client: *T.Client) !void {
@@ -677,6 +683,45 @@ test "run-shell -E forwards stderr into stdout output" {
 
     try std.testing.expectEqualStrings("out\nerr\n", output);
     try std.testing.expectEqualStrings("stderr-finished", setup.window.name);
+}
+
+test "run-shell without -t shows shell output in the attached current pane view mode" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var setup = testSetup("run-shell-current-pane");
+    defer testTeardown(&setup);
+    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+    const output = try captureStdout(&setup.client, struct {
+        fn run(client: *T.Client) !void {
+            try appendCommand(client, &.{
+                "run-shell",
+                "printf 'pane\\noutput'",
+            });
+            try appendCommand(client, &.{
+                "rename-window",
+                "-t",
+                "run-shell-current-pane:0",
+                "current-pane-finished",
+            });
+            try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
+            try waitForQueueProgress(client, 1);
+        }
+    }.run);
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings("", output);
+    try std.testing.expectEqualStrings("current-pane-finished", setup.window.name);
+    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+    try std.testing.expect(window_mod.window_pane_mode(setup.pane) != null);
+
+    const first = try gridRowString(setup.pane.screen.grid, 0);
+    defer xm.allocator.free(first);
+    const second = try gridRowString(setup.pane.screen.grid, 1);
+    defer xm.allocator.free(second);
+    try std.testing.expectEqualStrings("pane", first);
+    try std.testing.expectEqualStrings("output", second);
 }
 
 test "run-shell -t shows shell output in the target pane view mode" {

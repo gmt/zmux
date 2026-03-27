@@ -24,6 +24,11 @@ const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
+pub const StringCellsOptions = struct {
+    trim_trailing_spaces: bool = false,
+    escape_sequences: bool = false,
+};
+
 pub fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
     const g = xm.allocator.create(T.Grid) catch unreachable;
     const lines = xm.allocator.alloc(T.GridLine, sy) catch unreachable;
@@ -195,10 +200,51 @@ pub fn line_length(gd: *T.Grid, row: u32) u32 {
     return px;
 }
 
+pub fn string_cells(gd: *T.Grid, row: u32, width: u32, options: StringCellsOptions) []u8 {
+    if (row >= gd.linedata.len or width == 0) return xm.xstrdup("");
+
+    const used = if (options.trim_trailing_spaces)
+        @min(line_length(gd, row), width)
+    else
+        @min(width, gd.sx);
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    var col: u32 = 0;
+    while (col < used) : (col += 1) {
+        var gc: T.GridCell = undefined;
+        get_cell(gd, row, col, &gc);
+        if (gc.isPadding()) continue;
+        append_rendered_cell(&out, &gc, options.escape_sequences);
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
 fn free_line_storage(line: *T.GridLine) void {
     if (line.celldata.len > 0) xm.allocator.free(line.celldata);
     if (line.extddata.len > 0) xm.allocator.free(line.extddata);
     line.* = .{};
+}
+
+fn append_rendered_cell(out: *std.ArrayList(u8), gc: *const T.GridCell, escape_sequences: bool) void {
+    const bytes = if (gc.payload().isEmpty()) " " else gc.payload().bytes();
+    if (!escape_sequences) {
+        out.appendSlice(xm.allocator, bytes) catch unreachable;
+        return;
+    }
+
+    for (bytes) |ch| {
+        if ((ch >= ' ' and ch <= '~') and ch != '\\') {
+            out.append(xm.allocator, ch) catch unreachable;
+            continue;
+        }
+
+        var octal: [4]u8 = undefined;
+        const rendered = std.fmt.bufPrint(&octal, "\\{o:0>3}", .{ch}) catch unreachable;
+        out.appendSlice(xm.allocator, rendered) catch unreachable;
+    }
 }
 
 fn cleared_entry() T.GridCellEntry {
@@ -420,6 +466,26 @@ test "grid stores multibyte cells and padding through the shared cell API" {
     try std.testing.expect(stored.isPadding());
     try std.testing.expectEqual(@as(u8, 0), stored.payload().width);
     try std.testing.expectEqual(@as(u32, 2), line_length(gd, 0));
+}
+
+test "grid string_cells preserves utf8 payloads while skipping padding cells" {
+    const gd = grid_create(4, 1, 0);
+    defer grid_free(gd);
+
+    const accent = utf8.Glyph.fromCodepoint('é').?;
+    const emoji = utf8.Glyph.fromCodepoint(0x1f642).?;
+
+    var accent_cell = T.GridCell.fromPayload(accent.payload());
+    var emoji_cell = T.GridCell.fromPayload(emoji.payload());
+    set_cell(gd, 0, 0, &accent_cell);
+    set_cell(gd, 0, 1, &emoji_cell);
+    set_padding(gd, 0, 2);
+    set_ascii(gd, 0, 3, '!');
+
+    const rendered = string_cells(gd, 0, gd.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("é🙂!", rendered);
 }
 
 test "grid overwriting an extended slot with ascii preserves readable content" {

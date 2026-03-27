@@ -232,20 +232,15 @@ fn parse_plain(bytes: []const u8, event: *T.key_event) ?usize {
 
     if (ch < 0x80) return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]);
 
-    var ud: T.Utf8Data = undefined;
-    if (utf8.utf8_open(&ud, ch) != .more) return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]);
-    if (bytes.len < ud.size) return null;
-
-    var idx: usize = 1;
-    var state: T.Utf8State = .more;
-    while (idx < ud.size and state == .more) : (idx += 1) {
-        state = utf8.utf8_append(&ud, bytes[idx]);
+    var decoder = utf8.Decoder.init();
+    switch (decoder.feed(bytes)) {
+        .glyph => |step| {
+            const compact = step.glyph.compact() orelse return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]);
+            return fill_event(event, @as(T.key_code, compact), bytes[0..step.consumed]);
+        },
+        .need_more => return null,
+        .invalid => return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]),
     }
-    if (state != .done) return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]);
-
-    var uc: T.utf8_char = 0;
-    if (utf8.utf8_from_data(&ud, &uc) != .done) return fill_event(event, T.KEYC_UNKNOWN, bytes[0..1]);
-    return fill_event(event, @as(T.key_code, uc), bytes[0..ud.size]);
 }
 
 fn parse_csi(bytes: []const u8, event: *T.key_event) ?usize {

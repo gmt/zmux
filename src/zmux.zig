@@ -36,6 +36,7 @@ const server_mod = @import("server.zig");
 const cfg_mod = @import("cfg.zig");
 const os_mod = @import("os/linux.zig");
 const c = @import("c.zig");
+const tty_features = @import("tty-features.zig");
 
 pub const tty_acs = @import("tty-acs.zig");
 
@@ -89,7 +90,6 @@ pub fn main() !void {
     var label: ?[]u8 = null;
     var flags: u64 = 0;
     var feat: i32 = 0;
-    _ = &feat; // mutable for future -T feature flags
     // Config file list (from -f flags)
     var cfg_file_override = false;
     var cmd_argc: i32 = 0;
@@ -122,7 +122,7 @@ pub fn main() !void {
             j += 1;
 
             switch (opt_char) {
-                '2' => {},
+                '2' => tty_features.addFeatures(&feat, "256", ":,"),
                 'C' => {
                     if (flags & T.CLIENT_CONTROL != 0)
                         flags |= T.CLIENT_CONTROLCONTROL
@@ -175,9 +175,7 @@ pub fn main() !void {
                             if (path) |p| xm.allocator.free(p);
                             path = xm.xstrdup(value);
                         },
-                        'T' => {
-                            feat += 0; // TODO: tty_add_features with value
-                        },
+                        'T' => tty_features.addFeatures(&feat, value, ":,"),
                         else => unreachable,
                     }
                 },

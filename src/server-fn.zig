@@ -31,6 +31,13 @@ const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
+const client_registry = @import("client-registry.zig");
+
+pub fn server_lock() void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != null) server_lock_client(cl);
+    }
+}
 
 pub fn server_redraw_session(s: *T.Session) void {
     srv.server_redraw_session(s);
@@ -49,7 +56,19 @@ pub fn server_status_window(w: *T.Window) void {
 }
 
 pub fn server_lock_session(s: *T.Session) void {
-    _ = s;
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == s) server_lock_client(cl);
+    }
+}
+
+pub fn server_lock_client(cl: *T.Client) void {
+    const s = cl.session orelse return;
+    if (cl.flags & (T.CLIENT_CONTROL | T.CLIENT_SUSPENDED) != 0) return;
+
+    const cmd = opts.options_get_string(s.options, "lock-command");
+    if (cmd.len == 0) return;
+
+    server_client_mod.server_client_lock(cl, cmd);
 }
 
 pub fn server_kill_window(w: *T.Window, detach_last: bool) void {

@@ -645,9 +645,9 @@ fn eval_modified_expr(
         defer alloc.free(marker);
 
         const trimmed = if (limit > 0)
-            utf8.utf8_trim_left(working, @intCast(limit))
+            utf8.trimDisplay(working, .left, @intCast(limit))
         else if (limit < 0)
-            utf8.utf8_trim_right(working, @intCast(-limit))
+            utf8.trimDisplay(working, .right, @intCast(-limit))
         else
             xm.xstrdup("");
         defer alloc.free(trimmed);
@@ -675,9 +675,9 @@ fn eval_modified_expr(
             return unresolved_expr(alloc, original_expr);
         };
         const padded = if (pad > 0)
-            utf8.utf8_padcstr(working, @intCast(pad))
+            utf8.padDisplay(working, .left, @intCast(pad))
         else if (pad < 0)
-            utf8.utf8_rpadcstr(working, @intCast(-pad))
+            utf8.padDisplay(working, .right, @intCast(-pad))
         else
             xm.xstrdup(working);
         alloc.free(working);
@@ -690,7 +690,7 @@ fn eval_modified_expr(
         working = rendered;
     }
     if (width_output) {
-        const rendered = xm.xasprintf("{d}", .{utf8.utf8_cstrwidth(working)});
+        const rendered = xm.xasprintf("{d}", .{utf8.displayWidth(working)});
         alloc.free(working);
         working = rendered;
     }

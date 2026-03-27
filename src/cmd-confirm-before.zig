@@ -101,10 +101,12 @@ fn prompt_callback(c: *T.Client, data: ?*anyopaque, s: ?[]const u8, _: bool) i32
     const state: *ConfirmBeforeState = @ptrCast(@alignCast(data orelse return 0));
     var retcode: i32 = 1;
 
-    if (s) |text| {
-        if (text.len != 0 and (text[0] == state.confirm_key or (text[0] == '\r' and state.default_yes))) {
-            retcode = 0;
-            enqueue_confirmed_command(c, state);
+    if ((c.flags & T.CLIENT_EXIT) == 0) {
+        if (s) |text| {
+            if (text.len != 0 and (text[0] == state.confirm_key or (text[0] == '\r' and state.default_yes))) {
+                retcode = 0;
+                enqueue_confirmed_command(c, state);
+            }
         }
     }
 
@@ -290,6 +292,33 @@ test "confirm-before default-yes accepts enter for single prompts" {
     try std.testing.expectEqualStrings("enter-accepted", setup.window.name);
 }
 
+test "confirm-before honors custom prompt text and confirm key" {
+    var setup = prompt_test_setup("confirm-before-custom");
+    defer prompt_test_teardown(&setup);
+
+    var cause: ?[]u8 = null;
+    const argv = [_][]const u8{
+        "confirm-before",
+        "-c",
+        "x",
+        "-p",
+        "Proceed?",
+        "rename-window",
+        "custom-ok",
+    };
+    const cmdlist = try cmd_mod.cmd_parse_from_argv_with_cause(&argv, &setup.client, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    cmdq.cmdq_append(&setup.client, cmdlist);
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+    try std.testing.expectEqualStrings("Proceed? ", status_prompt.status_prompt_message(&setup.client).?);
+
+    send_key(&setup.client, 'x', "x");
+    try std.testing.expect(!status_prompt.status_prompt_active(&setup.client));
+    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
+    try std.testing.expectEqualStrings("custom-ok", setup.window.name);
+}
+
 test "confirm-before background mode returns immediately and appends after confirmation" {
     var setup = prompt_test_setup("confirm-before-background");
     defer prompt_test_teardown(&setup);
@@ -314,6 +343,29 @@ test "confirm-before background mode returns immediately and appends after confi
     try std.testing.expect(!status_prompt.status_prompt_active(&setup.client));
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
     try std.testing.expectEqualStrings("background-ok", setup.window.name);
+}
+
+test "confirm-before skips the command when the client is already exiting" {
+    var setup = prompt_test_setup("confirm-before-exit");
+    defer prompt_test_teardown(&setup);
+
+    var cause: ?[]u8 = null;
+    const argv = [_][]const u8{
+        "confirm-before",
+        "rename-window",
+        "should-not-run",
+    };
+    const cmdlist = try cmd_mod.cmd_parse_from_argv_with_cause(&argv, &setup.client, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    cmdq.cmdq_append(&setup.client, cmdlist);
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+
+    setup.client.flags |= T.CLIENT_EXIT;
+    send_key(&setup.client, 'y', "y");
+    try std.testing.expect(!status_prompt.status_prompt_active(&setup.client));
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+    try std.testing.expect(!std.mem.eql(u8, setup.window.name, "should-not-run"));
 }
 
 test "confirm-before rejection updates detached client retval" {

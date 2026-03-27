@@ -47,6 +47,12 @@ const CollectedValue = struct {
     inherited: bool,
 };
 
+pub const HookMode = enum {
+    exclude,
+    include,
+    only,
+};
+
 pub fn resolve_target(
     item: *cmdq.CmdqItem,
     args: *const @import("arguments.zig").Arguments,
@@ -137,15 +143,22 @@ pub fn is_custom_option(name: []const u8) bool {
     return name.len > 0 and name[0] == '@';
 }
 
-pub fn collect_lines(target: ResolvedTarget, name: ?[]const u8, values_only: bool, include_inherited: bool) [][]u8 {
+pub fn collect_lines(
+    target: ResolvedTarget,
+    name: ?[]const u8,
+    values_only: bool,
+    include_inherited: bool,
+    hook_mode: HookMode,
+) [][]u8 {
     if (name) |single_name| {
         return collect_single(target, single_name, values_only, include_inherited);
     }
 
     var lines: std.ArrayList([]u8) = .{};
-    append_custom_lines(&lines, target, values_only);
+    if (hook_mode != .only) append_custom_lines(&lines, target, values_only);
     for (@import("options-table.zig").options_table) |*oe| {
         if (!option_allowed(oe, target.kind)) continue;
+        if (!hook_allowed(oe, hook_mode)) continue;
         const collected = lookup_value(target.options, oe.name, include_inherited) orelse continue;
         append_lines(&lines, oe.name, collected.value, oe, values_only, collected.inherited);
     }
@@ -173,6 +186,14 @@ fn append_custom_lines(lines: *std.ArrayList([]u8), target: ResolvedTarget, valu
         const value = target.options.entries.getPtr(name).?;
         append_lines(lines, name, value, null, values_only, false);
     }
+}
+
+fn hook_allowed(oe: *const T.OptionsTableEntry, hook_mode: HookMode) bool {
+    return switch (hook_mode) {
+        .exclude => !oe.is_hook,
+        .include => true,
+        .only => oe.is_hook,
+    };
 }
 
 fn append_lines(
@@ -308,7 +329,7 @@ test "resolve_target and collect_lines support pane scoped options" {
     const resolved = resolve_target(&item, cmd_mod.cmd_get_args(cmd), false).?;
     try std.testing.expectEqual(wp, resolved.pane.?);
 
-    const lines = collect_lines(resolved, "@pane-note", false, false);
+    const lines = collect_lines(resolved, "@pane-note", false, false, .exclude);
     defer {
         for (lines) |line| xm.allocator.free(line);
         xm.allocator.free(lines);
@@ -350,11 +371,11 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
         .session = s,
     };
 
-    const local_builtin = collect_lines(target, "status-left", false, false);
+    const local_builtin = collect_lines(target, "status-left", false, false, .exclude);
     defer xm.allocator.free(local_builtin);
     try std.testing.expectEqual(@as(usize, 0), local_builtin.len);
 
-    const inherited_builtin = collect_lines(target, "status-left", false, true);
+    const inherited_builtin = collect_lines(target, "status-left", false, true, .exclude);
     defer {
         for (inherited_builtin) |line| xm.allocator.free(line);
         xm.allocator.free(inherited_builtin);
@@ -362,7 +383,7 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
     try std.testing.expectEqual(@as(usize, 1), inherited_builtin.len);
     try std.testing.expectEqualStrings("status-left* \"global left\"", inherited_builtin[0]);
 
-    const inherited_custom = collect_lines(target, "@theme", false, true);
+    const inherited_custom = collect_lines(target, "@theme", false, true, .exclude);
     defer {
         for (inherited_custom) |line| xm.allocator.free(line);
         xm.allocator.free(inherited_custom);
@@ -370,7 +391,7 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
     try std.testing.expectEqual(@as(usize, 1), inherited_custom.len);
     try std.testing.expectEqualStrings("@theme* \"solarized dark\"", inherited_custom[0]);
 
-    const all_with_inherited = collect_lines(target, null, false, true);
+    const all_with_inherited = collect_lines(target, null, false, true, .exclude);
     defer {
         for (all_with_inherited) |line| xm.allocator.free(line);
         xm.allocator.free(all_with_inherited);

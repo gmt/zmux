@@ -449,6 +449,29 @@ pub fn session_next_index(s: *T.Session) i32 {
     return idx;
 }
 
+pub fn winlink_shuffle_up(s: *T.Session, wl: ?*T.Winlink, before: bool) i32 {
+    const target = wl orelse return -1;
+    const limit = std.math.maxInt(i32);
+
+    const idx = if (before) target.idx else blk: {
+        if (target.idx == limit) return -1;
+        break :blk target.idx + 1;
+    };
+
+    var last = idx;
+    while (last < limit and s.windows.contains(last)) : (last += 1) {}
+    if (last == limit) return -1;
+
+    while (last > idx) : (last -= 1) {
+        const moving = winlink_find_by_index(&s.windows, last - 1) orelse unreachable;
+        _ = s.windows.remove(last - 1);
+        moving.idx += 1;
+        s.windows.put(last, moving) catch unreachable;
+    }
+
+    return idx;
+}
+
 pub fn session_renumber_windows(s: *T.Session) void {
     const RenumberEntry = struct {
         old_idx: i32,

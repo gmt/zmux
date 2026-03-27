@@ -29,6 +29,7 @@ const sess = @import("session.zig");
 const win = @import("window.zig");
 const server_client_mod = @import("server-client.zig");
 const cmdq = @import("cmd-queue.zig");
+const job_mod = @import("job.zig");
 const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
 const key_bindings = @import("key-bindings.zig");
@@ -322,6 +323,7 @@ pub fn server_start(
 
     proc_mod.proc_loop(server_proc.?, server_loop);
 
+    job_mod.job_kill_all();
     std.process.exit(0);
 }
 

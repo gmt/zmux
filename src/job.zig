@@ -206,8 +206,26 @@ pub fn job_free(job: *Job) void {
         break;
     }
 
+    if (job.pid != -1 and job.state == .running) {
+        _ = std.c.kill(job.pid, std.posix.SIG.TERM);
+    }
+    if (job.fd != -1) {
+        _ = std.c.close(job.fd);
+        job.fd = -1;
+    }
+
     xm.allocator.free(job.cmd);
     xm.allocator.destroy(job);
+}
+
+pub fn job_kill_all() void {
+    jobs_lock.lock();
+    defer jobs_lock.unlock();
+
+    for (jobs.items) |job| {
+        if (job.pid != -1 and job.state == .running)
+            _ = std.c.kill(job.pid, std.posix.SIG.TERM);
+    }
 }
 
 pub fn job_reset_all() void {
@@ -261,4 +279,59 @@ test "job shared shell runner captures stdout and merged stderr" {
     try std.testing.expect(!result.spawn_failed);
     try std.testing.expectEqual(@as(i32, 0), result.retcode);
     try std.testing.expectEqualStrings("outerr", result.output.items);
+}
+
+test "job_free terminates a live shared job process" {
+    defer job_reset_all();
+
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    const job = job_register("sleep 30", 0);
+    job_started(job, @intCast(child.id), -1);
+    job_free(job);
+
+    const term = try child.wait();
+    switch (term) {
+        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "job_kill_all terminates all live shared job processes" {
+    defer job_reset_all();
+
+    var first_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+    first_child.stdin_behavior = .Ignore;
+    first_child.stdout_behavior = .Ignore;
+    first_child.stderr_behavior = .Ignore;
+    try first_child.spawn();
+
+    var second_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+    second_child.stdin_behavior = .Ignore;
+    second_child.stdout_behavior = .Ignore;
+    second_child.stderr_behavior = .Ignore;
+    try second_child.spawn();
+
+    const first = job_register("sleep 30", 0);
+    const second = job_register("sleep 30", JOB_NOWAIT);
+    job_started(first, @intCast(first_child.id), -1);
+    job_started(second, @intCast(second_child.id), -1);
+
+    job_kill_all();
+
+    const first_term = try first_child.wait();
+    const second_term = try second_child.wait();
+
+    switch (first_term) {
+        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (second_term) {
+        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+        else => return error.TestUnexpectedResult,
+    }
 }

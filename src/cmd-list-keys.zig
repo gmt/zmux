@@ -88,15 +88,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const prefix = get_prefix_string(args);
     defer xm.allocator.free(prefix);
-    const target_client = cmdq.cmdq_get_target_client(@ptrCast(item)) orelse cmdq.cmdq_get_client(item);
+    const target_client = item.target_client;
 
     const count = if (args.has('1') and bindings.len > 1) @as(usize, 1) else bindings.len;
     const key_width = max_key_width(bindings[0..count]);
     for (bindings[0..count]) |binding| {
         const line = require_binding_line(item, binding, template, mode, prefix, key_width) orelse return .@"error";
         defer xm.allocator.free(line);
-        if (((args.has('1') and target_client != null) or count == 1) and target_client != null) {
-            status_runtime.status_message_set_text(target_client.?, -1, true, false, false, line);
+        if ((args.has('1') and target_client != null) or count == 1) {
+            status_runtime.status_message_set_text_optional(target_client, -1, true, false, false, line);
         } else if (line.len != 0) {
             cmdq.cmdq_print(item, "{s}", .{line});
         }
@@ -339,4 +339,45 @@ test "list-keys -1 shows a single binding through the shared status runtime" {
     };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("F1 show note", client.message_string.?);
+}
+
+test "list-keys single-result without a target client logs through the shared status-message path" {
+    const env_mod = @import("environ.zig");
+
+    key_bindings.key_bindings_init();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    const server = @import("server.zig");
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    key_bindings.key_bindings_add("unit-list-keys-log", T.KEYC_F1, "show note", false, null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty.client = &client;
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-N", "-P", "", "-T", "unit-list-keys-log", "F1" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expect(client.message_string == null);
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("message: F1 show note", server.message_log.items[0].msg);
 }

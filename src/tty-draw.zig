@@ -161,7 +161,9 @@ fn style_of(cell: T.GridCellEntry) CellStyle {
 }
 
 fn style_is_default(style: CellStyle) bool {
-    return style.attr == 0 and style.fg == 0 and style.bg == 0;
+    return style.attr == 0 and
+        (style.fg == 0 or style.fg == 8) and
+        (style.bg == 0 or style.bg == 8);
 }
 
 fn style_to_sgr(style: CellStyle) ![]u8 {

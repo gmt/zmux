@@ -137,16 +137,12 @@ fn parse_bound(raw: ?[]const u8, sy: u32, is_start: bool, item: *cmdq.CmdqItem) 
 
 fn render_grid_line(gd: *T.Grid, row: u32, keep_spaces: bool, escape_sequences: bool) []u8 {
     if (row >= gd.linedata.len) return xm.xstrdup("");
-    const raw = xm.allocator.alloc(u8, gd.sx) catch unreachable;
+    const used = if (keep_spaces) gd.sx else grid_mod.line_length(gd, row);
+    const raw = xm.allocator.alloc(u8, used) catch unreachable;
     defer xm.allocator.free(raw);
 
-    for (0..gd.sx) |idx| {
+    for (0..used) |idx| {
         raw[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
-    }
-
-    var used: usize = raw.len;
-    if (!keep_spaces) {
-        while (used > 0 and raw[used - 1] == ' ') used -= 1;
     }
 
     if (!escape_sequences) return xm.allocator.dupe(u8, raw[0..used]) catch unreachable;
@@ -188,22 +184,11 @@ pub const entry_clear: cmd_mod.CmdEntry = .{
 };
 
 fn set_grid_line_text(gd: *T.Grid, row: usize, text: []const u8) void {
-    const cells = xm.allocator.alloc(T.GridCellEntry, text.len) catch unreachable;
+    grid_mod.ensure_line_capacity(gd, @intCast(row));
+    grid_mod.clear_line(&gd.linedata[row]);
     for (text, 0..) |ch, idx| {
-        cells[idx] = .{
-            .offset_or_data = .{
-                .data = .{
-                    .attr = 0,
-                    .fg = 0,
-                    .bg = 0,
-                    .data = ch,
-                },
-            },
-            .flags = 0,
-        };
+        grid_mod.set_ascii(gd, @intCast(row), @intCast(idx), ch);
     }
-    gd.linedata[row].celldata = cells;
-    gd.linedata[row].cellused = @intCast(text.len);
 }
 
 test "capture-pane helper captures current grid lines and trims spaces by default" {

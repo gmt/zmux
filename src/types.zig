@@ -391,6 +391,13 @@ pub const GRID_FLAG_SELECTED: u8 = 0x10;
 pub const GRID_FLAG_NOPALETTE: u8 = 0x20;
 pub const GRID_FLAG_CLEARED: u8 = 0x40;
 pub const GRID_FLAG_TAB: u8 = 0x80;
+pub const GRID_HISTORY: i32 = 0x01;
+
+pub const GRID_LINE_WRAPPED: i32 = 0x01;
+pub const GRID_LINE_EXTENDED: i32 = 0x02;
+pub const GRID_LINE_DEAD: i32 = 0x04;
+pub const GRID_LINE_START_PROMPT: i32 = 0x08;
+pub const GRID_LINE_START_OUTPUT: i32 = 0x10;
 
 // ── Grid cell ─────────────────────────────────────────────────────────────
 
@@ -416,6 +423,10 @@ pub const GridCell = extern struct {
     pub fn isPadding(self: *const GridCell) bool {
         return (self.flags & GRID_FLAG_PADDING) != 0;
     }
+
+    pub fn isCleared(self: *const GridCell) bool {
+        return (self.flags & GRID_FLAG_CLEARED) != 0;
+    }
 };
 
 pub const grid_default_cell = GridCell{
@@ -427,6 +438,36 @@ pub const grid_default_cell = GridCell{
     },
     .attr = 0,
     .flags = 0,
+    .fg = 8,
+    .bg = 8,
+    .us = 8,
+    .link = 0,
+};
+
+pub const grid_padding_cell = GridCell{
+    .data = .{
+        .data = [_]u8{'!'} ++ [_]u8{0} ** (UTF8_SIZE - 1),
+        .have = 0,
+        .size = 0,
+        .width = 0,
+    },
+    .attr = 0,
+    .flags = GRID_FLAG_PADDING,
+    .fg = 8,
+    .bg = 8,
+    .us = 8,
+    .link = 0,
+};
+
+pub const grid_cleared_cell = GridCell{
+    .data = .{
+        .data = [_]u8{' '} ++ [_]u8{0} ** (UTF8_SIZE - 1),
+        .have = 0,
+        .size = 1,
+        .width = 1,
+    },
+    .attr = 0,
+    .flags = GRID_FLAG_CLEARED,
     .fg = 8,
     .bg = 8,
     .us = 8,

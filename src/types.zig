@@ -573,6 +573,16 @@ pub const Style = struct {
     default_type: StyleDefaultType = .base,
 };
 
+pub const StyleRange = struct {
+    type: StyleRangeType = .none,
+    argument: u32 = 0,
+    string: [16]u8 = std.mem.zeroes([16]u8),
+    start: u32 = 0,
+    end: u32 = 0,
+};
+
+pub const StyleRanges = std.ArrayList(StyleRange);
+
 // ── Screen ────────────────────────────────────────────────────────────────
 
 pub const ScreenCursorStyle = enum {
@@ -943,6 +953,12 @@ pub const StatusLine = struct {
     active: ?*Screen = null,
     references: u32 = 0,
     style: GridCell = std.mem.zeroes(GridCell),
+    entries: [STATUS_LINES_LIMIT]StatusLineEntry = [_]StatusLineEntry{.{}} ** STATUS_LINES_LIMIT,
+};
+
+pub const StatusLineEntry = struct {
+    expanded: ?[]u8 = null,
+    ranges: StyleRanges = .{},
 };
 
 pub const ClientPaneCache = struct {

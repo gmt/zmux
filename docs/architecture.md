@@ -97,7 +97,7 @@ that truth still stops before the live grid/write path.
 | combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks, and `src/screen-write.zig` now calls that layer during live pane writes | the reduced writer still lacks fuller tmux `screen_write_cell` side effects, so combined-cell reachability exists for live writes but is not yet the full reopen gate |
 | cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model, and live pane writes now materially store through that path | most readers and prompt/status consumers still have not adopted the same shared cell payload model end to end |
 | live screen-write integration | `src/screen-write.zig` now owns `putGlyph`, `putCell`, and `putBytes`, and `src/input.zig` feeds printable terminal bytes through that shared path so live pane writes preserve decoded width, padding, and combine consequences | this is still a reduced `screen_write_cell` seam: insert-mode parity, selected-cell styling, tty draw collection, tab-cell treatment, and non-input consumer adoption are still missing |
-| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, and shared cell writes; `src/status-prompt.zig` now owns cursor-aware prompt editing, vi prompt command mode, and quote-next/control rendering over that shared cell buffer; `src/status-runtime.zig` now owns the reduced shared saved-screen/message-timer lifetime seam; `src/server-fn.zig` now clears active status messages on the attached key path before pane input; `src/alerts.zig` now routes visual alert messages through that shared message runtime; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, translated style ranges are not yet persisted into a shared hit-test consumer, and the remaining status/message runtime gaps are now broader producer adoption, message-log/write-side plumbing, multiline/runtime fidelity, and the rest of the `status.c` surface |
+| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, shared cell writes, and a persisted per-client status-range cache that shared hit-test consumers can query; `src/server-print.zig` now gives `cmdq` and attached show-buffer consumers one reduced shared attached-output/view-mode seam instead of isolated local writers; `src/status-prompt.zig` now owns cursor-aware prompt editing, vi prompt command mode, and quote-next/control rendering over that shared cell buffer; `src/status-runtime.zig` now owns the reduced shared saved-screen/message-timer lifetime seam and logs shared status messages into `server.message_log`; `src/cmd-queue.zig` now routes reduced command logging plus attached/detached command output through the same shared message-log/write-side seam; `src/server-fn.zig` now clears active status messages on the attached key path before pane input; `src/alerts.zig` now routes visual alert messages through that shared message runtime; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, the new hit-test consumer still stops at persisted status-row ranges because tmux-style mouse coordinate/runtime plumbing is not ported yet, and the remaining status/message runtime gaps are now multiline/runtime fidelity, richer producer coverage, and the rest of the `status.c` surface |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
@@ -107,9 +107,11 @@ still lacks fuller tmux `screen_write_cell` side effects, and the adopted
 prompt path is still only a reduced shared-cell editor/runtime: cursor
 motion, history navigation, completion, and shared cursor-window rendering now
 exist on the shared path, and prompt command mode plus the reduced
-timer/saved-screen lifetime seam now also ride that shared runtime, but
-persisted hit-test consumers, broader message-producer adoption, and broader
-display-consumer reach are still open.
+timer/saved-screen lifetime seam now also ride that shared runtime. The
+remaining open seam is now narrower and more structural: status-row ranges and
+message-log/write-side producers now persist on the shared path, but the
+broader multiline status/runtime surface, fuller mouse/runtime consumers, and
+the rest of the display reach are still open.
 
 The seal matrix below stays conservative on purpose: lower-layer truth does not
 reopen anything by itself. A row is only sealed when the future shared
@@ -264,11 +266,13 @@ runtime form:
   stopping at bells
 
 That landing materially closes the old prompt command mode, quote-next/control
-rendering, and timer/saved-screen lifetime gap, but it is still not a reopen
-gate for `status.c`: translated ranges are still not persisted into a shared
-hit-test consumer, the broader message-log and message-producer write path is
-still not shared, and the rest of the multiline/overlay/status runtime remains
-reduced.
+rendering, timer/saved-screen lifetime gap, persisted status-range cache gap,
+and the first shared message-log/write-side producer gap, but it is still not
+a reopen gate for `status.c`: the new hit-test consumer still stops at cached
+status rows because tmux-style mouse/runtime plumbing is not ported yet, the
+shared `server-print`/message-log seam is still reduced relative to tmux's
+full `server_client_print` + `file.c` + `window-copy` stack, and the rest of
+the multiline/overlay/status runtime remains reduced.
 
 ### Lower layers: what the top layer sits on
 

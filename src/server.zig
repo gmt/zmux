@@ -46,6 +46,7 @@ pub var server_fd: i32 = -1;
 pub var server_client_flags: u64 = 0;
 pub var server_exit: bool = false;
 pub var message_log: std.ArrayList(T.MessageEntry) = .{};
+var message_next: u32 = 0;
 var server_accept_ev: ?*c.libevent.event = null;
 
 // Globals exported to the rest of the codebase
@@ -192,6 +193,34 @@ fn server_loop() bool {
     return true;
 }
 
+pub fn server_reset_message_log() void {
+    for (message_log.items) |entry| {
+        xm.allocator.free(entry.msg);
+    }
+    message_log.deinit(xm.allocator);
+    message_log = .{};
+    message_next = 0;
+}
+
+pub fn server_add_message(comptime fmt: []const u8, args: anytype) void {
+    const rendered = xm.xasprintf(fmt, args);
+    log.log_debug("message: {s}", .{rendered});
+
+    message_log.append(xm.allocator, .{
+        .msg = rendered,
+        .msg_num = message_next,
+        .msg_time = std.time.timestamp(),
+    }) catch unreachable;
+    message_next += 1;
+
+    const limit_raw = @max(opts.options_get_number(opts.global_options, "message-limit"), 0);
+    const limit: usize = @intCast(limit_raw);
+    while (message_log.items.len > limit) {
+        const removed = message_log.orderedRemove(0);
+        xm.allocator.free(removed.msg);
+    }
+}
+
 // ── Server startup ────────────────────────────────────────────────────────
 
 /// Fork the server daemon, initialise state, run the event loop.
@@ -239,7 +268,7 @@ pub fn server_start(
     proc_mod.proc_set_signals(server_proc.?, server_signal);
 
     // Initialise global state
-    message_log = .{};
+    server_reset_message_log();
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 

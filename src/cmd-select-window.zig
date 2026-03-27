@@ -16,6 +16,7 @@ const spawn_mod = @import("spawn.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const format_mod = @import("format.zig");
+const client_registry = @import("client-registry.zig");
 
 const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
@@ -71,7 +72,10 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     };
     if (!args.has('d')) _ = sess.session_set_current(s, wl);
-    server_fn.server_redraw_session(s);
+    if (!args.has('d') or s.curw == wl)
+        server_fn.server_redraw_session_group(s)
+    else
+        server_fn.server_status_session_group(s);
     if (args.has('P')) {
         const state = T.CmdFindState{
             .s = s,
@@ -115,6 +119,31 @@ fn free_argv(argv: [][]u8) void {
     xm.allocator.free(argv);
 }
 
+fn init_test_state() void {
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    opts.global_s_options = opts.options_create(null);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+}
+
+fn deinit_test_state() void {
+    const opts = @import("options.zig");
+
+    env_mod.environ_free(env_mod.global_environ);
+    opts.options_free(opts.global_w_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_options);
+}
+
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "select-window",
     .alias = "selectw",
@@ -136,3 +165,68 @@ pub const entry_neww: cmd_mod.CmdEntry = .{
     .flags = 0,
     .exec = exec_neww,
 };
+
+test "new-window synchronizes grouped peers and uses shared group status-only invalidation for detached creates" {
+    const opts = @import("options.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const leader = sess.session_create(null, "new-window-group-a", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("new-window-group-a") != null) sess.session_destroy(leader, false, "test");
+    const peer = sess.session_create(null, "new-window-group-b", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("new-window-group-b") != null) sess.session_destroy(peer, false, "test");
+
+    const group = sess.session_group_new("new-window-group");
+    sess.session_group_add(group, leader);
+    sess.session_group_add(group, peer);
+
+    var cause: ?[]u8 = null;
+    var initial_sc: T.SpawnContext = .{ .s = leader, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const initial_wl = spawn_mod.spawn_window(&initial_sc, &cause).?;
+    leader.curw = initial_wl;
+    peer.curw = sess.winlink_find_by_index(&peer.windows, initial_wl.idx).?;
+
+    var leader_client = T.Client{
+        .name = "new-window-group-leader",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = leader,
+    };
+    defer env_mod.environ_free(leader_client.environ);
+    leader_client.tty.client = &leader_client;
+
+    var peer_client = T.Client{
+        .name = "new-window-group-peer",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = peer,
+    };
+    defer env_mod.environ_free(peer_client.environ);
+    peer_client.tty.client = &peer_client;
+
+    client_registry.add(&leader_client);
+    client_registry.add(&peer_client);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-d", "-t", "new-window-group-a" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &leader_client, .target_client = &leader_client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec_neww(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 2), leader.windows.count());
+    try std.testing.expectEqual(@as(usize, 2), peer.windows.count());
+    try std.testing.expectEqual(initial_wl.idx, peer.curw.?.idx);
+    try std.testing.expect(leader_client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(leader_client.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWWINDOW == 0);
+}

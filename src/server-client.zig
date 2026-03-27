@@ -36,6 +36,7 @@ const sess_mod = @import("session.zig");
 const tty_mod = @import("tty.zig");
 const tty_draw = @import("tty-draw.zig");
 const input_keys = @import("input-keys.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 const resize_mod = @import("resize.zig");
 const server_fn = @import("server-fn.zig");
 const c = @import("c.zig");
@@ -96,9 +97,14 @@ pub fn server_client_lost(cl: *T.Client) void {
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
     cl.peer = null;
     server_client_cancel_escape_timer(cl);
+    server_client_cancel_click_timer(cl);
     if (cl.escape_timer) |ev| {
         c.libevent.event_free(ev);
         cl.escape_timer = null;
+    }
+    if (cl.click_timer) |ev| {
+        c.libevent.event_free(ev);
+        cl.click_timer = null;
     }
     if (cl.cwd) |cwd| xm.allocator.free(@constCast(cwd));
     if (cl.name) |name| xm.allocator.free(@constCast(name));
@@ -445,6 +451,12 @@ fn server_client_cancel_escape_timer(cl: *T.Client) void {
     }
 }
 
+fn server_client_cancel_click_timer(cl: *T.Client) void {
+    if (cl.click_timer) |ev| {
+        _ = c.libevent.event_del(ev);
+    }
+}
+
 export fn server_client_escape_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
@@ -462,6 +474,38 @@ export fn server_client_escape_timeout_cb(_fd: c_int, _events: c_short, arg: ?*a
     }
     cl.stdin_pending.shrinkRetainingCapacity(remaining);
     server_client_process_stdin_pending(cl);
+}
+
+pub fn server_client_refresh_click_timer(cl: *T.Client) void {
+    if (cl.click_state == .none or T.KEYC_CLICK_TIMEOUT == 0) {
+        server_client_cancel_click_timer(cl);
+        return;
+    }
+
+    if (cl.click_timer == null) {
+        const base = proc_mod.libevent orelse return;
+        cl.click_timer = c.libevent.event_new(base, -1, @intCast(c.libevent.EV_TIMEOUT), server_client_click_timeout_cb, cl);
+    }
+    if (cl.click_timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = @intCast(@divFloor(T.KEYC_CLICK_TIMEOUT, 1000)),
+            .usec = @intCast(@mod(T.KEYC_CLICK_TIMEOUT, 1000) * 1000),
+        };
+        _ = c.libevent.event_del(ev);
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+export fn server_client_click_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    server_client_cancel_click_timer(cl);
+
+    if (mouse_runtime.click_timeout_event(cl)) |event| {
+        var translated = event;
+        _ = server_fn.server_client_handle_key(cl, &translated);
+    }
 }
 
 pub fn server_client_set_key_table(cl: *T.Client, name: ?[]const u8) void {

@@ -28,6 +28,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const server_client_mod = @import("server-client.zig");
+const status_runtime = @import("status-runtime.zig");
 
 const IfShellState = struct {
     item: ?*cmdq.CmdqItem = null,
@@ -77,10 +78,7 @@ fn commandParseError(item: ?*cmdq.CmdqItem, queue_client_id: ?u32, err: []const 
         return;
     }
 
-    const message = xm.xstrdup(err);
-    defer xm.allocator.free(message);
-    if (message.len != 0) message[0] = std.ascii.toUpper(message[0]);
-    cmdq.cmdq_write_client(findQueueClient(queue_client_id), 2, "{s}", .{message});
+    status_runtime.present_client_message(findQueueClient(queue_client_id), err);
 }
 
 fn enqueueParsedBranch(state: *IfShellState, branch_text: ?[]const u8) void {
@@ -141,7 +139,9 @@ fn completeState(state: *IfShellState) void {
         if (state.item) |item| {
             cmdq.cmdq_error(item, "failed to run command: {s}", .{state.shell_command});
         } else {
-            cmdq.cmdq_write_client(findQueueClient(state.queue_client_id), 2, "failed to run command: {s}", .{state.shell_command});
+            const message = xm.xasprintf("failed to run command: {s}", .{state.shell_command});
+            defer xm.allocator.free(message);
+            status_runtime.present_client_message(findQueueClient(state.queue_client_id), message);
         }
     } else {
         enqueueParsedBranch(state, if (state.success) state.if_command else state.else_command);

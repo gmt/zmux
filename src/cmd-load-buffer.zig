@@ -30,12 +30,41 @@ const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 
+const LoadBufferRemoteState = struct {
+    item: *cmdq.CmdqItem,
+    target_client: ?*T.Client,
+    name: ?[]u8,
+    export_after_store: bool,
+};
+
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const client = cmdq.cmdq_get_client(item);
     const target_client = cmdq.cmdq_get_target_client(item);
     const raw_path = file_mod.formatPathFromClient(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
+
+    if (file_mod.shouldUseRemotePathIO(client)) {
+        const state = xm.allocator.create(LoadBufferRemoteState) catch unreachable;
+        state.* = .{
+            .item = item,
+            .target_client = target_client,
+            .name = if (args.get('b')) |name| xm.xstrdup(name) else null,
+            .export_after_store = args.has('w'),
+        };
+
+        const resolved = file_mod.resolvePath(client, raw_path);
+        defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
+
+        return switch (file_mod.startRemoteRead(client.?, resolved.path, load_buffer_done, state)) {
+            .wait => .wait,
+            .err => |errno_value| blk: {
+                free_remote_state(state);
+                file_mod.reportErrnoPath(item, errno_value, resolved.path);
+                break :blk .@"error";
+            },
+        };
+    }
 
     const data = read_buffer(item, client, raw_path) catch return .@"error";
     const export_after_store = args.has('w') and data.len != 0;
@@ -54,6 +83,41 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     return .normal;
+}
+
+fn load_buffer_done(path: []const u8, errno_value: c_int, data: []const u8, cbdata: ?*anyopaque) void {
+    const state: *LoadBufferRemoteState = @ptrCast(@alignCast(cbdata orelse return));
+    defer free_remote_state(state);
+
+    if (errno_value != 0) {
+        file_mod.reportErrnoPath(state.item, errno_value, path);
+        cmdq.cmdq_continue(state.item);
+        return;
+    }
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    const copy = xm.allocator.alloc(u8, data.len) catch unreachable;
+    @memcpy(copy, data);
+
+    if (paste_mod.paste_set(copy, state.name, &cause) != 0) {
+        xm.allocator.free(copy);
+        cmdq.cmdq_error(state.item, "{s}", .{cause orelse "load buffer failed"});
+        cmdq.cmdq_continue(state.item);
+        return;
+    }
+
+    if (state.export_after_store and data.len != 0) {
+        clipboard_mod.export_selection(state.target_client, "", data);
+    }
+
+    cmdq.cmdq_continue(state.item);
+}
+
+fn free_remote_state(state: *LoadBufferRemoteState) void {
+    if (state.name) |name| xm.allocator.free(name);
+    xm.allocator.destroy(state);
 }
 
 fn read_buffer(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) ![]u8 {
@@ -232,15 +296,38 @@ test "load-buffer reads stdin when path is dash" {
     init_options_for_tests();
     defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
 
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "load-buffer-stdin-test" };
+    defer proc.peers.deinit(xm.allocator);
 
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
         .status = .{ .screen = undefined },
     };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};
@@ -261,7 +348,29 @@ test "load-buffer reads stdin when path is dash" {
     try std.posix.dup2(pipe_fds[0], std.posix.STDIN_FILENO);
     defer std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO) catch {};
 
-    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(load, &item));
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(load, &item));
+
+    var open_imsg = read_single_peer_imsg(&reader);
+    defer c.imsg.imsg_free(&open_imsg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.read_open))), c.imsg.imsg_get_type(&open_imsg));
+
+    file_mod.clientHandleReadOpen(client.peer.?, &open_imsg, true, false);
+
+    while (true) {
+        var imsg_msg = read_single_peer_imsg(&reader);
+        defer c.imsg.imsg_free(&imsg_msg);
+
+        const msg_type = std.meta.intToEnum(protocol.MsgType, imsg_msg.hdr.type) catch unreachable;
+        switch (msg_type) {
+            .read => file_mod.handleReadData(&imsg_msg),
+            .read_done => {
+                file_mod.handleReadDone(&imsg_msg);
+                break;
+            },
+            else => unreachable,
+        }
+    }
+
     try std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO);
 
     const pb = paste_mod.paste_get_name("stdin-buffer") orelse return error.TestUnexpectedResult;
@@ -329,6 +438,14 @@ test "load-buffer ignores target-client without clipboard export" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(load, &item));
     const pb = paste_mod.paste_get_name("buffer0") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("clipboard seam", paste_mod.paste_buffer_data(pb, null));
+}
+
+fn read_single_peer_imsg(reader: *c.imsg.imsgbuf) c.imsg.imsg {
+    var imsg_msg: c.imsg.imsg = undefined;
+    if (c.imsg.imsg_get(reader, &imsg_msg) > 0) return imsg_msg;
+    if (c.imsg.imsgbuf_read(reader) != 1) unreachable;
+    if (c.imsg.imsg_get(reader, &imsg_msg) <= 0) unreachable;
+    return imsg_msg;
 }
 
 test "load-buffer write flag is a no-op without a sessionful target client" {

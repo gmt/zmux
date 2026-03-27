@@ -50,6 +50,16 @@ pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const
     _ = file.writeAll(data) catch {};
 }
 
+pub fn server_client_control_message(client: *T.Client, message: []const u8) void {
+    var line: std.ArrayList(u8) = .{};
+    defer line.deinit(xm.allocator);
+
+    line.appendSlice(xm.allocator, "%message ") catch unreachable;
+    line.appendSlice(xm.allocator, message) catch unreachable;
+    line.append(xm.allocator, '\n') catch unreachable;
+    server_client_write_stream(client, 1, line.items);
+}
+
 pub fn server_client_print(client: ?*T.Client, parse: bool, data: []const u8) void {
     if (client) |cl| {
         if (cl.session != null and (cl.flags & T.CLIENT_CONTROL) == 0) {

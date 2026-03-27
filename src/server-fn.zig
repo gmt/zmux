@@ -27,6 +27,7 @@ const srv = @import("server.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
 const opts = @import("options.zig");
+const cmd_display_panes = @import("cmd-display-panes.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const cmd_find = @import("cmd-find.zig");
@@ -207,6 +208,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
     sess.session_update_activity(s, now);
+
+    if (cmd_display_panes.overlay_active(cl)) {
+        if (cmd_display_panes.handle_key(cl, event))
+            return true;
+    }
 
     if (status_runtime.status_message_active(cl)) {
         if (status_runtime.status_message_ignore_keys(cl))

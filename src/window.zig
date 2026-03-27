@@ -568,7 +568,7 @@ pub fn window_redraw_active_switch(_w: *T.Window, _wp: *T.WindowPane) void {
     _ = _wp;
 }
 
-fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {
+pub fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {
     for (w.panes.items) |pane| {
         if (pane == wp) return true;
     }

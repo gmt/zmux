@@ -728,6 +728,7 @@ pub const WindowMode = struct {
     key: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, key_code, ?*const MouseEvent) void = null,
     key_table: ?*const fn (*WindowModeEntry) []const u8 = null,
     command: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, *const anyopaque, ?*const MouseEvent) void = null,
+    get_screen: ?*const fn (*WindowModeEntry) *Screen = null,
 };
 
 pub const WindowModeEntry = struct {

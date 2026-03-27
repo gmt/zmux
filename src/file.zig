@@ -24,10 +24,13 @@ const c = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
+const proc_mod = @import("proc.zig");
 const file_path_mod = @import("file-path.zig");
 const file_write_mod = @import("file-write.zig");
 
 pub const ResolvedPath = file_path_mod.ResolvedPath;
+
+const max_stream_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(i32);
 
 pub const ReadResult = union(enum) {
     data: []u8,
@@ -44,6 +47,22 @@ pub fn resolvePath(client: ?*T.Client, raw_path: []const u8) ResolvedPath {
 
 pub fn strerror(errno_value: c_int) []const u8 {
     return std.mem.span(c.posix_sys.strerror(errno_value));
+}
+
+pub fn sendPeerStream(peer: *T.ZmuxPeer, stream: i32, data: []const u8) bool {
+    var remaining = data;
+    while (remaining.len != 0) {
+        const chunk_len = @min(remaining.len, max_stream_payload);
+        var payload = std.ArrayList(u8){};
+        defer payload.deinit(xm.allocator);
+
+        payload.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch return false;
+        payload.appendSlice(xm.allocator, remaining[0..chunk_len]) catch return false;
+        if (proc_mod.proc_send(peer, .write, -1, payload.items.ptr, payload.items.len) != 0)
+            return false;
+        remaining = remaining[chunk_len..];
+    }
+    return true;
 }
 
 pub fn reportErrnoPath(item: *cmdq.CmdqItem, errno_value: c_int, path: []const u8) void {
@@ -197,4 +216,65 @@ test "readResolvedPathAlloc reads stdin for reduced detached consumers" {
         },
         .err => |errno_value| return std.posix.unexpectedErrno(@enumFromInt(errno_value)),
     }
+}
+
+fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+    _ = _imsg;
+    _ = _arg;
+}
+
+test "sendPeerStream chunks oversized write payloads across imsg boundaries" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "file-stream-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const total_len = max_stream_payload * 2 + 17;
+    const payload = try xm.allocator.alloc(u8, total_len);
+    defer xm.allocator.free(payload);
+    for (payload, 0..) |*byte, idx| byte.* = @intCast('a' + @as(u8, @intCast(idx % 26)));
+
+    try std.testing.expect(sendPeerStream(peer, 2, payload));
+
+    var collected: std.ArrayList(u8) = .{};
+    defer collected.deinit(xm.allocator);
+
+    var chunks: usize = 0;
+    while (collected.items.len < payload.len) {
+        var imsg_msg: c.imsg.imsg = undefined;
+        const got = c.imsg.imsg_get(&reader, &imsg_msg);
+        if (got == 0) {
+            try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+            continue;
+        }
+        try std.testing.expect(got > 0);
+        defer c.imsg.imsg_free(&imsg_msg);
+
+        const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+        try std.testing.expect(data_len > @sizeOf(i32));
+        const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+        const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
+        try std.testing.expectEqual(@as(i32, 2), stream.*);
+        try collected.appendSlice(xm.allocator, raw[@sizeOf(i32)..data_len]);
+        chunks += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), chunks);
+    try std.testing.expectEqualSlices(u8, payload, collected.items);
 }

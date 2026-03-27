@@ -621,6 +621,30 @@ than tmux's `status.c` plus `server-client.c` surface, the reduced print seam
 still stops well short of the full `server_client_print` + `file.c` +
 `window-copy` runtime, and broader producer coverage is still open.
 
+The next checkpoint down is now also landed in reduced shared `file.c`
+follow-through form:
+
+- `src/file.zig` now owns one shared reduced file seam over the existing
+  detached write IPC slice plus a new synchronous read helper, instead of
+  leaving `load-buffer`, `save-buffer`, and config consumers to each reinvent
+  path resolution and local file IO
+- `src/cmd-load-buffer.zig`, `src/cmd-save-buffer.zig`, `src/client.zig`, and
+  `src/server-client.zig` now consume that shared file seam for path
+  resolution, detached write runtime handoff, and write-message dispatch
+  instead of importing the write-only helper directly or keeping command-local
+  read or write branches
+- `src/cfg.zig` now reads `source-file` content through the same shared file
+  seam, so reduced stdin-backed config loading and the existing relative-path
+  behavior stop living behind a config-local "not supported yet" fork
+
+That landing narrows another honest part of the broader print/runtime gap:
+buffer and config consumers now share one lower file seam instead of carrying
+separate synchronous IO stories above the stack. Keep it partial because this
+is still much smaller than tmux's full `file.c` surface: `MSG_READ_*`,
+callback-driven completion, shared `client_file` ownership and backpressure,
+and the rest of the `server_client_print` + `window-copy` runtime are still
+missing.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:

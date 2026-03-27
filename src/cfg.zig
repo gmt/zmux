@@ -23,7 +23,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
-const server_client_mod = @import("server-client.zig");
+const file_mod = @import("file.zig");
 
 pub const CfgFlags = packed struct {
     quiet: bool = false,
@@ -79,30 +79,22 @@ pub fn cfg_source_path(cl: ?*T.Client, raw_path: []const u8, flags: CfgFlags) bo
     cfg_source_depth += 1;
     defer cfg_source_depth -= 1;
 
-    if (std.mem.eql(u8, raw_path, "-")) {
-        cfg_note_cause("source-file - not supported yet", .{}, flags.quiet);
-        return false;
-    }
-
-    const resolved = resolve_path(cl, raw_path);
+    const resolved = file_mod.resolvePath(cl, raw_path);
     defer if (resolved.owned) xm.allocator.free(resolved.path);
 
     if (flags.verbose) cmdq.cmdq_write_client(cl, 1, "source-file: {s}", .{resolved.path});
     if (std.mem.eql(u8, resolved.path, "/dev/null")) return true;
 
-    const file = std.fs.cwd().openFile(resolved.path, .{}) catch |err| {
-        if (!flags.quiet) cfg_note_cause("{s}: {}", .{ resolved.path, err }, false);
-        return false;
+    return switch (file_mod.readResolvedPathAlloc(cl, resolved.path)) {
+        .data => |content| blk: {
+            defer xm.allocator.free(content);
+            break :blk cfg_load_buffer(cl, resolved.path, content, flags);
+        },
+        .err => |errno_value| blk: {
+            if (!flags.quiet) cfg_note_cause("{s}: {s}", .{ file_mod.strerror(errno_value), resolved.path }, false);
+            break :blk false;
+        },
     };
-    defer file.close();
-
-    const content = file.readToEndAlloc(xm.allocator, 1024 * 1024) catch |err| {
-        if (!flags.quiet) cfg_note_cause("{s}: {}", .{ resolved.path, err }, false);
-        return false;
-    };
-    defer xm.allocator.free(content);
-
-    return cfg_load_buffer(cl, resolved.path, content, flags);
 }
 
 pub fn cfg_show_causes(cl: ?*T.Client) void {
@@ -173,20 +165,6 @@ fn expand_default_path(path: []const u8) ?[]u8 {
     return xm.xstrdup(path);
 }
 
-const ResolvedPath = struct {
-    path: []const u8,
-    owned: bool = false,
-};
-
-fn resolve_path(cl: ?*T.Client, raw_path: []const u8) ResolvedPath {
-    if (std.mem.startsWith(u8, raw_path, "/")) return .{ .path = raw_path };
-    if (std.mem.startsWith(u8, raw_path, "~/") or std.mem.eql(u8, raw_path, "~")) {
-        if (expand_default_path(raw_path)) |expanded| return .{ .path = expanded, .owned = true };
-    }
-    const cwd = server_client_mod.server_client_get_cwd(cl, null);
-    return .{ .path = xm.xasprintf("{s}/{s}", .{ cwd, raw_path }), .owned = true };
-}
-
 test "cfg default path expansion handles home and xdg" {
     cfg_reset_files();
     defer cfg_reset_files();
@@ -211,4 +189,31 @@ test "cfg parse only does not enqueue commands" {
 
     const content = "set-option status off\n";
     try std.testing.expect(cfg_load_buffer(null, "/tmp/test.conf", content, .{ .parse_only = true }));
+}
+
+test "cfg source path reads stdin through the shared reduced file seam" {
+    cfg_clear_causes();
+    defer cfg_clear_causes();
+
+    const saved_stdin = try std.posix.dup(std.posix.STDIN_FILENO);
+    defer {
+        std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO) catch {};
+        std.posix.close(saved_stdin);
+    }
+
+    const pipe_fds = try std.posix.pipe();
+    try std.posix.dup2(pipe_fds[0], std.posix.STDIN_FILENO);
+    std.posix.close(pipe_fds[0]);
+    _ = try std.posix.write(pipe_fds[1], "set-option status off\n");
+    std.posix.close(pipe_fds[1]);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+
+    try std.testing.expect(cfg_source_path(&client, "-", .{ .parse_only = true }));
 }

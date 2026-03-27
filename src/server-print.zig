@@ -155,63 +155,7 @@ fn render_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) void {
         return;
     }
 
-    var start: usize = 0;
-    for (data, 0..) |byte, idx| {
-        if (byte != '\n') continue;
-        render_raw_line(&ctx, data[start..idx]);
-        screen_write.newline(&ctx);
-        start = idx + 1;
-    }
-    render_raw_line(&ctx, data[start..]);
-}
-
-fn render_raw_line(ctx: *T.ScreenWriteCtx, line: []const u8) void {
-    var remaining = line;
-    while (remaining.len != 0) {
-        const consumed = render_raw_unit(ctx, remaining);
-        remaining = remaining[consumed..];
-    }
-}
-
-fn render_raw_unit(ctx: *T.ScreenWriteCtx, bytes: []const u8) usize {
-    const byte = bytes[0];
-    switch (byte) {
-        '\r' => {
-            screen_write.carriage_return(ctx);
-            return 1;
-        },
-        '\t' => {
-            screen_write.tab(ctx);
-            return 1;
-        },
-        0x20...0x7e => {
-            screen_write.putc(ctx, byte);
-            return 1;
-        },
-        else => {},
-    }
-
-    var ud: T.Utf8Data = undefined;
-    if (utf8.utf8_open(&ud, byte) == .more) {
-        var idx: usize = 1;
-        var state: T.Utf8State = .more;
-        while (idx < bytes.len and state == .more) : (idx += 1) {
-            state = utf8.utf8_append(&ud, bytes[idx]);
-        }
-        if (state == .done) {
-            screen_write.putn(ctx, ud.data[0..ud.size]);
-            return ud.size;
-        }
-    }
-
-    render_raw_escape(ctx, byte);
-    return 1;
-}
-
-fn render_raw_escape(ctx: *T.ScreenWriteCtx, byte: u8) void {
-    const escaped = utf8.utf8_strvisx(&.{byte}, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_NOSLASH);
-    defer xm.allocator.free(escaped);
-    screen_write.putn(ctx, escaped);
+    _ = screen_write.putEscapedBytes(&ctx, data, false);
 }
 
 fn server_print_view_key(
@@ -573,6 +517,89 @@ test "server_client_print preserves utf8 payloads on the shared attached view-mo
     defer xm.allocator.free(second_row);
     try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first_row);
     try std.testing.expectEqualStrings("\xce\xb2", second_row);
+}
+
+test "server_client_print raw attached output uses the shared escaped-byte writer path" {
+    const client_registry = @import("client-registry.zig");
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("server-print-raw");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(16, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(16, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 31,
+        .name = window_name,
+        .sx = 16,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 32,
+        .window = &window,
+        .options = undefined,
+        .sx = 16,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| server_client_close_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 30,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    try session.windows.put(0, &winlink);
+    try window.winlinks.append(xm.allocator, &winlink);
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client_registry.add(&client);
+    defer {
+        client_registry.remove(&client);
+        clearClientRedrawFlags(&client);
+    }
+
+    server_client_print(&client, false, "\x1b🙂\xc3(");
+
+    const row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(row);
+    try std.testing.expectEqualStrings("\\033🙂\\303(", row);
 }
 
 fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {

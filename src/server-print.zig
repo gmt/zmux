@@ -192,7 +192,7 @@ test "server_client_print appends parsed output in the shared view mode" {
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(10, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -285,7 +285,7 @@ test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(10, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -446,7 +446,7 @@ test "server_client_print preserves utf8 payloads on the shared attached view-mo
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(8, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -533,7 +533,7 @@ test "server_client_print raw attached output uses the shared escaped-byte write
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(16, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 

@@ -124,6 +124,7 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
         },
         .input_pending = .{},
     };
+    screen_mod.screen_reset_hyperlinks(&wp.base);
     window_pane_options_changed(wp, null);
     next_window_pane_id += 1;
     all_window_panes.put(wp.id, wp) catch unreachable;
@@ -324,12 +325,9 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     wp.modes.deinit(xm.allocator);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
-    if (wp.screen.title) |title| xm.allocator.free(title);
-    if (wp.screen.path) |path| xm.allocator.free(path);
-    if (wp.screen.tabs) |tabs| xm.allocator.free(tabs);
-    if (wp.screen.grid != wp.base.grid) grid_mod.grid_free(wp.screen.grid);
+    screen_mod.screen_free(wp.screen);
     xm.allocator.destroy(wp.screen);
-    grid_mod.grid_free(wp.base.grid);
+    screen_mod.screen_free(&wp.base);
     xm.allocator.destroy(wp);
 }
 

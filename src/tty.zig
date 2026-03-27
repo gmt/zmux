@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const proc_mod = @import("proc.zig");
+const tty_features = @import("tty-features.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -76,6 +77,7 @@ pub fn tty_invalidate(tty: *T.Tty) void {
 pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     if (title.len == 0) return;
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    if (!tty_features.supportsTty(tty, .title)) return;
     const sequence = std.fmt.allocPrint(xm.allocator, "\x1b]2;{s}\x07", .{title}) catch return;
     defer xm.allocator.free(sequence);
     tty_write(tty, sequence);
@@ -86,20 +88,27 @@ pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !
     if ((tty.flags & @as(i32, @intCast(T.TTY_NOCURSOR))) != 0)
         actual &= ~@as(i32, T.MODE_CURSOR);
 
+    const supports_mouse = tty_features.supportsTty(tty, .mouse);
+    const supports_bpaste = tty_features.supportsTty(tty, .bpaste);
+    if (!supports_mouse)
+        actual &= ~@as(i32, T.ALL_MOUSE_MODES);
+    if (!supports_bpaste)
+        actual &= ~@as(i32, T.MODE_BRACKETPASTE);
+
     const changed = actual ^ tty.mode;
-    if ((changed & T.ALL_MOUSE_MODES) != 0) {
+    if ((changed & T.ALL_MOUSE_MODES) != 0 and (supports_mouse or (tty.mode & T.ALL_MOUSE_MODES) != 0)) {
         try out.appendSlice(xm.allocator, "\x1b[?1006l\x1b[?1005l\x1b[?1000l\x1b[?1002l\x1b[?1003l");
-        if ((actual & T.ALL_MOUSE_MODES) != 0)
+        if (supports_mouse and (actual & T.ALL_MOUSE_MODES) != 0)
             try out.appendSlice(xm.allocator, "\x1b[?1006h");
-        if ((actual & T.MODE_MOUSE_ALL) != 0)
+        if (supports_mouse and (actual & T.MODE_MOUSE_ALL) != 0)
             try out.appendSlice(xm.allocator, "\x1b[?1000h\x1b[?1002h\x1b[?1003h")
-        else if ((actual & T.MODE_MOUSE_BUTTON) != 0)
+        else if (supports_mouse and (actual & T.MODE_MOUSE_BUTTON) != 0)
             try out.appendSlice(xm.allocator, "\x1b[?1000h\x1b[?1002h")
-        else if ((actual & T.MODE_MOUSE_STANDARD) != 0)
+        else if (supports_mouse and (actual & T.MODE_MOUSE_STANDARD) != 0)
             try out.appendSlice(xm.allocator, "\x1b[?1000h");
     }
-    if ((changed & T.MODE_BRACKETPASTE) != 0) {
-        if ((actual & T.MODE_BRACKETPASTE) != 0)
+    if ((changed & T.MODE_BRACKETPASTE) != 0 and (supports_bpaste or (tty.mode & T.MODE_BRACKETPASTE) != 0)) {
+        if (supports_bpaste and (actual & T.MODE_BRACKETPASTE) != 0)
             try out.appendSlice(xm.allocator, "\x1b[?2004h")
         else
             try out.appendSlice(xm.allocator, "\x1b[?2004l");
@@ -185,6 +194,7 @@ test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negot
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
+        .term_name = @constCast("xterm-256color"),
     };
     tty_init(&cl.tty, &cl);
 
@@ -200,4 +210,44 @@ test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negot
     try tty_append_mode_update(&cl.tty, 0, &out);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1006l") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?2004l") != null);
+}
+
+test "tty_append_mode_update suppresses unsupported outer modes on reduced dumb terminals" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_name = @constCast("dumb"),
+    };
+    tty_init(&cl.tty, &cl);
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expectEqual(@as(i32, 0), cl.tty.mode);
+}
+
+test "tty_set_title honours the reduced title capability layer" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_name = @constCast("dumb"),
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.flags |= @as(i32, @intCast(T.TTY_STARTED));
+
+    tty_set_title(&cl.tty, "suppressed");
 }

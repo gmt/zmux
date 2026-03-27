@@ -239,6 +239,13 @@ fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_ty
                 cl.ttyname = xm.xstrdup(ttyname);
             }
         },
+        .identify_features => {
+            if (data_len >= @sizeOf(i32)) {
+                var features: i32 = 0;
+                @memcpy(std.mem.asBytes(&features), data[0..@sizeOf(i32)]);
+                cl.term_features |= features;
+            }
+        },
         .identify_cwd => {
             if (data_len > 0) {
                 const cwd = data[0 .. data_len - 1];

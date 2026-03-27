@@ -38,7 +38,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const w = wl.window;
 
     if (args.has('T')) {
-        trim_history(wp);
+        if (trim_history(wp)) server_fn.server_redraw_pane(wp);
         return .normal;
     }
     if (args.has('M')) {
@@ -68,19 +68,20 @@ fn has_layout_resize_request(args: *const @import("arguments.zig").Arguments) bo
         args.has('L') or args.has('R') or args.has('U') or args.has('D');
 }
 
-fn trim_history(wp: *T.WindowPane) void {
-    if (wp.modes.items.len != 0) return;
+fn trim_history(wp: *T.WindowPane) bool {
+    if (wp.modes.items.len != 0) return false;
 
     const gd = wp.base.grid;
-    if (gd.sy == 0) return;
+    if (gd.sy == 0) return false;
 
     var adjust = gd.sy - 1 - @min(wp.base.cy, gd.sy - 1);
     if (adjust > gd.hsize) adjust = gd.hsize;
-    if (adjust == 0) return;
+    if (adjust == 0) return false;
 
     grid_mod.remove_history(gd, adjust);
     wp.base.cy += adjust;
     wp.flags |= T.PANE_REDRAW;
+    return true;
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

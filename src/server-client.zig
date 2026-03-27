@@ -610,6 +610,14 @@ fn redraw_needs_body(redraw_flags: u64) bool {
         T.CLIENT_REDRAWOVERLAY)) != 0;
 }
 
+fn redraw_needs_full_body(redraw_flags: u64) bool {
+    return (redraw_flags & (T.CLIENT_REDRAWWINDOW | T.CLIENT_REDRAWOVERLAY)) != 0;
+}
+
+fn redraw_needs_dirty_panes(redraw_flags: u64) bool {
+    return (redraw_flags & T.CLIENT_REDRAWPANES) != 0 and !redraw_needs_full_body(redraw_flags);
+}
+
 fn redraw_needs_borders(redraw_flags: u64, w: *T.Window) bool {
     return (redraw_flags & T.CLIENT_REDRAWBORDERS) != 0 or
         ((redraw_flags & T.CLIENT_REDRAWWINDOW) != 0 and visiblePaneCount(w) > 1);
@@ -624,6 +632,14 @@ fn redraw_needs_status(redraw_flags: u64, body_draw: bool, overlay_rows: u32) bo
     if (overlay_rows == 0) return false;
     if (body_draw) return true;
     return (redraw_flags & (T.CLIENT_REDRAWSTATUS | T.CLIENT_REDRAWSTATUSALWAYS)) != 0;
+}
+
+fn clear_rendered_pane_flags(w: *T.Window, dirty_only: bool) void {
+    for (w.panes.items) |pane| {
+        if (!win_mod.window_pane_visible(pane)) continue;
+        if (dirty_only and pane.flags & T.PANE_REDRAW == 0) continue;
+        pane.flags &= ~@as(u32, T.PANE_REDRAW);
+    }
 }
 
 fn current_body_cursor(
@@ -667,12 +683,14 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     if (tty_sx == 0) return null;
 
     const body_needs_draw = redraw_needs_body(redraw_flags);
+    const full_body_needs_draw = redraw_needs_full_body(redraw_flags);
+    const dirty_pane_needs_draw = redraw_needs_dirty_panes(redraw_flags);
     const border_needs_draw = redraw_needs_borders(redraw_flags, wl.window);
     const scrollbar_needs_draw = redraw_needs_scrollbars(redraw_flags, body_needs_draw);
     const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
 
     var body = BodyRenderResult{};
-    if (body_needs_draw and pane_area_sy != 0) {
+    if (full_body_needs_draw and pane_area_sy != 0) {
         if (canUseCachedPaneDraw(wl.window, wp)) {
             win_mod.window_pane_update_scrollbar_geometry(wp);
             const pane_width = win_mod.window_pane_total_width(wp);
@@ -694,6 +712,23 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
             };
             tty_draw.tty_draw_invalidate(&cl.pane_cache);
         }
+    } else if (dirty_pane_needs_draw and pane_area_sy != 0) {
+        if (canUseCachedPaneDraw(wl.window, wp) and wp.flags & T.PANE_REDRAW != 0) {
+            win_mod.window_pane_update_scrollbar_geometry(wp);
+            const pane_width = win_mod.window_pane_total_width(wp);
+            const sx = @min(tty_sx, pane_width);
+            const sy = @min(pane_area_sy, wp.base.grid.sy);
+            if (sx != 0 and sy != 0) {
+                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
+            }
+        } else {
+            body.payload = tty_draw.tty_draw_render_dirty_panes(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null;
+            if (body.payload.len != 0) tty_draw.tty_draw_invalidate(&cl.pane_cache);
+        }
+        const cursor = current_body_cursor(wl.window, tty_sx, pane_area_sy, pane_row_offset);
+        body.cursor_visible = cursor.cursor_visible;
+        body.cursor_x = cursor.cursor_x;
+        body.cursor_y = cursor.cursor_y;
     } else {
         body = current_body_cursor(wl.window, tty_sx, pane_area_sy, pane_row_offset);
     }
@@ -749,6 +784,13 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
         buf.appendSlice(xm.allocator, cursor) catch return null;
     } else if (body.payload.len != 0 or border_payload.len != 0 or scrollbar_payload.len != 0 or status_render.payload.len != 0) {
         buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
+    }
+
+    if (body.payload.len != 0) {
+        if (full_body_needs_draw)
+            clear_rendered_pane_flags(wl.window, false)
+        else if (dirty_pane_needs_draw)
+            clear_rendered_pane_flags(wl.window, true);
     }
 
     return buf.toOwnedSlice(xm.allocator) catch return null;
@@ -1127,4 +1169,58 @@ test "build_client_draw_payload keeps scrollbar-only redraw off the full-clear b
     try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "\x1b[H\x1b[2J") == null);
     try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "abcd") == null);
     try std.testing.expect(std.mem.indexOf(u8, scrollbars_only, "\x1b[0;34m ") != null);
+}
+
+test "build_client_draw_payload can redraw only dirty panes without clearing the whole window" {
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-dirty-pane", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-dirty-pane") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const left = win_mod.window_add_pane(w, null, 3, 2);
+    const right = win_mod.window_add_pane(w, null, 3, 2);
+    left.xoff = 0;
+    left.yoff = 0;
+    right.xoff = 3;
+    right.yoff = 0;
+    w.active = right;
+
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
+    right.flags |= T.PANE_REDRAW;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 6, .sy = 2 };
+
+    const dirty = build_client_draw_payload(&client, T.CLIENT_REDRAWPANES) orelse unreachable;
+    defer xm.allocator.free(dirty);
+    try std.testing.expect(dirty.len != 0);
+    try std.testing.expect(std.mem.indexOf(u8, dirty, "\x1b[H\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dirty, "L1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dirty, "R1") != null);
+    try std.testing.expect(right.flags & T.PANE_REDRAW == 0);
 }

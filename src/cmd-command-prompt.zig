@@ -23,6 +23,9 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_render = @import("cmd-render.zig");
 const cmdq = @import("cmd-queue.zig");
+const opts_mod = @import("options.zig");
+const options_table = @import("options-table.zig");
+const sess_mod = @import("session.zig");
 const status_prompt = @import("status-prompt.zig");
 
 const PromptStep = struct {
@@ -55,6 +58,201 @@ fn state_free(state: *CommandPromptState) void {
 fn prompt_free(data: ?*anyopaque) void {
     const state: *CommandPromptState = @ptrCast(@alignCast(data orelse return));
     state_free(state);
+}
+
+fn append_candidate(candidates: *std.ArrayList([]u8), value: []const u8) void {
+    for (candidates.items) |existing| {
+        if (std.mem.eql(u8, existing, value)) return;
+    }
+    candidates.append(xm.allocator, xm.xstrdup(value)) catch unreachable;
+}
+
+fn append_prefixed_candidate(candidates: *std.ArrayList([]u8), flag: ?u8, value: []const u8) void {
+    if (flag) |ch| {
+        const prefixed = xm.xasprintf("-{c}{s}", .{ ch, value });
+        defer xm.allocator.free(prefixed);
+        append_candidate(candidates, prefixed);
+        return;
+    }
+    append_candidate(candidates, value);
+}
+
+fn free_candidates(candidates: *std.ArrayList([]u8)) void {
+    for (candidates.items) |candidate| xm.allocator.free(candidate);
+    candidates.deinit(xm.allocator);
+}
+
+fn shared_prefix_len(a: []const u8, b: []const u8) usize {
+    const limit = @min(a.len, b.len);
+    var idx: usize = 0;
+    while (idx < limit and a[idx] == b[idx]) : (idx += 1) {}
+    return idx;
+}
+
+fn longest_candidate_prefix(candidates: []const []u8) ?[]u8 {
+    if (candidates.len == 0) return null;
+    var prefix_len = candidates[0].len;
+    for (candidates[1..]) |candidate| {
+        prefix_len = shared_prefix_len(candidates[0][0..prefix_len], candidate);
+        if (prefix_len == 0) return null;
+    }
+    return xm.xstrdup(candidates[0][0..prefix_len]);
+}
+
+fn completion_result(word: []const u8, candidates: *std.ArrayList([]u8), add_space: bool) ?[]u8 {
+    if (candidates.items.len == 0) return null;
+    if (candidates.items.len == 1) {
+        if (add_space) return xm.xasprintf("{s} ", .{candidates.items[0]});
+        return xm.xstrdup(candidates.items[0]);
+    }
+
+    const prefix = longest_candidate_prefix(candidates.items) orelse return null;
+    if (std.mem.eql(u8, prefix, word)) {
+        xm.allocator.free(prefix);
+        return null;
+    }
+    return prefix;
+}
+
+fn collect_command_candidates(candidates: *std.ArrayList([]u8), word: []const u8, at_start: bool) void {
+    for (cmd_mod.cmd_entries()) |cmd_entry| {
+        if (std.mem.startsWith(u8, cmd_entry.name, word))
+            append_candidate(candidates, cmd_entry.name);
+        if (cmd_entry.alias) |alias| {
+            if (std.mem.startsWith(u8, alias, word))
+                append_candidate(candidates, alias);
+        }
+    }
+
+    for (opts_mod.options_get_array(opts_mod.global_options, "command-alias")) |value| {
+        const eq = std.mem.indexOfScalar(u8, value, '=') orelse continue;
+        const alias = value[0..eq];
+        if (std.mem.startsWith(u8, alias, word))
+            append_candidate(candidates, alias);
+    }
+
+    if (at_start) return;
+
+    for (options_table.options_table) |table_entry| {
+        if (std.mem.startsWith(u8, table_entry.name, word))
+            append_candidate(candidates, table_entry.name);
+    }
+
+    for (&[_][]const u8{
+        "even-horizontal",
+        "even-vertical",
+        "main-horizontal",
+        "main-horizontal-mirrored",
+        "main-vertical",
+        "main-vertical-mirrored",
+        "tiled",
+    }) |layout| {
+        if (std.mem.startsWith(u8, layout, word))
+            append_candidate(candidates, layout);
+    }
+}
+
+fn complete_command_like(word: []const u8, at_start: bool) ?[]u8 {
+    var candidates: std.ArrayList([]u8) = .{};
+    defer free_candidates(&candidates);
+
+    collect_command_candidates(&candidates, word, at_start);
+    return completion_result(word, &candidates, true);
+}
+
+fn collect_session_candidates(candidates: *std.ArrayList([]u8), word: []const u8, flag: ?u8) void {
+    var it = sess_mod.sessions.valueIterator();
+    while (it.next()) |session_ptr| {
+        const session = session_ptr.*;
+        if (std.mem.startsWith(u8, session.name, word)) {
+            const target = xm.xasprintf("{s}:", .{session.name});
+            defer xm.allocator.free(target);
+            append_prefixed_candidate(candidates, flag, target);
+        }
+
+        var id_buf: [32]u8 = undefined;
+        const id_text = std.fmt.bufPrint(&id_buf, "${d}:", .{session.id}) catch unreachable;
+        if (std.mem.startsWith(u8, id_text, word))
+            append_prefixed_candidate(candidates, flag, id_text);
+    }
+}
+
+fn find_target_session(c: *T.Client, spec: []const u8) ?*T.Session {
+    if (spec.len == 0) return c.session;
+    if (spec[0] == '$') return sess_mod.session_find_by_id_str(spec);
+    return sess_mod.session_find(spec);
+}
+
+fn collect_window_candidates(
+    candidates: *std.ArrayList([]u8),
+    prompt_type: status_prompt.PromptType,
+    session: *T.Session,
+    word: []const u8,
+    flag: ?u8,
+) void {
+    var it = session.windows.valueIterator();
+    while (it.next()) |wl_ptr| {
+        const wl = wl_ptr.*;
+        var idx_buf: [32]u8 = undefined;
+        const idx_text = std.fmt.bufPrint(&idx_buf, "{d}", .{wl.idx}) catch unreachable;
+        if (!std.mem.startsWith(u8, idx_text, word)) continue;
+
+        const target = if (prompt_type == .window_target)
+            xm.xstrdup(idx_text)
+        else
+            xm.xasprintf("{s}:{s}", .{ session.name, idx_text });
+        defer xm.allocator.free(target);
+        append_prefixed_candidate(candidates, flag, target);
+    }
+}
+
+fn complete_target_like(c: *T.Client, prompt_type: status_prompt.PromptType, word: []const u8) ?[]u8 {
+    var candidates: std.ArrayList([]u8) = .{};
+    defer free_candidates(&candidates);
+
+    if (prompt_type == .window_target) {
+        const session = c.session orelse return null;
+        collect_window_candidates(&candidates, prompt_type, session, word, null);
+        return completion_result(word, &candidates, false);
+    }
+
+    var flag: ?u8 = null;
+    var spec = word;
+    if (prompt_type != .target) {
+        if (!std.mem.startsWith(u8, word, "-t") and !std.mem.startsWith(u8, word, "-s"))
+            return null;
+        flag = word[1];
+        spec = word[2..];
+    }
+
+    const colon = std.mem.indexOfScalar(u8, spec, ':');
+    if (colon == null) {
+        collect_session_candidates(&candidates, spec, flag);
+        return completion_result(word, &candidates, false);
+    }
+
+    const session_name = spec[0..colon.?];
+    const window_word = spec[colon.? + 1 ..];
+    if (std.mem.indexOfScalar(u8, window_word, '.') != null) return null;
+
+    const session = find_target_session(c, session_name) orelse return null;
+    collect_window_candidates(&candidates, prompt_type, session, window_word, flag);
+    return completion_result(word, &candidates, false);
+}
+
+fn prompt_complete(c: *T.Client, data: ?*anyopaque, word: []const u8, offset: usize) ?[]u8 {
+    const state: *CommandPromptState = @ptrCast(@alignCast(data orelse return null));
+
+    if (word.len == 0 and state.prompt_type != .target and state.prompt_type != .window_target)
+        return null;
+
+    if (state.prompt_type != .target and state.prompt_type != .window_target and
+        !std.mem.startsWith(u8, word, "-t") and !std.mem.startsWith(u8, word, "-s"))
+    {
+        return complete_command_like(word, offset == 0);
+    }
+
+    return complete_target_like(c, state.prompt_type, word);
 }
 
 fn append_saved_arg(state: *CommandPromptState, text: []const u8) void {
@@ -331,6 +529,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         state.steps[0].prompt,
         state.steps[0].input,
         prompt_callback,
+        prompt_complete,
         prompt_free,
         state,
         flags,
@@ -477,4 +676,28 @@ test "command-prompt key mode forwards the tmux key name" {
     try std.testing.expect(!status_prompt.status_prompt_active(&setup.client));
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
     try std.testing.expectEqualStrings("Left", setup.window.name);
+}
+
+test "command-prompt tab completion uses the shared prompt completion seam" {
+    var setup = prompt_test_setup("command-prompt-complete");
+    defer prompt_test_teardown(&setup);
+
+    var cause: ?[]u8 = null;
+    const argv = [_][]const u8{
+        "command-prompt",
+        "-I",
+        "rename-w",
+        "--",
+        "%1",
+    };
+    const cmdlist = try cmd_mod.cmd_parse_from_argv_with_cause(&argv, &setup.client, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    cmdq.cmdq_append(&setup.client, cmdlist);
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+    try std.testing.expect(status_prompt.status_prompt_active(&setup.client));
+    try std.testing.expectEqualStrings("rename-w", status_prompt.status_prompt_input(&setup.client).?);
+
+    send_key(&setup.client, T.C0_HT, "\t");
+    try std.testing.expectEqualStrings("rename-window ", status_prompt.status_prompt_input(&setup.client).?);
 }

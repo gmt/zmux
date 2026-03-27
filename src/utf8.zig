@@ -409,11 +409,19 @@ pub const CellBuffer = struct {
     }
 
     pub fn appendGlyph(self: *CellBuffer, glyph: *const Glyph) void {
-        self.cells.append(xm.allocator, glyph.data) catch unreachable;
+        self.appendData(&glyph.data);
+    }
+
+    pub fn appendData(self: *CellBuffer, data: *const T.Utf8Data) void {
+        self.cells.append(xm.allocator, data.*) catch unreachable;
     }
 
     pub fn insertGlyph(self: *CellBuffer, index: usize, glyph: *const Glyph) void {
-        self.cells.insert(xm.allocator, @min(index, self.cells.items.len), glyph.data) catch unreachable;
+        self.insertData(index, &glyph.data);
+    }
+
+    pub fn insertData(self: *CellBuffer, index: usize, data: *const T.Utf8Data) void {
+        self.cells.insert(xm.allocator, @min(index, self.cells.items.len), data.*) catch unreachable;
     }
 
     pub fn insertBytes(self: *CellBuffer, index: usize, bytes: []const u8) usize {
@@ -452,6 +460,74 @@ pub const CellBuffer = struct {
         return true;
     }
 
+    pub fn deleteAt(self: *CellBuffer, index: usize) bool {
+        if (index >= self.cells.items.len) return false;
+        _ = self.cells.orderedRemove(index);
+        return true;
+    }
+
+    pub fn deleteRange(self: *CellBuffer, start: usize, end: usize) usize {
+        const from = @min(start, self.cells.items.len);
+        const to = @min(end, self.cells.items.len);
+        if (from >= to) return 0;
+
+        var removed: usize = 0;
+        while (from < self.cells.items.len and removed < to - from) : (removed += 1) {
+            _ = self.cells.orderedRemove(from);
+        }
+        return removed;
+    }
+
+    pub fn replaceRange(self: *CellBuffer, start: usize, end: usize, bytes: []const u8) usize {
+        const from = @min(start, self.cells.items.len);
+        _ = self.deleteRange(from, end);
+        return self.insertBytes(from, bytes);
+    }
+
+    pub fn displayWidth(self: *const CellBuffer) u32 {
+        return self.prefixDisplayWidth(self.cells.items.len);
+    }
+
+    pub fn prefixDisplayWidth(self: *const CellBuffer, end: usize) u32 {
+        var width: u32 = 0;
+        const limit = @min(end, self.cells.items.len);
+        for (self.cells.items[0..limit]) |cell| width += cell.width;
+        return width;
+    }
+
+    pub fn rangeToOwnedString(self: *const CellBuffer, start: usize, end: usize) []u8 {
+        var out: std.ArrayList(u8) = .{};
+        self.appendRangeToBytes(start, end, &out);
+        return out.toOwnedSlice(xm.allocator) catch unreachable;
+    }
+
+    pub fn windowString(self: *const CellBuffer, offset: u32, width: u32) []u8 {
+        var out: std.ArrayList(u8) = .{};
+        if (width == 0) return out.toOwnedSlice(xm.allocator) catch unreachable;
+
+        const limit = offset + width;
+        var position: u32 = 0;
+        for (self.cells.items) |cell| {
+            const cell_width: u32 = cell.width;
+            const next = position + cell_width;
+
+            if (cell_width == 0) {
+                if (position >= offset and position < limit)
+                    out.appendSlice(xm.allocator, cell.data[0..cell.size]) catch unreachable;
+                continue;
+            }
+            if (next <= offset) {
+                position = next;
+                continue;
+            }
+            if (position >= limit or next > limit) break;
+
+            out.appendSlice(xm.allocator, cell.data[0..cell.size]) catch unreachable;
+            position = next;
+        }
+        return out.toOwnedSlice(xm.allocator) catch unreachable;
+    }
+
     pub fn toOwnedString(self: *const CellBuffer) []u8 {
         var out: std.ArrayList(u8) = .{};
         self.appendToBytes(&out);
@@ -459,7 +535,13 @@ pub const CellBuffer = struct {
     }
 
     pub fn appendToBytes(self: *const CellBuffer, out: *std.ArrayList(u8)) void {
-        for (self.cells.items) |cell| {
+        self.appendRangeToBytes(0, self.cells.items.len, out);
+    }
+
+    pub fn appendRangeToBytes(self: *const CellBuffer, start: usize, end: usize, out: *std.ArrayList(u8)) void {
+        const from = @min(start, self.cells.items.len);
+        const to = @min(end, self.cells.items.len);
+        for (self.cells.items[from..to]) |cell| {
             out.appendSlice(xm.allocator, cell.data[0..cell.size]) catch unreachable;
         }
     }

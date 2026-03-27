@@ -21,7 +21,7 @@ Live work selection now happens in `ralphq`.
 | options, env, and command scaffolding | mostly partial but broadly present | widen shared parsers and table-driven metadata instead of command-local forks |
 | server, session, window, and pane runtime | broad partial coverage | keep shared ownership and redraw/runtime seams moving downward |
 | layout and interactive UI modes | still mostly missing | treat layout and mode work as real substrate, not cleanup |
-| grid, screen, tty, and UTF-8/display | active foundation area with real shared substrate and reduced consumers | finish consumer adoption and the remaining display/runtime seams |
+| grid, screen, tty, and UTF-8/display | partial shared substrate with ordinary queue work reopened | finish consumer adoption and the remaining display/runtime seams |
 | minimum smoke-harness commands | broadly partial | keep landing truthful reduced command behavior on shared runtime seams |
 | full deferred command surface | many partial files and a smaller set of missing files | prefer queue-shaped canonical tasks over planner prose |
 | optional features and platform surface | mostly missing or gated | keep these out of the main parity path until core runtime is steadier |

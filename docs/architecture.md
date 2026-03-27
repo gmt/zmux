@@ -17,8 +17,9 @@ all answer the same question:
   tmux does today, read the C.
 - this file decides the new stack shape, the allowed seams between layers, and
   the rule against local UTF-8/rendering hacks.
-- `/goodz/work/agents/zmux/porting-planning.md` is the queue and reduced-seam
-  ledger. If the architecture teaches us something material, record it there.
+- `ralphq` owns live work selection. If the architecture teaches us something
+  material, turn that into exact queue tasks or small current-state docs rather
+  than growing a planner blob.
 - `/goodz/work/agents/zmux/TODO.md` is where ugly-but-ported fallout belongs
   once a slice has landed honestly.
 - `/goodz/work/agents/zmux/utf8-midgame-brainstorm.md` is noncanonical
@@ -26,10 +27,9 @@ all answer the same question:
 - `/goodz/work/agents/zmux/NOTES.md` is archival context only. Do not let it
   silently regain authority by accretion.
 
-The split matters because the UTF-8 foundation tranche is not deciding whether
-tmux's behavior exists; tmux already answers that. The tranche is deciding
-where that behavior should live in the Zig stack so later slices stop solving
-Unicode problems locally.
+The split matters because tmux already decides what the behavior is. This file
+only decides where that behavior should live in the Zig stack so later slices
+stop solving Unicode problems locally.
 
 ## Current UTF-8 / display problem
 
@@ -757,67 +757,16 @@ not just described here.
 5. Only then resume ordinary low-hanging work on files such as
    `format-draw.c`, `status.c`, `tty-keys.c`, and remaining `utf8.c` fallout.
 
-## Ralph foundation-mode contract
+## Queue policy
 
-During the UTF-8 foundation tranche:
+There is no active UTF-8 foundation tranche now. The remaining
+UTF-8-sensitive work should run under the ordinary Ralph loop:
 
-- coherent breaking commits are allowed
-- focused build/test green is welcome but not mandatory for every checkpoint
-- the planner and this architecture note must stay honest every round
-- `ACCEPT: yes` is not allowed from foundation tasks
-- no new local UTF-8/rendering hacks outside this stack
-- soft pause boundaries must still end clean: either a commit or a hard reset
+- normal verification and acceptance rules apply
+- `ACCEPT: yes` is available again through the usual audit path
+- if a future substrate-first push is needed, seed exact bounded queue tasks in
+  `ralphq` instead of reviving a self-expanding foundation blob
 
-The foundation queue should therefore lead with:
-
-1. architecture/spec canonicalization
-2. semantic gap + seal matrix
-3. consumer-facing façade definition
-4. grid/cell storage rewrite
-5. `screen-write` combine/width integration
-6. consumer adoption
-
-Only after that should UTF-8-sensitive tmux file slices come back to the head
-of the line.
-
-## Foundation-tranche adjustments to unwind later
-
-The current Ralph loop and planner carry a few deliberate temporary
-adjustments so this tranche can proceed as a bounded refactor instead of a
-normal parity march. Do not let these turn into invisible permanent policy.
-
-When the UTF-8 foundation tranche is materially complete, review and either
-remove or deliberately keep each of these:
-
-1. `foundation:*` queue items at the head of
-   `/goodz/work/agents/zmux/porting-planning.md`.
-   - Temporary purpose: keep Ralph building the declared stack before ordinary
-     UTF-8-sensitive tmux slices reopen.
-   - Unwind action: replace the foundation queue head with ordinary low-hanging
-     file slices once the matrix says those files are fair game again.
-2. Foundation-mode prompt relaxations in
-   `/goodz/work/agents/zmux/tools/ralph/gmt3-proxy.py` and
-   `/goodz/work/agents/zmux/tools/ralph/attic/ralph-legacy`.
-   - Temporary purpose: allow coherent breaking checkpoints, optional focused
-     verification, and mandatory `ACCEPT: no` while the substrate is being
-     rebuilt.
-   - Unwind action: restore normal Ralph slice expectations for the affected
-     area so UTF-8-sensitive parity work returns to the same acceptance and
-     verification discipline as the rest of the port.
-3. The controller-side tranche boundary stop in
-   `/goodz/work/agents/zmux/tools/ralph/gmt3-proxy.py`.
-   - Temporary purpose: stop the loop after the foundation tranche even if
-     ordinary low-hanging work still exists, so we can inspect the result
-     before rejoining the main war path.
-   - Unwind action: remove or replace that stop once we are ready for UTF-8
-     follow-on work to flow back into the ordinary queue.
-4. The "brainstorm is noncanonical" split between this file and
-   `/goodz/work/agents/zmux/utf8-midgame-brainstorm.md`.
-   - Temporary purpose: let us mine ideas without letting the brainstorm note
-     silently overrule the real spec.
-   - Unwind action: either archive the brainstorm note or fold any surviving
-     useful ideas into this document so future work is not haunted by both.
-
-The clean-pause rule is intentionally not on this unwind list. First `Ctrl-C`
-ending at a clean boundary is generally useful and should stay unless it proves
-harmful outside the UTF-8 tranche.
+The old foundation-mode prompt relaxations and tranche-stop logic in the tools
+layer are now just cleanup debt. Keep them dormant unless the queue
+deliberately reintroduces a small explicit task that genuinely needs them.

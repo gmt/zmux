@@ -333,13 +333,15 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
     window_add_winlink(w, wl);
     w.references += 1;
     notify.notify_session_window("window-linked", s, w);
+    session_group_synchronize_from(s);
     return wl;
 }
 
-pub fn session_detach(_s: *T.Session, _wl: ?*T.Winlink) void {
-    const s = _s;
-    const wl = _wl orelse return;
-    _ = session_detach_index(s, wl.idx, "session_detach");
+pub fn session_detach(s: *T.Session, wl: ?*T.Winlink) bool {
+    const live = wl orelse return false;
+    if (!session_detach_index(s, live.idx, "session_detach")) return false;
+    session_group_synchronize_from(s);
+    return s.windows.count() == 0;
 }
 
 fn session_has_live_winlink_ptr(s: *T.Session, candidate: *T.Winlink) bool {

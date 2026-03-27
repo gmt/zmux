@@ -547,24 +547,24 @@ still far smaller than tmux's full per-pane/status/overlay machinery.
 The next checkpoint down is now also landed in reduced grouped-session
 redraw/status form:
 
+- `src/session.zig` now synchronizes grouped session window membership on the
+  shared `session_attach` and `session_detach` seams instead of leaving that
+  follow-through to `spawn.zig` or ad hoc command-local patches
 - `src/server.zig` plus `src/server-fn.zig` now expose shared
   `server_redraw_session_group` and `server_status_session_group`
   invalidation seams instead of collapsing grouped-session fallout back onto
   one session at a time
-- `src/spawn.zig` now synchronizes grouped session window membership after
-  `spawn_window` instead of leaving `new-window` peers stale above the shared
-  session layer until a caller patches around it
 - `src/cmd-select-window.zig` now routes detached `new-window` fallout
   through the shared group status-only seam and selected `new-window` fallout
   through the shared group redraw seam instead of a single-session redraw
   shortcut
 
 That landing narrows another honest part of the broader redraw/runtime gap:
-grouped `new-window` behavior now sits on shared session sync plus shared
-group invalidation seams instead of a command-local redraw shortcut. Keep it
-partial because other grouped-session mutation paths still need the same
-follow-through, and the redraw matrix is still far smaller than tmux's full
-per-pane/status/overlay machinery.
+grouped `new-window` behavior and shared unlink fallout now sit on shared
+session attach or detach sync plus shared group invalidation seams instead of
+command-local redraw shortcuts. Keep it partial because other grouped-session
+mutation paths still need the same follow-through, and the redraw matrix is
+still far smaller than tmux's full per-pane/status/overlay machinery.
 
 The next checkpoint down is now also landed in reduced pane-local redraw form:
 

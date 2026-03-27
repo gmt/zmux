@@ -24,6 +24,8 @@ const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
+const WHITESPACE = "\t ";
+
 pub const StringCellsOptions = struct {
     trim_trailing_spaces: bool = false,
     escape_sequences: bool = false,
@@ -220,6 +222,313 @@ pub fn string_cells(gd: *T.Grid, row: u32, width: u32, options: StringCellsOptio
     }
 
     return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+pub fn grid_in_set(gd: *T.Grid, row: u32, col: u32, set: []const u8) u32 {
+    if (row >= gd.linedata.len or col >= gd.sx) return 0;
+
+    var gc: T.GridCell = undefined;
+    var tmp_gc: T.GridCell = undefined;
+    get_cell(gd, row, col, &gc);
+
+    if (std.mem.indexOfScalar(u8, set, '\t') != null) {
+        if (gc.isPadding()) {
+            var scan = col;
+            while (scan > 0) {
+                scan -= 1;
+                get_cell(gd, row, scan, &tmp_gc);
+                if (!tmp_gc.isPadding()) break;
+            }
+            if ((tmp_gc.flags & T.GRID_FLAG_TAB) != 0)
+                return tmp_gc.data.width - (col - scan);
+        } else if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
+            return gc.data.width;
+        }
+    }
+    if (gc.isPadding()) return 0;
+    return if (utf8.utf8_cstrhas(set, &gc.data)) 1 else 0;
+}
+
+pub fn grid_reader_start(gr: *T.GridReader, gd: *T.Grid, cx: u32, cy: u32) void {
+    gr.* = .{
+        .gd = gd,
+        .cx = cx,
+        .cy = cy,
+    };
+}
+
+pub fn grid_reader_get_cursor(gr: *const T.GridReader, cx: *u32, cy: *u32) void {
+    cx.* = gr.cx;
+    cy.* = gr.cy;
+}
+
+pub fn grid_reader_line_length(gr: *const T.GridReader) u32 {
+    return line_length(gr.gd, gr.cy);
+}
+
+pub fn grid_reader_cursor_right(gr: *T.GridReader, wrap: bool, all: bool) void {
+    const px = if (all) gr.gd.sx else grid_reader_line_length(gr);
+
+    if (wrap and gr.cx >= px and gr.cy < grid_reader_last_row(gr.gd)) {
+        grid_reader_cursor_start_of_line(gr, false);
+        grid_reader_cursor_down(gr);
+    } else if (gr.cx < px) {
+        gr.cx += 1;
+        while (gr.cx < px) {
+            var gc: T.GridCell = undefined;
+            get_cell(gr.gd, gr.cy, gr.cx, &gc);
+            if (!gc.isPadding()) break;
+            gr.cx += 1;
+        }
+    }
+}
+
+pub fn grid_reader_cursor_left(gr: *T.GridReader, wrap: bool) void {
+    while (gr.cx > 0) {
+        var gc: T.GridCell = undefined;
+        get_cell(gr.gd, gr.cy, gr.cx, &gc);
+        if (!gc.isPadding()) break;
+        gr.cx -= 1;
+    }
+    if (gr.cx == 0 and gr.cy > 0 and (wrap or grid_line_wrapped(gr.gd, gr.cy - 1))) {
+        grid_reader_cursor_up(gr);
+        grid_reader_cursor_end_of_line(gr, false, false);
+    } else if (gr.cx > 0) {
+        gr.cx -= 1;
+    }
+}
+
+pub fn grid_reader_cursor_down(gr: *T.GridReader) void {
+    if (gr.cy < grid_reader_last_row(gr.gd)) gr.cy += 1;
+    while (gr.cx > 0) {
+        var gc: T.GridCell = undefined;
+        get_cell(gr.gd, gr.cy, gr.cx, &gc);
+        if (!gc.isPadding()) break;
+        gr.cx -= 1;
+    }
+}
+
+pub fn grid_reader_cursor_up(gr: *T.GridReader) void {
+    if (gr.cy > 0) gr.cy -= 1;
+    while (gr.cx > 0) {
+        var gc: T.GridCell = undefined;
+        get_cell(gr.gd, gr.cy, gr.cx, &gc);
+        if (!gc.isPadding()) break;
+        gr.cx -= 1;
+    }
+}
+
+pub fn grid_reader_cursor_start_of_line(gr: *T.GridReader, wrap: bool) void {
+    if (wrap) {
+        while (gr.cy > 0 and grid_line_wrapped(gr.gd, gr.cy - 1)) gr.cy -= 1;
+    }
+    gr.cx = 0;
+}
+
+pub fn grid_reader_cursor_end_of_line(gr: *T.GridReader, wrap: bool, all: bool) void {
+    if (wrap) {
+        const last_row = grid_reader_last_row(gr.gd);
+        while (gr.cy < last_row and grid_line_wrapped(gr.gd, gr.cy)) gr.cy += 1;
+    }
+    gr.cx = if (all) gr.gd.sx else grid_reader_line_length(gr);
+}
+
+pub fn grid_reader_in_set(gr: *T.GridReader, set: []const u8) u32 {
+    return grid_in_set(gr.gd, gr.cy, gr.cx, set);
+}
+
+pub fn grid_reader_cursor_next_word(gr: *T.GridReader, separators: []const u8) void {
+    var xx: u32 = if (grid_line_wrapped(gr.gd, gr.cy)) gr.gd.sx - 1 else grid_reader_line_length(gr);
+    var yy = grid_reader_last_row(gr.gd);
+
+    if (!grid_reader_handle_wrap(gr, &xx, &yy)) return;
+    if (grid_reader_in_set(gr, WHITESPACE) == 0) {
+        if (grid_reader_in_set(gr, separators) != 0) {
+            while (true) {
+                gr.cx += 1;
+                if (!grid_reader_handle_wrap(gr, &xx, &yy) or grid_reader_in_set(gr, separators) == 0 or grid_reader_in_set(gr, WHITESPACE) != 0) break;
+            }
+        } else {
+            while (true) {
+                gr.cx += 1;
+                if (!grid_reader_handle_wrap(gr, &xx, &yy) or grid_reader_in_set(gr, separators) != 0 or grid_reader_in_set(gr, WHITESPACE) != 0) break;
+            }
+        }
+    }
+    while (grid_reader_handle_wrap(gr, &xx, &yy)) {
+        const width = grid_reader_in_set(gr, WHITESPACE);
+        if (width == 0) break;
+        gr.cx += width;
+    }
+}
+
+pub fn grid_reader_cursor_next_word_end(gr: *T.GridReader, separators: []const u8) void {
+    var xx: u32 = if (grid_line_wrapped(gr.gd, gr.cy)) gr.gd.sx - 1 else grid_reader_line_length(gr);
+    var yy = grid_reader_last_row(gr.gd);
+
+    while (grid_reader_handle_wrap(gr, &xx, &yy)) {
+        if (grid_reader_in_set(gr, WHITESPACE) != 0) {
+            gr.cx += 1;
+        } else if (grid_reader_in_set(gr, separators) != 0) {
+            while (true) {
+                gr.cx += 1;
+                if (!grid_reader_handle_wrap(gr, &xx, &yy) or grid_reader_in_set(gr, separators) == 0 or grid_reader_in_set(gr, WHITESPACE) != 0) break;
+            }
+            return;
+        } else {
+            while (true) {
+                gr.cx += 1;
+                if (!grid_reader_handle_wrap(gr, &xx, &yy) or grid_reader_in_set(gr, WHITESPACE) != 0 or grid_reader_in_set(gr, separators) != 0) break;
+            }
+            return;
+        }
+    }
+}
+
+pub fn grid_reader_cursor_previous_word(gr: *T.GridReader, separators: []const u8, already: bool, stop_at_eol: bool) void {
+    var oldx: u32 = 0;
+    var oldy: u32 = 0;
+    var word_is_letters = false;
+
+    if (already or grid_reader_in_set(gr, WHITESPACE) != 0) {
+        while (true) {
+            if (gr.cx > 0) {
+                gr.cx -= 1;
+                if (grid_reader_in_set(gr, WHITESPACE) == 0) {
+                    word_is_letters = grid_reader_in_set(gr, separators) == 0;
+                    break;
+                }
+            } else {
+                if (gr.cy == 0) return;
+                grid_reader_cursor_up(gr);
+                grid_reader_cursor_end_of_line(gr, false, false);
+
+                if (stop_at_eol and gr.cx > 0) {
+                    oldx = gr.cx;
+                    gr.cx -= 1;
+                    const at_eol = grid_reader_in_set(gr, WHITESPACE) != 0;
+                    gr.cx = oldx;
+                    if (at_eol) {
+                        word_is_letters = false;
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        word_is_letters = grid_reader_in_set(gr, separators) == 0;
+    }
+
+    while (true) {
+        oldx = gr.cx;
+        oldy = gr.cy;
+        if (gr.cx == 0) {
+            if (gr.cy == 0 or !grid_line_wrapped(gr.gd, gr.cy - 1)) break;
+            grid_reader_cursor_up(gr);
+            grid_reader_cursor_end_of_line(gr, false, true);
+        }
+        if (gr.cx > 0) gr.cx -= 1;
+        if (grid_reader_in_set(gr, WHITESPACE) != 0) break;
+        if (word_is_letters == (grid_reader_in_set(gr, separators) == 0)) continue;
+        break;
+    }
+    gr.cx = oldx;
+    gr.cy = oldy;
+}
+
+pub fn grid_reader_cursor_jump(gr: *T.GridReader, jump_cell: *const T.Utf8Data) bool {
+    var px = gr.cx;
+    const last_row = grid_reader_last_row(gr.gd);
+    var py = gr.cy;
+    while (py <= last_row) : (py += 1) {
+        const xx = line_length(gr.gd, py);
+        while (px < xx) : (px += 1) {
+            var gc: T.GridCell = undefined;
+            get_cell(gr.gd, py, px, &gc);
+            if (grid_reader_cell_equals_data(&gc, jump_cell)) {
+                gr.cx = px;
+                gr.cy = py;
+                return true;
+            }
+        }
+        if (py == last_row or !grid_line_wrapped(gr.gd, py)) return false;
+        px = 0;
+    }
+    return false;
+}
+
+pub fn grid_reader_cursor_jump_back(gr: *T.GridReader, jump_cell: *const T.Utf8Data) bool {
+    var xx = gr.cx + 1;
+    var py = gr.cy + 1;
+    while (py > 0) : (py -= 1) {
+        var px = xx;
+        while (px > 0) : (px -= 1) {
+            var gc: T.GridCell = undefined;
+            get_cell(gr.gd, py - 1, px - 1, &gc);
+            if (grid_reader_cell_equals_data(&gc, jump_cell)) {
+                gr.cx = px - 1;
+                gr.cy = py - 1;
+                return true;
+            }
+        }
+        if (py == 1 or !grid_line_wrapped(gr.gd, py - 2)) return false;
+        xx = line_length(gr.gd, py - 2);
+    }
+    return false;
+}
+
+pub fn grid_reader_cursor_back_to_indentation(gr: *T.GridReader) void {
+    const oldx = gr.cx;
+    const oldy = gr.cy;
+    const last_row = grid_reader_last_row(gr.gd);
+    grid_reader_cursor_start_of_line(gr, true);
+
+    var py = gr.cy;
+    while (py <= last_row) : (py += 1) {
+        const xx = line_length(gr.gd, py);
+        var px: u32 = 0;
+        while (px < xx) : (px += 1) {
+            var gc: T.GridCell = undefined;
+            get_cell(gr.gd, py, px, &gc);
+            if ((gc.data.size != 1 or gc.data.data[0] != ' ') and (gc.flags & (T.GRID_FLAG_TAB | T.GRID_FLAG_PADDING)) == 0) {
+                gr.cx = px;
+                gr.cy = py;
+                return;
+            }
+        }
+        if (!grid_line_wrapped(gr.gd, py)) break;
+    }
+    gr.cx = oldx;
+    gr.cy = oldy;
+}
+
+fn grid_line_wrapped(gd: *T.Grid, row: u32) bool {
+    return row < gd.linedata.len and (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0;
+}
+
+fn grid_reader_last_row(gd: *T.Grid) u32 {
+    return if (gd.linedata.len == 0) 0 else @intCast(gd.linedata.len - 1);
+}
+
+fn grid_reader_handle_wrap(gr: *T.GridReader, xx: *u32, yy: *u32) bool {
+    while (gr.cx > xx.*) {
+        if (gr.cy == yy.*) return false;
+        grid_reader_cursor_start_of_line(gr, false);
+        grid_reader_cursor_down(gr);
+
+        if (grid_line_wrapped(gr.gd, gr.cy))
+            xx.* = gr.gd.sx - 1
+        else
+            xx.* = grid_reader_line_length(gr);
+    }
+    return true;
+}
+
+fn grid_reader_cell_equals_data(gc: *const T.GridCell, ud: *const T.Utf8Data) bool {
+    if (gc.isPadding()) return false;
+    if ((gc.flags & T.GRID_FLAG_TAB) != 0 and ud.size == 1 and ud.data[0] == '\t') return true;
+    if (gc.data.size != ud.size) return false;
+    return std.mem.eql(u8, gc.data.data[0..gc.data.size], ud.data[0..ud.size]);
 }
 
 fn free_line_storage(line: *T.GridLine) void {
@@ -503,4 +812,80 @@ test "grid overwriting an extended slot with ascii preserves readable content" {
     try std.testing.expectEqual(@as(u8, 'x'), ascii_at(gd, 0, 0));
     try std.testing.expectEqual(@as(u8, 1), stored.payload().size);
     try std.testing.expectEqual(@as(u8, 'x'), stored.payload().data[0]);
+}
+
+test "grid_in_set follows stored tab width across padding cells" {
+    const gd = grid_create(4, 1, 0);
+    defer grid_free(gd);
+
+    var tab = T.grid_default_cell;
+    set_tab(&tab, 4);
+    set_cell(gd, 0, 0, &tab);
+    set_padding(gd, 0, 1);
+    set_padding(gd, 0, 2);
+    set_padding(gd, 0, 3);
+
+    try std.testing.expectEqual(@as(u32, 4), grid_in_set(gd, 0, 0, "\t"));
+    try std.testing.expectEqual(@as(u32, 2), grid_in_set(gd, 0, 2, "\t"));
+    try std.testing.expectEqual(@as(u32, 2), grid_in_set(gd, 0, 2, WHITESPACE));
+}
+
+test "grid reader word helpers respect wrapped rows and stored cell widths" {
+    const gd = grid_create(6, 2, 0);
+    defer grid_free(gd);
+
+    set_ascii(gd, 0, 0, 'a');
+    set_ascii(gd, 0, 1, 'b');
+    set_ascii(gd, 0, 2, 'c');
+    set_ascii(gd, 0, 3, 'd');
+    set_ascii(gd, 0, 4, 'e');
+    gd.linedata[0].flags |= T.GRID_LINE_WRAPPED;
+    set_ascii(gd, 1, 0, ' ');
+    set_ascii(gd, 1, 1, 'f');
+    set_ascii(gd, 1, 2, 'g');
+
+    var gr: T.GridReader = undefined;
+    grid_reader_start(&gr, gd, 0, 0);
+    grid_reader_cursor_next_word_end(&gr, "");
+    try std.testing.expectEqual(@as(u32, 5), gr.cx);
+    try std.testing.expectEqual(@as(u32, 0), gr.cy);
+
+    grid_reader_start(&gr, gd, 0, 0);
+    grid_reader_cursor_next_word(&gr, "");
+    try std.testing.expectEqual(@as(u32, 1), gr.cx);
+    try std.testing.expectEqual(@as(u32, 1), gr.cy);
+
+    grid_reader_cursor_previous_word(&gr, "", true, false);
+    try std.testing.expectEqual(@as(u32, 0), gr.cx);
+    try std.testing.expectEqual(@as(u32, 0), gr.cy);
+}
+
+test "grid reader jump and indentation helpers stay on stored utf8 cells" {
+    const gd = grid_create(5, 2, 0);
+    defer grid_free(gd);
+
+    var emoji = T.GridCell.fromPayload(utf8.Glyph.fromCodepoint(0x1f642).?.payload());
+    set_ascii(gd, 0, 0, ' ');
+    set_ascii(gd, 0, 1, ' ');
+    set_cell(gd, 0, 2, &emoji);
+    set_padding(gd, 0, 3);
+    gd.linedata[0].flags |= T.GRID_LINE_WRAPPED;
+    set_ascii(gd, 1, 0, ' ');
+    set_ascii(gd, 1, 1, 'x');
+
+    var gr: T.GridReader = undefined;
+    grid_reader_start(&gr, gd, 4, 1);
+    grid_reader_cursor_back_to_indentation(&gr);
+    try std.testing.expectEqual(@as(u32, 2), gr.cx);
+    try std.testing.expectEqual(@as(u32, 0), gr.cy);
+
+    const jump = emoji.payload();
+    try std.testing.expect(grid_reader_cursor_jump(&gr, jump));
+    try std.testing.expectEqual(@as(u32, 2), gr.cx);
+    try std.testing.expectEqual(@as(u32, 0), gr.cy);
+
+    grid_reader_start(&gr, gd, 4, 1);
+    try std.testing.expect(grid_reader_cursor_jump_back(&gr, jump));
+    try std.testing.expectEqual(@as(u32, 2), gr.cx);
+    try std.testing.expectEqual(@as(u32, 0), gr.cy);
 }

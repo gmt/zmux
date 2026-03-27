@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const grid_mod = @import("grid.zig");
 const xm = @import("xmalloc.zig");
 const screen_mod = @import("screen.zig");
 
@@ -43,6 +44,16 @@ pub fn tty_draw_pane(
     wp: *T.WindowPane,
     sx: u32,
     sy: u32,
+) ![]u8 {
+    return tty_draw_pane_offset(cache, wp, sx, sy, 0);
+}
+
+pub fn tty_draw_pane_offset(
+    cache: *T.ClientPaneCache,
+    wp: *T.WindowPane,
+    sx: u32,
+    sy: u32,
+    row_offset: u32,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -82,7 +93,7 @@ pub fn tty_draw_pane(
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
             try begin_update(&out, &update_started);
-            const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};1H", .{row_idx + 1});
+            const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};1H", .{row_offset + row_idx + 1});
             defer xm.allocator.free(move);
             try out.appendSlice(xm.allocator, move);
             try out.appendSlice(xm.allocator, rendered);
@@ -103,7 +114,7 @@ pub fn tty_draw_pane(
         try begin_update(&out, &update_started);
     }
     if (screen.cursor_visible and (full_redraw or cache.cursor_x != cursor_x or cache.cursor_y != cursor_y or !cache.cursor_visible)) {
-        const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ cursor_y + 1, cursor_x + 1 });
+        const cursor = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ row_offset + cursor_y + 1, cursor_x + 1 });
         defer xm.allocator.free(cursor);
         try out.appendSlice(xm.allocator, cursor);
     }
@@ -112,6 +123,23 @@ pub fn tty_draw_pane(
     cache.cursor_visible = screen.cursor_visible;
 
     if (update_started and screen.cursor_visible) try out.appendSlice(xm.allocator, "\x1b[?25h");
+    return out.toOwnedSlice(xm.allocator);
+}
+
+pub fn tty_draw_render_screen(screen: *T.Screen, sx: u32, sy: u32, row_offset: u32) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    for (0..sy) |row_idx| {
+        const rendered = try render_row(screen.grid, @intCast(row_idx), sx);
+        defer xm.allocator.free(rendered);
+        const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};1H", .{row_offset + row_idx + 1});
+        defer xm.allocator.free(move);
+        try out.appendSlice(xm.allocator, move);
+        try out.appendSlice(xm.allocator, rendered);
+        try out.appendSlice(xm.allocator, "\x1b[K");
+    }
+
     return out.toOwnedSlice(xm.allocator);
 }
 
@@ -129,7 +157,10 @@ fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
     var have_style = false;
 
     for (0..sx) |col_idx| {
-        const cell = cell_at(gd, row, @intCast(col_idx));
+        var cell: T.GridCell = undefined;
+        grid_mod.get_cell(gd, row, @intCast(col_idx), &cell);
+        if (cell.isPadding()) continue;
+
         const style = style_of(cell);
         if (!have_style or !std.meta.eql(style, last_style)) {
             const sgr = try style_to_sgr(style);
@@ -138,7 +169,8 @@ fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
             last_style = style;
             have_style = true;
         }
-        try out.append(xm.allocator, ascii_of(cell));
+        const bytes = if (cell.payload().isEmpty()) " " else cell.payload().bytes();
+        try out.appendSlice(xm.allocator, bytes);
     }
 
     if (have_style and !style_is_default(last_style))
@@ -152,11 +184,11 @@ const CellStyle = struct {
     bg: i32 = 0,
 };
 
-fn style_of(cell: T.GridCellEntry) CellStyle {
+fn style_of(cell: T.GridCell) CellStyle {
     return .{
-        .attr = cell.offset_or_data.data.attr,
-        .fg = cell.offset_or_data.data.fg,
-        .bg = cell.offset_or_data.data.bg,
+        .attr = cell.attr,
+        .fg = cell.fg,
+        .bg = cell.bg,
     };
 }
 
@@ -199,32 +231,6 @@ fn append_code(buf: *std.ArrayList(u8), code: i32) !void {
     const text = try std.fmt.allocPrint(xm.allocator, ";{d}", .{code});
     defer xm.allocator.free(text);
     try buf.appendSlice(xm.allocator, text);
-}
-
-fn cell_at(gd: *T.Grid, row: u32, col: u32) T.GridCellEntry {
-    if (row >= gd.linedata.len) return blank_cell();
-    const line = gd.linedata[row];
-    if (col >= line.celldata.len or col >= line.cellused) return blank_cell();
-    return line.celldata[col];
-}
-
-fn ascii_of(cell: T.GridCellEntry) u8 {
-    const ch = cell.offset_or_data.data.data;
-    return if (ch == 0) ' ' else ch;
-}
-
-fn blank_cell() T.GridCellEntry {
-    return .{
-        .offset_or_data = .{
-            .data = .{
-                .attr = 0,
-                .fg = 0,
-                .bg = 0,
-                .data = ' ',
-            },
-        },
-        .flags = 0,
-    };
 }
 
 fn free_rows(cache: *T.ClientPaneCache) void {
@@ -351,4 +357,39 @@ test "tty_draw_invalidate forces full redraw again" {
     const second = try tty_draw_pane(&cache, wp, 3, 1);
     defer xm.allocator.free(second);
     try std.testing.expect(std.mem.indexOf(u8, second, "\x1b[H\x1b[2J") != null);
+}
+
+test "tty_draw_pane preserves stored utf8 glyph bytes" {
+    const opts = @import("options.zig");
+    const win = @import("window.zig");
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 1, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 1);
+    pane_io.pane_io_feed(wp, "🙂x");
+
+    var cache = T.ClientPaneCache{};
+    defer tty_draw_free(&cache);
+
+    const draw = try tty_draw_pane(&cache, wp, 4, 1);
+    defer xm.allocator.free(draw);
+    try std.testing.expect(std.mem.indexOf(u8, draw, "🙂x") != null);
 }

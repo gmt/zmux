@@ -47,6 +47,7 @@ pub const FormatContext = struct {
     paste_buffer: ?*paste_mod.PasteBuffer = null,
 
     message_text: ?[]const u8 = null,
+    command_prompt: ?bool = null,
 
     key_binding: ?*const T.KeyBinding = null,
     key_note: ?[]const u8 = null,
@@ -77,7 +78,9 @@ const Resolver = struct {
 const FORMAT_LOOP_LIMIT: u32 = 100;
 
 const resolver_table = [_]Resolver{
+    .{ .name = "message", .func = resolve_message },
     .{ .name = "message_text", .func = resolve_message_text },
+    .{ .name = "command_prompt", .func = resolve_command_prompt },
 
     .{ .name = "client_control_mode", .func = resolve_client_control_mode },
     .{ .name = "client_height", .func = resolve_client_height },
@@ -1550,6 +1553,14 @@ fn ctx_buffer(ctx: *const FormatContext) ?*paste_mod.PasteBuffer {
 
 fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
+}
+
+fn resolve_message(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
+}
+
+fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, if (ctx.command_prompt orelse false) "1" else "0") catch unreachable;
 }
 
 fn resolve_client_control_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

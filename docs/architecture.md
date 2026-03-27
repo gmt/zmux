@@ -90,7 +90,7 @@ that truth still stops before the live grid/write path.
 | combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks, and `src/screen-write.zig` now calls that layer during live pane writes | the reduced writer still lacks fuller tmux `screen_write_cell` side effects, so combined-cell reachability exists for live writes but is not yet the full reopen gate |
 | cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model, and live pane writes now materially store through that path | most readers and prompt/status consumers still have not adopted the same shared cell payload model end to end |
 | live screen-write integration | `src/screen-write.zig` now owns `putGlyph`, `putCell`, and `putBytes`, and `src/input.zig` feeds printable terminal bytes through that shared path so live pane writes preserve decoded width, padding, and combine consequences | this is still a reduced `screen_write_cell` seam: insert-mode parity, selected-cell styling, tty draw collection, tab-cell treatment, and non-input consumer adoption are still missing |
-| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables, and `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer` instead of a raw byte array | there is still no broader shared display-cell search/edit surface for prompt/status consumers, and the reduced prompt/runtime path still lacks status-line draw, cursor motion, history navigation, and completion |
+| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; and the new reduced `src/format-draw.zig` + `src/status.zig` path now renders prompt/status rows through shared cell writes while `src/tty-draw.zig` emits stored UTF-8 cell payload bytes instead of collapsing back to ASCII | there is still no broader shared display-cell search/edit surface for prompt/status consumers, and the reduced prompt/runtime path still lacks tmux's full status-format list/range semantics, cursor motion, history navigation, completion, timers, and saved-screen overlay behavior |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
@@ -189,6 +189,26 @@ has no status-line renderer, cursor motion, completion, or history navigation,
 and `format-draw`/`status`-style display consumers still do not ride the same
 shared cell surface.
 
+The next checkpoint down is now also landed in reduced display-consumer form:
+
+- `src/format-draw.zig` now gives format/status consumers a reduced,
+  style-aware renderer that writes through the shared `screen-write` cell path
+  instead of treating expanded formats as byte strings
+- `src/status.zig` now builds a reduced status/prompt surface on temporary
+  shared screens, expands `message-format`/`status-left`/`status-right`
+  through the shared formatter, and renders those rows via the same shared
+  cell path
+- `src/tty-draw.zig` now emits stored `GridCell` UTF-8 payload bytes to the
+  attached client path instead of flattening those cells back to ASCII bytes,
+  and `src/server-client.zig` now redraws attached clients on status-only
+  invalidations so the reduced status/prompt renderer is materially reachable
+
+That landing makes `format-draw`/`status`-style consumers ride the shared
+cell model for a reduced subset, but it is still well short of tmux reopen
+criteria: `status-format` window-list/list-marker alignment, style ranges and
+hit-testing, message timers, saved-screen push/pop, and the rest of the
+prompt editor/runtime are still open.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:
@@ -246,9 +266,9 @@ through truthful lower layers.
 | compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `Y` | `Y` | open: width truth now reaches live pane writes, but prompt/status/search/edit consumers and fuller screen-write parity still stop the row from sealing end to end |
 | append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `Y` | `-` | open: combine logic now reaches live pane writes with padding-cell consequences, but the reduced writer still lacks fuller tmux side effects and higher consumer adoption |
 | store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `Y` | `-` | open: direct grid storage now has a real live writer, but there is still no broader shared reader/search/editor surface above it |
-| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `Y` | `-` | open: live pane writes now use `putGlyph`/`putBytes` over truthful storage and combine helpers, but the writer is still a reduced seam without tmux's fuller insert/selection/tty collection path |
-| trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the grid now has truthful cell equality/length substrate, but shared search/edit consumers still stay byte-oriented |
-| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the reduced prompt editor now stores shared cell payloads through `utf8.CellBuffer`, but status-line draw, cursor motion, completion, history navigation, and broader display-consumer adoption are still missing |
+| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `Y` | `-` | open: live pane writes now use `putGlyph`/`putBytes` over truthful storage and attached-client row emission now preserves stored UTF-8 cell payload bytes, but the writer/runtime is still a reduced seam without tmux's fuller insert/selection/tty collection path |
+| trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the reduced status/prompt renderer now consumes those width rules, but shared search/read/edit consumers are still missing and grid-reader-style search remains byte-oriented |
+| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the reduced prompt editor now stores shared cell payloads through `utf8.CellBuffer` and the reduced status renderer now consumes that path, but full status-format semantics, cursor motion, completion, history navigation, timers, and broader display-consumer adoption are still missing |
 | choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
 
 The current read of the matrix is deliberately blunt:
@@ -262,9 +282,9 @@ The current read of the matrix is deliberately blunt:
 - row 4's raw storage blocker is gone and row 5's ASCII collapse is gone for
   live pane writes; the remaining blockers are now fuller reader/editor
   adoption and the reduced side effects around the writer
-- row 7's raw prompt-storage blocker is gone, but it remains open because the
-  reduced prompt/runtime path still lacks the rest of tmux's editor and
-  status-renderer semantics
+- row 7's raw prompt-storage blocker is gone and there is now a reduced shared
+  status/prompt renderer, but the row remains open because the rest of tmux's
+  editor, status-format, timer, and overlay semantics are still missing
 - rows 6 and 7 are now blocked mainly by remaining prompt/status consumer
   seams rather than by the underlying grid storage format itself
 - row 8 is a truthful reduced helper, not yet the full tty output policy layer

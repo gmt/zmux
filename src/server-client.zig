@@ -42,6 +42,7 @@ const c = @import("c.zig");
 const notify = @import("notify.zig");
 const client_registry = @import("client-registry.zig");
 const alerts = @import("alerts.zig");
+const status = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
 
 var next_client_id: u32 = 0;
@@ -340,13 +341,13 @@ pub fn server_client_loop() void {
         }
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.flags & T.CLIENT_SUSPENDED != 0) continue;
-        if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) continue;
+        if (cl.flags & T.CLIENT_REDRAW == 0) continue;
         if (cl.flags & T.CLIENT_CONTROL != 0) {
-            cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
+            cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
             continue;
         }
         server_client_draw(cl);
-        cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
+        cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
     }
 }
 
@@ -511,16 +512,39 @@ fn server_client_draw(cl: *T.Client) void {
     const sx = if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx);
     const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
     if (sx == 0 or sy == 0) return;
-    const payload = tty_draw.tty_draw_pane(&cl.pane_cache, wp, sx, sy) catch return;
-    defer xm.allocator.free(payload);
+    const pane_payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, status.pane_row_offset(cl)) catch return;
+    defer xm.allocator.free(pane_payload);
+    const status_render = status.render(cl);
+    defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
-    if (payload.len != 0) {
+    if (pane_payload.len != 0 or status_render.payload.len != 0) {
         if (cl.peer) |peer| {
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(xm.allocator);
             const stream: i32 = 1;
             buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, payload) catch unreachable;
+            buf.appendSlice(xm.allocator, pane_payload) catch unreachable;
+            if (status_render.payload.len != 0) {
+                buf.appendSlice(xm.allocator, "\x1b[?25l") catch unreachable;
+                buf.appendSlice(xm.allocator, status_render.payload) catch unreachable;
+                if (status_render.cursor_visible) {
+                    const cursor = std.fmt.allocPrint(
+                        xm.allocator,
+                        "\x1b[{d};{d}H\x1b[?25h",
+                        .{ status_render.cursor_y + 1, status_render.cursor_x + 1 },
+                    ) catch unreachable;
+                    defer xm.allocator.free(cursor);
+                    buf.appendSlice(xm.allocator, cursor) catch unreachable;
+                } else if (cl.pane_cache.cursor_visible) {
+                    const cursor = std.fmt.allocPrint(
+                        xm.allocator,
+                        "\x1b[{d};{d}H\x1b[?25h",
+                        .{ status.pane_row_offset(cl) + cl.pane_cache.cursor_y + 1, cl.pane_cache.cursor_x + 1 },
+                    ) catch unreachable;
+                    defer xm.allocator.free(cursor);
+                    buf.appendSlice(xm.allocator, cursor) catch unreachable;
+                }
+            }
             _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
         }
     }

@@ -615,14 +615,9 @@ fn captureStdout(ctx: anytype, comptime run: fn (@TypeOf(ctx)) anyerror!void) ![
 }
 
 fn gridRowString(grid: *T.Grid, row: u32) ![]u8 {
-    const used = grid_mod.line_used(grid, row);
-    const out = try xm.allocator.alloc(u8, used);
-    errdefer xm.allocator.free(out);
-
-    for (0..used) |idx| {
-        out[idx] = grid_mod.ascii_at(grid, row, @intCast(idx));
-    }
-    return out;
+    return grid_mod.string_cells(grid, row, grid.sx, .{
+        .trim_trailing_spaces = true,
+    });
 }
 
 test "run-shell writes output to stdout when no target pane is forced" {
@@ -720,6 +715,35 @@ test "run-shell -t shows shell output in the target pane view mode" {
     defer xm.allocator.free(second);
     try std.testing.expectEqualStrings("pane", first);
     try std.testing.expectEqualStrings("output", second);
+}
+
+test "run-shell target-pane output preserves shared utf8 grid payloads" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var setup = testSetup("run-shell-pane-utf8");
+    defer testTeardown(&setup);
+    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
+    defer xm.allocator.free(target);
+
+    try appendCommand(&setup.client, &.{
+        "run-shell",
+        "-t",
+        target,
+        "printf '\\360\\237\\231\\202\\n\\316\\262'",
+    });
+
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+    try waitForAlternateScreen(setup.pane);
+
+    const first = try gridRowString(setup.pane.screen.grid, 0);
+    defer xm.allocator.free(first);
+    const second = try gridRowString(setup.pane.screen.grid, 1);
+    defer xm.allocator.free(second);
+    try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first);
+    try std.testing.expectEqualStrings("\xce\xb2", second);
 }
 
 test "run-shell -bC preserves the original target context for delayed commands" {

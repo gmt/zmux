@@ -488,13 +488,95 @@ test "server_client_print keeps direct control-client output on the shared sanit
     try std.testing.expectEqualStrings("bad _(\n", buf[0..read_len]);
 }
 
-fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
-    const used = grid_mod.line_used(gd, row);
-    const out = try xm.allocator.alloc(u8, used);
-    errdefer xm.allocator.free(out);
+test "server_client_print preserves utf8 payloads on the shared attached view-mode seam" {
+    const client_registry = @import("client-registry.zig");
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
 
-    for (0..used) |idx| {
-        out[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
+    const session_name = xm.xstrdup("server-print-utf8");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(8, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(8, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
     }
-    return out;
+
+    var window = T.Window{
+        .id = 21,
+        .name = window_name,
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 22,
+        .window = &window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| server_client_close_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 20,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    try session.windows.put(0, &winlink);
+    try window.winlinks.append(xm.allocator, &winlink);
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client_registry.add(&client);
+    defer {
+        client_registry.remove(&client);
+        clearClientRedrawFlags(&client);
+    }
+
+    server_client_print(&client, true, "\xf0\x9f\x99\x82");
+    server_client_print(&client, true, "\xce\xb2");
+
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    const second_row = try grid_row_string(pane.screen.grid, 1);
+    defer xm.allocator.free(second_row);
+    try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first_row);
+    try std.testing.expectEqualStrings("\xce\xb2", second_row);
+}
+
+fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
+    return grid_mod.string_cells(gd, row, gd.sx, .{
+        .trim_trailing_spaces = true,
+    });
 }

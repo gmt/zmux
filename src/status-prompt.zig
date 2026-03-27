@@ -155,6 +155,22 @@ fn append_event(state: *PromptState, event: *const T.key_event) bool {
     return false;
 }
 
+fn single_prompt_text(key: T.key_code, buf: *[4]u8) ?[]const u8 {
+    if ((key & T.KEYC_MASK_KEY) == T.KEYC_BSPACE) {
+        buf[0] = 0x7f;
+        return buf[0..1];
+    }
+
+    if ((key & T.KEYC_MASK_KEY) > 0x7f) {
+        if (!T.keycIsUnicode(key)) return null;
+        const len = std.unicode.utf8Encode(@intCast(key & T.KEYC_MASK_KEY), buf) catch return null;
+        return buf[0..len];
+    }
+
+    buf[0] = @intCast(key & if (key & T.KEYC_CTRL != 0) @as(T.key_code, 0x1f) else T.KEYC_MASK_KEY);
+    return buf[0..1];
+}
+
 pub fn status_prompt_type(name: []const u8) PromptType {
     if (std.mem.eql(u8, name, "command")) return .command;
     if (std.mem.eql(u8, name, "search")) return .search;
@@ -263,6 +279,13 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         }
         const text = state_copy_input(state);
         defer xm.allocator.free(text);
+        prompt_finish(c, state, text, true);
+        return true;
+    }
+
+    if (state.flags & PROMPT_SINGLE != 0) {
+        var buf: [4]u8 = undefined;
+        const text = single_prompt_text(event.key, &buf) orelse return false;
         prompt_finish(c, state, text, true);
         return true;
     }

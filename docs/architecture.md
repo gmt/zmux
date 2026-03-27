@@ -82,6 +82,31 @@ No new UTF-8, display-width, combine, or rendering workaround should be added
 outside the declared stack until the seal matrix says the relevant row is
 materially built.
 
+## Current gap ledger
+
+This slice exists to name the real seam in the current code, not just restate
+the target API. The lower layers already contain useful truthful substrate, but
+that truth still stops before the live grid/write path.
+
+| behavior / seam | already truthful today | still missing before reopen |
+|---|---|---|
+| byte decode into Unicode key candidates | `src/utf8.zig` already owns `utf8_open`, `utf8_append`, and `utf8_from_data`, and `src/input-keys.zig` already uses them for attached-key decode and encode | there is still no shared consumer-facing `utf8.Decoder` or glyph object, so other consumers can still drift back into local byte handling |
+| width policy and overrides | `src/utf8.zig` already owns width cache logic, `codepoint-widths`, `utf8_cstrwidth`, and the trim/pad helpers used by existing string consumers | the live grid/write path still does not preserve width consequences, so width truth currently stops at strings and key helpers |
+| combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks | `src/screen-write.zig` never calls that layer, so combined-cell behavior is still unreachable from live pane writes |
+| cell payload representation | `src/types.zig` already exposes `Utf8Data`, `utf8_char`, `GridCell`, and the `GRID_FLAG_PADDING` constants that describe tmux's cell model | `src/grid.zig` still stores only compact ASCII `GridCellEntry.data`; there is no extended-cell, padding-cell, or `grid_get_cell`/`grid_set_cell`-grade path yet |
+| live screen-write integration | `src/input.zig` already routes terminal parser events through shared `screen-write` entry points instead of writing directly into panes | those entry points are still byte-at-a-time `putc`/`putn` helpers over `grid.set_ascii`/`ascii_at`, so they collapse glyph semantics back to ASCII storage |
+| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables | `src/status-prompt.zig` still edits raw UTF-8 byte buffers, and there is no shared display-cell editing/search surface for prompt/status consumers yet |
+| ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
+
+The practical reopen gate is therefore not "add more UTF-8 helpers." It is
+replacing the ASCII-only storage/write seam in `src/grid.zig`,
+`src/screen-write.zig`, and `src/input.zig`, then pulling prompt/status
+consumers onto that shared cell model.
+
+The seal matrix below stays conservative on purpose: seeded lower-layer helpers
+do not count as green until the row works end-to-end through storage,
+screen-write, and the relevant consumer adapters.
+
 ## Target stack
 
 ### Highest layer: consumer-facing text/cell operations

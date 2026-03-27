@@ -105,7 +105,7 @@ pub fn options_get_number(oo: *T.Options, name: []const u8) i64 {
     const v = options_get(oo, name) orelse return 0;
     return switch (v.*) {
         .number => |n| n,
-        .@"bool" => |b| if (b) 1 else 0,
+        .bool => |b| if (b) 1 else 0,
         .choice => |ch| @intCast(ch),
         .colour => |col| col,
         else => 0,
@@ -148,7 +148,7 @@ pub fn options_set_number(oo: *T.Options, name: []const u8, value: i64) void {
 
 /// Set a boolean option.
 pub fn options_set_bool(oo: *T.Options, name: []const u8, value: bool) void {
-    put_value(oo, name, .{ .@"bool" = value });
+    put_value(oo, name, .{ .bool = value });
 }
 
 /// Set a string option (takes ownership of a copy of value).
@@ -273,7 +273,7 @@ pub fn options_set_from_string(
         return true;
     }
 
-    switch (oe.?.@"type") {
+    switch (oe.?.type) {
         .string, .style => {
             if (value == null) {
                 cause.* = xm.xstrdup("empty value");
@@ -295,7 +295,7 @@ pub fn options_set_from_string(
             };
             options_set_number(oo, name, parsed);
         },
-        .flag, .@"bool" => {
+        .flag, .bool => {
             const parsed = options_parse_boolish(value) orelse {
                 cause.* = xm.xasprintf("invalid flag value: {s}", .{value orelse ""});
                 return false;
@@ -346,17 +346,17 @@ pub fn options_value_to_string(_: []const u8, value: *const T.OptionsValue, oe: 
     return switch (value.*) {
         .string => |s| xm.xstrdup(s),
         .number => |n| if (oe) |entry|
-            switch (entry.@"type") {
+            switch (entry.type) {
                 .choice => if (entry.choices) |choices|
                     if (n >= 0 and @as(usize, @intCast(n)) < choices.len) xm.xstrdup(choices[@intCast(n)]) else xm.xasprintf("{d}", .{n})
                 else
                     xm.xasprintf("{d}", .{n}),
-                .flag, .@"bool" => xm.xstrdup(if (n != 0) "on" else "off"),
+                .flag, .bool => xm.xstrdup(if (n != 0) "on" else "off"),
                 else => xm.xasprintf("{d}", .{n}),
             }
         else
             xm.xasprintf("{d}", .{n}),
-        .@"bool" => |b| xm.xstrdup(if (b) "on" else "off"),
+        .bool => |b| xm.xstrdup(if (b) "on" else "off"),
         .choice => |idx| if (oe) |entry|
             if (entry.choices) |choices|
                 if (idx < choices.len) xm.xstrdup(choices[idx]) else xm.xasprintf("{d}", .{idx})
@@ -382,11 +382,11 @@ const table = @import("options-table.zig");
 
 /// Install the default value for one table entry into an options set.
 pub fn options_default(oo: *T.Options, oe: *const T.OptionsTableEntry) void {
-    switch (oe.@"type") {
+    switch (oe.type) {
         .number, .choice, .colour, .flag => {
             options_set_number(oo, oe.name, oe.default_num);
         },
-        .@"bool" => {
+        .bool => {
             options_set_bool(oo, oe.name, oe.default_num != 0);
         },
         .string => {
@@ -398,7 +398,9 @@ pub fn options_default(oo: *T.Options, oe: *const T.OptionsTableEntry) void {
             options_set_string(oo, false, oe.name, def);
         },
         .array => {
-            // leave array empty; individual entries added via set-option
+            if (oe.default_arr) |items| {
+                options_set_array(oo, oe.name, items);
+            }
         },
         .command => {},
     }

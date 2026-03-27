@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const screen_mod = @import("screen.zig");
 
 const FixedSequence = struct {
     key: T.key_code,
@@ -101,6 +102,11 @@ const modifier_templates = [_]ModifierTemplate{
     .{ .key = T.KEYC_IC, .template = "\x1b[2;_~" },
     .{ .key = T.KEYC_DC, .template = "\x1b[3;_~" },
 };
+
+const MOUSE_PARAM_MAX: u32 = 0xff;
+const MOUSE_PARAM_UTF8_MAX: u32 = 0x7ff;
+const MOUSE_PARAM_BTN_OFF: u32 = 0x20;
+const MOUSE_PARAM_POS_OFF: u32 = 0x21;
 
 pub fn input_key_get(bytes: []const u8, event: *T.key_event) ?usize {
     return input_key_get_client(null, bytes, event);
@@ -201,6 +207,17 @@ pub fn input_key_encode_screen(screen: *const T.Screen, key_in: T.key_code, buf:
         },
         else => return encode_vt10x_key(lookup_key, buf),
     }
+}
+
+pub fn input_key_mouse_pane(wp: *T.WindowPane, m: *const T.MouseEvent, buf: *[40]u8) []const u8 {
+    if (!m.valid or m.ignore) return buf[0..0];
+
+    const pane_id: u32 = std.math.cast(u32, m.wp) orelse return buf[0..0];
+    if (pane_id != wp.id) return buf[0..0];
+    if (!input_key_pane_visible(wp)) return buf[0..0];
+
+    const point = input_key_mouse_at(wp, m, false) orelse return buf[0..0];
+    return input_key_get_mouse(screen_mod.screen_current(wp), m, point.x, point.y, buf);
 }
 
 fn parse_escape(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
@@ -400,6 +417,94 @@ fn ctrl_key(ch: u8) ?T.key_code {
         0x1c...0x1f => (@as(T.key_code, ch) + 0x40) | T.KEYC_CTRL,
         else => null,
     };
+}
+
+fn input_key_pane_visible(wp: *T.WindowPane) bool {
+    if (wp.window.flags & T.WINDOW_ZOOMED == 0) return true;
+    return wp.window.active == wp;
+}
+
+fn input_key_mouse_at(wp: *T.WindowPane, m: *const T.MouseEvent, last: bool) ?struct { x: u32, y: u32 } {
+    const x = (if (last) m.lx else m.x) + m.ox;
+    var y = (if (last) m.ly else m.y) + m.oy;
+
+    if (m.statusat == 0 and y >= m.statuslines)
+        y -= m.statuslines;
+
+    if (x < wp.xoff or x >= wp.xoff + wp.sx) return null;
+    if (y < wp.yoff or y >= wp.yoff + wp.sy) return null;
+
+    return .{
+        .x = x - wp.xoff,
+        .y = y - wp.yoff,
+    };
+}
+
+fn input_key_get_mouse(screen: *const T.Screen, m: *const T.MouseEvent, x: u32, y: u32, buf: *[40]u8) []const u8 {
+    if (T.mouseDrag(m.b) and (screen.mode & T.MOTION_MOUSE_MODES) == 0)
+        return buf[0..0];
+    if ((screen.mode & T.ALL_MOUSE_MODES) == 0)
+        return buf[0..0];
+
+    if (m.sgr_type != ' ') {
+        if (T.mouseDrag(m.sgr_b) and T.mouseRelease(m.sgr_b) and (screen.mode & T.MODE_MOUSE_ALL) == 0)
+            return buf[0..0];
+    } else {
+        if (T.mouseDrag(m.b) and T.mouseRelease(m.b) and T.mouseRelease(m.lb) and (screen.mode & T.MODE_MOUSE_ALL) == 0)
+            return buf[0..0];
+    }
+
+    if (m.sgr_type != ' ' and (screen.mode & T.MODE_MOUSE_SGR) != 0) {
+        return std.fmt.bufPrint(buf, "\x1b[<{d};{d};{d}{c}", .{
+            m.sgr_b,
+            x + 1,
+            y + 1,
+            m.sgr_type,
+        }) catch buf[0..0];
+    }
+
+    var len: usize = 0;
+    buf[len] = 0x1b;
+    len += 1;
+    buf[len] = '[';
+    len += 1;
+    buf[len] = 'M';
+    len += 1;
+
+    if ((screen.mode & T.MODE_MOUSE_UTF8) != 0) {
+        if (m.b > MOUSE_PARAM_UTF8_MAX - MOUSE_PARAM_BTN_OFF or
+            x > MOUSE_PARAM_UTF8_MAX - MOUSE_PARAM_POS_OFF or
+            y > MOUSE_PARAM_UTF8_MAX - MOUSE_PARAM_POS_OFF)
+        {
+            return buf[0..0];
+        }
+
+        len += input_key_split2(m.b + MOUSE_PARAM_BTN_OFF, buf[len..]);
+        len += input_key_split2(x + MOUSE_PARAM_POS_OFF, buf[len..]);
+        len += input_key_split2(y + MOUSE_PARAM_POS_OFF, buf[len..]);
+        return buf[0..len];
+    }
+
+    if (m.b + MOUSE_PARAM_BTN_OFF > MOUSE_PARAM_MAX)
+        return buf[0..0];
+
+    buf[len] = @intCast(m.b + MOUSE_PARAM_BTN_OFF);
+    len += 1;
+    buf[len] = @intCast(@min(MOUSE_PARAM_MAX, x + MOUSE_PARAM_POS_OFF));
+    len += 1;
+    buf[len] = @intCast(@min(MOUSE_PARAM_MAX, y + MOUSE_PARAM_POS_OFF));
+    len += 1;
+    return buf[0..len];
+}
+
+fn input_key_split2(c: u32, dst: []u8) usize {
+    if (c > 0x7f) {
+        dst[0] = @intCast((c >> 6) | 0xc0);
+        dst[1] = @intCast((c & 0x3f) | 0x80);
+        return 2;
+    }
+    dst[0] = @intCast(c);
+    return 1;
 }
 
 fn encode_ascii_key(masked: T.key_code, modifiers: T.key_code, buf: *[16]u8) error{UnsupportedKey}![]const u8 {
@@ -888,4 +993,48 @@ test "input_key_encode_screen ports backspace and extended-key options" {
 
     screen.mode = T.MODE_KEYS_EXTENDED_2;
     try std.testing.expectEqualStrings("\x1b[27;2;9~", try input_key_encode_screen(&screen, T.KEYC_BTAB, &buf));
+}
+
+test "input_key_mouse_pane encodes SGR mouse bytes with pane-relative coordinates" {
+    const win = @import("window.zig");
+    const xm = @import("xmalloc.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+    w.active = wp;
+    wp.base.mode |= T.MODE_MOUSE_ALL | T.MODE_MOUSE_SGR;
+    wp.xoff = 3;
+    wp.yoff = 2;
+
+    var mouse = T.MouseEvent{
+        .valid = true,
+        .wp = @intCast(wp.id),
+        .x = 4,
+        .y = 4,
+        .b = T.MOUSE_BUTTON_1,
+        .statusat = 0,
+        .statuslines = 1,
+        .sgr_type = 'M',
+        .sgr_b = T.MOUSE_BUTTON_1,
+    };
+    var buf: [40]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[<0;2;2M", input_key_mouse_pane(wp, &mouse, &buf));
 }

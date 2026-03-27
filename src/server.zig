@@ -571,7 +571,6 @@ test "server session-group redraw and status helpers fan out across grouped sess
     var cause: ?[]u8 = null;
     const leader_wl = sess.session_attach(leader, shared_w, 0, &cause).?;
     leader.curw = leader_wl;
-    sess.session_group_synchronize_from(leader);
     peer.curw = sess.winlink_find_by_index(&peer.windows, leader_wl.idx).?;
 
     const outsider_w = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);

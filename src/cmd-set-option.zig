@@ -36,10 +36,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "-o not supported yet", .{});
         return .@"error";
     }
-    if (args.has('U')) {
-        cmdq.cmdq_error(item, "-U not supported yet", .{});
-        return .@"error";
-    }
 
     const option_name = args.value_at(0) orelse {
         cmdq.cmdq_error(item, "invalid option", .{});
@@ -60,7 +56,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    if (args.has('u')) {
+    if (args.has('u') or args.has('U')) {
+        if (args.has('U') and target.kind == .window)
+            clear_window_option_overrides(target, option_name);
         unset_option(target, option_name, oe);
         apply_target_side_effects(target, option_name);
         return .normal;
@@ -81,7 +79,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     defer if (expanded) |value| xm.allocator.free(value);
     const value = expanded orelse raw_value;
 
-    if (args.has('a') and oe != null and oe.?.@"type" != .string and oe.?.@"type" != .style and oe.?.@"type" != .array) {
+    if (args.has('a') and oe != null and oe.?.type != .string and oe.?.type != .style and oe.?.type != .array) {
         cmdq.cmdq_error(item, "-a only supported for string and array options", .{});
         return .@"error";
     }
@@ -110,11 +108,27 @@ fn unset_option(target: cmd_opts.ResolvedTarget, name: []const u8, oe: ?*const T
     }
 }
 
+fn clear_window_option_overrides(target: cmd_opts.ResolvedTarget, name: []const u8) void {
+    const w = target.window orelse return;
+    for (w.panes.items) |wp| {
+        if (opts.options_get_only(wp.options, name) == null) continue;
+        opts.options_remove(wp.options, name);
+        win.window_pane_options_changed(wp, name);
+    }
+}
+
 fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) void {
     if (std.mem.eql(u8, name, "monitor-silence"))
         alerts.alerts_reset_all();
     if (std.mem.eql(u8, name, "codepoint-widths") and target.kind == .server and target.global)
         utf8.utf8_update_width_cache();
+    if (target.kind == .window) {
+        if (target.window) |w| {
+            for (w.panes.items) |wp|
+                win.window_pane_options_changed(wp, name);
+        }
+        return;
+    }
     if (target.pane) |wp| {
         win.window_pane_options_changed(wp, name);
     }
@@ -198,4 +212,64 @@ test "set-option -p stores pane local custom options and updates consumers" {
     defer cmd_mod.cmd_free(set_palette);
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_palette, &item));
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x02, 0x03, 0x04), colour_mod.colour_palette_get(&wp.palette, 1));
+}
+
+test "set-option -w -U clears pane local overrides before unsetting window options" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_string(opts.global_w_options, false, "pane-scrollbars-style", "fg=red,pad=2");
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "unset-window-override", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &attach_cause).?;
+    const pane_with_override = win.window_add_pane(w, null, 80, 24);
+    const inherited_pane = win.window_add_pane(w, null, 80, 24);
+    w.active = pane_with_override;
+    s.curw = sess.winlink_find_by_window(&s.windows, w).?;
+
+    opts.options_set_string(w.options, false, "pane-scrollbars-style", "fg=blue,pad=5");
+    win.window_pane_options_changed(pane_with_override, "pane-scrollbars-style");
+    win.window_pane_options_changed(inherited_pane, "pane-scrollbars-style");
+    opts.options_set_string(pane_with_override.options, false, "pane-scrollbars-style", "fg=yellow,pad=7");
+    win.window_pane_options_changed(pane_with_override, "pane-scrollbars-style");
+
+    try std.testing.expectEqual(@as(i32, 7), pane_with_override.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 5), inherited_pane.scrollbar_style.pad);
+
+    const target = try std.fmt.allocPrint(xm.allocator, "@{d}", .{w.id});
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-w", "-U", "-t", target, "pane-scrollbars-style" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expect(opts.options_get_only(w.options, "pane-scrollbars-style") == null);
+    try std.testing.expect(opts.options_get_only(pane_with_override.options, "pane-scrollbars-style") == null);
+    try std.testing.expectEqual(@as(i32, 2), pane_with_override.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 2), inherited_pane.scrollbar_style.pad);
 }

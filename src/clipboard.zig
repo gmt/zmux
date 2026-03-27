@@ -16,8 +16,8 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const file_mod = @import("file.zig");
 const xm = @import("xmalloc.zig");
-const proc_mod = @import("proc.zig");
 
 pub fn export_selection(cl: ?*T.Client, clip: []const u8, data: []const u8) void {
     const client = cl orelse return;
@@ -26,13 +26,7 @@ pub fn export_selection(cl: ?*T.Client, clip: []const u8, data: []const u8) void
     const sequence = osc52_sequence(xm.allocator, clip, data) catch unreachable;
     defer xm.allocator.free(sequence);
 
-    var payload: std.ArrayList(u8) = .{};
-    defer payload.deinit(xm.allocator);
-
-    const stream: i32 = 1;
-    payload.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-    payload.appendSlice(xm.allocator, sequence) catch unreachable;
-    _ = proc_mod.proc_send(client.peer.?, .write, -1, payload.items.ptr, payload.items.len);
+    _ = file_mod.sendPeerStream(client.peer.?, 1, sequence);
 }
 
 fn can_export_selection(cl: *const T.Client) bool {

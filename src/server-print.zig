@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
-const proc_mod = @import("proc.zig");
+const file_mod = @import("file.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -48,11 +48,7 @@ const DirectPrintData = struct {
 pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const u8) void {
     if (client) |cl| {
         if (cl.peer) |peer| {
-            var buf: std.ArrayList(u8) = .{};
-            defer buf.deinit(xm.allocator);
-            buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-            buf.appendSlice(xm.allocator, data) catch unreachable;
-            _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+            _ = file_mod.sendPeerStream(peer, stream, data);
             return;
         }
     }

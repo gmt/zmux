@@ -22,10 +22,9 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const file_mod = @import("file.zig");
 const xm = @import("xmalloc.zig");
 const registry = @import("client-registry.zig");
-const proc_mod = @import("proc.zig");
-const protocol = @import("zmux-protocol.zig");
 
 fn should_notify_client(cl: *T.Client) bool {
     return (cl.flags & T.CLIENT_CONTROL) != 0;
@@ -51,13 +50,9 @@ fn write_control(cl: *T.Client, comptime fmt: []const u8, args: anytype) void {
     defer xm.allocator.free(msg);
 
     if (cl.peer) |peer| {
-        var stream: i32 = 1;
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(xm.allocator);
-        buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
-        buf.appendSlice(xm.allocator, msg) catch unreachable;
-        buf.append(xm.allocator, '\n') catch unreachable;
-        _ = proc_mod.proc_send(peer, .write, -1, buf.items.ptr, buf.items.len);
+        const line = std.fmt.allocPrint(xm.allocator, "{s}\n", .{msg}) catch unreachable;
+        defer xm.allocator.free(line);
+        _ = file_mod.sendPeerStream(peer, 1, line);
     }
 }
 

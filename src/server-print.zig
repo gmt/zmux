@@ -94,7 +94,7 @@ pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) b
     if (!ensure_view_mode(wp)) return false;
     render_view_data(wp, data, parse);
     wp.flags |= T.PANE_REDRAW;
-    server.server_redraw_window(wp.window);
+    server.server_redraw_pane(wp);
     return true;
 }
 
@@ -106,6 +106,7 @@ pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
     }
     screen_mod.screen_leave_alternate(wp, true);
     wp.flags |= T.PANE_REDRAW;
+    server.server_redraw_pane(wp);
 }
 
 fn ensure_view_mode(wp: *T.WindowPane) bool {

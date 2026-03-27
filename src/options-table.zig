@@ -36,6 +36,47 @@ const WP = T.OptionsScope{ .window = true, .pane = true };
 
 const OT = T.OptionsType;
 
+const status_format_default_0 =
+    "#[align=left range=left #{E:status-left-style}]" ++
+    "#[push-default]" ++
+    "#{T;=/#{status-left-length}:status-left}" ++
+    "#[pop-default]" ++
+    "#[norange default]" ++
+    "#[list=on align=#{status-justify}]" ++
+    "#[list=left-marker]<#[list=right-marker]>#[list=on]" ++
+    "#{W:" ++
+    "#[range=window|#{window_index} " ++
+    "#{E:window-status-style}" ++
+    "#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}},#{E:window-status-last-style},}" ++
+    "#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}},#{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}},#{E:window-status-activity-style},}}" ++
+    "]" ++
+    "#[push-default]" ++
+    "#{T:window-status-format}" ++
+    "#[pop-default]" ++
+    "#[norange default]" ++
+    "#{?loop_last_flag,,#{E:window-status-separator}}" ++
+    "," ++
+    "#[range=window|#{window_index} list=focus " ++
+    "#{?#{!=:#{E:window-status-current-style},default},#{E:window-status-current-style},#{E:window-status-style}}" ++
+    "#{?#{&&:#{window_last_flag},#{!=:#{E:window-status-last-style},default}},#{E:window-status-last-style},}" ++
+    "#{?#{&&:#{window_bell_flag},#{!=:#{E:window-status-bell-style},default}},#{E:window-status-bell-style},#{?#{&&:#{||:#{window_activity_flag},#{window_silence_flag}},#{!=:#{E:window-status-activity-style},default}},#{E:window-status-activity-style},}}" ++
+    "]" ++
+    "#[push-default]" ++
+    "#{T:window-status-current-format}" ++
+    "#[pop-default]" ++
+    "#[norange list=on default]" ++
+    "#{?loop_last_flag,,#{E:window-status-separator}}" ++
+    "}" ++
+    "#[nolist align=right range=right #{E:status-right-style}]" ++
+    "#[push-default]" ++
+    "#{T;=/#{status-right-length}:status-right}" ++
+    "#[pop-default]" ++
+    "#[norange default]";
+
+const status_format_default = [_][]const u8{
+    status_format_default_0,
+};
+
 pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     // ── Server options ────────────────────────────────────────────────────
     .{ .name = "backspace", .type = .string, .scope = S, .default_str = "\x7f" },
@@ -99,7 +140,12 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "status", .type = .choice, .scope = Ss, .default_num = 1, .choices = &.{ "off", "on", "2", "3", "4", "5" } },
     .{ .name = "status-bg", .type = .colour, .scope = Ss, .default_num = 8 },
     .{ .name = "status-fg", .type = .colour, .scope = Ss, .default_num = 8 },
-    .{ .name = "status-format", .type = .array, .scope = Ss },
+    .{
+        .name = "status-format",
+        .type = .array,
+        .scope = Ss,
+        .default_arr = status_format_default[0..],
+    },
     .{ .name = "status-interval", .type = .number, .scope = Ss, .default_num = 15, .minimum = 0 },
     .{ .name = "status-justify", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "left", "centre", "right", "absolute-centre" } },
     .{ .name = "status-keys", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "emacs", "vi" } },

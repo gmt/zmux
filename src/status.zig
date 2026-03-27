@@ -132,33 +132,18 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
     if (resize_mod.status_line_size(c) == 0) return;
 
     var ctx = format_context(c);
-    const left_full = format_mod.format_require_complete(xm.allocator, "#{E:status-left}", &ctx) orelse xm.xstrdup("");
-    defer xm.allocator.free(left_full);
-    const right_full = format_mod.format_require_complete(xm.allocator, "#{T:status-right}", &ctx) orelse xm.xstrdup("");
-    defer xm.allocator.free(right_full);
-
-    const left_limit: u32 = @intCast(@max(opts.options_get_number(s.options, "status-left-length"), 0));
-    const right_limit: u32 = @intCast(@max(opts.options_get_number(s.options, "status-right-length"), 0));
-    const left_text = utf8.trimDisplay(left_full, .left, left_limit);
-    defer xm.allocator.free(left_text);
-    const right_text = utf8.trimDisplay(right_full, .right, right_limit);
-    defer xm.allocator.free(right_text);
-
-    const total = screen.grid.sx;
-    const right_width = @min(utf8.displayWidth(right_text), total);
-    const left_available = total - right_width;
-
+    const formats = opts.options_get_array(s.options, "status-format");
     var left_gc = base_gc;
-    style_mod.style_apply(&left_gc, s.options, "status-left-style", null);
     var swctx = T.ScreenWriteCtx{ .s = screen };
-    screen_write.cursor_to(&swctx, 0, 0);
-    format_draw.format_draw(&swctx, &left_gc, left_available, left_text);
-
-    if (right_width != 0) {
-        var right_gc = base_gc;
-        style_mod.style_apply(&right_gc, s.options, "status-right-style", null);
-        screen_write.cursor_to(&swctx, 0, total - right_width);
-        format_draw.format_draw(&swctx, &right_gc, right_width, right_text);
+    row = 0;
+    while (row < rows) : (row += 1) {
+        const row_index: usize = @intCast(row);
+        if (row_index >= formats.len) break;
+        style_mod.style_apply(&left_gc, s.options, "status-style", null);
+        const expanded = format_mod.format_expand(xm.allocator, formats[row_index], &ctx);
+        defer xm.allocator.free(expanded.text);
+        screen_write.cursor_to(&swctx, row, 0);
+        format_draw.format_draw(&swctx, &left_gc, screen.grid.sx, expanded.text);
     }
 }
 
@@ -346,7 +331,9 @@ test "status render draws reduced status line and utf8 prompt overlay" {
     const base = render(&client);
     defer if (base.payload.len != 0) xm.allocator.free(base.payload);
     try std.testing.expect(std.mem.indexOf(u8, base.payload, "[alpha]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, base.payload, "0:editor*") != null);
     try std.testing.expect(std.mem.indexOf(u8, base.payload, "pane") != null);
+    try std.testing.expect(std.mem.indexOf(u8, base.payload, "#{") == null);
 
     const capture = xm.allocator.create(PromptCapture) catch unreachable;
     capture.* = .{};

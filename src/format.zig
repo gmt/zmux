@@ -161,17 +161,21 @@ const resolver_table = [_]Resolver{
     .{ .name = "session_windows", .func = resolve_session_windows },
 
     .{ .name = "window_active", .func = resolve_window_active },
+    .{ .name = "window_activity_flag", .func = resolve_window_activity_flag },
+    .{ .name = "window_bell_flag", .func = resolve_window_bell_flag },
     .{ .name = "window_bigger", .func = resolve_window_bigger },
     .{ .name = "window_flags", .func = resolve_window_flags },
     .{ .name = "window_height", .func = resolve_window_height },
     .{ .name = "window_id", .func = resolve_window_id },
     .{ .name = "window_index", .func = resolve_window_index },
+    .{ .name = "window_last_flag", .func = resolve_window_last_flag },
     .{ .name = "window_linked", .func = resolve_window_linked },
     .{ .name = "window_name", .func = resolve_window_name },
     .{ .name = "window_offset_x", .func = resolve_window_offset_x },
     .{ .name = "window_offset_y", .func = resolve_window_offset_y },
     .{ .name = "window_panes", .func = resolve_window_panes },
     .{ .name = "window_raw_flags", .func = resolve_window_raw_flags },
+    .{ .name = "window_silence_flag", .func = resolve_window_silence_flag },
     .{ .name = "window_zoomed_flag", .func = resolve_window_zoomed_flag },
     .{ .name = "window_width", .func = resolve_window_width },
     .{ .name = "version", .func = resolve_version },
@@ -1911,6 +1915,16 @@ fn resolve_window_active(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
     return alloc.dupe(u8, value) catch unreachable;
 }
 
+fn resolve_window_activity_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_ACTIVITY != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_window_bell_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_BELL != 0) "1" else "0") catch unreachable;
+}
+
 fn resolve_window_bigger(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const w = ctx_window(ctx) orelse return null;
     const cl = ctx.client orelse return alloc.dupe(u8, "0") catch unreachable;
@@ -1924,6 +1938,13 @@ fn resolve_window_id(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
     return xm.xasprintf("@{d}", .{w.id});
 }
 
+fn resolve_window_last_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    const s = ctx_session(ctx) orelse return null;
+    const value: []const u8 = if (s.lastw.items.len > 0 and s.lastw.items[0] == wl) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
 fn resolve_window_linked(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const w = ctx_window(ctx) orelse return null;
     return alloc.dupe(u8, if (w.references > 1) "1" else "0") catch unreachable;
@@ -1935,6 +1956,11 @@ fn resolve_window_flags(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
 
 fn resolve_window_raw_flags(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return resolve_window_flags_impl(alloc, ctx);
+}
+
+fn resolve_window_silence_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_SILENCE != 0) "1" else "0") catch unreachable;
 }
 
 fn resolve_window_flags_impl(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

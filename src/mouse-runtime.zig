@@ -21,9 +21,12 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const options_mod = @import("options.zig");
 const resize_mod = @import("resize.zig");
+const screen_mod = @import("screen.zig");
 const sess = @import("session.zig");
 const status_mod = @import("status.zig");
+const status_prompt = @import("status-prompt.zig");
 const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
@@ -54,6 +57,36 @@ const ResolvedTarget = struct {
     target: T.KeyMouseTarget,
     slider_mpos: i32 = -1,
 };
+
+pub fn client_outer_tty_mode(cl: *const T.Client) i32 {
+    if ((cl.flags & (T.CLIENT_CONTROL | T.CLIENT_SUSPENDED)) != 0) return 0;
+
+    const session = cl.session orelse return 0;
+    const wl = session.curw orelse return 0;
+    const window = wl.window;
+
+    var mode: i32 = 0;
+    if (!status_prompt.status_prompt_active(@constCast(cl))) {
+        if (window.active) |wp| {
+            const current = screen_mod.screen_current(wp);
+            if (current.bracketed_paste) mode |= T.MODE_BRACKETPASTE;
+        }
+    }
+
+    if (options_mod.options_get_number(session.options, "mouse") == 0) return mode;
+
+    for (window.panes.items) |pane| {
+        const current = screen_mod.screen_current(pane);
+        if ((current.mode & T.MODE_MOUSE_ALL) != 0) mode |= T.MODE_MOUSE_ALL;
+    }
+
+    if (options_mod.options_get_number(session.options, "focus-follows-mouse") != 0)
+        mode |= T.MODE_MOUSE_ALL
+    else if ((mode & T.MODE_MOUSE_ALL) == 0)
+        mode |= T.MODE_MOUSE_BUTTON;
+
+    return mode;
+}
 
 pub fn key_target(key: T.key_code) ?T.KeyMouseTarget {
     if (!T.keycIsMouse(key)) return null;
@@ -517,6 +550,52 @@ test "translate_client_mouse_event maps status pane ranges onto shared status ta
     try std.testing.expectEqual(@as(i32, @intCast(s.id)), event.m.s);
     try std.testing.expectEqual(@as(i32, @intCast(w.id)), event.m.w);
     try std.testing.expectEqual(@as(i32, @intCast(wp.id)), event.m.wp);
+}
+
+test "client_outer_tty_mode follows tmux-style button versus all-motion negotiation" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "mouse-mode", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(12, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 12, 4);
+    w.active = wp;
+    opts.options_set_number(s.options, "mouse", 1);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+
+    try std.testing.expectEqual(@as(i32, T.MODE_MOUSE_BUTTON), client_outer_tty_mode(&client) & T.ALL_MOUSE_MODES);
+
+    wp.base.mode |= T.MODE_MOUSE_ALL;
+    try std.testing.expectEqual(@as(i32, T.MODE_MOUSE_ALL), client_outer_tty_mode(&client) & T.ALL_MOUSE_MODES);
+
+    opts.options_set_number(s.options, "focus-follows-mouse", 1);
+    wp.base.mode &= ~@as(i32, T.MODE_MOUSE_ALL);
+    try std.testing.expectEqual(@as(i32, T.MODE_MOUSE_ALL), client_outer_tty_mode(&client) & T.ALL_MOUSE_MODES);
 }
 
 test "translate_client_mouse_event maps pane hits onto pane targets" {

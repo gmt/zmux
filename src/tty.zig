@@ -81,6 +81,33 @@ pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     tty_write(tty, sequence);
 }
 
+pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !void {
+    var actual = mode;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_NOCURSOR))) != 0)
+        actual &= ~@as(i32, T.MODE_CURSOR);
+
+    const changed = actual ^ tty.mode;
+    if ((changed & T.ALL_MOUSE_MODES) != 0) {
+        try out.appendSlice(xm.allocator, "\x1b[?1006l\x1b[?1005l\x1b[?1000l\x1b[?1002l\x1b[?1003l");
+        if ((actual & T.ALL_MOUSE_MODES) != 0)
+            try out.appendSlice(xm.allocator, "\x1b[?1006h");
+        if ((actual & T.MODE_MOUSE_ALL) != 0)
+            try out.appendSlice(xm.allocator, "\x1b[?1000h\x1b[?1002h\x1b[?1003h")
+        else if ((actual & T.MODE_MOUSE_BUTTON) != 0)
+            try out.appendSlice(xm.allocator, "\x1b[?1000h\x1b[?1002h")
+        else if ((actual & T.MODE_MOUSE_STANDARD) != 0)
+            try out.appendSlice(xm.allocator, "\x1b[?1000h");
+    }
+    if ((changed & T.MODE_BRACKETPASTE) != 0) {
+        if ((actual & T.MODE_BRACKETPASTE) != 0)
+            try out.appendSlice(xm.allocator, "\x1b[?2004h")
+        else
+            try out.appendSlice(xm.allocator, "\x1b[?2004l");
+    }
+
+    tty.mode = actual;
+}
+
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
     const peer = tty.client.peer orelse return;
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
@@ -146,4 +173,31 @@ test "tty_resize clamps size and restores default pixels" {
     try std.testing.expectEqual(@as(u32, 1), cl.tty.sy);
     try std.testing.expectEqual(T.DEFAULT_XPIXEL, cl.tty.xpixel);
     try std.testing.expectEqual(T.DEFAULT_YPIXEL, cl.tty.ypixel);
+}
+
+test "tty_append_mode_update emits reduced outer mouse and bracketed-paste negotiation" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    try tty_append_mode_update(&cl.tty, T.MODE_MOUSE_BUTTON | T.MODE_BRACKETPASTE, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1006h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1002h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?2004h") != null);
+
+    out.clearRetainingCapacity();
+    try tty_append_mode_update(&cl.tty, 0, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1006l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?2004l") != null);
 }

@@ -90,6 +90,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     status_prompt.status_prompt_clear(cl);
     status_runtime.status_message_clear(cl);
     status_runtime.status_cleanup(cl);
+    status.status_free(cl);
     const srv = @import("server.zig");
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);

@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
+const server = @import("server.zig");
 const xm = @import("xmalloc.zig");
 
 pub fn status_push_screen(client: *T.Client) void {
@@ -82,6 +83,7 @@ fn status_message_set_owned(
     status_message_clear(client);
     status_push_screen(client);
     client.message_string = message;
+    server.server_add_message("{s} message: {s}", .{ client.name orelse "client", message });
 
     var actual_delay = delay;
     if (actual_delay == -1) {
@@ -184,6 +186,8 @@ test "status runtime arms and clears a timed message overlay" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
 
     sess_mod.session_init_globals(xm.allocator);
     win_mod.window_init_globals(xm.allocator);
@@ -209,6 +213,7 @@ test "status runtime arms and clears a timed message overlay" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
     var client = T.Client{
+        .name = "status-runtime-client",
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
@@ -221,6 +226,8 @@ test "status runtime arms and clears a timed message overlay" {
     try std.testing.expectEqualStrings("timed", client.message_string.?);
     try std.testing.expectEqual(@as(u32, 1), client.status.references);
     try std.testing.expect(client.message_timer != null);
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("status-runtime-client message: timed", server.message_log.items[0].msg);
 
     std.Thread.sleep(20 * std.time.ns_per_ms);
     _ = c.libevent.event_loop(c.libevent.EVLOOP_ONCE);

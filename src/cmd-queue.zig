@@ -20,6 +20,7 @@
 //! cmd-queue.zig – the command queue that serialises command execution.
 
 const std = @import("std");
+const c_mod = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
@@ -513,22 +514,16 @@ pub fn cmdq_error(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void
 
     if (item.client) |cl| {
         if (cl.session == null or (cl.flags & T.CLIENT_CONTROL) != 0) {
-            server.server_add_message("{s} message: {s}", .{ cl.name orelse "client", msg });
-            const line = xm.xasprintf("{s}\n", .{msg});
-            defer xm.allocator.free(line);
-            server_print.server_client_write_stream(cl, 2, line);
+            status_runtime.present_client_message(cl, msg);
             cl.retval = 1;
             return;
         }
 
-        if (msg.len != 0) msg[0] = std.ascii.toUpper(msg[0]);
-        status_runtime.status_message_set_text(cl, -1, true, false, false, msg);
+        status_runtime.present_client_message(cl, msg);
         return;
     }
 
-    const line = xm.xasprintf("{s}\n", .{msg});
-    defer xm.allocator.free(line);
-    server_print.server_client_write_stream(null, 2, line);
+    status_runtime.present_client_message(null, msg);
 }
 
 pub fn cmdq_print(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void {
@@ -599,6 +594,129 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
     cmdq_append_event(&cl, @ptrCast(list), &event);
     try std.testing.expectEqual(@as(u32, 1), cmdq_next(&cl));
     try std.testing.expectEqual(@as(T.key_code, 'x'), capture.seen_key);
+}
+
+test "cmdq_error routes control clients through the shared presenter seam" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "cmdq-error-control-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = "control-client",
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    client.tty.client = &client;
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c_mod.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c_mod.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_mod.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c_mod.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var item = CmdqItem{ .client = &client };
+    cmdq_error(&item, "parse error", .{});
+
+    try std.testing.expectEqual(@as(i32, 1), client.retval);
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("control-client message: parse error", server.message_log.items[0].msg);
+    try std.testing.expectEqual(@as(i32, 1), c_mod.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c_mod.imsg.imsg = undefined;
+    try std.testing.expect(c_mod.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_mod.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c_mod.imsg.imsg_get_type(&imsg_msg));
+    const payload_len = c_mod.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c_mod.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    const stream: *const i32 = @ptrCast(@alignCast(payload.ptr));
+    try std.testing.expectEqual(@as(i32, 1), stream.*);
+    try std.testing.expectEqualStrings("%message parse error\n", payload[@sizeOf(i32)..]);
+}
+
+test "cmdq_error keeps detached non-utf8 clients on the shared sanitized stderr path" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
+
+    var stderr_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&stderr_pipe));
+    defer {
+        std.posix.close(stderr_pipe[0]);
+        if (stderr_pipe[1] != -1) std.posix.close(stderr_pipe[1]);
+    }
+
+    const stderr_dup = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(stderr_dup);
+
+    try std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(stderr_dup, std.posix.STDERR_FILENO) catch {};
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .name = "detached-client",
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = 0,
+    };
+    client.tty.client = &client;
+
+    var item = CmdqItem{ .client = &client };
+    cmdq_error(&item, "bad \xc3(", .{});
+
+    try std.testing.expectEqual(@as(i32, 1), client.retval);
+    try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+    try std.testing.expectEqualStrings("detached-client message: bad \xc3(", server.message_log.items[0].msg);
+
+    std.posix.close(stderr_pipe[1]);
+    stderr_pipe[1] = -1;
+
+    var buf: [128]u8 = undefined;
+    const read_len = try std.posix.read(stderr_pipe[0], &buf);
+    try std.testing.expectEqualStrings("bad _(\n", buf[0..read_len]);
+}
+
+fn noopDispatch(_imsg: ?*c_mod.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+    _ = _imsg;
+    _ = _arg;
 }
 
 test "cmdq waiting items block later entries until continued" {

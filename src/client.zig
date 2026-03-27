@@ -33,6 +33,9 @@ const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const tty_term = @import("tty-term.zig");
 
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn system(command: [*:0]const u8) c_int;
+
 // ── Client globals ────────────────────────────────────────────────────────
 
 var client_proc: ?*T.ZmuxProc = null;
@@ -41,6 +44,8 @@ var client_flags: u64 = 0;
 var client_exitreason: T.ClientExitReason = .none;
 var client_exitsession: ?[]u8 = null;
 var client_exitmessage: ?[]u8 = null;
+var client_exec_command: ?[]u8 = null;
+var client_exec_shell: ?[]u8 = null;
 var client_retval: i32 = 0;
 var client_stdin_event: ?*c.libevent.event = null;
 var client_control_input: std.ArrayList(u8) = .{};
@@ -248,8 +253,14 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
         .exited => {
             proc_mod.proc_exit(client_proc.?);
         },
-        .detach => {
-            client_exitreason = .detached;
+        .detach, .detachkill => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (imsg_msg.data == null or !client_record_detach(msg_type, @as([*]const u8, @ptrCast(imsg_msg.data.?))[0..data_len])) return;
+            proc_mod.proc_exit(client_proc.?);
+        },
+        .exec => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (imsg_msg.data == null or !client_record_exec(@as([*]const u8, @ptrCast(imsg_msg.data.?))[0..data_len])) return;
             proc_mod.proc_exit(client_proc.?);
         },
         .ready => {
@@ -267,6 +278,52 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
         },
         else => {},
     }
+}
+
+fn client_clear_exec_request() void {
+    if (client_exec_command) |cmd| xm.allocator.free(cmd);
+    if (client_exec_shell) |shell| xm.allocator.free(shell);
+    client_exec_command = null;
+    client_exec_shell = null;
+}
+
+fn client_record_detach(msg_type: protocol.MsgType, data: []const u8) bool {
+    if (data.len == 0 or data[data.len - 1] != 0) return false;
+
+    if (client_exitsession) |session| xm.allocator.free(session);
+    client_exitsession = xm.xstrdup(data[0 .. data.len - 1]);
+    client_exitreason = switch (msg_type) {
+        .detachkill => .detached_hup,
+        else => .detached,
+    };
+    return true;
+}
+
+fn client_record_exec(data: []const u8) bool {
+    if (data.len == 0 or data[data.len - 1] != 0) return false;
+
+    const command_end = std.mem.indexOfScalar(u8, data, 0) orelse return false;
+    if (command_end + 1 >= data.len) return false;
+
+    const shell_field = data[command_end + 1 ..];
+    const shell_end = std.mem.indexOfScalar(u8, shell_field, 0) orelse return false;
+    if (shell_end == 0 or command_end + 1 + shell_end + 1 != data.len) return false;
+
+    client_clear_exec_request();
+    client_exec_command = xm.xstrdup(data[0..command_end]);
+    client_exec_shell = xm.xstrdup(shell_field[0..shell_end]);
+    return true;
+}
+
+fn client_exec(shell: []const u8, command: []const u8) noreturn {
+    const shell_z = xm.xm_dupeZ(shell);
+    const shell_name_z = xm.xm_dupeZ(std.fs.path.basename(shell));
+    const command_z = xm.xm_dupeZ(command);
+
+    _ = setenv("SHELL", shell_z.ptr, 1);
+    var argv = [_:null]?[*:0]const u8{ shell_name_z.ptr, "-c", command_z.ptr, null };
+    _ = std.c.execve(shell_z, @ptrCast(&argv), std.c.environ);
+    std.process.exit(1);
 }
 
 fn client_enter_attached_mode() void {
@@ -392,7 +449,7 @@ fn client_handle_lock_command(cmd: []const u8) void {
 
     const cmd_z = xm.xm_dupeZ(cmd);
     defer xm.allocator.free(cmd_z);
-    _ = std.c.system(cmd_z.ptr);
+    _ = system(cmd_z.ptr);
 
     if (was_attached) {
         client_enter_attached_mode();
@@ -529,6 +586,19 @@ pub fn client_main(
     client_control_input = .{};
     proc_mod.proc_clear_signals(client_proc.?, true);
 
+    if (client_exec_command != null and client_exec_shell != null) {
+        const shell = client_exec_shell.?;
+        const command = client_exec_command.?;
+        client_exec_shell = null;
+        client_exec_command = null;
+        client_exec(shell, command);
+    }
+
+    if (client_exitreason == .detached_hup) {
+        const ppid = std.c.getppid();
+        if (ppid > 1) _ = std.c.kill(ppid, std.posix.SIG.HUP);
+    }
+
     return client_retval;
 }
 
@@ -546,6 +616,25 @@ export fn client_signal(signo: c_int) void {
 }
 
 fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+test "client detach payload preserves session name and kill reason" {
+    defer if (client_exitsession) |session| {
+        xm.allocator.free(session);
+        client_exitsession = null;
+    };
+
+    try std.testing.expect(client_record_detach(.detachkill, "victim\x00"));
+    try std.testing.expectEqual(T.ClientExitReason.detached_hup, client_exitreason);
+    try std.testing.expectEqualStrings("victim", client_exitsession.?);
+}
+
+test "client exec payload preserves command and shell" {
+    defer client_clear_exec_request();
+
+    try std.testing.expect(client_record_exec("printf exec\x00/bin/sh\x00"));
+    try std.testing.expectEqualStrings("printf exec", client_exec_command.?);
+    try std.testing.expectEqualStrings("/bin/sh", client_exec_shell.?);
+}
 
 test "client lock command runs shell command then sends unlock" {
     var tmp = std.testing.tmpDir(.{});

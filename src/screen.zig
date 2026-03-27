@@ -36,6 +36,14 @@ pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
     return s;
 }
 
+pub fn screen_free(s: *T.Screen) void {
+    if (s.title) |title| xm.allocator.free(title);
+    if (s.path) |path| xm.allocator.free(path);
+    if (s.tabs) |tabs| xm.allocator.free(tabs);
+    grid.grid_free(s.grid);
+    s.* = undefined;
+}
+
 pub fn screen_reset(s: *T.Screen) void {
     grid.grid_reset(s.grid);
     s.cx = 0;

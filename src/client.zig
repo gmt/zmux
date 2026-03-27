@@ -26,7 +26,7 @@ const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
 const protocol = @import("zmux-protocol.zig");
-const file_write_mod = @import("file-write.zig");
+const file_mod = @import("file.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
@@ -233,13 +233,13 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
                 _ = file.writeAll(text) catch {};
                 return;
             }
-            file_write_mod.client_handle_write_data(imsg_msg);
+            file_mod.clientHandleWriteData(imsg_msg);
         },
         .write_open => {
             const peer = client_peer orelse return;
-            file_write_mod.client_handle_write_open(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
+            file_mod.clientHandleWriteOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
         },
-        .write_close => file_write_mod.client_handle_write_close(imsg_msg),
+        .write_close => file_mod.clientHandleWriteClose(imsg_msg),
         .exited => {
             proc_mod.proc_exit(client_proc.?);
         },
@@ -515,7 +515,7 @@ pub fn client_main(
 
     // Run the event loop until done
     proc_mod.proc_loop(client_proc.?, null);
-    file_write_mod.client_cleanup();
+    file_mod.clientCleanup();
     if (client_attached or client_raw_tty) {
         client_leave_attached_mode();
     }

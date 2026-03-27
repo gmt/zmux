@@ -17,6 +17,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
+const tty_features = @import("tty-features.zig");
 const xm = @import("xmalloc.zig");
 
 pub fn export_selection(cl: ?*T.Client, clip: []const u8, data: []const u8) void {
@@ -32,6 +33,8 @@ pub fn export_selection(cl: ?*T.Client, clip: []const u8, data: []const u8) void
 fn can_export_selection(cl: *const T.Client) bool {
     if (cl.peer == null) return false;
     if (cl.flags & T.CLIENT_CONTROL != 0) return false;
+    const features = tty_features.effectiveFeatures(cl) orelse return false;
+    if ((features & tty_features.featureBit(.clipboard)) == 0) return false;
     return (cl.flags & T.CLIENT_ATTACHED) != 0 or (cl.tty.flags & T.TTY_STARTED) != 0;
 }
 
@@ -48,4 +51,21 @@ test "osc52 sequence base64-encodes clipboard data" {
     defer std.testing.allocator.free(sequence);
 
     try std.testing.expectEqualStrings("\x1b]52;;aGVsbG8=\x07", sequence);
+}
+
+test "clipboard export requires clipboard feature truth" {
+    var peer: T.ZmuxPeer = undefined;
+    var client = T.Client{
+        .environ = undefined,
+        .tty = .{ .client = undefined },
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .peer = &peer,
+    };
+    client.tty.client = &client;
+
+    try std.testing.expect(!can_export_selection(&client));
+
+    client.term_features = tty_features.featureBit(.clipboard);
+    try std.testing.expect(can_export_selection(&client));
 }

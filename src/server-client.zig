@@ -133,6 +133,7 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .command => server_client_dispatch_command(cl, imsg_msg),
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
+        .unlock, .wakeup => server_client_unlock(cl),
         .write_ready => file_write_mod.handle_write_ready(imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);
@@ -160,11 +161,41 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 }
 
 fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len == 0) return;
     const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
     cl.stdin_pending.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
     server_client_process_stdin_pending(cl);
+}
+
+pub fn server_client_lock(cl: *T.Client, cmd: []const u8) void {
+    const peer = cl.peer orelse return;
+
+    tty_mod.tty_stop_tty(&cl.tty);
+    tty_draw.tty_draw_invalidate(&cl.pane_cache);
+    cl.flags |= T.CLIENT_SUSPENDED;
+
+    const cmd_z = xm.xm_dupeZ(cmd);
+    defer xm.allocator.free(cmd_z);
+    _ = proc_mod.proc_send(peer, .lock, -1, cmd_z.ptr, cmd.len + 1);
+}
+
+pub fn server_client_unlock(cl: *T.Client) void {
+    if (cl.flags & T.CLIENT_SUSPENDED == 0) return;
+    cl.flags &= ~@as(u64, T.CLIENT_SUSPENDED);
+
+    if (cl.fd == -1) return;
+    const s = cl.session orelse return;
+
+    const now = std.time.milliTimestamp();
+    cl.last_activity_time = cl.activity_time;
+    cl.activity_time = now;
+    sess.session_update_activity(s, now);
+
+    tty_mod.tty_start_tty(&cl.tty);
+    server_client_force_redraw(cl);
+    resize_mod.recalculate_sizes();
 }
 
 fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_type: protocol.MsgType) void {
@@ -308,6 +339,7 @@ pub fn server_client_loop() void {
             cl.flags &= ~@as(u64, T.CLIENT_EXIT);
         }
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        if (cl.flags & T.CLIENT_SUSPENDED != 0) continue;
         if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) continue;
         if (cl.flags & T.CLIENT_CONTROL != 0) {
             cl.flags &= ~@as(u64, T.CLIENT_REDRAWWINDOW);
@@ -600,4 +632,89 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
 
     cl.flags = T.CLIENT_CONTROL;
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
+}
+
+fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+test "server_client_lock sends lock message and unlock restores redraw state" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-lock-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    opts.options_set_number(&options, "status", 1);
+    opts.options_set_number(&options, "status-position", 0);
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session = T.Session{
+        .id = 1,
+        .name = @constCast("lock-test"),
+        .cwd = "/tmp",
+        .options = &options,
+        .environ = &session_env,
+    };
+
+    var client = T.Client{
+        .fd = 1,
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+    };
+    tty_mod.tty_init(&client.tty, &client);
+    tty_mod.tty_start_tty(&client.tty);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    server_client_lock(&client, "printf locked");
+    try std.testing.expect(client.flags & T.CLIENT_SUSPENDED != 0);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.lock))), c.imsg.imsg_get_type(&imsg_msg));
+    const data_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqualStrings("printf locked", payload[0 .. payload.len - 1]);
+
+    server_client_unlock(&client);
+    try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW != 0);
 }

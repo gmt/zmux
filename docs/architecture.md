@@ -149,3 +149,40 @@ The foundation queue should therefore lead with:
 
 Only after that should UTF-8-sensitive tmux file slices come back to the head
 of the line.
+
+## Foundation-tranche adjustments to unwind later
+
+The current Ralph loop and planner carry a few deliberate temporary
+adjustments so this tranche can proceed as a bounded refactor instead of a
+normal parity march. Do not let these turn into invisible permanent policy.
+
+When the UTF-8 foundation tranche is materially complete, review and either
+remove or deliberately keep each of these:
+
+1. `foundation:*` queue items at the head of
+   - Temporary purpose: keep Ralph building the declared stack before ordinary
+     UTF-8-sensitive tmux slices reopen.
+   - Unwind action: replace the foundation queue head with ordinary low-hanging
+     file slices once the matrix says those files are fair game again.
+2. Foundation-mode prompt relaxations in
+   - Temporary purpose: allow coherent breaking checkpoints, optional focused
+     verification, and mandatory `ACCEPT: no` while the substrate is being
+     rebuilt.
+   - Unwind action: restore normal Ralph slice expectations for the affected
+     area so UTF-8-sensitive parity work returns to the same acceptance and
+     verification discipline as the rest of the port.
+3. The controller-side tranche boundary stop in
+   - Temporary purpose: stop the loop after the foundation tranche even if
+     ordinary low-hanging work still exists, so we can inspect the result
+     before rejoining the main war path.
+   - Unwind action: remove or replace that stop once we are ready for UTF-8
+     follow-on work to flow back into the ordinary queue.
+4. The "brainstorm is noncanonical" split between this file and
+   - Temporary purpose: let us mine ideas without letting the brainstorm note
+     silently overrule the real spec.
+   - Unwind action: either archive the brainstorm note or fold any surviving
+     useful ideas into this document so future work is not haunted by both.
+
+The clean-pause rule is intentionally not on this unwind list. First `Ctrl-C`
+ending at a clean boundary is generally useful and should stay unless it proves
+harmful outside the UTF-8 tranche.

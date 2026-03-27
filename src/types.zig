@@ -859,6 +859,7 @@ pub const CLIENT_NOFORK: u64 = 0x100000;
 pub const CLIENT_DEFAULTSOCKET: u64 = 0x200000;
 pub const CLIENT_SIZECHANGED: u64 = 0x400000;
 pub const CLIENT_STATUSOFF: u64 = 0x800000;
+pub const CLIENT_SUSPENDED: u64 = 0x1000000;
 pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
 
 pub const ClientExitReason = enum {

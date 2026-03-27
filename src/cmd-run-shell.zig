@@ -429,22 +429,40 @@ fn shellThreadMain(state: *RunShellState) void {
         xm.xstrdup(state.shell_command.?);
     defer xm.allocator.free(command_to_run);
 
-    const result = std.process.Child.run(.{
-        .allocator = xm.allocator,
-        .argv = &.{ "/bin/sh", "-c", command_to_run },
-        .cwd = state.cwd,
-        .max_output_bytes = 1024 * 1024,
-    }) catch {
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", command_to_run }, xm.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.cwd = state.cwd;
+
+    child.spawn() catch {
         state.spawn_failed = true;
         return;
     };
     state.spawned = true;
-    defer xm.allocator.free(result.stdout);
-    defer xm.allocator.free(result.stderr);
 
-    state.output.appendSlice(xm.allocator, result.stdout) catch unreachable;
+    const stdout_pipe = child.stdout orelse {
+        state.spawn_failed = true;
+        _ = child.wait() catch {};
+        return;
+    };
 
-    switch (result.term) {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const amt = stdout_pipe.read(&buf) catch {
+            state.spawn_failed = true;
+            _ = child.wait() catch {};
+            return;
+        };
+        if (amt == 0) break;
+        state.output.appendSlice(xm.allocator, buf[0..amt]) catch unreachable;
+    }
+
+    const term = child.wait() catch {
+        state.spawn_failed = true;
+        return;
+    };
+    switch (term) {
         .Exited => |code| {
             state.retcode = code;
         },
@@ -956,4 +974,45 @@ test "run-shell -b without a client falls back to the best session pane" {
     const line = try gridRowString(second.pane.screen.grid, 0);
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("best-pane", line);
+}
+
+test "run-shell does not truncate large target-pane output" {
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var setup = testSetup("run-shell-large-output");
+    defer testTeardown(&setup);
+    defer if (window_mod.window_pane_mode(setup.pane)) |_| closeRunShellViewMode(setup.pane);
+
+    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
+    defer xm.allocator.free(target);
+
+    try appendCommand(&setup.client, &.{
+        "run-shell",
+        "-t",
+        target,
+        "python3 -c \"import sys; sys.stdout.write('a' * 1100000 + '\\nEND')\"",
+    });
+    try appendCommand(&setup.client, &.{
+        "rename-window",
+        "-t",
+        "run-shell-large-output:0",
+        "large-output-finished",
+    });
+
+    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+    try waitForQueueProgress(&setup.client, 1);
+
+    var found_end = false;
+    for (0..setup.pane.screen.grid.sy) |row| {
+        const line = try gridRowString(setup.pane.screen.grid, @intCast(row));
+        defer xm.allocator.free(line);
+        if (std.mem.eql(u8, line, "END")) {
+            found_end = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(found_end);
+    try std.testing.expectEqualStrings("large-output-finished", setup.window.name);
 }

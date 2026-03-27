@@ -166,8 +166,7 @@ pub fn server_link_window(
 }
 
 pub fn server_unlink_window(s: *T.Session, wl: *T.Winlink) void {
-    _ = sess.session_detach_index(s, wl.idx, "server_unlink_window");
-    if (s.windows.count() == 0) {
+    if (sess.session_detach(s, wl)) {
         srv.server_destroy_session(s);
         sess.session_destroy(s, true, "server_unlink_window");
     } else {

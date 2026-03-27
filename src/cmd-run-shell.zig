@@ -30,11 +30,10 @@ const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
-const screen_write = @import("screen-write.zig");
 const server_client_mod = @import("server-client.zig");
+const server_print = @import("server-print.zig");
 const session_mod = @import("session.zig");
 const status_runtime = @import("status-runtime.zig");
-const utf8_mod = @import("utf8.zig");
 const window_mod = @import("window.zig");
 
 const TargetSnapshot = struct {
@@ -62,11 +61,6 @@ const RunShellState = struct {
     spawn_failed: bool = false,
     retcode: i32 = 0,
     signal_code: ?u32 = null,
-};
-
-const run_shell_view_mode = T.WindowMode{
-    .name = "run-shell-view",
-    .key = runShellViewKey,
 };
 
 fn freeState(state: *RunShellState) void {
@@ -193,104 +187,8 @@ fn currentPaneForClient(client: ?*T.Client) ?*T.WindowPane {
     return wl.window.active;
 }
 
-fn ensureRunShellViewMode(wp: *T.WindowPane) bool {
-    if (window_mod.window_pane_mode(wp)) |wme| {
-        return wme.mode == &run_shell_view_mode;
-    }
-
-    screen_mod.screen_enter_alternate(wp, true);
-    _ = window_mod.window_pane_push_mode(wp, &run_shell_view_mode, null, null);
-    return true;
-}
-
-fn closeRunShellViewMode(wp: *T.WindowPane) void {
-    if (window_mod.window_pane_mode(wp)) |wme| {
-        if (wme.mode == &run_shell_view_mode) {
-            _ = window_mod.window_pane_pop_mode(wp, wme);
-        }
-    }
-    screen_mod.screen_leave_alternate(wp, true);
-    wp.flags |= T.PANE_REDRAW;
-}
-
-fn runShellViewKey(
-    wme: *T.WindowModeEntry,
-    _client: ?*T.Client,
-    _session: *T.Session,
-    _wl: *T.Winlink,
-    _key: T.key_code,
-    _mouse: ?*const T.MouseEvent,
-) void {
-    _ = _client;
-    _ = _session;
-    _ = _wl;
-    _ = _key;
-    _ = _mouse;
-    closeRunShellViewMode(wme.wp);
-}
-
 fn showOutputInPane(wp: *T.WindowPane, data: []const u8) void {
-    if (!ensureRunShellViewMode(wp)) return;
-
-    screen_mod.screen_reset_active(wp.screen);
-    wp.screen.cursor_visible = false;
-
-    var ctx = T.ScreenWriteCtx{ .s = wp.screen };
-    var start: usize = 0;
-    for (data, 0..) |byte, idx| {
-        if (byte != '\n') continue;
-        renderOutputLine(&ctx, data[start..idx]);
-        screen_write.newline(&ctx);
-        start = idx + 1;
-    }
-    renderOutputLine(&ctx, data[start..]);
-
-    wp.flags |= T.PANE_REDRAW;
-}
-
-fn renderOutputLine(ctx: *T.ScreenWriteCtx, line: []const u8) void {
-    var remaining = line;
-    while (remaining.len != 0) {
-        const consumed = renderOutputUnit(ctx, remaining);
-        remaining = remaining[consumed..];
-    }
-}
-
-fn renderOutputUnit(ctx: *T.ScreenWriteCtx, bytes: []const u8) usize {
-    const byte = bytes[0];
-    switch (byte) {
-        '\r' => {
-            screen_write.carriage_return(ctx);
-            return 1;
-        },
-        '\t' => {
-            screen_write.tab(ctx);
-            return 1;
-        },
-        0x20...0x7e => {
-            screen_write.putc(ctx, byte);
-            return 1;
-        },
-        else => {},
-    }
-
-    var ud: T.Utf8Data = undefined;
-    if (utf8_mod.utf8_open(&ud, byte) == .more) {
-        var idx: usize = 1;
-        var state: T.Utf8State = .more;
-        while (idx < bytes.len and state == .more) : (idx += 1) {
-            state = utf8_mod.utf8_append(&ud, bytes[idx]);
-        }
-        if (state == .done) {
-            screen_write.putn(ctx, ud.data[0..ud.size]);
-            return ud.size;
-        }
-    }
-
-    const escaped = utf8_mod.utf8_strvisx(&.{byte}, utf8_mod.VIS_OCTAL | utf8_mod.VIS_CSTYLE | utf8_mod.VIS_NOSLASH);
-    defer xm.allocator.free(escaped);
-    screen_write.putn(ctx, escaped);
-    return 1;
+    _ = server_print.server_pane_view_data(wp, data, true);
 }
 
 fn deliverOutput(state: *RunShellState) void {
@@ -880,7 +778,7 @@ test "run-shell -t shows shell output in the target pane view mode" {
 
     var setup = testSetup("run-shell-pane");
     defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| closeRunShellViewMode(setup.pane);
+    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
 
     const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
     defer xm.allocator.free(target);
@@ -954,11 +852,11 @@ test "run-shell -b without a client falls back to the best session pane" {
 
     var first = testSetup("run-shell-no-client-first");
     defer testTeardown(&first);
-    defer if (window_mod.window_pane_mode(first.pane)) |_| closeRunShellViewMode(first.pane);
+    defer if (window_mod.window_pane_mode(first.pane)) |_| server_print.server_client_close_view_mode(first.pane);
 
     var second = addSessionPane("run-shell-no-client-second");
     defer removeSessionPane(&second);
-    defer if (window_mod.window_pane_mode(second.pane)) |_| closeRunShellViewMode(second.pane);
+    defer if (window_mod.window_pane_mode(second.pane)) |_| server_print.server_client_close_view_mode(second.pane);
 
     first.session.activity_time = 100;
     second.session.activity_time = 200;
@@ -984,7 +882,7 @@ test "run-shell does not truncate large target-pane output" {
 
     var setup = testSetup("run-shell-large-output");
     defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| closeRunShellViewMode(setup.pane);
+    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
 
     const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
     defer xm.allocator.free(target);

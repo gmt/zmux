@@ -119,7 +119,7 @@ pub fn render(c: *T.Client) RenderResult {
     return result;
 }
 
-fn overlay_rows(c: *T.Client) u32 {
+pub fn overlay_rows(c: *T.Client) u32 {
     const lines = resize_mod.status_line_size(c);
     if (lines != 0) return lines;
     return if (status_prompt.status_prompt_active(c) or status_runtime.status_message_active(c)) 1 else 0;

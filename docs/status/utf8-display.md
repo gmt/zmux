@@ -11,9 +11,10 @@ future intent for reopening UTF-8-sensitive parity work.
 - `src/grid.zig` stores real cell payloads rather than forcing all text through
   ASCII-only storage, and now also exposes reduced shared `string_cells` and
   `grid_reader` seams above that payload model.
-- `src/utf8.zig` now also exposes a reduced shared `CellBufferReader` seam so
-  prompt-side word/search boundaries can reuse lower display-cell traversal
-  instead of keeping local byte-oriented scans.
+- `src/utf8.zig` now also exposes reduced shared `CellBufferReader` plus
+  `CellBuffer` word/range helpers so prompt-side word/search/edit boundaries
+  can reuse lower display-cell traversal instead of keeping local byte-oriented
+  scans.
 - `src/server-print.zig` raw attached view output now writes through a shared
   `screen-write` escaped-byte seam instead of keeping a consumer-local UTF-8
   decode-and-escape loop.
@@ -35,7 +36,7 @@ consumer and runtime adoption of the shared display-cell model.
 
 Open pressure points:
 - prompt and status consumers still have reduced runtime behavior beyond the
-  now-shared prompt word/search reader seam
+  now-shared prompt word/search/edit helpers
 - some redraw, tty, and mode behavior still sits on reduced seams
 - broader search, edit, and message surfaces still do not all share one
   display-cell representation

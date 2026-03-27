@@ -30,6 +30,7 @@ const opts = @import("options.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const cmd_find = @import("cmd-find.zig");
+const input_keys = @import("input-keys.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
@@ -263,7 +264,14 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         return true;
     }
 
-    if (T.keycIsMouse(event.key)) return true;
+    if (T.keycIsMouse(event.key)) {
+        if (target_wp.fd < 0 or target_wp.flags & T.PANE_INPUTOFF != 0) return true;
+
+        var mouse_buf: [40]u8 = undefined;
+        const bytes = input_keys.input_key_mouse_pane(target_wp, &event.m, &mouse_buf);
+        if (bytes.len != 0) write_pane_bytes(target_wp.fd, bytes);
+        return true;
+    }
     if (wp.fd < 0 or event.len == 0) return false;
     write_pane_bytes(wp.fd, event.data[0..event.len]);
     win.window_pane_synchronize_key_bytes(wp, event.key, event.data[0..event.len]);
@@ -666,6 +674,74 @@ test "server_client_handle_key routes raw mouse events through the shared pane m
     try std.testing.expectEqual(@as(usize, 1), state.calls);
     try std.testing.expect(state.saw_mouse);
     try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), state.last_key);
+}
+
+test "server_client_handle_key encodes pane mouse events when no mode owns them" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "key-mouse-pane-bytes", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-mouse-pane-bytes") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    defer {
+        if (wp.fd >= 0) {
+            std.posix.close(wp.fd);
+            wp.fd = -1;
+        }
+    }
+    wp.fd = pipe_fds[1];
+    wp.base.mode |= T.MODE_MOUSE_ALL | T.MODE_MOUSE_SGR;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty = .{ .client = &cl, .sx = wp.sx, .sy = wp.sy };
+
+    var event = T.key_event{
+        .key = T.KEYC_MOUSE,
+        .len = 1,
+        .m = .{
+            .x = 1,
+            .y = 1,
+            .b = T.MOUSE_BUTTON_1,
+            .sgr_type = 'M',
+            .sgr_b = T.MOUSE_BUTTON_1,
+        },
+    };
+    try std.testing.expect(server_client_handle_key(&cl, &event));
+
+    var got: [64]u8 = undefined;
+    const nread = try std.posix.read(pipe_fds[0], &got);
+    try std.testing.expectEqualStrings("\x1b[<0;2;1M", got[0..nread]);
 }
 
 test "server_link_window replaces occupied destination with -k and server_unlink_window drops one link" {

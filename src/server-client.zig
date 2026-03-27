@@ -558,6 +558,7 @@ fn server_client_draw(cl: *T.Client) void {
     const s = cl.session orelse return;
     const wl = s.curw orelse return;
     const wp = wl.window.active orelse return;
+    win_mod.window_pane_update_scrollbar_geometry(wp);
     const sx = if (cl.tty.sx == 0) wp.sx else @min(cl.tty.sx, wp.base.grid.sx);
     const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
     if (sx == 0 or sy == 0) return;

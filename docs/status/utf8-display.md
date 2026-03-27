@@ -11,6 +11,9 @@ future intent for reopening UTF-8-sensitive parity work.
 - `src/grid.zig` stores real cell payloads rather than forcing all text through
   ASCII-only storage, and now also exposes reduced shared `string_cells` and
   `grid_reader` seams above that payload model.
+- `src/utf8.zig` now also exposes a reduced shared `CellBufferReader` seam so
+  prompt-side word/search boundaries can reuse lower display-cell traversal
+  instead of keeping local byte-oriented scans.
 - `src/screen-write.zig` writes through a shared cell-aware seam, but that seam
   is still reduced relative to tmux `screen_write_cell`.
 - prompt, status, and message consumers already touch the shared path, but they
@@ -22,7 +25,8 @@ The main open gap is not raw Unicode decoding. The main open gap is broader
 consumer and runtime adoption of the shared display-cell model.
 
 Open pressure points:
-- prompt and status consumers still have reduced runtime behavior
+- prompt and status consumers still have reduced runtime behavior beyond the
+  now-shared prompt word/search reader seam
 - some redraw, tty, and mode behavior still sits on reduced seams
 - broader search, edit, and message surfaces still do not all share one
   display-cell representation

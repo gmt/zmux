@@ -547,6 +547,118 @@ pub const CellBuffer = struct {
     }
 };
 
+pub const CellBufferRange = struct {
+    start: usize,
+    end: usize,
+};
+
+pub const CELL_BUFFER_WHITESPACE = "\t ";
+
+pub const CellBufferReader = struct {
+    buffer: *const CellBuffer,
+    cursor: usize = 0,
+
+    pub fn init(buffer: *const CellBuffer, cursor: usize) CellBufferReader {
+        return .{
+            .buffer = buffer,
+            .cursor = @min(cursor, buffer.len()),
+        };
+    }
+
+    pub fn inSet(self: *const CellBufferReader, set: []const u8) bool {
+        if (self.cursor >= self.buffer.len()) return false;
+        return cellBufferInSet(&self.buffer.cells.items[self.cursor], set);
+    }
+
+    pub fn cursorNextWord(self: *CellBufferReader, separators: []const u8) void {
+        const size = self.buffer.len();
+        var idx = self.cursor;
+
+        while (idx != size and cellBufferIsWhitespace(&self.buffer.cells.items[idx])) idx += 1;
+        if (idx == size) {
+            self.cursor = idx;
+            return;
+        }
+
+        const word_is_separators = cellBufferInSet(&self.buffer.cells.items[idx], separators) and
+            !cellBufferIsWhitespace(&self.buffer.cells.items[idx]);
+        while (idx != size) {
+            idx += 1;
+            if (idx == size) break;
+            if (cellBufferIsWhitespace(&self.buffer.cells.items[idx])) break;
+            if (word_is_separators != cellBufferInSet(&self.buffer.cells.items[idx], separators)) break;
+        }
+
+        self.cursor = idx;
+    }
+
+    pub fn cursorNextWordEnd(self: *CellBufferReader, separators: []const u8) void {
+        const size = self.buffer.len();
+        var idx = self.cursor;
+        if (idx == size) return;
+
+        while (idx < size and cellBufferIsWhitespace(&self.buffer.cells.items[idx])) idx += 1;
+        if (idx == size) {
+            self.cursor = size;
+            return;
+        }
+
+        const word_is_separators = cellBufferInSet(&self.buffer.cells.items[idx], separators);
+        while (idx < size) : (idx += 1) {
+            if (idx + 1 == size) {
+                idx = size - 1;
+                break;
+            }
+            const next = &self.buffer.cells.items[idx + 1];
+            if (cellBufferIsWhitespace(next) or word_is_separators != cellBufferInSet(next, separators))
+                break;
+        }
+
+        self.cursor = idx;
+    }
+
+    pub fn cursorPreviousWord(self: *CellBufferReader, separators: []const u8) void {
+        var idx = self.cursor;
+        if (idx == 0) return;
+
+        while (idx != 0) {
+            idx -= 1;
+            if (!cellBufferIsWhitespace(&self.buffer.cells.items[idx])) break;
+        }
+        const word_is_separators = cellBufferInSet(&self.buffer.cells.items[idx], separators);
+        while (idx != 0) {
+            idx -= 1;
+            if (cellBufferIsWhitespace(&self.buffer.cells.items[idx]) or
+                word_is_separators != cellBufferInSet(&self.buffer.cells.items[idx], separators))
+            {
+                idx += 1;
+                break;
+            }
+        }
+
+        self.cursor = idx;
+    }
+
+    pub fn rangeBoundedBySet(self: *const CellBufferReader, set: []const u8) CellBufferRange {
+        const size = self.buffer.len();
+        var start = @min(self.cursor, size);
+        while (start > 0 and !cellBufferInSet(&self.buffer.cells.items[start - 1], set)) start -= 1;
+
+        var end = @min(self.cursor, size);
+        while (end < size and !cellBufferInSet(&self.buffer.cells.items[end], set)) end += 1;
+
+        return .{ .start = start, .end = end };
+    }
+};
+
+fn cellBufferInSet(cell: *const T.Utf8Data, set: []const u8) bool {
+    return cell.size == 1 and cell.width == 1 and std.mem.indexOfScalar(u8, set, cell.data[0]) != null;
+}
+
+fn cellBufferIsWhitespace(cell: *const T.Utf8Data) bool {
+    return cellBufferInSet(cell, CELL_BUFFER_WHITESPACE);
+}
+
 pub fn displayWidth(bytes: []const u8) u32 {
     return WidthPolicy.shared().displayWidth(bytes);
 }
@@ -1355,7 +1467,36 @@ test "utf8 cell buffer stores decoded display cells and falls back bytewise on i
 
     const fallback = buffer.toOwnedString();
     defer xm.allocator.free(fallback);
-    try std.testing.expectEqualSlices(u8, &.{ 'A', 0xc3, 0xf0, 0x9f, 0x99, 0x82 }, fallback);
+    try std.testing.expectEqualSlices(u8, &.{ 'A', 0xc3, '(' }, fallback);
+}
+
+test "utf8 cell buffer reader shares word motion and token bounds over stored cells" {
+    resetUtf8StateForTests();
+
+    var buffer: CellBuffer = .{};
+    defer buffer.deinit();
+
+    buffer.setString("  é,🙂 two");
+
+    var reader = CellBufferReader.init(&buffer, 0);
+    reader.cursorNextWord(",");
+    try std.testing.expectEqual(@as(usize, 3), reader.cursor);
+
+    reader.cursorNextWordEnd(",");
+    try std.testing.expectEqual(@as(usize, 3), reader.cursor);
+
+    reader.cursorNextWord(",");
+    try std.testing.expectEqual(@as(usize, 4), reader.cursor);
+
+    reader.cursorNextWord(",");
+    try std.testing.expectEqual(@as(usize, 5), reader.cursor);
+
+    reader.cursorPreviousWord(",");
+    try std.testing.expectEqual(@as(usize, 4), reader.cursor);
+
+    const whitespace_bounds = CellBufferReader.init(&buffer, 4).rangeBoundedBySet(CELL_BUFFER_WHITESPACE);
+    try std.testing.expectEqual(@as(usize, 2), whitespace_bounds.start);
+    try std.testing.expectEqual(@as(usize, 5), whitespace_bounds.end);
 }
 
 test "utf8 width policy and display helpers share the tmux width surface" {

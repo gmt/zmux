@@ -482,6 +482,28 @@ reduced shared geometry rather than tmux's full `screen-redraw.c` surface,
 and `tty-term` is still only a selected-capability slice instead of tmux's
 full terminal registry/query/runtime layer.
 
+The next checkpoint down is now also landed in reduced `show-messages`
+formatter and terminal-reporting form:
+
+- `src/format.zig` now resolves shared `message_time` and `message_number`
+  fields, and the shared `#{t/...}` modifier now supports tmux-style pretty
+  time rendering instead of forcing message-log consumers back onto local time
+  formatting
+- `src/cmd-show-messages.zig` now renders the default message log through that
+  shared formatter path instead of keeping a command-local pretty-time printer
+- `src/tty-term.zig` now describes the selected recorded terminfo capability
+  slice so `show-messages -T` can report the attached runtime through the same
+  lower tty-term seam instead of inventing a second ad hoc terminal dump
+
+That landing narrows one more honest part of the broader producer/runtime gap:
+message-log consumers now ride the shared format stack for message fields and
+pretty-time semantics, and terminal reporting now reuses the lower selected-
+capability tty seam. Keep it partial because `show-messages -J` is still
+intentionally blocked until the missing `job.c`/`file.c` runtime exists, the
+tty report is still only the selected-capability slice rather than tmux's full
+terminal registry, and the rest of the broader status/message producer family
+still has not all moved onto the shared runtime.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:

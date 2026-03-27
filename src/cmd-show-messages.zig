@@ -21,32 +21,35 @@ const std = @import("std");
 const c = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const client_registry = @import("client-registry.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const format_mod = @import("format.zig");
 const server = @import("server.zig");
+const tty_term = @import("tty-term.zig");
+
+const SHOW_MESSAGES_TEMPLATE = "#{t/p:message_time}: #{message_text}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('J') and args.has('T')) {
-        cmdq.cmdq_error(item, "show-messages -J and -T are not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('J')) {
-        cmdq.cmdq_error(item, "show-messages -J is not supported yet", .{});
+        cmdq.cmdq_error(item, "show-messages -J is not supported yet; job.c has not landed", .{});
         return .@"error";
     }
     if (args.has('T')) {
-        cmdq.cmdq_error(item, "show-messages -T is not supported yet", .{});
-        return .@"error";
+        const rendered = render_terminal_report(xm.allocator, client_registry.clients.items, cmdq.cmdq_get_target_client(item));
+        defer xm.allocator.free(rendered);
+        if (rendered.len != 0) cmdq.cmdq_print_data(item, rendered);
+        return .normal;
     }
 
-    const rendered = render_message_log_at(xm.allocator, server.message_log.items, std.time.timestamp());
+    const rendered = render_message_log(xm.allocator, cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item), server.message_log.items);
     defer xm.allocator.free(rendered);
     if (rendered.len != 0) cmdq.cmdq_print_data(item, rendered);
     return .normal;
 }
 
-fn render_message_log_at(alloc: std.mem.Allocator, entries: []const T.MessageEntry, now_seconds: i64) []u8 {
+fn render_message_log(alloc: std.mem.Allocator, client: ?*T.Client, entries: []const T.MessageEntry) []u8 {
     var out: std.ArrayList(u8) = .{};
     errdefer out.deinit(alloc);
 
@@ -54,38 +57,26 @@ fn render_message_log_at(alloc: std.mem.Allocator, entries: []const T.MessageEnt
     while (i > 0) {
         i -= 1;
         const message = entries[i];
-        const pretty = format_pretty_time_at(alloc, now_seconds, message.msg_time) orelse
-            std.fmt.allocPrint(alloc, "{d}", .{message.msg_time}) catch unreachable;
-        defer alloc.free(pretty);
-        out.writer(alloc).print("{s}: {s}\n", .{ pretty, message.msg }) catch unreachable;
+        const line = render_message_line(alloc, client, message);
+        defer alloc.free(line);
+        out.appendSlice(alloc, line) catch unreachable;
+        out.append(alloc, '\n') catch unreachable;
     }
 
     return out.toOwnedSlice(alloc) catch unreachable;
 }
 
-fn format_pretty_time_at(alloc: std.mem.Allocator, now_seconds: i64, when_seconds: i64) ?[]u8 {
-    const effective_now = @max(now_seconds, when_seconds);
-    const age = effective_now - when_seconds;
-
-    var now_time: c.posix_sys.time_t = @intCast(effective_now);
-    var when_time: c.posix_sys.time_t = @intCast(when_seconds);
-    var now_tm: c.posix_sys.struct_tm = undefined;
-    var when_tm: c.posix_sys.struct_tm = undefined;
-
-    if (c.posix_sys.localtime_r(&now_time, &now_tm) == null) return null;
-    if (c.posix_sys.localtime_r(&when_time, &when_tm) == null) return null;
-
-    const fmt = if (age < 24 * 3600)
-        "%H:%M"
-    else if ((when_tm.tm_year == now_tm.tm_year and when_tm.tm_mon == now_tm.tm_mon) or age < 28 * 24 * 3600)
-        "%a%d"
-    else if ((when_tm.tm_year == now_tm.tm_year and when_tm.tm_mon < now_tm.tm_mon) or
-        (when_tm.tm_year == now_tm.tm_year - 1 and when_tm.tm_mon > now_tm.tm_mon))
-        "%d%b"
-    else
-        "%h%y";
-
-    return format_strftime_tm(alloc, fmt, &when_tm);
+fn render_message_line(alloc: std.mem.Allocator, client: ?*T.Client, message: T.MessageEntry) []u8 {
+    const ctx = format_mod.FormatContext{
+        .client = client,
+        .message_text = message.msg,
+        .message_number = message.msg_num,
+        .message_time = message.msg_time,
+    };
+    const expanded = format_mod.format_expand(alloc, SHOW_MESSAGES_TEMPLATE, &ctx);
+    if (expanded.complete) return expanded.text;
+    defer alloc.free(expanded.text);
+    return std.fmt.allocPrint(alloc, "{d}: {s}", .{ message.msg_num, message.msg }) catch unreachable;
 }
 
 fn format_strftime_tm(alloc: std.mem.Allocator, fmt: []const u8, tm_value: *c.posix_sys.struct_tm) ?[]u8 {
@@ -117,6 +108,41 @@ fn local_timestamp(year: c_int, month: c_int, day: c_int, hour: c_int, minute: c
     return @intCast(c.posix_sys.mktime(&tm_value));
 }
 
+fn render_terminal_report(alloc: std.mem.Allocator, clients: []const *T.Client, target_client: ?*T.Client) []u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(alloc);
+
+    var terminal_index: usize = 0;
+    for (clients) |client| {
+        if (target_client) |target| {
+            if (client != target) continue;
+        }
+        if (terminal_index != 0) out.append(alloc, '\n') catch unreachable;
+        out.writer(alloc).print(
+            "Terminal {d}: {s} for {s}, features=0x{x}:",
+            .{
+                terminal_index,
+                client.term_name orelse "unknown",
+                client.name orelse "client",
+                @as(u32, @bitCast(client.term_features)),
+            },
+        ) catch unreachable;
+        out.append(alloc, '\n') catch unreachable;
+
+        if (client.term_caps) |caps| {
+            for (caps, 0..) |cap, cap_index| {
+                const line = tty_term.describeRecordedCapability(alloc, cap_index, cap);
+                defer alloc.free(line);
+                out.appendSlice(alloc, line) catch unreachable;
+                out.append(alloc, '\n') catch unreachable;
+            }
+        }
+        terminal_index += 1;
+    }
+
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "show-messages",
     .alias = "showmsgs",
@@ -128,29 +154,55 @@ pub const entry: cmd_mod.CmdEntry = .{
     .exec = exec,
 };
 
-test "show-messages renders newest-first message log entries" {
-    const now = local_timestamp(2026, 3, 27, 20, 15, 0);
+test "show-messages renders newest-first message log entries through shared format fields" {
     var messages = [_]T.MessageEntry{
-        .{ .msg = try std.testing.allocator.dupe(u8, "older"), .msg_num = 11, .msg_time = local_timestamp(2026, 3, 27, 9, 5, 0) },
-        .{ .msg = try std.testing.allocator.dupe(u8, "newer"), .msg_num = 12, .msg_time = local_timestamp(2026, 3, 27, 18, 45, 0) },
+        .{ .msg = try std.testing.allocator.dupe(u8, "older"), .msg_num = 11, .msg_time = local_timestamp(1970, 1, 5, 9, 5, 0) },
+        .{ .msg = try std.testing.allocator.dupe(u8, "newer"), .msg_num = 12, .msg_time = local_timestamp(1971, 2, 6, 18, 45, 0) },
     };
     defer {
         for (&messages) |*message| std.testing.allocator.free(message.msg);
     }
 
-    const rendered = render_message_log_at(std.testing.allocator, &messages, now);
-    defer std.testing.allocator.free(rendered);
+    const rendered = render_message_log(xm.allocator, null, &messages);
+    defer xm.allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        \\18:45: newer
-        \\09:05: older
+        \\Feb71: newer
+        \\Jan70: older
         \\
     ,
         rendered,
     );
 }
 
-test "show-messages rejects unsupported job and terminal flags" {
+test "show-messages renders reduced terminal capability reports from shared tty-term state" {
+    var caps = [_][]u8{
+        @constCast("U8=1"),
+        @constCast("kmous=\x1b[M"),
+    };
+    var client = T.Client{
+        .name = "tty-client",
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_name = try std.testing.allocator.dupe(u8, "xterm-256color"),
+        .term_features = 0x21,
+        .term_caps = caps[0..],
+    };
+    defer std.testing.allocator.free(client.term_name.?);
+    client.tty = .{ .client = &client };
+
+    const rendered = render_terminal_report(xm.allocator, &.{&client}, null);
+    defer xm.allocator.free(rendered);
+    try std.testing.expectEqualStrings(
+        "Terminal 0: xterm-256color for tty-client, features=0x21:\n" ++
+            "   0: U8: (number) 1\n" ++
+            "   1: kmous: (string) \\x1B[M\n",
+        rendered,
+    );
+}
+
+test "show-messages rejects unsupported job flag" {
     var cause: ?[]u8 = null;
     const show_jobs = try cmd_mod.cmd_parse_one(&.{ "show-messages", "-J" }, null, &cause);
     defer cmd_mod.cmd_free(show_jobs);
@@ -158,8 +210,4 @@ test "show-messages rejects unsupported job and terminal flags" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(show_jobs, &item));
-
-    const show_terminals = try cmd_mod.cmd_parse_one(&.{ "show-messages", "-T" }, null, &cause);
-    defer cmd_mod.cmd_free(show_terminals);
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(show_terminals, &item));
 }

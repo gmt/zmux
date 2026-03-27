@@ -19,12 +19,14 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const tty_features = @import("tty-features.zig");
 const xm = @import("xmalloc.zig");
 const c = @import("c.zig");
 
 const CapabilityType = enum {
     string,
     number,
+    flag,
 };
 
 const CapabilitySpec = struct {
@@ -37,11 +39,38 @@ const selected_caps = [_]CapabilitySpec{
     .{ .name = "acsc", .kind = .string },
     .{ .name = "tsl", .kind = .string },
     .{ .name = "fsl", .kind = .string },
+    .{ .name = "Swd", .kind = .string },
     .{ .name = "kmous", .kind = .string },
+    .{ .name = "Ms", .kind = .string },
+    .{ .name = "Hls", .kind = .string },
+    .{ .name = "AX", .kind = .flag },
+    .{ .name = "setrgbf", .kind = .string },
+    .{ .name = "setrgbb", .kind = .string },
+    .{ .name = "setab", .kind = .string },
+    .{ .name = "setaf", .kind = .string },
+    .{ .name = "Smol", .kind = .string },
+    .{ .name = "Smulx", .kind = .string },
+    .{ .name = "Setulc", .kind = .string },
+    .{ .name = "Setulc1", .kind = .string },
+    .{ .name = "ol", .kind = .string },
     .{ .name = "Enbp", .kind = .string },
     .{ .name = "Dsbp", .kind = .string },
     .{ .name = "Enfcs", .kind = .string },
     .{ .name = "Dsfcs", .kind = .string },
+    .{ .name = "Ss", .kind = .string },
+    .{ .name = "Se", .kind = .string },
+    .{ .name = "Cs", .kind = .string },
+    .{ .name = "Cr", .kind = .string },
+    .{ .name = "smxx", .kind = .string },
+    .{ .name = "Sync", .kind = .string },
+    .{ .name = "Eneks", .kind = .string },
+    .{ .name = "Dseks", .kind = .string },
+    .{ .name = "Enmg", .kind = .string },
+    .{ .name = "Dsmg", .kind = .string },
+    .{ .name = "Clmg", .kind = .string },
+    .{ .name = "Cmg", .kind = .string },
+    .{ .name = "Rect", .kind = .flag },
+    .{ .name = "Sxl", .kind = .flag },
 };
 
 pub fn readTermCaps(term_name: []const u8, fd: i32) ![][]u8 {
@@ -68,11 +97,12 @@ pub fn readTermCaps(term_name: []const u8, fd: i32) ![][]u8 {
         const value = switch (spec.kind) {
             .string => readStringCapability(spec.name),
             .number => readNumberCapability(spec.name),
+            .flag => readFlagCapability(spec.name),
         } orelse continue;
 
         const cap_entry = try std.fmt.allocPrint(xm.allocator, "{s}={s}", .{ spec.name, value });
         try caps.append(xm.allocator, cap_entry);
-        if (spec.kind == .number)
+        if (spec.kind != .string)
             xm.allocator.free(value);
     }
 
@@ -85,15 +115,15 @@ pub fn freeTermCaps(caps: [][]u8) void {
 }
 
 pub fn hasCapability(tty: *const T.Tty, name: []const u8) bool {
-    return capabilityValue(tty.client, name) != null;
+    return capabilityValue(tty.client, name) != null or tty_features.hasCapability(tty.client, name);
 }
 
 pub fn stringCapability(tty: *const T.Tty, name: []const u8) ?[]const u8 {
-    return capabilityValue(tty.client, name);
+    return capabilityValue(tty.client, name) orelse tty_features.stringCapability(tty.client, name);
 }
 
 pub fn numberCapability(tty: *const T.Tty, name: []const u8) ?i32 {
-    const value = capabilityValue(tty.client, name) orelse return null;
+    const value = capabilityValue(tty.client, name) orelse tty_features.stringCapability(tty.client, name) orelse return null;
     return std.fmt.parseInt(i32, value, 10) catch null;
 }
 
@@ -117,6 +147,7 @@ pub fn describeRecordedCapability(alloc: std.mem.Allocator, ordinal: usize, cap:
     const kind = capabilityKind(name) orelse .string;
     return switch (kind) {
         .number => std.fmt.allocPrint(alloc, "{d: >4}: {s}: (number) {s}", .{ ordinal, name, value }) catch unreachable,
+        .flag => std.fmt.allocPrint(alloc, "{d: >4}: {s}: (flag) {s}", .{ ordinal, name, value }) catch unreachable,
         .string => blk: {
             const escaped = escapeCapabilityValue(alloc, value);
             defer alloc.free(escaped);
@@ -184,6 +215,15 @@ fn readNumberCapability(name: []const u8) ?[]u8 {
     return xm.xasprintf("{d}", .{value});
 }
 
+fn readFlagCapability(name: []const u8) ?[]u8 {
+    const name_z = xm.xm_dupeZ(name);
+    defer xm.allocator.free(name_z);
+
+    const value = c.ncurses.tigetflag(name_z.ptr);
+    if (value != 1) return null;
+    return xm.xstrdup("1");
+}
+
 test "tty_term parses numeric, string, and ACS capabilities from reduced terminfo state" {
     var caps = [_][]u8{
         @constCast("U8=0"),
@@ -211,7 +251,25 @@ test "tty_term describes recorded reduced capabilities" {
     defer std.testing.allocator.free(number_line);
     try std.testing.expectEqualStrings("   0: U8: (number) 1", number_line);
 
+    const flag_line = describeRecordedCapability(std.testing.allocator, 1, "AX=1");
+    defer std.testing.allocator.free(flag_line);
+    try std.testing.expectEqualStrings("   1: AX: (flag) 1", flag_line);
+
     const string_line = describeRecordedCapability(std.testing.allocator, 4, "kmous=\x1b[M");
     defer std.testing.allocator.free(string_line);
     try std.testing.expectEqualStrings("   4: kmous: (string) \\x1B[M", string_line);
+}
+
+test "tty_term falls back to feature-provided capability strings" {
+    var client = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_features = tty_features.featureBit(.title) | tty_features.featureBit(.clipboard),
+    };
+    client.tty = .{ .client = &client };
+
+    try std.testing.expect(hasCapability(&client.tty, "Ms"));
+    try std.testing.expectEqualStrings("\x1b]0;", stringCapability(&client.tty, "tsl").?);
+    try std.testing.expectEqualStrings("\x1b]52;%p1%s;%p2%s\x07", stringCapability(&client.tty, "Ms").?);
 }

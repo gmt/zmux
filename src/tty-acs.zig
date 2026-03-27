@@ -22,6 +22,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const env_mod = @import("environ.zig");
+const tty_term = @import("tty-term.zig");
 
 pub const CELL_INSIDE: usize = 0;
 pub const CELL_TOPBOTTOM: usize = 1;
@@ -188,16 +189,15 @@ pub fn tty_acs_rounded_borders(cell_type: usize) *const T.Utf8Data {
 pub fn tty_acs_needed(tty: ?*const T.Tty) bool {
     const real_tty = tty orelse return false;
 
-    if (real_tty.u8_cap_present and real_tty.u8_cap == 0) return true;
+    if (tty_term.numberCapability(real_tty, "U8")) |u8_cap|
+        if (u8_cap == 0) return true;
     return (real_tty.client.flags & T.CLIENT_UTF8) == 0;
 }
 
 pub fn tty_acs_get(tty: ?*const T.Tty, ch: u8) ?[]const u8 {
     if (tty_acs_needed(tty)) {
         const real_tty = tty orelse return null;
-        const acs = real_tty.acs[ch];
-        if (acs[0] == 0) return null;
-        return acs[0..if (acs[1] == 0) 1 else 2];
+        return tty_term.acsCapability(real_tty, ch);
     }
 
     for (acs_table) |entry| {
@@ -253,13 +253,15 @@ test "tty_acs_get returns unicode line drawing when utf8 is usable" {
 }
 
 test "tty_acs_get falls back to tty ACS table when U8 disables utf8 drawing" {
+    var caps = [_][]u8{
+        @constCast("U8=0"),
+        @constCast("acsc=q-"),
+    };
     var owned = makeClient(T.CLIENT_UTF8);
     defer env_mod.environ_free(owned.env);
 
     owned.client.tty = .{ .client = &owned.client };
-    owned.client.tty.u8_cap_present = true;
-    owned.client.tty.u8_cap = 0;
-    owned.client.tty.acs['q'][0] = '-';
+    owned.client.term_caps = caps[0..];
 
     try std.testing.expect(tty_acs_needed(&owned.client.tty));
     try std.testing.expectEqualStrings("-", tty_acs_get(&owned.client.tty, 'q').?);

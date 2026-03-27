@@ -23,6 +23,10 @@ const grid_mod = @import("grid.zig");
 const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 const screen_mod = @import("screen.zig");
+const opts = @import("options.zig");
+const style_mod = @import("style.zig");
+const tty_acs = @import("tty-acs.zig");
+const utf8 = @import("utf8.zig");
 
 pub const WindowRenderResult = struct {
     payload: []u8 = &.{},
@@ -213,6 +217,68 @@ pub fn tty_draw_render_window(
     return result;
 }
 
+pub fn tty_draw_render_borders(
+    tty: ?*const T.Tty,
+    w: *T.Window,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    for (0..sy_limit) |row_idx| {
+        for (0..sx_limit) |col_idx| {
+            const border = borderCellAt(w, @intCast(col_idx), @intCast(row_idx)) orelse continue;
+            const cell = makeBorderCell(tty, border.pane, border.cell_type);
+
+            var renderer = RowRenderer{};
+            defer renderer.deinit();
+            try renderer.appendCell(&cell);
+            const rendered = try renderer.finish();
+            defer xm.allocator.free(rendered);
+
+            try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, @as(u32, @intCast(col_idx)) + 1);
+            try out.appendSlice(xm.allocator, rendered);
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
+pub fn tty_draw_render_scrollbars(
+    w: *T.Window,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    for (w.panes.items) |wp| {
+        if (!window_mod.window_pane_visible(wp)) continue;
+        const layout = window_mod.window_pane_scrollbar_layout(wp) orelse continue;
+        const bounds = window_mod.window_pane_draw_bounds(wp);
+        const start_x = if (layout.left)
+            bounds.xoff
+        else
+            bounds.xoff + bounds.sx - (layout.width + layout.pad);
+        if (start_x >= sx_limit or bounds.yoff >= sy_limit) continue;
+
+        const draw_width = @min(layout.width + layout.pad, sx_limit - start_x);
+        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
+        for (0..draw_height) |row_idx| {
+            const rendered = try render_scrollbar_row(wp, @intCast(row_idx), draw_width, layout.left, layout);
+            defer xm.allocator.free(rendered);
+
+            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, start_x + 1);
+            try out.appendSlice(xm.allocator, rendered);
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
 pub fn tty_draw_render_screen(screen: *T.Screen, sx: u32, sy: u32, row_offset: u32) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -348,6 +414,19 @@ fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
     return render_text_row(gd, row, sx);
 }
 
+fn render_scrollbar_row(
+    wp: *T.WindowPane,
+    row: u32,
+    sx: u32,
+    left: bool,
+    layout: window_mod.ScrollbarLayout,
+) ![]u8 {
+    var renderer = RowRenderer{};
+    errdefer renderer.deinit();
+    try append_scrollbar_segment(&renderer, wp, row, sx, left, layout);
+    return renderer.finish();
+}
+
 fn style_of(cell: T.GridCell) CellStyle {
     return .{
         .attr = cell.attr,
@@ -402,8 +481,128 @@ fn free_rows(cache: *T.ClientPaneCache) void {
     cache.rows.clearRetainingCapacity();
 }
 
+const BorderCell = struct {
+    pane: *T.WindowPane,
+    cell_type: usize,
+};
+
+fn borderCellAt(w: *T.Window, x: u32, y: u32) ?BorderCell {
+    const hit = window_mod.window_hit_test(w, x, y) orelse return null;
+    if (hit.region != .border) return null;
+    return .{ .pane = hit.pane, .cell_type = borderCellType(w, x, y) };
+}
+
+fn isBorderCoord(w: *T.Window, x: u32, y: u32) bool {
+    const hit = window_mod.window_hit_test(w, x, y) orelse return false;
+    return hit.region == .border;
+}
+
+fn borderCellType(w: *T.Window, x: u32, y: u32) usize {
+    var borders: u8 = 0;
+
+    if (x == 0 or isBorderCoord(w, x - 1, y)) borders |= 8;
+    if (x + 1 >= w.sx or isBorderCoord(w, x + 1, y)) borders |= 4;
+    if (y == 0 or isBorderCoord(w, x, y - 1)) borders |= 2;
+    if (y + 1 >= w.sy or isBorderCoord(w, x, y + 1)) borders |= 1;
+
+    return switch (borders) {
+        15 => tty_acs.CELL_JOIN,
+        14 => tty_acs.CELL_BOTTOMJOIN,
+        13 => tty_acs.CELL_TOPJOIN,
+        12 => tty_acs.CELL_LEFTRIGHT,
+        11 => tty_acs.CELL_RIGHTJOIN,
+        10 => tty_acs.CELL_BOTTOMRIGHT,
+        9 => tty_acs.CELL_TOPRIGHT,
+        7 => tty_acs.CELL_LEFTJOIN,
+        6 => tty_acs.CELL_BOTTOMLEFT,
+        5 => tty_acs.CELL_TOPLEFT,
+        3 => tty_acs.CELL_TOPBOTTOM,
+        else => blk: {
+            const vertical = (borders & 0b0011) != 0;
+            const horizontal = (borders & 0b1100) != 0;
+            break :blk if (vertical and !horizontal)
+                tty_acs.CELL_TOPBOTTOM
+            else if (horizontal and !vertical)
+                tty_acs.CELL_LEFTRIGHT
+            else
+                tty_acs.CELL_OUTSIDE;
+        },
+    };
+}
+
+fn makeBorderCell(tty: ?*const T.Tty, pane: *T.WindowPane, cell_type: usize) T.GridCell {
+    var gc = T.grid_default_cell;
+    if (pane.window.active != null and pane.window.active.? == pane)
+        style_mod.style_apply(&gc, pane.options, "pane-active-border-style", null)
+    else
+        style_mod.style_apply(&gc, pane.options, "pane-border-style", null);
+    setBorderGlyph(tty, &gc, pane, cell_type);
+    return gc;
+}
+
+fn setBorderGlyph(tty: ?*const T.Tty, gc: *T.GridCell, pane: *T.WindowPane, cell_type: usize) void {
+    switch (@as(u32, @intCast(opts.options_get_number(pane.options, "pane-border-lines")))) {
+        1 => gc.data = tty_acs.tty_acs_double_borders(cell_type).*,
+        2 => gc.data = tty_acs.tty_acs_heavy_borders(cell_type).*,
+        3 => utf8.utf8_set(&gc.data, simpleBorderByte(cell_type)),
+        4 => {
+            const idx = window_mod.window_pane_index(pane.window, pane) orelse 0;
+            utf8.utf8_set(&gc.data, if (idx < 10) @as(u8, '0') + @as(u8, @intCast(idx)) else '*');
+        },
+        5 => utf8.utf8_set(&gc.data, ' '),
+        else => setSingleBorderGlyph(tty, gc, cell_type),
+    }
+}
+
+fn setSingleBorderGlyph(tty: ?*const T.Tty, gc: *T.GridCell, cell_type: usize) void {
+    const key: u8 = switch (cell_type) {
+        tty_acs.CELL_TOPBOTTOM => 'x',
+        tty_acs.CELL_LEFTRIGHT => 'q',
+        tty_acs.CELL_TOPLEFT => 'l',
+        tty_acs.CELL_TOPRIGHT => 'k',
+        tty_acs.CELL_BOTTOMLEFT => 'm',
+        tty_acs.CELL_BOTTOMRIGHT => 'j',
+        tty_acs.CELL_TOPJOIN => 'w',
+        tty_acs.CELL_BOTTOMJOIN => 'v',
+        tty_acs.CELL_LEFTJOIN => 't',
+        tty_acs.CELL_RIGHTJOIN => 'u',
+        tty_acs.CELL_JOIN => 'n',
+        else => 0,
+    };
+    if (key == 0) {
+        utf8.utf8_set(&gc.data, ' ');
+        return;
+    }
+    const bytes = tty_acs.tty_acs_get(tty, key) orelse {
+        utf8.utf8_set(&gc.data, simpleBorderByte(cell_type));
+        return;
+    };
+
+    gc.data = std.mem.zeroes(T.Utf8Data);
+    std.mem.copyForwards(u8, gc.data.data[0..bytes.len], bytes);
+    gc.data.size = @intCast(bytes.len);
+    gc.data.width = 1;
+}
+
+fn simpleBorderByte(cell_type: usize) u8 {
+    return switch (cell_type) {
+        tty_acs.CELL_TOPBOTTOM => '|',
+        tty_acs.CELL_LEFTRIGHT => '-',
+        tty_acs.CELL_TOPLEFT,
+        tty_acs.CELL_TOPRIGHT,
+        tty_acs.CELL_BOTTOMLEFT,
+        tty_acs.CELL_BOTTOMRIGHT,
+        tty_acs.CELL_TOPJOIN,
+        tty_acs.CELL_BOTTOMJOIN,
+        tty_acs.CELL_LEFTJOIN,
+        tty_acs.CELL_RIGHTJOIN,
+        tty_acs.CELL_JOIN,
+        => '+',
+        else => ' ',
+    };
+}
+
 test "tty_draw_pane performs full redraw then row diff" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const pane_io = @import("pane-io.zig");
 
@@ -450,7 +649,6 @@ test "tty_draw_pane performs full redraw then row diff" {
 }
 
 test "tty_draw_pane respects hidden cursor state" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const pane_io = @import("pane-io.zig");
 
@@ -487,7 +685,6 @@ test "tty_draw_pane respects hidden cursor state" {
 }
 
 test "tty_draw_invalidate forces full redraw again" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const pane_io = @import("pane-io.zig");
 
@@ -524,7 +721,6 @@ test "tty_draw_invalidate forces full redraw again" {
 }
 
 test "tty_draw_pane preserves stored utf8 glyph bytes" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const pane_io = @import("pane-io.zig");
 
@@ -559,7 +755,6 @@ test "tty_draw_pane preserves stored utf8 glyph bytes" {
 }
 
 test "tty_draw_render_window paints multiple visible panes at shared offsets" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const pane_io = @import("pane-io.zig");
 
@@ -612,7 +807,6 @@ test "tty_draw_render_window paints multiple visible panes at shared offsets" {
 }
 
 test "tty_draw_pane renders attached right scrollbar columns from shared window geometry" {
-    const opts = @import("options.zig");
     const win = @import("window.zig");
     const screen_write = @import("screen-write.zig");
 

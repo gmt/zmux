@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const c = @import("c.zig");
+const hyperlinks_mod = @import("hyperlinks.zig");
 pub const protocol = @import("zmux-protocol.zig");
 
 // ── Build constants ────────────────────────────────────────────────────────
@@ -637,6 +638,7 @@ pub const Screen = struct {
     title: ?[]u8 = null,
     path: ?[]u8 = null,
     grid: *Grid,
+    hyperlinks: ?*hyperlinks_mod.Hyperlinks = null,
     cx: u32 = 0,
     cy: u32 = 0,
     cstyle: ScreenCursorStyle = .default,

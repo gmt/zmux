@@ -399,6 +399,10 @@ pub fn server_redraw_window_borders(w: *T.Window) void {
     }
 }
 
+pub fn server_status_client(cl: *T.Client) void {
+    cl.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
 pub fn server_status_session(s: *T.Session) void {
     for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;

@@ -234,14 +234,6 @@ fn replace_prompt_range(state: *PromptState, start: usize, end: usize, bytes: []
     return inserted != 0 or end > replace_at;
 }
 
-fn prompt_space(ud: *const T.Utf8Data) bool {
-    return ud.size == 1 and ud.width == 1 and ud.data[0] == ' ';
-}
-
-fn prompt_in_list(ws: []const u8, ud: *const T.Utf8Data) bool {
-    return ud.size == 1 and ud.width == 1 and std.mem.indexOfScalar(u8, ws, ud.data[0]) != null;
-}
-
 fn prompt_separators(c: *T.Client) []const u8 {
     const session = c.session orelse return "";
     return opts.options_get_string(session.options, "word-separators");
@@ -283,79 +275,26 @@ fn insert_prompt_data(state: *PromptState, data: *const T.Utf8Data) void {
 }
 
 fn prompt_forward_word(state: *PromptState, separators: []const u8) bool {
-    const size = state.input.len();
-    var idx = @min(state.cursor, size);
-
-    while (idx != size and prompt_space(&state.input.cells.items[idx])) idx += 1;
-    if (idx == size) {
-        if (state.cursor == idx) return false;
-        state.cursor = idx;
-        return true;
-    }
-
-    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]) and
-        !prompt_space(&state.input.cells.items[idx]);
-    while (idx != size) {
-        idx += 1;
-        if (idx == size) break;
-        if (prompt_space(&state.input.cells.items[idx])) break;
-        if (word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx])) break;
-    }
-
-    if (state.cursor == idx) return false;
-    state.cursor = idx;
+    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
+    reader.cursorNextWord(separators);
+    if (state.cursor == reader.cursor) return false;
+    state.cursor = reader.cursor;
     return true;
 }
 
 fn prompt_end_word(state: *PromptState, separators: []const u8) bool {
-    const size = state.input.len();
-    var idx = @min(state.cursor, size);
-    if (idx == size) return false;
-
-    while (idx < size and prompt_space(&state.input.cells.items[idx])) idx += 1;
-    if (idx == size) {
-        if (state.cursor == size) return false;
-        state.cursor = size;
-        return true;
-    }
-
-    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
-    while (idx < size) : (idx += 1) {
-        if (idx + 1 == size) {
-            idx = size - 1;
-            break;
-        }
-        const next = &state.input.cells.items[idx + 1];
-        if (prompt_space(next) or word_is_separators != prompt_in_list(separators, next))
-            break;
-    }
-
-    if (state.cursor == idx) return false;
-    state.cursor = idx;
+    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
+    reader.cursorNextWordEnd(separators);
+    if (state.cursor == reader.cursor) return false;
+    state.cursor = reader.cursor;
     return true;
 }
 
 fn prompt_backward_word(state: *PromptState, separators: []const u8) bool {
-    var idx = @min(state.cursor, state.input.len());
-    if (idx == 0) return false;
-
-    while (idx != 0) {
-        idx -= 1;
-        if (!prompt_space(&state.input.cells.items[idx])) break;
-    }
-    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
-    while (idx != 0) {
-        idx -= 1;
-        if (prompt_space(&state.input.cells.items[idx]) or
-            word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx]))
-        {
-            idx += 1;
-            break;
-        }
-    }
-
-    if (state.cursor == idx) return false;
-    state.cursor = idx;
+    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
+    reader.cursorPreviousWord(separators);
+    if (state.cursor == reader.cursor) return false;
+    state.cursor = reader.cursor;
     return true;
 }
 
@@ -366,26 +305,14 @@ fn save_prompt_range(state: *PromptState, start: usize, end: usize) void {
 }
 
 fn delete_prompt_word_before_cursor(state: *PromptState, separators: []const u8) bool {
-    var idx = @min(state.cursor, state.input.len());
-    if (idx == 0) return false;
+    const end = state.cursor;
+    if (end == 0) return false;
 
-    while (idx != 0) {
-        idx -= 1;
-        if (!prompt_space(&state.input.cells.items[idx])) break;
-    }
-    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
-    while (idx != 0) {
-        idx -= 1;
-        if (prompt_space(&state.input.cells.items[idx]) or
-            word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx]))
-        {
-            idx += 1;
-            break;
-        }
-    }
+    var reader = utf8.CellBufferReader.init(&state.input, end);
+    reader.cursorPreviousWord(separators);
 
-    save_prompt_range(state, idx, state.cursor);
-    return delete_prompt_range(state, idx, state.cursor);
+    save_prompt_range(state, reader.cursor, end);
+    return delete_prompt_range(state, reader.cursor, end);
 }
 
 fn yank_saved_prompt(state: *PromptState) bool {
@@ -433,22 +360,16 @@ fn history_down(state: *PromptState) bool {
 
 fn replace_prompt_complete(c: *T.Client, state: *PromptState, replacement: ?[]const u8) bool {
     const completecb = state.completecb orelse return false;
-    const size = state.input.len();
+    const bounds = utf8.CellBufferReader.init(&state.input, state.cursor).rangeBoundedBySet(utf8.CELL_BUFFER_WHITESPACE);
 
-    var first = @min(state.cursor, size);
-    while (first > 0 and !prompt_space(&state.input.cells.items[first - 1])) first -= 1;
-
-    var last = @min(state.cursor, size);
-    while (last < size and !prompt_space(&state.input.cells.items[last])) last += 1;
-
-    const word = state.input.rangeToOwnedString(first, last);
+    const word = state.input.rangeToOwnedString(bounds.start, bounds.end);
     defer xm.allocator.free(word);
 
-    const owned_completion = if (replacement == null) completecb(c, state.data, word, first) else null;
+    const owned_completion = if (replacement == null) completecb(c, state.data, word, bounds.start) else null;
     defer if (owned_completion) |value| xm.allocator.free(value);
     const completed = replacement orelse owned_completion orelse return false;
     if (std.mem.eql(u8, completed, word)) return false;
-    return replace_prompt_range(state, first, last, completed);
+    return replace_prompt_range(state, bounds.start, bounds.end, completed);
 }
 
 fn append_event(state: *PromptState, event: *const T.key_event) bool {
@@ -1431,6 +1352,44 @@ test "status-prompt cursor edits stay on the shared status-only redraw path" {
     try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWBORDERS == 0);
+}
+
+test "status-prompt word motion and delete-word use the shared cell reader" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        "é 🙂 two",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .search,
+    );
+    defer status_prompt_clear(&client);
+
+    try std.testing.expect(send_prompt_key(&client, 'b' | T.KEYC_META, ""));
+    try std.testing.expect(send_prompt_key(&client, 'b' | T.KEYC_META, ""));
+    try std.testing.expect(send_prompt_key(&client, 'f' | T.KEYC_META, ""));
+    try std.testing.expect(send_prompt_key(&client, 'w' | T.KEYC_CTRL, ""));
+    try std.testing.expectEqualStrings("é two", status_prompt_input(&client).?);
 }
 
 test "status-prompt vi command mode and quote-next render through the shared cell buffer" {

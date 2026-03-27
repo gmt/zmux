@@ -109,7 +109,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null;
     defer if (expanded_values) |values| free_expanded_values(values);
 
-    if (args.has('R')) reset_pane(wp);
+    if (args.has('R')) {
+        reset_pane(wp);
+        server_fn.server_redraw_pane(wp);
+    }
 
     if (args.count() == 0) {
         if (args.has('N') or args.has('R')) return .normal;

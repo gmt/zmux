@@ -109,13 +109,9 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub fn pane_line_text(wp: *T.WindowPane, row: usize) []u8 {
     const gd = wp.base.grid;
     if (row >= gd.linedata.len) return xm.xstrdup("");
-    var used = grid_mod.line_used(gd, @intCast(row));
-    while (used > 0 and grid_mod.ascii_at(gd, @intCast(row), used - 1) == ' ') used -= 1;
-    const out = xm.allocator.alloc(u8, used) catch unreachable;
-    for (0..used) |idx| {
-        out[idx] = grid_mod.ascii_at(gd, @intCast(row), @intCast(idx));
-    }
-    return out;
+    return grid_mod.string_cells(gd, @intCast(row), gd.sx, .{
+        .trim_trailing_spaces = true,
+    });
 }
 
 pub fn pane_contains(wp: *T.WindowPane, needle: []const u8) bool {
@@ -233,4 +229,32 @@ test "respawn-pane with -k preserves pane identity and applies cwd/env overlay" 
     const output = read_pane_output(wl.window.active.?);
     defer xm.allocator.free(output);
     try std.testing.expect(std.mem.indexOf(u8, output, "bar") != null);
+}
+
+test "pane_line_text preserves shared utf8 grid payloads" {
+    const gd = grid_mod.grid_create(4, 1, 0);
+    defer grid_mod.grid_free(gd);
+
+    var emoji = T.GridCell.fromPayload(@import("utf8.zig").Glyph.fromCodepoint(0x1f642).?.payload());
+    grid_mod.set_cell(gd, 0, 0, &emoji);
+    grid_mod.set_padding(gd, 0, 1);
+    grid_mod.set_ascii(gd, 0, 2, '!');
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    var screen = T.Screen{ .grid = gd };
+    var fake_window: T.Window = undefined;
+    var pane = T.WindowPane{
+        .id = 1,
+        .window = &fake_window,
+        .options = &options,
+        .sx = 4,
+        .sy = 1,
+        .screen = &screen,
+        .base = screen,
+    };
+
+    const line = pane_line_text(&pane, 0);
+    defer xm.allocator.free(line);
+    try std.testing.expectEqualStrings("\xf0\x9f\x99\x82!", line);
 }

@@ -168,7 +168,9 @@ pub fn hanguljamo_check_state(previous: *const T.Utf8Data, ud: *const T.Utf8Data
 }
 
 fn utf8ToCodepoint(ud: *const T.Utf8Data) ?u21 {
-    if (ud.size == 0 or ud.size > T.UTF8_SIZE) return null;
+    if (ud.size == 0 or ud.size > 4 or ud.size > T.UTF8_SIZE) return null;
+    const expected = std.unicode.utf8ByteSequenceLength(ud.data[0]) catch return null;
+    if (ud.size != expected) return null;
     return std.unicode.utf8Decode(ud.data[0..ud.size]) catch null;
 }
 

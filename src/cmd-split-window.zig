@@ -24,6 +24,8 @@ const cmd_mod = @import("cmd.zig");
 const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const env_mod = @import("environ.zig");
+const cmd_respawn_pane = @import("cmd-respawn-pane.zig");
 const spawn_mod = @import("spawn.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
@@ -32,10 +34,6 @@ const SPLIT_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('e')) {
-        cmdq.cmdq_error(item, "-e not supported yet", .{});
-        return .@"error";
-    }
     if (args.has('f')) {
         cmdq.cmdq_error(item, "-f not supported yet", .{});
         return .@"error";
@@ -72,6 +70,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .cwd = args.get('c'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
     };
+
+    const overlay = cmd_respawn_pane.build_overlay_environment(args, item) catch return .@"error";
+    defer if (overlay) |env| env_mod.environ_free(env);
+    sc.environ = overlay;
 
     const argv = argv_tail(args, 0);
     defer if (argv) |slice| free_argv(slice);
@@ -138,7 +140,7 @@ fn render_split_location(item: *cmdq.CmdqItem, template: []const u8, s: *T.Sessi
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "split-window",
     .alias = "splitw",
-    .usage = "[-bdP] [-c start-directory] [-F format] [-t target-pane] [shell-command [argument ...]]",
+    .usage = "[-bdP] [-c start-directory] [-e environment] [-F format] [-t target-pane] [shell-command [argument ...]]",
     .template = "bc:de:fF:hIl:p:Pt:vZ",
     .lower = 0,
     .upper = -1,
@@ -148,7 +150,6 @@ pub const entry: cmd_mod.CmdEntry = .{
 
 test "split-window adds a pane after target and makes it active" {
     const opts = @import("options.zig");
-    const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
 
@@ -197,7 +198,6 @@ test "split-window adds a pane after target and makes it active" {
 
 test "split-window -b inserts before target and -d preserves active pane" {
     const opts = @import("options.zig");
-    const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
 
@@ -245,7 +245,6 @@ test "split-window -b inserts before target and -d preserves active pane" {
 
 test "split-window location rendering uses pane ordinals" {
     const opts = @import("options.zig");
-    const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
 
@@ -288,4 +287,98 @@ test "split-window rejects unsupported sizing flags" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(split_cmd, &item));
+}
+
+test "split-window applies repeated -e overlays to the spawned pane" {
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const respawn_cmd = @import("cmd-respawn-pane.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const opts = @import("options.zig");
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "split-env", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("split-env") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var root_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&root_ctx, &cause).?;
+    s.curw = wl;
+
+    var parse_cause: ?[]u8 = null;
+    const split_cmd = try cmd_mod.cmd_parse_one(&.{
+        "split-window",
+        "-d",
+        "-e",
+        "FOO=first",
+        "-e",
+        "FOO=second",
+        "-e",
+        "BAR=ok",
+        "-t",
+        "split-env:0.0",
+        "printf '%s %s' \"$FOO\" \"$BAR\"",
+    }, null, &parse_cause);
+    defer cmd_mod.cmd_free(split_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(split_cmd, &item));
+
+    std.Thread.sleep(500 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 2), wl.window.panes.items.len);
+    const output = respawn_cmd.read_pane_output(wl.window.panes.items[1]);
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "second ok") != null);
+}
+
+test "split-window rejects invalid -e overlays" {
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "split-invalid-env", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("split-invalid-env") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var root_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&root_ctx, &cause).?;
+    s.curw = wl;
+
+    var parse_cause: ?[]u8 = null;
+    const split_cmd = try cmd_mod.cmd_parse_one(&.{ "split-window", "-e", "BROKEN", "-t", "split-invalid-env:0.0" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(split_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(split_cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), wl.window.panes.items.len);
 }

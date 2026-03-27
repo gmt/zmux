@@ -488,7 +488,7 @@ test "screen-write handles cursor movement and erase" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(4, 2, 100);
     defer {
-        grid.grid_free(s.grid);
+        screen.screen_free(s);
         @import("xmalloc.zig").allocator.destroy(s);
     }
 
@@ -510,7 +510,7 @@ test "screen-write supports insert delete and save restore cursor" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(5, 3, 100);
     defer {
-        grid.grid_free(s.grid);
+        screen.screen_free(s);
         @import("xmalloc.zig").allocator.destroy(s);
     }
 
@@ -537,7 +537,7 @@ test "screen-write stores wide glyphs and combines modifier cells" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(6, 2, 100);
     defer {
-        grid.grid_free(s.grid);
+        screen.screen_free(s);
         @import("xmalloc.zig").allocator.destroy(s);
     }
 
@@ -566,7 +566,7 @@ test "screen-write escaped byte path keeps utf8 glyphs but visualizes raw contro
     const screen = @import("screen.zig");
     const s = screen.screen_init(16, 2, 100);
     defer {
-        grid.grid_free(s.grid);
+        screen.screen_free(s);
         @import("xmalloc.zig").allocator.destroy(s);
     }
 

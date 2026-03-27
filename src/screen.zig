@@ -22,6 +22,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const grid = @import("grid.zig");
+const hyperlinks = @import("hyperlinks.zig");
 const xm = @import("xmalloc.zig");
 const utf8 = @import("utf8.zig");
 
@@ -33,6 +34,7 @@ pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
         .mode = T.MODE_CURSOR | T.MODE_WRAP,
         .rlower = if (sy == 0) 0 else sy - 1,
     };
+    screen_reset_hyperlinks(s);
     return s;
 }
 
@@ -40,6 +42,7 @@ pub fn screen_free(s: *T.Screen) void {
     if (s.title) |title| xm.allocator.free(title);
     if (s.path) |path| xm.allocator.free(path);
     if (s.tabs) |tabs| xm.allocator.free(tabs);
+    if (s.hyperlinks) |hl| hyperlinks.hyperlinks_free(hl);
     grid.grid_free(s.grid);
     s.* = undefined;
 }
@@ -56,6 +59,7 @@ pub fn screen_reset(s: *T.Screen) void {
     s.saved_cx = 0;
     s.saved_cy = 0;
     s.saved_grid = null;
+    screen_reset_hyperlinks(s);
 }
 
 pub fn screen_resize(s: *T.Screen, sx: u32, sy: u32) void {
@@ -76,6 +80,15 @@ pub fn screen_reset_active(s: *T.Screen) void {
     s.mode = T.MODE_CURSOR | T.MODE_WRAP;
     s.cursor_visible = true;
     s.bracketed_paste = false;
+    screen_reset_hyperlinks(s);
+}
+
+pub fn screen_reset_hyperlinks(s: *T.Screen) void {
+    if (s.hyperlinks) |hl| {
+        hyperlinks.hyperlinks_reset(hl);
+        return;
+    }
+    s.hyperlinks = hyperlinks.hyperlinks_init();
 }
 
 pub fn screen_current(wp: *T.WindowPane) *T.Screen {
@@ -137,7 +150,7 @@ pub fn screen_leave_alternate(wp: *T.WindowPane, restore_cursor: bool) void {
 test "screen_reset clears cursor and region state" {
     const s = screen_init(4, 2, 100);
     defer {
-        grid.grid_free(s.grid);
+        screen_free(s);
         @import("xmalloc.zig").allocator.destroy(s);
     }
 
@@ -158,7 +171,7 @@ test "screen alternate helpers switch current screen and restore cursor" {
     defer grid.grid_free(base_grid);
     const alt = screen_init(4, 2, 100);
     defer {
-        grid.grid_free(alt.grid);
+        screen_free(alt);
         xm.allocator.destroy(alt);
     }
 
@@ -193,9 +206,7 @@ test "screen alternate helpers switch current screen and restore cursor" {
 test "screen title rejects invalid utf8 and path is escaped" {
     const s = screen_init(4, 2, 100);
     defer {
-        if (s.title) |title| xm.allocator.free(title);
-        if (s.path) |path| xm.allocator.free(path);
-        grid.grid_free(s.grid);
+        screen_free(s);
         xm.allocator.destroy(s);
     }
 
@@ -204,4 +215,21 @@ test "screen title rejects invalid utf8 and path is escaped" {
 
     screen_set_path(s, "one\ntwo");
     try std.testing.expectEqualStrings("one\\ntwo", s.path.?);
+}
+
+test "screen_reset_hyperlinks keeps the set but drops stored ids" {
+    const s = screen_init(4, 2, 100);
+    defer {
+        screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    const first = hyperlinks.hyperlinks_put(s.hyperlinks.?, "https://example.com", "pane");
+    try std.testing.expect(hyperlinks.hyperlinks_get(s.hyperlinks.?, first, null, null, null));
+
+    const original = s.hyperlinks.?;
+    screen_reset_hyperlinks(s);
+
+    try std.testing.expectEqual(original, s.hyperlinks.?);
+    try std.testing.expect(!hyperlinks.hyperlinks_get(s.hyperlinks.?, first, null, null, null));
 }

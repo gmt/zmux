@@ -27,6 +27,7 @@ const paste_mod = @import("paste.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -36,11 +37,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const wp = target.wp orelse return .@"error";
 
     if (cmd.entry == &entry_clear) {
-        if (args.has('H')) {
-            cmdq.cmdq_error(item, "hyperlink history clearing not supported yet", .{});
-            return .@"error";
-        }
-        wp.base.grid.hsize = 0;
+        clear_history(wp, args.has('H'));
         return .normal;
     }
 
@@ -94,6 +91,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
     return .normal;
+}
+
+fn clear_history(wp: *T.WindowPane, clear_hyperlinks: bool) void {
+    while (window_mod.window_pane_mode(wp)) |wme| {
+        _ = window_mod.window_pane_pop_mode(wp, wme);
+    }
+    grid_mod.grid_clear_history(wp.base.grid);
+    if (clear_hyperlinks) screen_mod.screen_reset_hyperlinks(screen_mod.screen_current(wp));
 }
 
 fn capture_grid(
@@ -314,4 +319,50 @@ test "capture-pane helper preserves combined and wide utf8 grid payloads" {
     defer xm.allocator.free(captured);
 
     try std.testing.expectEqualStrings("é🙂\n", captured);
+}
+
+test "clear-history helper drops history, resets modes, and clears current screen hyperlinks" {
+    const hyperlinks = @import("hyperlinks.zig");
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "clear-history-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("clear-history-test") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const wp = wl.window.active.?;
+
+    const dummy_mode = T.WindowMode{ .name = "dummy" };
+    _ = window_mod.window_pane_push_mode(wp, &dummy_mode, null, null);
+    wp.base.grid.hsize = 4;
+    wp.base.grid.hscrolled = 2;
+    const first = hyperlinks.hyperlinks_put(wp.base.hyperlinks.?, "https://example.com", "pane");
+    try std.testing.expect(hyperlinks.hyperlinks_get(wp.base.hyperlinks.?, first, null, null, null));
+
+    clear_history(wp, true);
+
+    try std.testing.expectEqual(@as(u32, 0), wp.base.grid.hsize);
+    try std.testing.expectEqual(@as(u32, 0), wp.base.grid.hscrolled);
+    try std.testing.expectEqual(@as(usize, 0), wp.modes.items.len);
+    try std.testing.expect(!hyperlinks.hyperlinks_get(wp.base.hyperlinks.?, first, null, null, null));
 }

@@ -372,7 +372,7 @@ test "show-buffer renders attached clients in the reduced view mode" {
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(8, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -477,7 +477,7 @@ test "show-buffer attached view preserves shared utf8 grid payloads" {
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(8, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -554,7 +554,7 @@ test "show-buffer attached view mode dismisses on the next key" {
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(8, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 
@@ -629,7 +629,7 @@ test "show-buffer attached view escapes control bytes instead of replacing them"
     defer grid_mod.grid_free(base_grid);
     const alt_screen = screen_mod.screen_init(16, 4, 2000);
     defer {
-        grid_mod.grid_free(alt_screen.grid);
+        screen_mod.screen_free(alt_screen);
         xm.allocator.destroy(alt_screen);
     }
 

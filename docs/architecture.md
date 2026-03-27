@@ -128,6 +128,22 @@ points, even if the first implementation is just a façade over existing code:
 - `displayWidth`, `trimDisplay`, and `padDisplay`
 - prompt/key helpers that consume the same width/glyph model
 
+The current foundation checkpoint now lands the named façade in code:
+
+- `src/utf8.zig` exports `utf8.Decoder`, `utf8.WidthPolicy`,
+  `utf8.Glyph`/`utf8.CellPayload`, and the top-level `displayWidth`,
+  `trimDisplay`, and `padDisplay` entry points
+- `src/types.zig` now gives `Utf8Data` and `GridCell` small payload-oriented
+  helpers so future grid work can stay on the same model instead of reaching
+  into raw fields everywhere
+
+That landing is intentionally thin. `utf8.Glyph` is still a wrapper around the
+tmux-shaped `Utf8Data` payload rather than a new ownership layer, and
+`utf8.WidthPolicy` is currently a façade over the shared global width cache and
+`codepoint-widths` override machinery that already lived below it. The point of
+this slice is to name the top of the stack explicitly so later work can build
+under it, not to claim that the lower rows are suddenly sealed.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:
@@ -173,14 +189,14 @@ Legend:
 - `B`: this layer is a live blocker or collapse point today
 - `-`: this row does not materially depend on that layer
 
-The next slice still has to define the named top-of-stack façade
-(`utf8.Decoder`, `utf8.WidthPolicy`, `utf8.Glyph`, and friends). Until that
-surface exists, every row below remains open even when lower layers already say
-`Y`.
+The named top-of-stack façade now exists in `src/utf8.zig`, but the matrix
+stays conservative: giving the shared path names does not by itself repair the
+ASCII-first grid, live write path, or raw-byte prompt editor beneath it. Rows
+seal only when callers actually ride that façade through truthful lower layers.
 
 | behavior row | decode / convert | width policy | combine policy | glyph / cell storage | grid / screen-write | consumer adapter | current seal |
 |---|---|---|---|---|---|---|---|
-| decode byte stream into Unicode key or glyph candidates | `Y` | `-` | `-` | `Y` | `-` | `Y` | open: shared façade is still unnamed, so only the attached-key path can rely on it |
+| decode byte stream into Unicode key or glyph candidates | `Y` | `-` | `-` | `Y` | `-` | `Y` | open: `utf8.Decoder` now names the shared path, but only a narrow set of callers materially depend on it yet |
 | compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: width truth exists for strings, but the live grid/write path still drops it |
 | append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `B` | `-` | open: combine logic is ported below, but `screen-write` never calls it and there is no padding-cell path yet |
 | store one display glyph in one grid cell | `-` | `-` | `-` | `B` | `-` | `-` | open: `GridCell` describes tmux's payload, but `grid.zig` still stores compact ASCII-only entries |
@@ -191,8 +207,10 @@ surface exists, every row below remains open even when lower layers already say
 
 The current read of the matrix is deliberately blunt:
 
-- rows 1 through 3 are seeded below but not sealed because the shared façade
-  and live write path are still open
+- row 1 now has a named shared façade, but it is not sealed until real caller
+  adoption stops local byte handling from creeping back in
+- rows 2 and 3 are still unsealed because the live grid/write path collapses
+  width and combine truth before they reach stored cells
 - rows 4 through 7 are blocked by the ASCII-first grid and prompt/storage seam
 - row 8 is a truthful reduced helper, not yet the full tty output policy layer
 
@@ -202,7 +220,8 @@ not just described here.
 
 ## Recommended implementation order
 
-1. Define the shared consumer-facing façade names and semantics.
+1. Keep the shared consumer-facing façade stable and explicit while the lower
+   layers move underneath it.
 2. Make grid/cell storage stop being ASCII-first.
 3. Make `screen-write` consume cell-width/combine semantics.
 4. Rewire prompt/status/format consumers onto the shared stack.

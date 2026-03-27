@@ -9,7 +9,8 @@ future intent for reopening UTF-8-sensitive parity work.
   decode substrate built around `Utf8Data`.
 - `src/utf8-combined.zig` already provides the reduced combine policy helpers.
 - `src/grid.zig` stores real cell payloads rather than forcing all text through
-  ASCII-only storage.
+  ASCII-only storage, and now also exposes reduced shared `string_cells` and
+  `grid_reader` seams above that payload model.
 - `src/screen-write.zig` writes through a shared cell-aware seam, but that seam
   is still reduced relative to tmux `screen_write_cell`.
 - prompt, status, and message consumers already touch the shared path, but they

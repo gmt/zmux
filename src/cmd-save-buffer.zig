@@ -459,6 +459,88 @@ test "show-buffer renders attached clients in the reduced view mode" {
     try std.testing.expectEqualStrings("b", second_row);
 }
 
+test "show-buffer attached view preserves shared utf8 grid payloads" {
+    paste_mod.paste_reset_for_tests();
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("\xf0\x9f\x99\x82\n\xce\xb2"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("show-buffer-utf8");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    const base_grid = grid_mod.grid_create(8, 4, 2000);
+    defer grid_mod.grid_free(base_grid);
+    const alt_screen = screen_mod.screen_init(8, 4, 2000);
+    defer {
+        grid_mod.grid_free(alt_screen.grid);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 70,
+        .name = window_name,
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 71,
+        .window = &window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer if (window_mod.window_pane_mode(&pane)) |_| close_show_buffer_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 72,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+
+    try std.testing.expect(show_buffer_in_view_mode(&client, "\xf0\x9f\x99\x82\n\xce\xb2"));
+
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    const second_row = try grid_row_string(pane.screen.grid, 1);
+    defer xm.allocator.free(second_row);
+    try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first_row);
+    try std.testing.expectEqualStrings("\xce\xb2", second_row);
+}
+
 test "show-buffer attached view mode dismisses on the next key" {
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
@@ -1021,14 +1103,9 @@ test "save-buffer reports strerror text for write failures" {
 }
 
 fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
-    const used = grid_mod.line_used(gd, row);
-    const out = try xm.allocator.alloc(u8, used);
-    errdefer xm.allocator.free(out);
-
-    for (0..used) |idx| {
-        out[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
-    }
-    return out;
+    return grid_mod.string_cells(gd, row, gd.sx, .{
+        .trim_trailing_spaces = true,
+    });
 }
 
 fn buildImsg(msg_type: protocol.MsgType, payload: []const u8) c.imsg.imsg {

@@ -402,7 +402,7 @@ fn cmd_find_session_better(candidate: *T.Session, than: ?*T.Session, flags: u32)
     return candidate.id > than.?.id;
 }
 
-fn cmd_find_best_client(s: ?*T.Session) ?*T.Client {
+pub fn cmd_find_best_client(s: ?*T.Session) ?*T.Client {
     var session_filter = s;
     if (session_filter != null and session_filter.?.attached == 0)
         session_filter = null;

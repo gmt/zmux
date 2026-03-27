@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const c = @import("c.zig");
 const cmd_render = @import("cmd-render.zig");
 const colour = @import("colour.zig");
+const log = @import("log.zig");
 const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const sort_mod = @import("sort.zig");
@@ -71,6 +72,7 @@ pub const FormatExpandResult = struct {
 };
 
 pub const FormatError = error{Incomplete};
+pub const FormatEachCallback = *const fn ([]const u8, []const u8, ?*anyopaque) void;
 
 const Resolver = struct {
     name: []const u8,
@@ -189,6 +191,17 @@ pub fn format_expand(alloc: std.mem.Allocator, template: []const u8, ctx: *const
     return expand_template(alloc, template, ctx, 0);
 }
 
+pub fn format_expand_time(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext) FormatExpandResult {
+    if (std.mem.indexOfScalar(u8, template, '%') == null) return format_expand(alloc, template, ctx);
+
+    const timed_template = format_strftime_now(alloc, template) orelse {
+        return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
+    };
+    defer alloc.free(timed_template);
+
+    return expand_template(alloc, timed_template, ctx, 0);
+}
+
 pub fn format_require_complete(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext) ?[]u8 {
     return format_require(alloc, template, ctx) catch null;
 }
@@ -240,6 +253,24 @@ pub fn format_single(
         .pane = wp,
     };
     return format_expand(xm.allocator, fmt, &ctx).text;
+}
+
+pub fn format_each(alloc: std.mem.Allocator, ctx: *const FormatContext, cb: FormatEachCallback, arg: ?*anyopaque) void {
+    for (resolver_table) |resolver| {
+        const value = resolver.func(alloc, ctx) orelse continue;
+        defer alloc.free(value);
+        cb(resolver.name, value, arg);
+    }
+}
+
+pub fn format_log_defaults(alloc: std.mem.Allocator, prefix: []const u8, ctx: *const FormatContext) void {
+    if (log.log_get_level() == 0) return;
+
+    for (resolver_table) |resolver| {
+        const value = resolver.func(alloc, ctx) orelse continue;
+        defer alloc.free(value);
+        log.log_debug("{s}: {s}={s}", .{ prefix, resolver.name, value });
+    }
 }
 
 pub fn format_tidy_jobs() void {}

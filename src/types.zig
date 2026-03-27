@@ -842,6 +842,7 @@ pub const OptionsTableEntry = struct {
     scope: OptionsScope,
     default_num: i64 = 0,
     default_str: ?[]const u8 = null,
+    default_arr: ?[]const []const u8 = null,
     choices: ?[]const []const u8 = null,
     minimum: ?i64 = null,
     maximum: ?i64 = null,

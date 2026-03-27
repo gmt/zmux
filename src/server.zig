@@ -543,7 +543,6 @@ test "server session-group redraw and status helpers fan out across grouped sess
     const env_mod = @import("environ.zig");
 
     client_registry.clients.clearRetainingCapacity();
-    defer client_registry.clients.clearRetainingCapacity();
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -611,6 +610,7 @@ test "server session-group redraw and status helpers fan out across grouped sess
     client_registry.add(&leader_client);
     client_registry.add(&peer_client);
     client_registry.add(&outsider_client);
+    defer client_registry.clients.clearRetainingCapacity();
 
     server_redraw_session_group(leader);
     try std.testing.expect(leader_client.flags & T.CLIENT_REDRAW != 0);

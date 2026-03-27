@@ -23,6 +23,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const file_write_mod = @import("file-write.zig");
 const grid_mod = @import("grid.zig");
 const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
@@ -69,8 +70,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
-    write_buffer(item, client, raw_path, args.has('a'), bufdata) catch return .@"error";
-    return .normal;
+    return write_buffer(item, client, raw_path, args.has('a'), bufdata);
 }
 
 fn show_uses_control_output(client: ?*T.Client) bool {
@@ -207,17 +207,22 @@ fn write_buffer(
     raw_path: []const u8,
     append: bool,
     data: []const u8,
-) !void {
+) T.CmdRetval {
     const resolved = file_path_mod.resolve_path(client, raw_path);
     defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
 
     if (std.mem.eql(u8, resolved.path, "-")) {
         if (client == null or (client.?.flags & (T.CLIENT_ATTACHED | T.CLIENT_CONTROL)) != 0) {
             report_errno_path(item, @intFromEnum(std.posix.E.BADF), resolved.path);
-            return error.BadFileDescriptor;
+            return .@"error";
         }
-        cmdq.cmdq_write_client_data(client, 1, data);
-        return;
+        const flags: c_int = if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC;
+        return file_write_mod.start_remote_write(item, client.?, resolved.path, flags, data);
+    }
+
+    if (client != null and (client.?.flags & T.CLIENT_ATTACHED) == 0) {
+        const flags: c_int = if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC;
+        return file_write_mod.start_remote_write(item, client.?, resolved.path, flags, data);
     }
 
     const path_z = xm.xm_dupeZ(resolved.path);
@@ -229,7 +234,7 @@ fn write_buffer(
     const fd = c.posix_sys.open(path_z, open_flags, @as(c.posix_sys.mode_t, 0o666));
     if (fd == -1) {
         report_last_errno_path(item, resolved.path);
-        return error.OpenFailed;
+        return .@"error";
     }
     defer _ = c.posix_sys.close(fd);
 
@@ -239,14 +244,16 @@ fn write_buffer(
         if (wrote == -1) {
             if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
             report_last_errno_path(item, resolved.path);
-            return error.WriteFailed;
+            return .@"error";
         }
         if (wrote == 0) {
             report_errno_path(item, @intFromEnum(std.posix.E.IO), resolved.path);
-            return error.WriteFailed;
+            return .@"error";
         }
         remaining = remaining[@as(usize, @intCast(wrote))..];
     }
+
+    return .normal;
 }
 
 fn report_last_errno_path(item: *cmdq.CmdqItem, path: []const u8) void {
@@ -320,6 +327,7 @@ test "save-buffer writes and appends a named buffer using client cwd for relativ
     var client = T.Client{
         .environ = &env,
         .cwd = cwd,
+        .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
         .status = .{ .screen = undefined },
     };
@@ -379,6 +387,7 @@ test "save-buffer writes a named buffer using session cwd when client cwd is mis
 
     var client = T.Client{
         .environ = &env,
+        .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
         .status = .{ .screen = undefined },
         .session = &session,
@@ -420,6 +429,7 @@ test "save-buffer uses the newest automatic buffer when no name is provided" {
     var client = T.Client{
         .environ = &env,
         .cwd = cwd,
+        .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
         .status = .{ .screen = undefined },
     };
@@ -477,6 +487,7 @@ test "save-buffer expands the output path through the format context" {
 
     var client = T.Client{
         .environ = &env,
+        .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
         .status = .{ .screen = undefined },
         .session = &session,
@@ -754,8 +765,10 @@ test "show-buffer attached view escapes control bytes instead of replacing them"
     try std.testing.expectEqualStrings("A\\001\\177B", first_row);
 }
 
-test "show-buffer writes stdout for detached clients without sessions" {
+test "show-buffer uses the remote write-open handshake for detached clients" {
     paste_mod.paste_reset_for_tests();
+    file_write_mod.reset_for_tests();
+    defer file_write_mod.reset_for_tests();
 
     var cause: ?[]u8 = null;
     try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("detached"), "named", &cause));
@@ -763,88 +776,10 @@ test "show-buffer writes stdout for detached clients without sessions" {
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
 
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{ .screen = undefined },
-    };
-
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-
-    const show = try cmd_mod.cmd_parse_one(&.{ "show-buffer", "-b", "named" }, null, &cause);
-    defer cmd_mod.cmd_free(show);
-
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
-
-    const pipe_fds = try std.posix.pipe();
-    defer std.posix.close(pipe_fds[0]);
-
-    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
-    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
-
-    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(show, &item));
-    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
-    std.posix.close(pipe_fds[1]);
-
-    var output: [32]u8 = undefined;
-    const got = try std.posix.read(pipe_fds[0], output[0..]);
-    try std.testing.expectEqualStrings("detached", output[0..got]);
-}
-
-test "save-buffer writes stdout when given dash for detached clients" {
-    paste_mod.paste_reset_for_tests();
-
-    var cause: ?[]u8 = null;
-    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("stdout-save"), "named", &cause));
-
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
-
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{ .screen = undefined },
-    };
-
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-
-    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "-" }, null, &cause);
-    defer cmd_mod.cmd_free(save);
-
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
-
-    const pipe_fds = try std.posix.pipe();
-    defer std.posix.close(pipe_fds[0]);
-
-    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
-    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
-
-    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
-    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
-    std.posix.close(pipe_fds[1]);
-
-    var output: [32]u8 = undefined;
-    const got = try std.posix.read(pipe_fds[0], output[0..]);
-    try std.testing.expectEqualStrings("stdout-save", output[0..got]);
-}
-
-test "save-buffer writes dash output over the peer transport for detached clients" {
-    paste_mod.paste_reset_for_tests();
-
-    var cause: ?[]u8 = null;
-    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("peer-save"), "named", &cause));
-
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
-
     var pair: [2]i32 = undefined;
     try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
 
-    var proc = T.ZmuxProc{ .name = "save-buffer-test-detached-peer" };
+    var proc = T.ZmuxProc{ .name = "show-buffer-test-stdout" };
     defer proc.peers.deinit(xm.allocator);
 
     var client = T.Client{
@@ -871,27 +806,132 @@ test "save-buffer writes dash output over the peer transport for detached client
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
 
-    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "-" }, null, &cause);
-    defer cmd_mod.cmd_free(save);
+    const show = try cmd_mod.cmd_parse_one(&.{ "show-buffer", "-b", "named" }, null, &cause);
+    defer cmd_mod.cmd_free(show);
 
-    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(save, &item));
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(show, &item));
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
 
-    var imsg_msg: c.imsg.imsg = undefined;
-    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c.imsg.imsg_free(&imsg_msg);
+    var open_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &open_imsg) > 0);
+    defer c.imsg.imsg_free(&open_imsg);
 
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_open))), c.imsg.imsg_get_type(&open_imsg));
+    const open_len = c.imsg.imsg_get_len(&open_imsg);
+    var open_payload = try xm.allocator.alloc(u8, open_len);
+    defer xm.allocator.free(open_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&open_imsg, open_payload.ptr, open_payload.len));
 
-    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
-    var payload = try xm.allocator.alloc(u8, payload_len);
-    defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    var open_msg: protocol.MsgWriteOpen = undefined;
+    @memcpy(std.mem.asBytes(&open_msg), open_payload[0..@sizeOf(protocol.MsgWriteOpen)]);
+    try std.testing.expectEqual(@as(i32, std.posix.STDOUT_FILENO), open_msg.fd);
+    try std.testing.expectEqualStrings("-", open_payload[@sizeOf(protocol.MsgWriteOpen) .. open_payload.len - 1]);
+}
 
-    var stream: i32 = 0;
-    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
-    try std.testing.expectEqual(@as(i32, 1), stream);
-    try std.testing.expectEqualStrings("peer-save", payload[@sizeOf(i32)..]);
+test "save-buffer writes detached file paths through write-ready then write-close" {
+    paste_mod.paste_reset_for_tests();
+    file_write_mod.reset_for_tests();
+    defer file_write_mod.reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("remote-save"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "save-buffer-test-remote-file" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = &env,
+        .cwd = cwd,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "buffer.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(save, &item));
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var open_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &open_imsg) > 0);
+    defer c.imsg.imsg_free(&open_imsg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_open))), c.imsg.imsg_get_type(&open_imsg));
+    const open_len = c.imsg.imsg_get_len(&open_imsg);
+    var open_payload = try xm.allocator.alloc(u8, open_len);
+    defer xm.allocator.free(open_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&open_imsg, open_payload.ptr, open_payload.len));
+
+    var open_msg: protocol.MsgWriteOpen = undefined;
+    @memcpy(std.mem.asBytes(&open_msg), open_payload[0..@sizeOf(protocol.MsgWriteOpen)]);
+    try std.testing.expectEqual(@as(i32, -1), open_msg.fd);
+    try std.testing.expectEqual(@as(c_int, c.posix_sys.O_TRUNC), open_msg.flags);
+    const resolved_path = open_payload[@sizeOf(protocol.MsgWriteOpen) .. open_payload.len - 1];
+    const expected_path = try std.fmt.allocPrint(xm.allocator, "{s}/buffer.txt", .{cwd});
+    defer xm.allocator.free(expected_path);
+    try std.testing.expectEqualStrings(expected_path, resolved_path);
+
+    const ready = protocol.MsgWriteReady{
+        .stream = open_msg.stream,
+        .@"error" = 0,
+    };
+    var ready_imsg = buildImsg(protocol.MsgType.write_ready, std.mem.asBytes(&ready));
+    file_write_mod.handle_write_ready(&ready_imsg);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var write_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &write_imsg) > 0);
+    defer c.imsg.imsg_free(&write_imsg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&write_imsg));
+    const write_len = c.imsg.imsg_get_len(&write_imsg);
+    var write_payload = try xm.allocator.alloc(u8, write_len);
+    defer xm.allocator.free(write_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&write_imsg, write_payload.ptr, write_payload.len));
+
+    var write_msg: protocol.MsgWriteData = undefined;
+    @memcpy(std.mem.asBytes(&write_msg), write_payload[0..@sizeOf(protocol.MsgWriteData)]);
+    try std.testing.expectEqual(open_msg.stream, write_msg.stream);
+    try std.testing.expectEqualStrings("remote-save", write_payload[@sizeOf(protocol.MsgWriteData)..]);
+
+    var close_imsg: c.imsg.imsg = undefined;
+    if (c.imsg.imsg_get(&reader, &close_imsg) == 0) {
+        try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+        try std.testing.expect(c.imsg.imsg_get(&reader, &close_imsg) > 0);
+    }
+    defer c.imsg.imsg_free(&close_imsg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_close))), c.imsg.imsg_get_type(&close_imsg));
 }
 
 test "save-buffer reports bad file descriptor for dash on attached clients" {
@@ -932,6 +972,98 @@ test "save-buffer reports bad file descriptor for dash on attached clients" {
     var output: [64]u8 = undefined;
     const got = try std.posix.read(pipe_fds[0], output[0..]);
     try std.testing.expectEqualStrings("Bad file descriptor: -\n", output[0..got]);
+}
+
+test "save-buffer reports client-side open errors from write-ready" {
+    paste_mod.paste_reset_for_tests();
+    file_write_mod.reset_for_tests();
+    defer file_write_mod.reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("remote-error"), "named", &cause));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "save-buffer-test-remote-error" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = &env,
+        .cwd = cwd,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const save = try cmd_mod.cmd_parse_one(&.{ "save-buffer", "-b", "named", "missing/buffer.txt" }, null, &cause);
+    defer cmd_mod.cmd_free(save);
+
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(save, &item));
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var open_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &open_imsg) > 0);
+    defer c.imsg.imsg_free(&open_imsg);
+
+    const open_len = c.imsg.imsg_get_len(&open_imsg);
+    var open_payload = try xm.allocator.alloc(u8, open_len);
+    defer xm.allocator.free(open_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&open_imsg, open_payload.ptr, open_payload.len));
+
+    var open_msg: protocol.MsgWriteOpen = undefined;
+    @memcpy(std.mem.asBytes(&open_msg), open_payload[0..@sizeOf(protocol.MsgWriteOpen)]);
+
+    const ready = protocol.MsgWriteReady{
+        .stream = open_msg.stream,
+        .@"error" = @intFromEnum(std.posix.E.NOENT),
+    };
+    var ready_imsg = buildImsg(protocol.MsgType.write_ready, std.mem.asBytes(&ready));
+    file_write_mod.handle_write_ready(&ready_imsg);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var error_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &error_imsg) > 0);
+    defer c.imsg.imsg_free(&error_imsg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&error_imsg));
+    const error_len = c.imsg.imsg_get_len(&error_imsg);
+    var error_payload = try xm.allocator.alloc(u8, error_len);
+    defer xm.allocator.free(error_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&error_imsg, error_payload.ptr, error_payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), error_payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 2), stream);
+    const text = error_payload[@sizeOf(i32)..];
+    try std.testing.expect(std.mem.indexOf(u8, text, "No such file or directory") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "missing/buffer.txt") != null);
 }
 
 test "show-buffer writes raw bytes over the peer transport for control clients" {
@@ -1015,6 +1147,7 @@ test "save-buffer reports strerror text for write failures" {
     var client = T.Client{
         .environ = &env,
         .cwd = cwd,
+        .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
         .status = .{ .screen = undefined },
     };
@@ -1053,4 +1186,17 @@ fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
         out[idx] = grid_mod.ascii_at(gd, row, @intCast(idx));
     }
     return out;
+}
+
+fn buildImsg(msg_type: protocol.MsgType, payload: []const u8) c.imsg.imsg {
+    return .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(msg_type)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = if (payload.len == 0) null else @constCast(payload.ptr),
+        .buf = null,
+    };
 }

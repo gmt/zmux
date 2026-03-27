@@ -25,7 +25,7 @@ const clipboard_mod = @import("clipboard.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
-const file_path_mod = @import("file-path.zig");
+const file_mod = @import("file.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
@@ -34,7 +34,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const client = cmdq.cmdq_get_client(item);
     const target_client = cmdq.cmdq_get_target_client(item);
-    const raw_path = file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
+    const raw_path = file_mod.formatPathFromClient(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
     const data = read_buffer(item, client, raw_path) catch return .@"error";
@@ -57,62 +57,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 }
 
 fn read_buffer(item: *cmdq.CmdqItem, client: ?*T.Client, raw_path: []const u8) ![]u8 {
-    const resolved = file_path_mod.resolve_path(client, raw_path);
+    const resolved = file_mod.resolvePath(client, raw_path);
     defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
 
-    if (std.mem.eql(u8, resolved.path, "-")) {
-        if (client == null or (client.?.flags & (T.CLIENT_ATTACHED | T.CLIENT_CONTROL)) != 0) {
-            report_errno_path(item, @intFromEnum(std.posix.E.BADF), resolved.path);
-            return error.BadFileDescriptor;
-        }
-        return read_fd_alloc(item, std.posix.STDIN_FILENO, resolved.path);
-    }
-
-    const path_z = xm.xm_dupeZ(resolved.path);
-    defer xm.allocator.free(path_z);
-
-    const fd = c.posix_sys.open(path_z, c.posix_sys.O_RDONLY, @as(c.posix_sys.mode_t, 0));
-    if (fd == -1) {
-        report_last_errno_path(item, resolved.path);
-        return error.OpenFailed;
-    }
-    defer _ = c.posix_sys.close(fd);
-
-    return read_fd_alloc(item, fd, resolved.path);
-}
-
-fn read_fd_alloc(item: *cmdq.CmdqItem, fd: i32, path: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
-    errdefer out.deinit(xm.allocator);
-
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const got = c.posix_sys.read(fd, @ptrCast(buf[0..].ptr), buf.len);
-        if (got == -1) {
-            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
-            report_last_errno_path(item, path);
-            return error.ReadFailed;
-        }
-        if (got == 0) break;
-        out.appendSlice(xm.allocator, buf[0..@as(usize, @intCast(got))]) catch {
-            report_errno_path(item, @intFromEnum(std.posix.E.NOMEM), path);
-            return error.OutOfMemory;
-        };
-    }
-
-    return out.toOwnedSlice(xm.allocator) catch {
-        report_errno_path(item, @intFromEnum(std.posix.E.NOMEM), path);
-        return error.OutOfMemory;
+    return switch (file_mod.readResolvedPathAlloc(client, resolved.path)) {
+        .data => |data| data,
+        .err => |errno_value| blk: {
+            file_mod.reportErrnoPath(item, errno_value, resolved.path);
+            break :blk error.ReadFailed;
+        },
     };
-}
-
-fn report_last_errno_path(item: *cmdq.CmdqItem, path: []const u8) void {
-    report_errno_path(item, std.c._errno().*, path);
-}
-
-fn report_errno_path(item: *cmdq.CmdqItem, errno_value: c_int, path: []const u8) void {
-    const err = std.mem.span(c.posix_sys.strerror(errno_value));
-    cmdq.cmdq_error(item, "{s}: {s}", .{ err, path });
 }
 
 pub const entry: cmd_mod.CmdEntry = .{

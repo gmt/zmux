@@ -300,23 +300,15 @@ pub fn window_forget_pane_history(w: *T.Window, wp: *T.WindowPane) void {
 
 fn window_pane_destroy(wp: *T.WindowPane) void {
     pane_io.pane_io_stop(wp);
+    pane_io.pane_pipe_close(wp);
     if (wp.pid > 0) {
         _ = std.c.kill(wp.pid, std.posix.SIG.HUP);
         _ = std.c.kill(wp.pid, std.posix.SIG.TERM);
         wp.pid = -1;
     }
-    if (wp.pipe_pid > 0) {
-        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.HUP);
-        _ = std.c.kill(wp.pipe_pid, std.posix.SIG.TERM);
-        wp.pipe_pid = -1;
-    }
     if (wp.fd >= 0) {
         std.posix.close(wp.fd);
         wp.fd = -1;
-    }
-    if (wp.pipe_fd >= 0) {
-        std.posix.close(wp.pipe_fd);
-        wp.pipe_fd = -1;
     }
     if (wp.argv) |argv| {
         for (argv) |arg| xm.allocator.free(arg);

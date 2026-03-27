@@ -23,9 +23,8 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
-const file_write_mod = @import("file-write.zig");
+const file_mod = @import("file.zig");
 const grid_mod = @import("grid.zig");
-const file_path_mod = @import("file-path.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
@@ -66,7 +65,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else file_path_mod.format_path_from_client(item, client, args.value_at(0).?);
+    const raw_path = if (cmd.entry == &entry_show) xm.xstrdup("-") else file_mod.formatPathFromClient(item, client, args.value_at(0).?);
     defer xm.allocator.free(raw_path);
 
     return write_buffer(item, client, raw_path, args.has('a'), bufdata);
@@ -97,61 +96,16 @@ fn write_buffer(
     append: bool,
     data: []const u8,
 ) T.CmdRetval {
-    const resolved = file_path_mod.resolve_path(client, raw_path);
+    const resolved = file_mod.resolvePath(client, raw_path);
     defer if (resolved.owned) xm.allocator.free(@constCast(resolved.path));
 
-    if (std.mem.eql(u8, resolved.path, "-")) {
-        if (client == null or (client.?.flags & (T.CLIENT_ATTACHED | T.CLIENT_CONTROL)) != 0) {
-            report_errno_path(item, @intFromEnum(std.posix.E.BADF), resolved.path);
-            return .@"error";
-        }
-        const flags: c_int = if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC;
-        return file_write_mod.start_remote_write(item, client.?, resolved.path, flags, data);
-    }
-
-    if (client != null and (client.?.flags & T.CLIENT_ATTACHED) == 0) {
-        const flags: c_int = if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC;
-        return file_write_mod.start_remote_write(item, client.?, resolved.path, flags, data);
-    }
-
-    const path_z = xm.xm_dupeZ(resolved.path);
-    defer xm.allocator.free(path_z);
-
-    const open_flags: c_int = c.posix_sys.O_WRONLY |
-        c.posix_sys.O_CREAT |
-        if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC;
-    const fd = c.posix_sys.open(path_z, open_flags, @as(c.posix_sys.mode_t, 0o666));
-    if (fd == -1) {
-        report_last_errno_path(item, resolved.path);
-        return .@"error";
-    }
-    defer _ = c.posix_sys.close(fd);
-
-    var remaining = data;
-    while (remaining.len != 0) {
-        const wrote = c.posix_sys.write(fd, @ptrCast(remaining.ptr), remaining.len);
-        if (wrote == -1) {
-            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
-            report_last_errno_path(item, resolved.path);
-            return .@"error";
-        }
-        if (wrote == 0) {
-            report_errno_path(item, @intFromEnum(std.posix.E.IO), resolved.path);
-            return .@"error";
-        }
-        remaining = remaining[@as(usize, @intCast(wrote))..];
-    }
-
-    return .normal;
-}
-
-fn report_last_errno_path(item: *cmdq.CmdqItem, path: []const u8) void {
-    report_errno_path(item, std.c._errno().*, path);
-}
-
-fn report_errno_path(item: *cmdq.CmdqItem, errno_value: c_int, path: []const u8) void {
-    const err = std.mem.span(c.posix_sys.strerror(errno_value));
-    cmdq.cmdq_error(item, "{s}: {s}", .{ err, path });
+    return file_mod.writeResolvedPath(
+        item,
+        client,
+        resolved.path,
+        if (append) c.posix_sys.O_APPEND else c.posix_sys.O_TRUNC,
+        data,
+    );
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -656,8 +610,8 @@ test "show-buffer attached view escapes control bytes instead of replacing them"
 
 test "show-buffer uses the remote write-open handshake for detached clients" {
     paste_mod.paste_reset_for_tests();
-    file_write_mod.reset_for_tests();
-    defer file_write_mod.reset_for_tests();
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
 
     var cause: ?[]u8 = null;
     try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("detached"), "named", &cause));
@@ -719,8 +673,8 @@ test "show-buffer uses the remote write-open handshake for detached clients" {
 
 test "save-buffer writes detached file paths through write-ready then write-close" {
     paste_mod.paste_reset_for_tests();
-    file_write_mod.reset_for_tests();
-    defer file_write_mod.reset_for_tests();
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -795,7 +749,7 @@ test "save-buffer writes detached file paths through write-ready then write-clos
         .@"error" = 0,
     };
     var ready_imsg = buildImsg(protocol.MsgType.write_ready, std.mem.asBytes(&ready));
-    file_write_mod.handle_write_ready(&ready_imsg);
+    file_mod.handleWriteReady(&ready_imsg);
 
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
     var write_imsg: c.imsg.imsg = undefined;
@@ -865,8 +819,8 @@ test "save-buffer reports bad file descriptor for dash on attached clients" {
 
 test "save-buffer reports client-side open errors from write-ready" {
     paste_mod.paste_reset_for_tests();
-    file_write_mod.reset_for_tests();
-    defer file_write_mod.reset_for_tests();
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -934,7 +888,7 @@ test "save-buffer reports client-side open errors from write-ready" {
         .@"error" = @intFromEnum(std.posix.E.NOENT),
     };
     var ready_imsg = buildImsg(protocol.MsgType.write_ready, std.mem.asBytes(&ready));
-    file_write_mod.handle_write_ready(&ready_imsg);
+    file_mod.handleWriteReady(&ready_imsg);
 
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
     var error_imsg: c.imsg.imsg = undefined;

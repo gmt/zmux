@@ -25,7 +25,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
-const file_write_mod = @import("file-write.zig");
+const file_mod = @import("file.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
@@ -88,7 +88,7 @@ pub fn server_client_create(fd: i32) *T.Client {
 
 pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
-    file_write_mod.fail_pending_writes_for_client(cl);
+    file_mod.failPendingWritesForClient(cl);
     status_prompt.status_prompt_clear(cl);
     status_runtime.status_message_clear(cl);
     status_runtime.status_cleanup(cl);
@@ -150,7 +150,7 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
         .unlock, .wakeup => server_client_unlock(cl),
-        .write_ready => file_write_mod.handle_write_ready(imsg_msg),
+        .write_ready => file_mod.handleWriteReady(imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);
             server_client_lost(cl);

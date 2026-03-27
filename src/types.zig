@@ -320,6 +320,14 @@ pub const Utf8Data = extern struct {
     have: u8,
     size: u8,
     width: u8, // 0xff if invalid
+
+    pub fn bytes(self: *const Utf8Data) []const u8 {
+        return self.data[0..self.size];
+    }
+
+    pub fn isEmpty(self: *const Utf8Data) bool {
+        return self.size == 0;
+    }
 };
 
 pub const Utf8State = enum(u32) {
@@ -394,6 +402,20 @@ pub const GridCell = extern struct {
     bg: i32,
     us: i32, // underline colour
     link: u32,
+
+    pub fn payload(self: *const GridCell) *const Utf8Data {
+        return &self.data;
+    }
+
+    pub fn fromPayload(ud: *const Utf8Data) GridCell {
+        var cell = grid_default_cell;
+        cell.data = ud.*;
+        return cell;
+    }
+
+    pub fn isPadding(self: *const GridCell) bool {
+        return (self.flags & GRID_FLAG_PADDING) != 0;
+    }
 };
 
 pub const grid_default_cell = GridCell{

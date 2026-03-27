@@ -47,6 +47,8 @@ pub const FormatContext = struct {
     paste_buffer: ?*paste_mod.PasteBuffer = null,
 
     message_text: ?[]const u8 = null,
+    message_number: ?u32 = null,
+    message_time: ?i64 = null,
     command_prompt: ?bool = null,
 
     key_binding: ?*const T.KeyBinding = null,
@@ -79,6 +81,8 @@ const FORMAT_LOOP_LIMIT: u32 = 100;
 
 const resolver_table = [_]Resolver{
     .{ .name = "message", .func = resolve_message },
+    .{ .name = "message_number", .func = resolve_message_number },
+    .{ .name = "message_time", .func = resolve_message_time },
     .{ .name = "message_text", .func = resolve_message_text },
     .{ .name = "command_prompt", .func = resolve_command_prompt },
 
@@ -412,6 +416,7 @@ fn eval_modified_expr(
     var time_string = false;
     var time_format_spec: ?[]const u8 = null;
     var time_pretty = false;
+    var time_pretty_seconds = false;
 
     for (modifiers, 0..) |modifier, idx| {
         if (std.mem.eql(u8, modifier.name, "==")) {
@@ -470,6 +475,7 @@ fn eval_modified_expr(
             time_string = true;
             if (modifier.args.len >= 1) {
                 if (std.mem.indexOfScalar(u8, modifier.args[0], 'p') != null) time_pretty = true;
+                if (std.mem.indexOfScalar(u8, modifier.args[0], 's') != null) time_pretty_seconds = true;
                 if (modifier.args.len >= 2 and std.mem.indexOfScalar(u8, modifier.args[0], 'f') != null) {
                     time_format_spec = modifier.args[1];
                 }
@@ -498,8 +504,6 @@ fn eval_modified_expr(
             loop_sort = parse_loop_sort(.clients, modifier.args);
         }
     }
-
-    if (time_pretty) return unresolved_expr(alloc, original_expr);
 
     const value = blk: {
         if (loop_kind != .none) break :blk eval_loop_expr(alloc, original_expr, copy, loop_kind, loop_sort, ctx, depth + 1);
@@ -539,18 +543,23 @@ fn eval_modified_expr(
     errdefer alloc.free(working);
 
     if (time_string) {
-        const fmt = if (time_format_spec) |raw_fmt| blk: {
-            const expanded_fmt = expand_template(alloc, raw_fmt, ctx, depth + 1);
-            defer alloc.free(expanded_fmt.text);
-            if (!expanded_fmt.complete) return unresolved_expr(alloc, original_expr);
-            break :blk expanded_fmt.text;
-        } else "%Y-%m-%d %H:%M:%S";
-        const rendered = format_timestamp_local(alloc, working, fmt) orelse {
+        const rendered = if (time_pretty)
+            format_pretty_time(alloc, working, time_pretty_seconds)
+        else blk: {
+            const fmt = if (time_format_spec) |raw_fmt| blk_fmt: {
+                const expanded_fmt = expand_template(alloc, raw_fmt, ctx, depth + 1);
+                defer alloc.free(expanded_fmt.text);
+                if (!expanded_fmt.complete) return unresolved_expr(alloc, original_expr);
+                break :blk_fmt expanded_fmt.text;
+            } else "%Y-%m-%d %H:%M:%S";
+            break :blk format_timestamp_local(alloc, working, fmt);
+        };
+        if (rendered == null) {
             alloc.free(working);
             return unresolved_expr(alloc, original_expr);
-        };
+        }
         alloc.free(working);
-        working = rendered;
+        working = rendered.?;
     }
 
     if (basename) {
@@ -1382,6 +1391,41 @@ fn format_timestamp_local(alloc: std.mem.Allocator, seconds_text: []const u8, fm
     return format_strftime_tm(alloc, fmt, &tm_value);
 }
 
+fn format_pretty_time(alloc: std.mem.Allocator, seconds_text: []const u8, include_seconds: bool) ?[]u8 {
+    const seconds = std.fmt.parseInt(i64, seconds_text, 10) catch return null;
+    return format_pretty_time_at(alloc, std.time.timestamp(), seconds, include_seconds);
+}
+
+fn format_pretty_time_at(
+    alloc: std.mem.Allocator,
+    now_seconds: i64,
+    when_seconds: i64,
+    include_seconds: bool,
+) ?[]u8 {
+    const effective_now = @max(now_seconds, when_seconds);
+    const age = effective_now - when_seconds;
+
+    var now_time: c.posix_sys.time_t = @intCast(effective_now);
+    var when_time: c.posix_sys.time_t = @intCast(when_seconds);
+    var now_tm: c.posix_sys.struct_tm = undefined;
+    var when_tm: c.posix_sys.struct_tm = undefined;
+
+    if (c.posix_sys.localtime_r(&now_time, &now_tm) == null) return null;
+    if (c.posix_sys.localtime_r(&when_time, &when_tm) == null) return null;
+
+    const fmt = if (age < 24 * 3600)
+        if (include_seconds) "%H:%M:%S" else "%H:%M"
+    else if ((when_tm.tm_year == now_tm.tm_year and when_tm.tm_mon == now_tm.tm_mon) or age < 28 * 24 * 3600)
+        "%a%d"
+    else if ((when_tm.tm_year == now_tm.tm_year and when_tm.tm_mon < now_tm.tm_mon) or
+        (when_tm.tm_year == now_tm.tm_year - 1 and when_tm.tm_mon > now_tm.tm_mon))
+        "%d%b"
+    else
+        "%h%y";
+
+    return format_strftime_tm(alloc, fmt, &when_tm);
+}
+
 fn format_strftime_now(alloc: std.mem.Allocator, fmt: []const u8) ?[]u8 {
     const now = std.time.timestamp();
     var when: c.posix_sys.time_t = @intCast(now);
@@ -1561,6 +1605,14 @@ fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
 
 fn resolve_message(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
+}
+
+fn resolve_message_number(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return std.fmt.allocPrint(alloc, "{d}", .{ctx.message_number orelse 0}) catch unreachable;
+}
+
+fn resolve_message_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return std.fmt.allocPrint(alloc, "{d}", .{ctx.message_time orelse 0}) catch unreachable;
 }
 
 fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2295,6 +2347,23 @@ test "format_expand handles time modifier and incomplete formats" {
     try std.testing.expect(!unresolved.complete);
     try std.testing.expectEqualStrings("#{definitely_missing}", unresolved.text);
     try std.testing.expect(format_require_complete(xm.allocator, "#{definitely_missing}", &ctx) == null);
+}
+
+test "format_expand handles pretty message time and explicit message fields" {
+    const ctx = FormatContext{
+        .message_text = "runtime",
+        .message_number = 7,
+        .message_time = 0,
+    };
+
+    const out = format_expand(xm.allocator, "#{t/p:message_time}:#{message_number}:#{message_text}", &ctx);
+    defer xm.allocator.free(out.text);
+    try std.testing.expect(out.complete);
+    const expected_time = format_pretty_time_at(xm.allocator, std.time.timestamp(), 0, false).?;
+    defer xm.allocator.free(expected_time);
+    const expected = try std.fmt.allocPrint(xm.allocator, "{s}:7:runtime", .{expected_time});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, out.text);
 }
 
 test "format_expand handles width, pad, repeat, and comparisons" {

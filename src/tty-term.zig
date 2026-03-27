@@ -108,6 +108,23 @@ pub fn acsCapability(tty: *const T.Tty, ch: u8) ?[]const u8 {
     return null;
 }
 
+pub fn describeRecordedCapability(alloc: std.mem.Allocator, ordinal: usize, cap: []const u8) []u8 {
+    const sep = std.mem.indexOfScalar(u8, cap, '=') orelse {
+        return std.fmt.allocPrint(alloc, "{d: >4}: {s}: [invalid]", .{ ordinal, cap }) catch unreachable;
+    };
+    const name = cap[0..sep];
+    const value = cap[sep + 1 ..];
+    const kind = capabilityKind(name) orelse .string;
+    return switch (kind) {
+        .number => std.fmt.allocPrint(alloc, "{d: >4}: {s}: (number) {s}", .{ ordinal, name, value }) catch unreachable,
+        .string => blk: {
+            const escaped = escapeCapabilityValue(alloc, value);
+            defer alloc.free(escaped);
+            break :blk std.fmt.allocPrint(alloc, "{d: >4}: {s}: (string) {s}", .{ ordinal, name, escaped }) catch unreachable;
+        },
+    };
+}
+
 fn capabilityValue(cl: *const T.Client, name: []const u8) ?[]const u8 {
     const caps = cl.term_caps orelse return null;
     for (caps) |cap| {
@@ -116,6 +133,36 @@ fn capabilityValue(cl: *const T.Client, name: []const u8) ?[]const u8 {
         return cap[name.len + 1 ..];
     }
     return null;
+}
+
+fn capabilityKind(name: []const u8) ?CapabilityType {
+    for (selected_caps) |spec| {
+        if (std.mem.eql(u8, spec.name, name)) return spec.kind;
+    }
+    return null;
+}
+
+fn escapeCapabilityValue(alloc: std.mem.Allocator, value: []const u8) []u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(alloc);
+
+    for (value) |ch| {
+        switch (ch) {
+            '\n' => out.appendSlice(alloc, "\\n") catch unreachable,
+            '\r' => out.appendSlice(alloc, "\\r") catch unreachable,
+            '\t' => out.appendSlice(alloc, "\\t") catch unreachable,
+            '\\' => out.appendSlice(alloc, "\\\\") catch unreachable,
+            '"' => out.appendSlice(alloc, "\\\"") catch unreachable,
+            else => {
+                if (ch >= 0x20 and ch <= 0x7e)
+                    out.append(alloc, ch) catch unreachable
+                else
+                    out.writer(alloc).print("\\x{X:0>2}", .{ch}) catch unreachable;
+            },
+        }
+    }
+
+    return out.toOwnedSlice(alloc) catch unreachable;
 }
 
 fn readStringCapability(name: []const u8) ?[]const u8 {
@@ -157,4 +204,14 @@ test "tty_term parses numeric, string, and ACS capabilities from reduced terminf
     try std.testing.expectEqualStrings("x", acsCapability(&client.tty, 'q').?);
     try std.testing.expect(hasCapability(&client.tty, "fsl"));
     try std.testing.expect(!hasCapability(&client.tty, "kmous"));
+}
+
+test "tty_term describes recorded reduced capabilities" {
+    const number_line = describeRecordedCapability(std.testing.allocator, 0, "U8=1");
+    defer std.testing.allocator.free(number_line);
+    try std.testing.expectEqualStrings("   0: U8: (number) 1", number_line);
+
+    const string_line = describeRecordedCapability(std.testing.allocator, 4, "kmous=\x1b[M");
+    defer std.testing.allocator.free(string_line);
+    try std.testing.expectEqualStrings("   4: kmous: (string) \\x1B[M", string_line);
 }

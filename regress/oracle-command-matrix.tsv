@@ -3,11 +3,11 @@
 attach-session	client	implemented
 bind-key	none	unsupported
 break-pane	pane	unsupported
-capture-pane	pane	unsupported
+capture-pane	pane	implemented
 choose-buffer	pane	unsupported
 choose-client	pane	unsupported
 choose-tree	pane	unsupported
-clear-history	pane	unsupported
+clear-history	pane	implemented
 clear-prompt-history	none	unsupported
 clock-mode	pane	unsupported
 command-prompt	client	unsupported

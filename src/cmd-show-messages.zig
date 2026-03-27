@@ -25,6 +25,7 @@ const client_registry = @import("client-registry.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
+const job_mod = @import("job.zig");
 const server = @import("server.zig");
 const tty_term = @import("tty-term.zig");
 
@@ -32,14 +33,25 @@ const SHOW_MESSAGES_TEMPLATE = "#{t/p:message_time}: #{message_text}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('J')) {
-        cmdq.cmdq_error(item, "show-messages -J is not supported yet; job.c has not landed", .{});
-        return .@"error";
-    }
-    if (args.has('T')) {
-        const rendered = render_terminal_report(xm.allocator, client_registry.clients.items, cmdq.cmdq_get_target_client(item));
-        defer xm.allocator.free(rendered);
-        if (rendered.len != 0) cmdq.cmdq_print_data(item, rendered);
+    if (args.has('J') or args.has('T')) {
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(xm.allocator);
+
+        if (args.has('T')) {
+            const rendered = render_terminal_report(xm.allocator, client_registry.clients.items, cmdq.cmdq_get_target_client(item));
+            defer xm.allocator.free(rendered);
+            if (rendered.len != 0) out.appendSlice(xm.allocator, rendered) catch unreachable;
+        }
+        if (args.has('J')) {
+            const rendered = job_mod.job_render_summary(xm.allocator);
+            defer xm.allocator.free(rendered);
+            if (rendered.len != 0) {
+                if (out.items.len != 0) out.append( xm.allocator, '\n') catch unreachable;
+                out.appendSlice(xm.allocator, rendered) catch unreachable;
+            }
+        }
+
+        if (out.items.len != 0) cmdq.cmdq_print_data(item, out.items);
         return .normal;
     }
 
@@ -202,12 +214,14 @@ test "show-messages renders reduced terminal capability reports from shared tty-
     );
 }
 
-test "show-messages rejects unsupported job flag" {
-    var cause: ?[]u8 = null;
-    const show_jobs = try cmd_mod.cmd_parse_one(&.{ "show-messages", "-J" }, null, &cause);
-    defer cmd_mod.cmd_free(show_jobs);
+test "show-messages renders reduced shared job summaries" {
+    defer job_mod.job_reset_all();
 
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(show_jobs, &item));
+    const job = job_mod.job_register("printf ready", 0);
+    job_mod.job_started(job, 99, 5);
+    job_mod.job_finished(job, 0);
+
+    const rendered = job_mod.job_render_summary(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expectEqualStrings("Job 0: printf ready [fd=5, pid=99, status=0]", rendered);
 }

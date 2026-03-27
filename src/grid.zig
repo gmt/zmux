@@ -57,6 +57,11 @@ pub fn grid_reset(gd: *T.Grid) void {
     gd.hscrolled = 0;
 }
 
+pub fn grid_clear_history(gd: *T.Grid) void {
+    gd.hsize = 0;
+    gd.hscrolled = 0;
+}
+
 pub fn ensure_line_capacity(gd: *T.Grid, row: u32) void {
     if (row >= gd.linedata.len) return;
     expand_line(gd, row, gd.sx, 8);
@@ -754,6 +759,18 @@ test "grid remove_history trims tracked history and clamps hscrolled" {
 
     remove_history(gd, 3);
     try std.testing.expectEqual(@as(u32, 2), gd.hsize);
+}
+
+test "grid_clear_history drops history offsets" {
+    const gd = grid_create(4, 2, 100);
+    defer grid_free(gd);
+
+    gd.hsize = 5;
+    gd.hscrolled = 3;
+
+    grid_clear_history(gd);
+    try std.testing.expectEqual(@as(u32, 0), gd.hsize);
+    try std.testing.expectEqual(@as(u32, 0), gd.hscrolled);
 }
 
 test "grid stores multibyte cells and padding through the shared cell API" {

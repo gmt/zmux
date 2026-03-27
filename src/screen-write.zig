@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const grid = @import("grid.zig");
 const opts = @import("options.zig");
 const utf8 = @import("utf8.zig");
+const xm = @import("xmalloc.zig");
 
 pub fn putc(ctx: *T.ScreenWriteCtx, ch: u8) void {
     const glyph = utf8.Glyph.fromAscii(ch);
@@ -35,6 +36,19 @@ pub fn putn(ctx: *T.ScreenWriteCtx, bytes: []const u8) void {
 }
 
 pub fn putBytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail: bool) usize {
+    return putBytesMode(ctx, bytes, keep_incomplete_tail, .literal);
+}
+
+pub fn putEscapedBytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail: bool) usize {
+    return putBytesMode(ctx, bytes, keep_incomplete_tail, .escaped);
+}
+
+const ByteWriteMode = enum {
+    literal,
+    escaped,
+};
+
+fn putBytesMode(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail: bool, mode: ByteWriteMode) usize {
     var decoder = utf8.Decoder.init();
     var i: usize = 0;
 
@@ -64,7 +78,13 @@ pub fn putBytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail:
             else => {},
         }
 
-        if (ch < ' ' and ch != 0x1b) {
+        if (mode == .escaped and ch < 0x80) {
+            putEscapedByte(ctx, ch);
+            i += 1;
+            continue;
+        }
+
+        if (mode == .literal and ch < ' ' and ch != 0x1b) {
             i += 1;
             continue;
         }
@@ -75,16 +95,38 @@ pub fn putBytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete_tail:
                 i += step.consumed;
             },
             .invalid => |consumed| {
-                if (consumed == 0) continue;
+                if (mode == .escaped) {
+                    putEscapedByte(ctx, ch);
+                    decoder.reset();
+                    i += 1;
+                    continue;
+                }
+
+                if (consumed == 0) {
+                    i += 1;
+                    continue;
+                }
                 i += consumed;
             },
             .need_more => {
+                if (mode == .escaped and !keep_incomplete_tail) {
+                    putEscapedByte(ctx, ch);
+                    decoder.reset();
+                    i += 1;
+                    continue;
+                }
                 return if (keep_incomplete_tail) i else bytes.len;
             },
         }
     }
 
     return i;
+}
+
+fn putEscapedByte(ctx: *T.ScreenWriteCtx, byte: u8) void {
+    const escaped = utf8.utf8_strvisx(&.{byte}, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_NOSLASH);
+    defer xm.allocator.free(escaped);
+    putn(ctx, escaped);
 }
 
 pub fn putGlyph(ctx: *T.ScreenWriteCtx, glyph: *const utf8.Glyph) void {
@@ -518,4 +560,23 @@ test "screen-write stores wide glyphs and combines modifier cells" {
     grid.get_cell(s.grid, 1, 1, &stored);
     try std.testing.expect(stored.isPadding());
     try std.testing.expectEqual(@as(u32, 2), s.cx);
+}
+
+test "screen-write escaped byte path keeps utf8 glyphs but visualizes raw control and invalid bytes" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(16, 2, 100);
+    defer {
+        grid.grid_free(s.grid);
+        @import("xmalloc.zig").allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    _ = putEscapedBytes(&ctx, "\x1b🙂\xc3(", false);
+
+    const rendered = grid.string_cells(s.grid, 0, s.grid.sx, .{
+        .trim_trailing_spaces = true,
+    });
+    defer xm.allocator.free(rendered);
+
+    try std.testing.expectEqualStrings("\\033🙂\\303(", rendered);
 }

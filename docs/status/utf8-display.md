@@ -14,6 +14,9 @@ future intent for reopening UTF-8-sensitive parity work.
 - `src/utf8.zig` now also exposes a reduced shared `CellBufferReader` seam so
   prompt-side word/search boundaries can reuse lower display-cell traversal
   instead of keeping local byte-oriented scans.
+- `src/server-print.zig` raw attached view output now writes through a shared
+  `screen-write` escaped-byte seam instead of keeping a consumer-local UTF-8
+  decode-and-escape loop.
 - `src/format.zig`, `src/cmd-list-keys.zig`, and `src/key-string.zig` now use
   the named shared `displayWidth`/`trimDisplay`/`padDisplay` consumer facade
   instead of reaching under it to the legacy raw helper names.

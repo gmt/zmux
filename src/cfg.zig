@@ -91,7 +91,7 @@ pub fn cfg_source_path(cl: ?*T.Client, raw_path: []const u8, flags: CfgFlags) bo
             break :blk cfg_load_buffer(cl, resolved.path, content, flags);
         },
         .err => |errno_value| blk: {
-            if (!flags.quiet) cfg_note_cause("{s}: {s}", .{ file_mod.strerror(errno_value), resolved.path }, false);
+            cfg_note_path_error(resolved.path, errno_value, flags.quiet);
             break :blk false;
         },
     };
@@ -103,6 +103,14 @@ pub fn cfg_show_causes(cl: ?*T.Client) void {
         xm.allocator.free(cause);
     }
     cfg_causes.clearRetainingCapacity();
+}
+
+pub fn cfg_source_content(cl: ?*T.Client, path: []const u8, content: []const u8, flags: CfgFlags) bool {
+    return cfg_load_buffer(cl, path, content, flags);
+}
+
+pub fn cfg_note_path_error(path: []const u8, errno_value: c_int, quiet: bool) void {
+    if (!quiet) cfg_note_cause("{s}: {s}", .{ file_mod.strerror(errno_value), path }, false);
 }
 
 fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags: CfgFlags) bool {

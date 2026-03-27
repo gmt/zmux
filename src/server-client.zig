@@ -88,6 +88,7 @@ pub fn server_client_create(fd: i32) *T.Client {
 
 pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
+    file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
     status_prompt.status_prompt_clear(cl);
     status_runtime.status_message_clear(cl);
@@ -150,6 +151,8 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
         .unlock, .wakeup => server_client_unlock(cl),
+        .read => file_mod.handleReadData(imsg_msg),
+        .read_done => file_mod.handleReadDone(imsg_msg),
         .write_ready => file_mod.handleWriteReady(imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);

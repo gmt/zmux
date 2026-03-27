@@ -93,15 +93,16 @@ that truth still stops before the live grid/write path.
 | byte decode into Unicode key candidates | `src/utf8.zig` already owns `utf8_open`, `utf8_append`, and `utf8_from_data`, and `src/input-keys.zig` already uses them for attached-key decode and encode | there is still no shared consumer-facing `utf8.Decoder` or glyph object, so other consumers can still drift back into local byte handling |
 | width policy and overrides | `src/utf8.zig` already owns width cache logic, `codepoint-widths`, `utf8_cstrwidth`, and the trim/pad helpers used by existing string consumers | the live grid/write path still does not preserve width consequences, so width truth currently stops at strings and key helpers |
 | combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks | `src/screen-write.zig` never calls that layer, so combined-cell behavior is still unreachable from live pane writes |
-| cell payload representation | `src/types.zig` already exposes `Utf8Data`, `utf8_char`, `GridCell`, and the `GRID_FLAG_PADDING` constants that describe tmux's cell model | `src/grid.zig` still stores only compact ASCII `GridCellEntry.data`; there is no extended-cell, padding-cell, or `grid_get_cell`/`grid_set_cell`-grade path yet |
+| cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model | the live write path and most readers still only exercise ASCII compatibility shims, so storage truth exists below them but is not yet the shared end-to-end path |
 | live screen-write integration | `src/input.zig` already routes terminal parser events through shared `screen-write` entry points instead of writing directly into panes | those entry points are still byte-at-a-time `putc`/`putn` helpers over `grid.set_ascii`/`ascii_at`, so they collapse glyph semantics back to ASCII storage |
 | consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables | `src/status-prompt.zig` still edits raw UTF-8 byte buffers, and there is no shared display-cell editing/search surface for prompt/status consumers yet |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
-replacing the ASCII-only storage/write seam in `src/grid.zig`,
-`src/screen-write.zig`, and `src/input.zig`, then pulling prompt/status
-consumers onto that shared cell model.
+finishing the remaining ASCII-only write/consumer seam in
+`src/screen-write.zig`, `src/input.zig`, and the prompt/status consumers now
+that `src/grid.zig` can already preserve truthful cell payloads underneath
+them.
 
 The seal matrix below stays conservative on purpose: lower-layer truth does not
 reopen anything by itself. A row is only sealed when the future shared
@@ -148,6 +149,19 @@ tmux-shaped `Utf8Data` payload rather than a new ownership layer, and
 `codepoint-widths` override machinery that already lived below it. The point of
 this slice is to name the top of the stack explicitly so later work can build
 under it, not to claim that the lower rows are suddenly sealed.
+
+The next checkpoint down is now also landed in code:
+
+- `src/grid.zig` stores `GridCell` payloads through a tmux-shaped direct cell
+  API with extended-cell offsets, padding-cell storage, cell equality, and
+  line-length helpers
+- the legacy `set_ascii` / `ascii_at` entry points remain only as compatibility
+  shims over that storage so the rest of the tree can keep moving while
+  `screen-write` and higher consumers are rebuilt
+
+That storage landing removes the old ASCII-only grid format blocker, but it
+still does not seal the live write or consumer rows by itself because the main
+writers and readers have not adopted the richer path yet.
 
 ### Lower layers: what the top layer sits on
 
@@ -204,9 +218,9 @@ seal only when callers actually ride that façade through truthful lower layers.
 | decode byte stream into Unicode key or glyph candidates | `Y` | `-` | `-` | `Y` | `-` | `Y` | open: `utf8.Decoder` now names the shared path, but only a narrow set of callers materially depend on it yet |
 | compute width with cache and `codepoint-widths` overrides | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: width truth exists for strings, but the live grid/write path still drops it |
 | append zero-width / ZWJ / VS / Hangul / emoji modifiers into the prior cell | `Y` | `Y` | `Y` | `Y` | `B` | `-` | open: combine logic is ported below, but `screen-write` never calls it and there is no padding-cell path yet |
-| store one display glyph in one grid cell | `-` | `-` | `-` | `B` | `-` | `-` | open: `GridCell` describes tmux's payload, but `grid.zig` still stores compact ASCII-only entries |
-| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `B` | `B` | `-` | open: the write path is still `putc`/`putn` over `set_ascii`/`ascii_at` |
-| trim, pad, and search by display cells | `Y` | `Y` | `-` | `B` | `-` | `Y` | open: string trim/pad is shared, but grid-cell search and comparison still have no truthful substrate |
+| store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `B` | `-` | open: direct grid storage now preserves extended and padding cells, but no live writer or higher consumer materially depends on that path yet |
+| write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `B` | `-` | open: the write path is still `putc`/`putn` over ASCII shims even though the grid can now preserve richer cells underneath |
+| trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the grid now has truthful cell equality/length substrate, but shared search/edit consumers still stay byte-oriented |
 | edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `B` | `-` | `B` | open: prompt/status editing still operates on raw UTF-8 byte buffers instead of shared cell payloads |
 | choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
 
@@ -216,7 +230,11 @@ The current read of the matrix is deliberately blunt:
   adoption stops local byte handling from creeping back in
 - rows 2 and 3 are still unsealed because the live grid/write path collapses
   width and combine truth before they reach stored cells
-- rows 4 through 7 are blocked by the ASCII-first grid and prompt/storage seam
+- row 4's storage blocker is gone for direct grid callers, but it is not
+  sealed until a real writer and reader ride the shared path instead of the
+  compatibility shims
+- rows 5 through 7 are now blocked mainly by the ASCII live-write and
+  prompt/status consumer seams rather than the raw cell storage format itself
 - row 8 is a truthful reduced helper, not yet the full tty output policy layer
 
 The foundation tranche is finished enough to reopen UTF-8-sensitive parity work

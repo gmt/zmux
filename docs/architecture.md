@@ -405,6 +405,29 @@ renderer rather than tmux's finer border/status-only/scrollbar-only redraw
 machinery, and the shared print seam is still reduced relative to tmux's full
 `server_client_print` + `file.c` + `window-copy` runtime.
 
+The next checkpoint down is now also landed in narrower shared status-only
+redraw form:
+
+- `src/server.zig` now distinguishes shared `server_status_session` and
+  `server_status_window` invalidations from full window redraw instead of
+  collapsing both onto `CLIENT_REDRAWWINDOW`
+- `src/server-fn.zig` now routes status-only callers through that lower seam
+  instead of treating status producers as full redraws by default
+- `src/server-client.zig` now skips pane-body rendering on pure status
+  refreshes, restores the active-pane cursor from shared window geometry when
+  only the overlay/status surface changed, and therefore stops forcing the
+  multi-pane attached path back through a full-window clear when the shared
+  runtime only asked for status/message work
+
+That landing narrows one concrete part of the old redraw/runtime gap: shared
+status/message producers can now stay on a real status-only invalidation path
+without immediately collapsing multi-pane attached redraw back into the
+full-window clear checkpoint. Keep it partial because border-only and
+scrollbar-only invalidations still are not lower-layer draw primitives yet,
+full redraw still re-renders the reduced status rows opportunistically rather
+than through tmux's finer redraw matrix, and the outer tty runtime is still
+only a reduced capability/mode seam.
+
 ### Lower layers: what the top layer sits on
 
 The stack beneath the consumer surface should be understood in this order:

@@ -377,7 +377,7 @@ pub fn server_redraw_session(s: *T.Session) void {
     for (client_registry.clients.items) |cl| {
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.session != s) continue;
-        cl.flags |= T.CLIENT_REDRAWWINDOW;
+        cl.flags |= T.CLIENT_REDRAW;
     }
 }
 
@@ -388,4 +388,109 @@ pub fn server_redraw_window(w: *T.Window) void {
         if (!sess.session_has_window(s, w)) continue;
         cl.flags |= T.CLIENT_REDRAWWINDOW;
     }
+}
+
+pub fn server_status_session(s: *T.Session) void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        if (cl.session != s) continue;
+        cl.flags |= T.CLIENT_REDRAWSTATUS;
+    }
+}
+
+pub fn server_status_window(w: *T.Window) void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        const s = cl.session orelse continue;
+        if (!sess.session_has_window(s, w)) continue;
+        cl.flags |= T.CLIENT_REDRAWSTATUS;
+    }
+}
+
+test "server status helpers mark attached clients for status-only redraw" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const s1 = sess.session_create(null, "server-status-session-1", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-status-session-1") != null) sess.session_destroy(s1, false, "test");
+    const s2 = sess.session_create(null, "server-status-session-2", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-status-session-2") != null) sess.session_destroy(s2, false, "test");
+    const s3 = sess.session_create(null, "server-status-session-3", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-status-session-3") != null) sess.session_destroy(s3, false, "test");
+
+    const w = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    _ = sess.session_attach(s1, w, 0, &cause) orelse unreachable;
+    _ = sess.session_attach(s2, w, 0, &cause) orelse unreachable;
+    const w3 = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    _ = sess.session_attach(s3, w3, 0, &cause) orelse unreachable;
+    s1.curw = sess.winlink_find_by_window(&s1.windows, w);
+    s2.curw = sess.winlink_find_by_window(&s2.windows, w);
+    s3.curw = sess.winlink_find_by_window(&s3.windows, w3);
+
+    var client1 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s1,
+    };
+    defer env_mod.environ_free(client1.environ);
+    client1.tty = .{ .client = &client1 };
+
+    var client2 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s2,
+    };
+    defer env_mod.environ_free(client2.environ);
+    client2.tty = .{ .client = &client2 };
+
+    var client3 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s3,
+    };
+    defer env_mod.environ_free(client3.environ);
+    client3.tty = .{ .client = &client3 };
+
+    client_registry.add(&client1);
+    client_registry.add(&client2);
+    client_registry.add(&client3);
+
+    server_status_session(s1);
+    try std.testing.expect(client1.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client1.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(client2.flags & T.CLIENT_REDRAWSTATUS == 0);
+    try std.testing.expect(client3.flags & T.CLIENT_REDRAWSTATUS == 0);
+
+    client1.flags = T.CLIENT_ATTACHED;
+    client2.flags = T.CLIENT_ATTACHED;
+    client3.flags = T.CLIENT_ATTACHED;
+
+    server_status_window(w);
+    try std.testing.expect(client1.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client2.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client3.flags & T.CLIENT_REDRAWSTATUS == 0);
+    try std.testing.expect(client1.flags & T.CLIENT_REDRAWWINDOW == 0);
+    try std.testing.expect(client2.flags & T.CLIENT_REDRAWWINDOW == 0);
 }

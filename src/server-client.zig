@@ -554,17 +554,62 @@ pub fn server_client_open(cl: *T.Client, cause: *?[]u8) i32 {
     return tty_mod.tty_open(&cl.tty, cause);
 }
 
+const BodyRenderResult = struct {
+    payload: []u8 = &.{},
+    cursor_visible: bool = false,
+    cursor_x: u32 = 0,
+    cursor_y: u32 = 0,
+};
+
+fn visiblePaneCount(w: *T.Window) usize {
+    var count: usize = 0;
+    for (w.panes.items) |pane| {
+        if (win_mod.window_pane_visible(pane)) count += 1;
+    }
+    return count;
+}
+
+fn canUseCachedPaneDraw(w: *T.Window, wp: *T.WindowPane) bool {
+    if (visiblePaneCount(w) != 1) return false;
+    const bounds = win_mod.window_pane_draw_bounds(wp);
+    return bounds.xoff == 0 and bounds.yoff == 0;
+}
+
 fn server_client_draw(cl: *T.Client) void {
     const s = cl.session orelse return;
     const wl = s.curw orelse return;
     const wp = wl.window.active orelse return;
-    win_mod.window_pane_update_scrollbar_geometry(wp);
-    const pane_width = win_mod.window_pane_total_width(wp);
-    const sx = if (cl.tty.sx == 0) pane_width else @min(cl.tty.sx, pane_width);
-    const sy = if (cl.tty.sy == 0) wp.sy else @min(cl.tty.sy, wp.base.grid.sy);
-    if (sx == 0 or sy == 0) return;
-    const pane_payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, status.pane_row_offset(cl)) catch return;
-    defer xm.allocator.free(pane_payload);
+    const overlay_rows = status.overlay_rows(cl);
+    const pane_row_offset = status.pane_row_offset(cl);
+    const tty_sx = if (cl.tty.sx == 0) win_mod.window_pane_total_width(wp) else cl.tty.sx;
+    const tty_sy = if (cl.tty.sy == 0) wp.base.grid.sy + overlay_rows else cl.tty.sy;
+    const pane_area_sy = if (tty_sy > overlay_rows) tty_sy - overlay_rows else 0;
+    if (tty_sx == 0 or pane_area_sy == 0) return;
+
+    var body = BodyRenderResult{};
+    if (canUseCachedPaneDraw(wl.window, wp)) {
+        win_mod.window_pane_update_scrollbar_geometry(wp);
+        const pane_width = win_mod.window_pane_total_width(wp);
+        const sx = @min(tty_sx, pane_width);
+        const sy = @min(pane_area_sy, wp.base.grid.sy);
+        if (sx == 0 or sy == 0) return;
+
+        body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return;
+        body.cursor_visible = cl.pane_cache.cursor_visible;
+        body.cursor_x = cl.pane_cache.cursor_x;
+        body.cursor_y = pane_row_offset + cl.pane_cache.cursor_y;
+    } else {
+        const rendered = tty_draw.tty_draw_render_window(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return;
+        body = .{
+            .payload = rendered.payload,
+            .cursor_visible = rendered.cursor_visible,
+            .cursor_x = rendered.cursor_x,
+            .cursor_y = rendered.cursor_y,
+        };
+        tty_draw.tty_draw_invalidate(&cl.pane_cache);
+    }
+    defer if (body.payload.len != 0) xm.allocator.free(body.payload);
+
     const status_render = status.render(cl);
     defer if (status_render.payload.len != 0) xm.allocator.free(status_render.payload);
 
@@ -572,14 +617,14 @@ fn server_client_draw(cl: *T.Client) void {
     defer mode_payload.deinit(xm.allocator);
     tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return;
 
-    if (mode_payload.items.len != 0 or pane_payload.len != 0 or status_render.payload.len != 0) {
+    if (mode_payload.items.len != 0 or body.payload.len != 0 or status_render.payload.len != 0) {
         if (cl.peer) |peer| {
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(xm.allocator);
             const stream: i32 = 1;
             buf.appendSlice(xm.allocator, std.mem.asBytes(&stream)) catch unreachable;
             buf.appendSlice(xm.allocator, mode_payload.items) catch unreachable;
-            buf.appendSlice(xm.allocator, pane_payload) catch unreachable;
+            buf.appendSlice(xm.allocator, body.payload) catch unreachable;
             if (status_render.payload.len != 0) {
                 buf.appendSlice(xm.allocator, "\x1b[?25l") catch unreachable;
                 buf.appendSlice(xm.allocator, status_render.payload) catch unreachable;
@@ -591,11 +636,11 @@ fn server_client_draw(cl: *T.Client) void {
                     ) catch unreachable;
                     defer xm.allocator.free(cursor);
                     buf.appendSlice(xm.allocator, cursor) catch unreachable;
-                } else if (cl.pane_cache.cursor_visible) {
+                } else if (body.cursor_visible) {
                     const cursor = std.fmt.allocPrint(
                         xm.allocator,
                         "\x1b[{d};{d}H\x1b[?25h",
-                        .{ status.pane_row_offset(cl) + cl.pane_cache.cursor_y + 1, cl.pane_cache.cursor_x + 1 },
+                        .{ body.cursor_y + 1, body.cursor_x + 1 },
                     ) catch unreachable;
                     defer xm.allocator.free(cursor);
                     buf.appendSlice(xm.allocator, cursor) catch unreachable;

@@ -27,6 +27,7 @@ const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const utf8 = @import("utf8.zig");
 const window_mod = @import("window.zig");
+const server = @import("server.zig");
 const xm = @import("xmalloc.zig");
 
 const server_print_view_mode = T.WindowMode{
@@ -84,11 +85,16 @@ pub fn server_client_view_data(client: *T.Client, data: []const u8, parse: bool)
     const wl = session.curw orelse return false;
     const wp = wl.window.active orelse return false;
 
+    if (!server_pane_view_data(wp, data, parse)) return false;
+    client.flags |= T.CLIENT_REDRAWWINDOW;
+    return true;
+}
+
+pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) bool {
     if (!ensure_view_mode(wp)) return false;
     render_view_data(wp, data, parse);
-
-    client.flags |= T.CLIENT_REDRAWWINDOW;
     wp.flags |= T.PANE_REDRAW;
+    server.server_redraw_window(wp.window);
     return true;
 }
 

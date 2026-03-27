@@ -28,6 +28,7 @@ const client_registry = @import("client-registry.zig");
 const file_mod = @import("file.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
+const tty_features = @import("tty-features.zig");
 const protocol = @import("zmux-protocol.zig");
 
 const LoadBufferRemoteState = struct {
@@ -532,6 +533,7 @@ test "load-buffer write flag exports selection for an attached target client" {
         .tty = undefined,
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
+        .term_features = tty_features.featureBit(.clipboard),
     };
     target.session = &session;
     target.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);

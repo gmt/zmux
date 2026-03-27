@@ -495,6 +495,36 @@ pub const CellBuffer = struct {
         return width;
     }
 
+    pub fn nextWordCursor(self: *const CellBuffer, cursor: usize, separators: []const u8) usize {
+        var reader = CellBufferReader.init(self, cursor);
+        reader.cursorNextWord(separators);
+        return reader.cursor;
+    }
+
+    pub fn nextWordEndCursor(self: *const CellBuffer, cursor: usize, separators: []const u8) usize {
+        var reader = CellBufferReader.init(self, cursor);
+        reader.cursorNextWordEnd(separators);
+        return reader.cursor;
+    }
+
+    pub fn previousWordCursor(self: *const CellBuffer, cursor: usize, separators: []const u8) usize {
+        var reader = CellBufferReader.init(self, cursor);
+        reader.cursorPreviousWord(separators);
+        return reader.cursor;
+    }
+
+    pub fn previousWordRange(self: *const CellBuffer, cursor: usize, separators: []const u8) CellBufferRange {
+        const end = @min(cursor, self.len());
+        return .{
+            .start = self.previousWordCursor(end, separators),
+            .end = end,
+        };
+    }
+
+    pub fn boundedRangeAtCursor(self: *const CellBuffer, cursor: usize, set: []const u8) CellBufferRange {
+        return CellBufferReader.init(self, cursor).rangeBoundedBySet(set);
+    }
+
     pub fn rangeToOwnedString(self: *const CellBuffer, start: usize, end: usize) []u8 {
         var out: std.ArrayList(u8) = .{};
         self.appendRangeToBytes(start, end, &out);
@@ -1497,6 +1527,28 @@ test "utf8 cell buffer reader shares word motion and token bounds over stored ce
     const whitespace_bounds = CellBufferReader.init(&buffer, 4).rangeBoundedBySet(CELL_BUFFER_WHITESPACE);
     try std.testing.expectEqual(@as(usize, 2), whitespace_bounds.start);
     try std.testing.expectEqual(@as(usize, 5), whitespace_bounds.end);
+}
+
+test "utf8 cell buffer exposes shared word and token helpers on the consumer-facing buffer" {
+    resetUtf8StateForTests();
+
+    var buffer: CellBuffer = .{};
+    defer buffer.deinit();
+
+    buffer.setString("  é,🙂 two");
+
+    try std.testing.expectEqual(@as(usize, 3), buffer.nextWordCursor(0, ","));
+    try std.testing.expectEqual(@as(usize, 3), buffer.nextWordEndCursor(3, ","));
+    try std.testing.expectEqual(@as(usize, 4), buffer.nextWordCursor(3, ","));
+    try std.testing.expectEqual(@as(usize, 4), buffer.previousWordCursor(5, ","));
+
+    const previous_word = buffer.previousWordRange(8, "");
+    try std.testing.expectEqual(@as(usize, 6), previous_word.start);
+    try std.testing.expectEqual(@as(usize, 8), previous_word.end);
+
+    const token = buffer.boundedRangeAtCursor(4, CELL_BUFFER_WHITESPACE);
+    try std.testing.expectEqual(@as(usize, 2), token.start);
+    try std.testing.expectEqual(@as(usize, 5), token.end);
 }
 
 test "utf8 width policy and display helpers share the tmux width surface" {

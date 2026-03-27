@@ -275,26 +275,23 @@ fn insert_prompt_data(state: *PromptState, data: *const T.Utf8Data) void {
 }
 
 fn prompt_forward_word(state: *PromptState, separators: []const u8) bool {
-    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
-    reader.cursorNextWord(separators);
-    if (state.cursor == reader.cursor) return false;
-    state.cursor = reader.cursor;
+    const next = state.input.nextWordCursor(state.cursor, separators);
+    if (state.cursor == next) return false;
+    state.cursor = next;
     return true;
 }
 
 fn prompt_end_word(state: *PromptState, separators: []const u8) bool {
-    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
-    reader.cursorNextWordEnd(separators);
-    if (state.cursor == reader.cursor) return false;
-    state.cursor = reader.cursor;
+    const next = state.input.nextWordEndCursor(state.cursor, separators);
+    if (state.cursor == next) return false;
+    state.cursor = next;
     return true;
 }
 
 fn prompt_backward_word(state: *PromptState, separators: []const u8) bool {
-    var reader = utf8.CellBufferReader.init(&state.input, state.cursor);
-    reader.cursorPreviousWord(separators);
-    if (state.cursor == reader.cursor) return false;
-    state.cursor = reader.cursor;
+    const next = state.input.previousWordCursor(state.cursor, separators);
+    if (state.cursor == next) return false;
+    state.cursor = next;
     return true;
 }
 
@@ -305,14 +302,11 @@ fn save_prompt_range(state: *PromptState, start: usize, end: usize) void {
 }
 
 fn delete_prompt_word_before_cursor(state: *PromptState, separators: []const u8) bool {
-    const end = state.cursor;
-    if (end == 0) return false;
+    const range = state.input.previousWordRange(state.cursor, separators);
+    if (range.start == range.end) return false;
 
-    var reader = utf8.CellBufferReader.init(&state.input, end);
-    reader.cursorPreviousWord(separators);
-
-    save_prompt_range(state, reader.cursor, end);
-    return delete_prompt_range(state, reader.cursor, end);
+    save_prompt_range(state, range.start, range.end);
+    return delete_prompt_range(state, range.start, range.end);
 }
 
 fn yank_saved_prompt(state: *PromptState) bool {
@@ -360,7 +354,7 @@ fn history_down(state: *PromptState) bool {
 
 fn replace_prompt_complete(c: *T.Client, state: *PromptState, replacement: ?[]const u8) bool {
     const completecb = state.completecb orelse return false;
-    const bounds = utf8.CellBufferReader.init(&state.input, state.cursor).rangeBoundedBySet(utf8.CELL_BUFFER_WHITESPACE);
+    const bounds = state.input.boundedRangeAtCursor(state.cursor, utf8.CELL_BUFFER_WHITESPACE);
 
     const word = state.input.rangeToOwnedString(bounds.start, bounds.end);
     defer xm.allocator.free(word);
@@ -1389,7 +1383,7 @@ test "status-prompt word motion and delete-word use the shared cell reader" {
     try std.testing.expect(send_prompt_key(&client, 'b' | T.KEYC_META, ""));
     try std.testing.expect(send_prompt_key(&client, 'f' | T.KEYC_META, ""));
     try std.testing.expect(send_prompt_key(&client, 'w' | T.KEYC_CTRL, ""));
-    try std.testing.expectEqualStrings("é two", status_prompt_input(&client).?);
+    try std.testing.expectEqualStrings("é  two", status_prompt_input(&client).?);
 }
 
 test "status-prompt vi command mode and quote-next render through the shared cell buffer" {

@@ -23,9 +23,8 @@
 //! alerts.zig - reduced window/session alert handling.
 //!
 //! This ports the core bell/activity/silence flag propagation from tmux.
-//! The honest reduced seam is user-facing status messages for visual-*
-//! options: audible bell delivery is implemented, but tmux's status-message
-//! overlay is still deferred until status/message rendering exists.
+//! The message overlay consumer is still reduced, but visual-* alerts now ride
+//! the shared status-message runtime instead of stopping at audible bells.
 
 const std = @import("std");
 const T = @import("types.zig");
@@ -37,6 +36,7 @@ const sess = @import("session.zig");
 const notify = @import("notify.zig");
 const proc_mod = @import("proc.zig");
 const client_registry = @import("client-registry.zig");
+const status_runtime = @import("status-runtime.zig");
 
 var alerts_fired = false;
 var alerts_list: std.ArrayList(*T.Window) = .{};
@@ -280,8 +280,6 @@ fn alerts_reset(w: *T.Window) void {
 }
 
 fn alerts_set_message(wl: *T.Winlink, comptime typ: []const u8, option: []const u8) void {
-    _ = typ;
-
     const visual: u32 = @intCast(opts.options_get_number(wl.session.options, option));
     for (client_registry.clients.items) |cl| {
         if (cl.session != wl.session)
@@ -291,9 +289,13 @@ fn alerts_set_message(wl: *T.Winlink, comptime typ: []const u8, option: []const 
 
         if (visual == T.VISUAL_OFF or visual == T.VISUAL_BOTH)
             send_bell(cl);
+        if (visual == T.VISUAL_OFF)
+            continue;
 
-        // Reduced seam: tmux routes visual-on/both message text through the
-        // status-message subsystem, which zmux does not yet have.
+        if (wl.session.curw == wl)
+            status_runtime.status_message_set(cl, -1, true, false, false, "{s} in current window", .{typ})
+        else
+            status_runtime.status_message_set(cl, -1, true, false, false, "{s} in window {d}", .{ typ, wl.idx });
     }
 }
 

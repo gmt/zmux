@@ -31,6 +31,7 @@ const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
+const status_runtime = @import("status-runtime.zig");
 const client_registry = @import("client-registry.zig");
 
 pub fn server_lock() void {
@@ -187,6 +188,12 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
     sess.session_update_activity(s, now);
+
+    if (status_runtime.status_message_active(cl)) {
+        if (status_runtime.status_message_ignore_keys(cl))
+            return true;
+        status_runtime.status_message_clear(cl);
+    }
 
     if (status_prompt.status_prompt_handle_key(cl, event)) return true;
 
@@ -393,6 +400,74 @@ test "server_client_handle_key forwards unbound keys to pane" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
+test "server_client_handle_key routes through the status-message runtime before pane input" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "status-message-key", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("status-message-key") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    defer {
+        if (wp.fd >= 0) std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    status_runtime.status_message_set_text(&cl, 0, true, false, false, "hello");
+    try std.testing.expect(status_runtime.status_message_active(&cl));
+
+    var event = T.key_event{ .key = 'x', .data = std.mem.zeroes([16]u8), .len = 1 };
+    event.data[0] = 'x';
+    try std.testing.expect(server_client_handle_key(&cl, &event));
+    try std.testing.expect(!status_runtime.status_message_active(&cl));
+
+    var buf: [8]u8 = undefined;
+    const n = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("x", buf[0..n]);
+
+    status_runtime.status_message_set_text(&cl, 1, true, true, false, "locked");
+    try std.testing.expect(status_runtime.status_message_active(&cl));
+    try std.testing.expect(server_client_handle_key(&cl, &event));
+    try std.testing.expect(status_runtime.status_message_active(&cl));
+    status_runtime.status_message_clear(&cl);
 }
 
 test "server_client_handle_key mirrors unbound keys to synchronized panes" {

@@ -97,7 +97,7 @@ that truth still stops before the live grid/write path.
 | combine policy | `src/utf8-combined.zig` already ports tmux's ZWJ, variation-selector, Hangul Jamo, and emoji combine checks, and `src/screen-write.zig` now calls that layer during live pane writes | the reduced writer still lacks fuller tmux `screen_write_cell` side effects, so combined-cell reachability exists for live writes but is not yet the full reopen gate |
 | cell payload representation | `src/types.zig` and `src/grid.zig` now expose tmux-shaped `GridCell` payload storage directly: extended-cell offsets, padding-cell storage, `get_cell`/`set_cell`, `cells_equal`, and `line_length` all sit on the same `Utf8Data` and `utf8_char` model, and live pane writes now materially store through that path | most readers and prompt/status consumers still have not adopted the same shared cell payload model end to end |
 | live screen-write integration | `src/screen-write.zig` now owns `putGlyph`, `putCell`, and `putBytes`, and `src/input.zig` feeds printable terminal bytes through that shared path so live pane writes preserve decoded width, padding, and combine consequences | this is still a reduced `screen_write_cell` seam: insert-mode parity, selected-cell styling, tty draw collection, tab-cell treatment, and non-input consumer adoption are still missing |
-| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, and shared cell writes; `src/status-prompt.zig` now owns cursor-aware prompt editing and history traversal over that shared cell buffer; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, translated style ranges are not yet persisted into a shared hit-test consumer, and the reduced prompt/runtime path still lacks prompt command mode, timers, saved-screen overlay behavior, and the rest of the status/message runtime |
+| consumer adapters | `src/format.zig`, `src/input-keys.zig`, and `src/tty-acs.zig` already reuse shared UTF-8 helpers instead of rolling their own width tables; `src/status-prompt.zig` now stores prompt input through a shared `utf8.CellBuffer`; `src/options-table.zig` now provides a real default `status-format` array entry; `src/format-draw.zig` + `src/status.zig` now render the default status row through shared list alignment, list markers, translated style ranges, and shared cell writes; `src/status-prompt.zig` now owns cursor-aware prompt editing, vi prompt command mode, and quote-next/control rendering over that shared cell buffer; `src/status-runtime.zig` now owns the reduced shared saved-screen/message-timer lifetime seam; `src/server-fn.zig` now clears active status messages on the attached key path before pane input; `src/alerts.zig` now routes visual alert messages through that shared message runtime; and `src/cmd-command-prompt.zig` now supplies command/target completion vocabulary through a consumer-side callback instead of local byte surgery | there is still no broader shared display-cell search/edit surface for prompt/status consumers, translated style ranges are not yet persisted into a shared hit-test consumer, and the remaining status/message runtime gaps are now broader producer adoption, message-log/write-side plumbing, multiline/runtime fidelity, and the rest of the `status.c` surface |
 | ACS / tty output policy | `src/tty-acs.zig` already owns the reduced ACS-versus-UTF-8 border lookup seam | `tty-term` and richer capability runtime are still missing, so this remains a reduced lower seam rather than the full tty output policy layer |
 
 The practical reopen gate is therefore not "add more UTF-8 helpers." It is
@@ -106,8 +106,10 @@ live pane writes no longer collapse back to ASCII storage: the current writer
 still lacks fuller tmux `screen_write_cell` side effects, and the adopted
 prompt path is still only a reduced shared-cell editor/runtime: cursor
 motion, history navigation, completion, and shared cursor-window rendering now
-exist on the shared path, but prompt command mode, timers, saved-screen
-overlay behavior, and broader display-consumer reach are still open.
+exist on the shared path, and prompt command mode plus the reduced
+timer/saved-screen lifetime seam now also ride that shared runtime, but
+persisted hit-test consumers, broader message-producer adoption, and broader
+display-consumer reach are still open.
 
 The seal matrix below stays conservative on purpose: lower-layer truth does not
 reopen anything by itself. A row is only sealed when the future shared
@@ -219,9 +221,8 @@ The next checkpoint down is now also landed in fuller display-consumer form:
 That landing makes the default `format-draw`/`status` status-row path ride the
 shared cell model with real window-list/list-marker semantics and translated
 style ranges, but it is still well short of tmux reopen criteria: those
-ranges are not yet persisted into a shared hit-test consumer, message timers
-and saved-screen push/pop remain reduced, and the rest of the prompt
-editor/runtime is still open.
+ranges are not yet persisted into a shared hit-test consumer, and the rest of
+the prompt editor/runtime was still open.
 
 The next checkpoint down is now also landed in shared prompt-editor form:
 
@@ -243,6 +244,31 @@ prompt editor, but it is still not a reopen gate for `status.c` or the
 broader prompt runtime: prompt command mode, quote-next/control rendering
 parity, message timers, saved-screen overlay behavior, persisted range
 consumers, and the rest of the status/message runtime remain reduced.
+
+The next checkpoint down is now also landed in reduced shared prompt/message
+runtime form:
+
+- `src/status-runtime.zig` now owns the reduced saved-screen reference-count,
+  prompt/message freeze+cursor lifetime, and message timer arm/clear seam so
+  prompt and message consumers stop inventing their own overlay lifetime
+- `src/status-prompt.zig` now keeps vi prompt command mode and
+  quote-next/control rendering on the shared `utf8.CellBuffer` path instead of
+  reopening local byte surgery to fake those display semantics
+- `src/status.zig` now renders prompt command mode through
+  `message-command-style` and escapes ignored message styles on the shared
+  formatter path instead of treating those runtime differences as local paint
+  hacks
+- `src/server-fn.zig` now clears visible status messages before attached pane
+  input delivery on the shared key path, and `src/alerts.zig` now routes
+  visual alert text through the same shared status-message runtime instead of
+  stopping at bells
+
+That landing materially closes the old prompt command mode, quote-next/control
+rendering, and timer/saved-screen lifetime gap, but it is still not a reopen
+gate for `status.c`: translated ranges are still not persisted into a shared
+hit-test consumer, the broader message-log and message-producer write path is
+still not shared, and the rest of the multiline/overlay/status runtime remains
+reduced.
 
 ### Lower layers: what the top layer sits on
 
@@ -303,7 +329,7 @@ through truthful lower layers.
 | store one display glyph in one grid cell | `-` | `-` | `-` | `Y` | `Y` | `-` | open: direct grid storage now has a real live writer, but there is still no broader shared reader/search/editor surface above it |
 | write/render cells through the live `screen-write` path | `-` | `Y` | `Y` | `Y` | `Y` | `-` | open: live pane writes now use `putGlyph`/`putBytes` over truthful storage and attached-client row emission now preserves stored UTF-8 cell payload bytes, but the writer/runtime is still a reduced seam without tmux's fuller insert/selection/tty collection path |
 | trim, pad, and search by display cells | `Y` | `Y` | `-` | `Y` | `B` | `Y` | open: string trim/pad is shared and the reduced status/prompt renderer now consumes those width rules, but shared search/read/edit consumers are still missing and grid-reader-style search remains byte-oriented |
-| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the shared prompt editor now stores shared cell payloads through `utf8.CellBuffer`, owns cursor motion/history traversal/completion replacement on that shared path, and the default status row now consumes shared list/range rendering, but prompt command mode, persisted range consumers, timers, saved-screen overlay behavior, and broader display-consumer adoption are still missing |
+| edit prompt/history/status text by display cells | `Y` | `Y` | `Y` | `Y` | `-` | `B` | open: the shared prompt editor now stores shared cell payloads through `utf8.CellBuffer`, owns cursor motion/history traversal/completion replacement plus prompt command mode/quote-next rendering on that shared path, and the reduced status/message runtime now owns timer and saved-screen lifetime, but persisted range consumers, broader message-producer adoption, and fuller display-consumer reach are still missing |
 | choose ACS versus UTF-8 output honestly | `-` | `-` | `-` | `Y` | `-` | `B` | open: `tty-acs.zig` owns a reduced lookup seam, but `tty-term` capability/runtime truth is still missing |
 
 The current read of the matrix is deliberately blunt:
@@ -318,9 +344,11 @@ The current read of the matrix is deliberately blunt:
   live pane writes; the remaining blockers are now fuller reader/editor
   adoption and the reduced side effects around the writer
 - row 7's raw prompt-storage blocker is gone, shared cursor/history/completion
-  now ride the prompt editor, and the default status row now rides shared
-  list/range rendering, but the row remains open because prompt command mode,
-  persisted range consumers, timer, and overlay semantics are still missing
+  now ride the prompt editor, prompt command mode and the reduced
+  timer/saved-screen lifetime seam now ride that same stack, and the default
+  status row now rides shared list/range rendering, but the row remains open
+  because persisted range consumers, broader message-producer adoption, and
+  fuller overlay/runtime semantics are still missing
 - rows 6 and 7 are now blocked mainly by remaining prompt/status consumer
   seams rather than by the underlying grid storage format itself
 - row 8 is a truthful reduced helper, not yet the full tty output policy layer

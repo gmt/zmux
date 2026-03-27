@@ -44,6 +44,7 @@ const client_registry = @import("client-registry.zig");
 const alerts = @import("alerts.zig");
 const status = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
+const status_runtime = @import("status-runtime.zig");
 
 var next_client_id: u32 = 0;
 
@@ -87,6 +88,8 @@ pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
     file_write_mod.fail_pending_writes_for_client(cl);
     status_prompt.status_prompt_clear(cl);
+    status_runtime.status_message_clear(cl);
+    status_runtime.status_cleanup(cl);
     const srv = @import("server.zig");
     srv.server_remove_client(cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);

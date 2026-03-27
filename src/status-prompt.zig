@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_display = @import("cmd-display-message.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const status_runtime = @import("status-runtime.zig");
 const utf8 = @import("utf8.zig");
 
 pub const PromptType = enum(u8) {
@@ -49,6 +50,12 @@ pub const PromptFreeCb = *const fn (?*anyopaque) void;
 pub const PromptRenderState = struct {
     input_visible: []u8,
     cursor_column: u32,
+    command_prompt: bool,
+};
+
+const PromptMode = enum {
+    entry,
+    command,
 };
 
 const PromptState = struct {
@@ -59,6 +66,8 @@ const PromptState = struct {
     saved_input: utf8.CellBuffer = .{},
     cursor: usize = 0,
     history_index: usize = 0,
+    mode: PromptMode = .entry,
+    quote_next: bool = false,
     flags: u32,
     prompt_type: PromptType,
     inputcb: PromptInputCb,
@@ -233,6 +242,41 @@ fn prompt_separators(c: *T.Client) []const u8 {
     return opts.options_get_string(session.options, "word-separators");
 }
 
+fn prompt_uses_vi_keys(c: *T.Client) bool {
+    const session = c.session orelse return false;
+    return opts.options_get_number(session.options, "status-keys") == T.MODEKEY_VI;
+}
+
+fn enter_command_mode(c: *T.Client, state: *PromptState) void {
+    if (state.mode == .command) return;
+    state.mode = .command;
+    if (state.cursor != 0) state.cursor -= 1;
+    state.quote_next = false;
+    c.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
+fn enter_entry_mode(c: *T.Client, state: *PromptState) void {
+    if (state.mode == .entry) return;
+    state.mode = .entry;
+    if (state.input.len() != 0 and state.cursor < state.input.len()) state.cursor += 1;
+    state.quote_next = false;
+    c.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
+fn enter_entry_mode_in_place(c: *T.Client, state: *PromptState) void {
+    if (state.mode == .entry) return;
+    state.mode = .entry;
+    state.quote_next = false;
+    c.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
+fn insert_prompt_data(state: *PromptState, data: *const T.Utf8Data) void {
+    const insert_at = @min(state.cursor, state.input.len());
+    state.input.insertData(insert_at, data);
+    state.cursor = insert_at + 1;
+    refresh_input_view(state);
+}
+
 fn prompt_forward_word(state: *PromptState, separators: []const u8) bool {
     const size = state.input.len();
     var idx = @min(state.cursor, size);
@@ -251,6 +295,34 @@ fn prompt_forward_word(state: *PromptState, separators: []const u8) bool {
         if (idx == size) break;
         if (prompt_space(&state.input.cells.items[idx])) break;
         if (word_is_separators != prompt_in_list(separators, &state.input.cells.items[idx])) break;
+    }
+
+    if (state.cursor == idx) return false;
+    state.cursor = idx;
+    return true;
+}
+
+fn prompt_end_word(state: *PromptState, separators: []const u8) bool {
+    const size = state.input.len();
+    var idx = @min(state.cursor, size);
+    if (idx == size) return false;
+
+    while (idx < size and prompt_space(&state.input.cells.items[idx])) idx += 1;
+    if (idx == size) {
+        if (state.cursor == size) return false;
+        state.cursor = size;
+        return true;
+    }
+
+    const word_is_separators = prompt_in_list(separators, &state.input.cells.items[idx]);
+    while (idx < size) : (idx += 1) {
+        if (idx + 1 == size) {
+            idx = size - 1;
+            break;
+        }
+        const next = &state.input.cells.items[idx + 1];
+        if (prompt_space(next) or word_is_separators != prompt_in_list(separators, next))
+            break;
     }
 
     if (state.cursor == idx) return false;
@@ -413,6 +485,309 @@ fn single_prompt_text(key: T.key_code, buf: *[4]u8) ?[]const u8 {
     return buf[0..1];
 }
 
+fn render_prompt_cell(out: *std.ArrayList(u8), cell: *const T.Utf8Data) void {
+    if (cell.size == 1 and (cell.data[0] <= 0x1f or cell.data[0] == 0x7f)) {
+        out.append(xm.allocator, '^') catch unreachable;
+        out.append(xm.allocator, if (cell.data[0] == 0x7f) '?' else cell.data[0] | 0x40) catch unreachable;
+        return;
+    }
+    out.appendSlice(xm.allocator, cell.data[0..cell.size]) catch unreachable;
+}
+
+fn rendered_cell_width(cell: *const T.Utf8Data) u32 {
+    if (cell.size == 1 and (cell.data[0] <= 0x1f or cell.data[0] == 0x7f)) return 2;
+    return cell.width;
+}
+
+fn rendered_cursor_width(state: *const PromptState) u32 {
+    var width: u32 = 0;
+    const limit = @min(state.cursor, state.input.len());
+    for (state.input.cells.items[0..limit]) |cell| width += rendered_cell_width(&cell);
+    if (state.quote_next) width += 1;
+    return width;
+}
+
+fn append_visible_render_items(
+    state: *const PromptState,
+    offset: u32,
+    width: u32,
+    out: *std.ArrayList(u8),
+) void {
+    if (width == 0) return;
+
+    const limit = offset + width;
+    var position: u32 = 0;
+    var quote_written = false;
+
+    for (state.input.cells.items, 0..) |cell, idx| {
+        if (state.quote_next and !quote_written and idx == state.cursor) {
+            if (position >= offset and position < limit)
+                out.append(xm.allocator, '^') catch unreachable;
+            position += 1;
+            quote_written = true;
+        }
+
+        const cell_width = rendered_cell_width(&cell);
+        const next = position + cell_width;
+
+        if (cell_width == 0) {
+            if (position >= offset and position < limit)
+                render_prompt_cell(out, &cell);
+            continue;
+        }
+        if (next <= offset) {
+            position = next;
+            continue;
+        }
+        if (position >= limit or next > limit) break;
+
+        render_prompt_cell(out, &cell);
+        position = next;
+    }
+
+    if (state.quote_next and !quote_written and state.cursor == state.input.len()) {
+        if (position >= offset and position < limit)
+            out.append(xm.allocator, '^') catch unreachable;
+    }
+}
+
+fn append_quoted_key(state: *PromptState, event: *const T.key_event) bool {
+    var data = std.mem.zeroes(T.Utf8Data);
+    const masked = event.key & T.KEYC_MASK_KEY;
+
+    if (masked == T.KEYC_BSPACE) {
+        utf8.utf8_set(&data, 0x7f);
+        data.width = 2;
+        insert_prompt_data(state, &data);
+        return true;
+    }
+
+    if (masked > 0x7f) {
+        if (T.keycIsUnicode(event.key)) {
+            const codepoint = std.math.cast(u21, masked) orelse return false;
+            const glyph = utf8.Glyph.fromCodepoint(codepoint) orelse return false;
+            insert_prompt_data(state, glyph.payload());
+            return true;
+        }
+        return false;
+    }
+
+    const value: u8 = @intCast(if (event.key & T.KEYC_CTRL != 0) masked & 0x1f else masked);
+    utf8.utf8_set(&data, value);
+    if (value <= 0x1f or value == 0x7f) data.width = 2;
+    insert_prompt_data(state, &data);
+    return true;
+}
+
+fn command_mode_cursor_right(state: *PromptState) bool {
+    const size = state.input.len();
+    if (size == 0 or state.cursor + 1 >= size) return false;
+    state.cursor += 1;
+    return true;
+}
+
+fn command_mode_delete_current(state: *PromptState) bool {
+    const size = state.input.len();
+    if (size == 0 or state.cursor >= size) return false;
+    const deleted = delete_prompt_at_cursor(state);
+    if (deleted and state.input.len() != 0 and state.cursor == state.input.len())
+        state.cursor -= 1;
+    return deleted;
+}
+
+fn command_mode_delete_to_end(state: *PromptState) bool {
+    const size = state.input.len();
+    if (size == 0 or state.cursor >= size) return false;
+    const deleted = delete_prompt_range(state, state.cursor, size);
+    if (deleted and state.input.len() != 0 and state.cursor == state.input.len())
+        state.cursor -= 1;
+    return deleted;
+}
+
+fn handle_command_mode_key(c: *T.Client, state: *PromptState, event: *const T.key_event) bool {
+    const masked = event.key & T.KEYC_MASK_KEY;
+    const size = state.input.len();
+
+    switch (event.key) {
+        T.KEYC_BSPACE => {
+            if (state.cursor > 0) state.cursor -= 1;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'A' => {
+            state.cursor = size;
+            enter_entry_mode_in_place(c, state);
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'I' => {
+            state.cursor = 0;
+            enter_entry_mode_in_place(c, state);
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'C' => {
+            _ = command_mode_delete_to_end(state);
+            enter_entry_mode_in_place(c, state);
+            prompt_changed(c, state, '=');
+            return true;
+        },
+        's' => {
+            _ = command_mode_delete_current(state);
+            enter_entry_mode_in_place(c, state);
+            prompt_changed(c, state, '=');
+            return true;
+        },
+        'a' => {
+            if (command_mode_cursor_right(state)) {}
+            enter_entry_mode_in_place(c, state);
+            if (size != 0 and state.cursor < state.input.len()) state.cursor += 1;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'S' => {
+            _ = delete_prompt_range(state, 0, state.input.len());
+            enter_entry_mode_in_place(c, state);
+            prompt_changed(c, state, '=');
+            return true;
+        },
+        'i' => {
+            enter_entry_mode_in_place(c, state);
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.C0_ESC => return true,
+        '$' => {
+            state.cursor = size;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        '0', '^' => {
+            state.cursor = 0;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'D' => {
+            if (command_mode_delete_to_end(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'X' => {
+            if (state.cursor > 0) {
+                state.cursor -= 1;
+                if (delete_prompt_at_cursor(state))
+                    prompt_changed(c, state, '=')
+                else
+                    c.flags |= T.CLIENT_REDRAWSTATUS;
+            } else {
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+            return true;
+        },
+        'b' => {
+            _ = prompt_backward_word(state, prompt_separators(c));
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'B' => {
+            _ = prompt_backward_word(state, "");
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'd' => {
+            if (delete_prompt_range(state, 0, state.input.len()))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'e' => {
+            _ = prompt_end_word(state, prompt_separators(c));
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'E' => {
+            _ = prompt_end_word(state, "");
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'w' => {
+            _ = prompt_forward_word(state, prompt_separators(c));
+            if (state.cursor == state.input.len() and state.cursor != 0) state.cursor -= 1;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'W' => {
+            _ = prompt_forward_word(state, "");
+            if (state.cursor == state.input.len() and state.cursor != 0) state.cursor -= 1;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'p' => {
+            if (yank_saved_prompt(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'q' => {
+            prompt_finish(c, state, null, true);
+            return true;
+        },
+        T.KEYC_DC, 'x' => {
+            if (command_mode_delete_current(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_DOWN, 'j' => {
+            if (history_down(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            if (state.input.len() != 0 and state.cursor == state.input.len()) state.cursor -= 1;
+            return true;
+        },
+        T.KEYC_LEFT, 'h' => {
+            if (state.cursor > 0) state.cursor -= 1;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_RIGHT, 'l' => {
+            _ = command_mode_cursor_right(state);
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        T.KEYC_UP, 'k' => {
+            if (history_up(state))
+                prompt_changed(c, state, '=')
+            else
+                c.flags |= T.CLIENT_REDRAWSTATUS;
+            if (state.input.len() != 0 and state.cursor == state.input.len()) state.cursor -= 1;
+            return true;
+        },
+        'h' | T.KEYC_CTRL, 'c' | T.KEYC_CTRL => {
+            prompt_finish(c, state, null, true);
+            return true;
+        },
+        else => {},
+    }
+
+    if (masked == T.C0_CR or masked == T.C0_LF or masked == T.KEYC_KP_ENTER) {
+        const text = state_copy_input(state);
+        defer xm.allocator.free(text);
+        if (text.len != 0)
+            status_prompt_history_add(text, state.prompt_type);
+        prompt_finish(c, state, text, true);
+        return true;
+    }
+
+    return true;
+}
+
 pub fn status_prompt_history_add(line: []const u8, prompt_type: PromptType) void {
     const history = prompt_history(prompt_type);
     const oldsize = history.items.len;
@@ -486,18 +861,25 @@ pub fn status_prompt_input(c: *T.Client) ?[]const u8 {
     return state_current_input(state);
 }
 
+pub fn status_prompt_command_mode(c: *T.Client) bool {
+    const state = find_state(c) orelse return false;
+    return state.mode == .command;
+}
+
 pub fn status_prompt_render_state(c: *T.Client, available_width: u32) ?PromptRenderState {
     const state = find_state(c) orelse return null;
-    const cursor_width = state.input.prefixDisplayWidth(state.cursor);
+    const cursor_width = rendered_cursor_width(state);
 
     var offset: u32 = 0;
     if (available_width != 0 and cursor_width >= available_width)
         offset = (cursor_width - available_width) + 1;
 
-    const visible = state.input.windowString(offset, available_width);
+    var out: std.ArrayList(u8) = .{};
+    append_visible_render_items(state, offset, available_width, &out);
     return .{
-        .input_visible = visible,
+        .input_visible = out.toOwnedSlice(xm.allocator) catch unreachable,
         .cursor_column = cursor_width - offset,
+        .command_prompt = state.mode == .command,
     };
 }
 
@@ -516,6 +898,7 @@ pub fn status_prompt_set(
     const expanded_input = expand_input(fs, input orelse "", flags);
     errdefer xm.allocator.free(expanded_input);
 
+    status_runtime.status_message_clear(c);
     status_prompt_clear(c);
     ensure_init();
 
@@ -537,7 +920,7 @@ pub fn status_prompt_set(
     xm.allocator.free(expanded_input);
 
     prompt_states.put(state_key(c), state) catch unreachable;
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    status_runtime.status_prompt_enter(c, flags & PROMPT_INCREMENTAL == 0);
 
     if (flags & PROMPT_INCREMENTAL != 0)
         _ = inputcb(c, data, "=", false);
@@ -552,6 +935,7 @@ pub fn status_prompt_update(c: *T.Client, msg: []const u8, input: ?[]const u8) v
     set_prompt_last_input(state, input orelse "");
     set_prompt_input(state, input orelse "");
     state.history_index = 0;
+    state.quote_next = false;
     c.flags |= T.CLIENT_REDRAWSTATUS;
 }
 
@@ -559,7 +943,7 @@ pub fn status_prompt_clear(c: *T.Client) void {
     if (!prompt_states_init) return;
     const removed = prompt_states.fetchRemove(state_key(c)) orelse return;
     prompt_state_free(removed.value);
-    c.flags |= T.CLIENT_REDRAWSTATUS;
+    status_runtime.status_prompt_leave(c);
 }
 
 pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
@@ -584,11 +968,31 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
         return true;
     }
 
+    if (state.quote_next) {
+        state.quote_next = false;
+        if (append_quoted_key(state, event))
+            prompt_changed(c, state, '=')
+        else
+            c.flags |= T.CLIENT_REDRAWSTATUS;
+        return true;
+    }
+
     if (state.flags & PROMPT_SINGLE != 0) {
         var buf: [4]u8 = undefined;
         const text = single_prompt_text(event.key, &buf) orelse return true;
         prompt_finish(c, state, text, true);
         return true;
+    }
+
+    if (prompt_uses_vi_keys(c)) {
+        if (state.mode == .entry and masked == T.C0_ESC) {
+            enter_command_mode(c, state);
+            return true;
+        }
+        if (state.mode == .command)
+            return handle_command_mode_key(c, state, event);
+    } else if (state.mode == .command) {
+        state.mode = .entry;
     }
 
     switch (event.key) {
@@ -661,6 +1065,37 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
                 prompt_changed(c, state, '=')
             else
                 c.flags |= T.CLIENT_REDRAWSTATUS;
+            return true;
+        },
+        'r' | T.KEYC_CTRL => {
+            if (state.flags & PROMPT_INCREMENTAL != 0) {
+                if (state.input.len() == 0) {
+                    const text = state.last_input.toOwnedString();
+                    defer xm.allocator.free(text);
+                    set_prompt_input(state, text);
+                    prompt_changed(c, state, '=');
+                } else {
+                    prompt_changed(c, state, '-');
+                }
+                return true;
+            }
+        },
+        's' | T.KEYC_CTRL => {
+            if (state.flags & PROMPT_INCREMENTAL != 0) {
+                if (state.input.len() == 0) {
+                    const text = state.last_input.toOwnedString();
+                    defer xm.allocator.free(text);
+                    set_prompt_input(state, text);
+                    prompt_changed(c, state, '=');
+                } else {
+                    prompt_changed(c, state, '+');
+                }
+                return true;
+            }
+        },
+        'v' | T.KEYC_CTRL => {
+            state.quote_next = true;
+            c.flags |= T.CLIENT_REDRAWSTATUS;
             return true;
         },
         'w' | T.KEYC_CTRL => {
@@ -953,4 +1388,85 @@ test "status-prompt supports cursor edits, history traversal, completion, and re
     defer xm.allocator.free(render_state.input_visible);
     try std.testing.expectEqualStrings("cde", render_state.input_visible);
     try std.testing.expectEqual(@as(u32, 2), render_state.cursor_column);
+}
+
+test "status-prompt vi command mode and quote-next render through the shared cell buffer" {
+    const env_mod = @import("environ.zig");
+    const sess_mod = @import("session.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+
+    sess_mod.session_init_globals(xm.allocator);
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess_mod.session_create(
+        null,
+        "prompt-vi",
+        "/",
+        env_mod.environ_create(),
+        opts.options_create(opts.global_s_options),
+        null,
+    );
+    defer if (sess_mod.session_find(session.name)) |_| sess_mod.session_destroy(session, false, "test");
+    opts.options_set_number(session.options, "status-keys", T.MODEKEY_VI);
+
+    var environ = T.Environ.init(xm.allocator);
+    defer environ.deinit();
+    var client = T.Client{
+        .environ = &environ,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = session,
+    };
+    client.tty.client = &client;
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+
+    status_prompt_set(
+        &client,
+        null,
+        "Prompt ",
+        "abc",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt_clear(&client);
+
+    try std.testing.expect(send_prompt_key(&client, T.C0_ESC, "\x1b"));
+    try std.testing.expect(status_prompt_command_mode(&client));
+    {
+        const render_state = status_prompt_render_state(&client, 10).?;
+        defer xm.allocator.free(render_state.input_visible);
+        try std.testing.expect(render_state.command_prompt);
+        try std.testing.expectEqualStrings("abc", render_state.input_visible);
+        try std.testing.expectEqual(@as(u32, 2), render_state.cursor_column);
+    }
+
+    try std.testing.expect(send_prompt_key(&client, 'x', "x"));
+    try std.testing.expectEqualStrings("ab", status_prompt_input(&client).?);
+    try std.testing.expect(status_prompt_command_mode(&client));
+
+    try std.testing.expect(send_prompt_key(&client, 'i', "i"));
+    try std.testing.expect(!status_prompt_command_mode(&client));
+    try std.testing.expect(send_prompt_key(&client, 'v' | T.KEYC_CTRL, ""));
+    try std.testing.expect(send_prompt_key(&client, 'a' | T.KEYC_CTRL, ""));
+    try std.testing.expectEqualSlices(u8, &.{ 'a', 0x01, 'b' }, status_prompt_input(&client).?);
+
+    {
+        const render_state = status_prompt_render_state(&client, 10).?;
+        defer xm.allocator.free(render_state.input_visible);
+        try std.testing.expectEqualStrings("a^Ab", render_state.input_visible);
+        try std.testing.expectEqual(@as(u32, 3), render_state.cursor_column);
+    }
 }

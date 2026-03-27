@@ -505,14 +505,14 @@ form:
 - `src/job.zig` now owns one shared async job registry with tmux-shaped
   command, fd, pid, and status summary fields, now also owns a reduced
   shared `/bin/sh -c` launcher with optional captured output or merged stderr,
-  and now also owns tmux-shaped kill-on-free plus server-exit bulk
-  termination for live reduced jobs instead of leaving async shell cleanup
-  to whichever caller happened to notice shutdown first
+  now also owns a reduced shared async completion bridge over that launcher so
+  `run-shell` and `if-shell` stop keeping separate thread-plus-pipe wakeups
+  above the stack, and now also owns tmux-shaped kill-on-free plus
+  server-exit bulk termination for live reduced jobs instead of leaving async
+  shell cleanup to whichever caller happened to notice shutdown first
 - `src/cmd-run-shell.zig` and `src/cmd-if-shell.zig` now register reduced job
   lifecycle there and now also reuse that lower launch/status seam instead of
-  keeping separate child-spawn loops above the stack, even though completion
-  still rides local thread-plus-pipe bridges instead of tmux's full job
-  runtime
+  keeping separate child-spawn or completion loops above the stack
 - `src/cmd-show-messages.zig` now reports `-J` through that lower summary seam
   and can combine it with the reduced `-T` report instead of treating job
   summaries as a command-local unsupported branch
@@ -523,11 +523,11 @@ now have one shared lower summary plus launch seam instead of disappearing
 from the runtime, and reduced live jobs now also die through that same lower
 layer on free or server exit instead of depending on consumer-local cleanup.
 Keep it partial because the new layer is still far smaller than tmux's full
-`job.c` surface: completion still uses local thread-plus-pipe wakeups instead
-of shared bufferevent job updates, there are still no streaming job buffers,
-no `file.c`-backed print or read runtime under those jobs, and the broader
-status/message producer family plus redraw matrix follow-through are still
-open.
+`job.c` surface: the shared completion bridge is still a reduced
+thread-plus-pipe wakeup inside `src/job.zig` rather than tmux's bufferevent
+job runtime, there are still no streaming job buffers, no `file.c`-backed
+print or read runtime under those jobs, and the broader status/message
+producer family plus redraw matrix follow-through are still open.
 
 The next checkpoint down is now also landed in reduced targeted
 `refresh-client` redraw form:

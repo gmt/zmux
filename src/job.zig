@@ -20,6 +20,8 @@
 //! job.zig – reduced shared async job registry and summary helpers.
 
 const std = @import("std");
+const c = @import("c.zig");
+const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 
 pub const JOB_NOWAIT: u32 = 0x1;
@@ -56,8 +58,116 @@ pub const ShellRunResult = struct {
     }
 };
 
+pub const AsyncShellCallback = *const fn (*AsyncShell, ?*anyopaque) void;
+
+pub const AsyncShell = struct {
+    job: ?*Job = null,
+    shell_command: []u8,
+    cwd: []u8,
+    merge_stderr: bool = false,
+    capture_output: bool = false,
+    pipe_read: std.posix.fd_t = -1,
+    pipe_write: std.posix.fd_t = -1,
+    event: ?*c.libevent.event = null,
+    thread: ?std.Thread = null,
+    callback: AsyncShellCallback,
+    callback_arg: ?*anyopaque = null,
+    result: ShellRunResult = .{},
+};
+
 var jobs: std.ArrayListUnmanaged(*Job) = .{};
 var jobs_lock: std.Thread.Mutex = .{};
+
+pub fn async_shell_start(
+    job: ?*Job,
+    shell_command: []const u8,
+    options: ShellRunOptions,
+    callback: AsyncShellCallback,
+    callback_arg: ?*anyopaque,
+) ?*AsyncShell {
+    const base = proc_mod.libevent orelse return null;
+    const async = xm.allocator.create(AsyncShell) catch unreachable;
+    async.* = .{
+        .job = job,
+        .shell_command = xm.xstrdup(shell_command),
+        .cwd = xm.xstrdup(options.cwd),
+        .merge_stderr = options.merge_stderr,
+        .capture_output = options.capture_output,
+        .callback = callback,
+        .callback_arg = callback_arg,
+    };
+    errdefer async_shell_free(async);
+
+    const pipe_fds = std.posix.pipe() catch return null;
+    async.pipe_read = pipe_fds[0];
+    async.pipe_write = pipe_fds[1];
+
+    async.event = c.libevent.event_new(
+        base,
+        async.pipe_read,
+        @intCast(c.libevent.EV_READ),
+        async_shell_event_cb,
+        async,
+    );
+    if (async.event == null) return null;
+    if (c.libevent.event_add(async.event.?, null) != 0) return null;
+
+    async.thread = std.Thread.spawn(.{}, asyncShellThreadMain, .{async}) catch return null;
+    return async;
+}
+
+pub fn async_shell_free(async: *AsyncShell) void {
+    if (async.thread) |thread| thread.join();
+    if (async.event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+    }
+    if (async.pipe_read >= 0) std.posix.close(async.pipe_read);
+    if (async.pipe_write >= 0) std.posix.close(async.pipe_write);
+    async.result.deinit();
+    xm.allocator.free(async.shell_command);
+    xm.allocator.free(async.cwd);
+    xm.allocator.destroy(async);
+}
+
+fn asyncShellThreadMain(async: *AsyncShell) void {
+    defer asyncShellNotifyComplete(async);
+
+    var result = job_run_shell_command(async.job, async.shell_command, .{
+        .cwd = async.cwd,
+        .merge_stderr = async.merge_stderr,
+        .capture_output = async.capture_output,
+    });
+    async.result = result;
+    result.output = .{};
+}
+
+fn asyncShellNotifyComplete(async: *AsyncShell) void {
+    if (async.pipe_write < 0) return;
+    _ = std.posix.write(async.pipe_write, &[1]u8{1}) catch {};
+    std.posix.close(async.pipe_write);
+    async.pipe_write = -1;
+}
+
+export fn async_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _events;
+    const async: *AsyncShell = @ptrCast(@alignCast(arg orelse return));
+
+    var discard: [16]u8 = undefined;
+    _ = std.posix.read(fd, &discard) catch {};
+
+    if (async.event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        async.event = null;
+    }
+    if (async.pipe_read >= 0) {
+        std.posix.close(async.pipe_read);
+        async.pipe_read = -1;
+    }
+
+    async.callback(async, async.callback_arg);
+}
 
 pub fn job_register(cmd: []const u8, flags: u32) *Job {
     const job = xm.allocator.create(Job) catch unreachable;

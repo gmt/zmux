@@ -38,23 +38,14 @@ const IfShellState = struct {
     else_command: ?[]u8 = null,
     shell_command: []u8,
     cwd: []u8,
+    async_shell: ?*job_mod.AsyncShell = null,
     job: ?*job_mod.Job = null,
-    pipe_read: std.posix.fd_t = -1,
-    pipe_write: std.posix.fd_t = -1,
-    event: ?*c.libevent.event = null,
-    thread: ?std.Thread = null,
     success: bool = false,
     spawn_failed: bool = false,
 };
 
 fn freeState(state: *IfShellState) void {
-    if (state.thread) |thread| thread.join();
-    if (state.event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-    }
-    if (state.pipe_read >= 0) std.posix.close(state.pipe_read);
-    if (state.pipe_write >= 0) std.posix.close(state.pipe_write);
+    if (state.async_shell) |async_shell| job_mod.async_shell_free(async_shell);
     if (state.job) |job| job_mod.job_free(job);
     xm.allocator.free(state.if_command);
     if (state.else_command) |else_command| xm.allocator.free(else_command);
@@ -154,62 +145,25 @@ fn completeState(state: *IfShellState) void {
     freeState(state);
 }
 
-fn shellThreadMain(state: *IfShellState) void {
-    defer {
-        if (state.pipe_write >= 0) {
-            _ = std.posix.write(state.pipe_write, &[1]u8{1}) catch {};
-            std.posix.close(state.pipe_write);
-            state.pipe_write = -1;
-        }
-    }
-
-    var result = job_mod.job_run_shell_command(state.job, state.shell_command, .{
-        .cwd = state.cwd,
-    });
-    defer result.deinit();
-
-    state.spawn_failed = result.spawn_failed;
-    state.success = !result.spawn_failed and result.retcode == 0;
-}
-
-export fn cmd_if_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {
-    _ = _events;
-    const state: *IfShellState = @ptrCast(@alignCast(arg orelse return));
-
-    var discard: [16]u8 = undefined;
-    _ = std.posix.read(fd, &discard) catch {};
-
-    if (state.event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-        state.event = null;
-    }
-    if (state.pipe_read >= 0) {
-        std.posix.close(state.pipe_read);
-        state.pipe_read = -1;
-    }
-
-    completeState(state);
-}
-
 fn startShellCommand(state: *IfShellState) bool {
-    const base = proc_mod.libevent orelse return false;
-    const pipe_fds = std.posix.pipe() catch return false;
-    state.pipe_read = pipe_fds[0];
-    state.pipe_write = pipe_fds[1];
-
-    state.event = c.libevent.event_new(
-        base,
-        state.pipe_read,
-        @intCast(c.libevent.EV_READ),
-        cmd_if_shell_event_cb,
+    state.async_shell = job_mod.async_shell_start(
+        state.job,
+        state.shell_command,
+        .{
+            .cwd = state.cwd,
+            .capture_output = false,
+        },
+        cmd_if_shell_async_complete,
         state,
     );
-    if (state.event == null) return false;
-    if (c.libevent.event_add(state.event.?, null) != 0) return false;
+    return state.async_shell != null;
+}
 
-    state.thread = std.Thread.spawn(.{}, shellThreadMain, .{state}) catch return false;
-    return true;
+fn cmd_if_shell_async_complete(async_shell: *job_mod.AsyncShell, arg: ?*anyopaque) void {
+    const state: *IfShellState = @ptrCast(@alignCast(arg orelse return));
+    state.spawn_failed = async_shell.result.spawn_failed;
+    state.success = !async_shell.result.spawn_failed and async_shell.result.retcode == 0;
+    completeState(state);
 }
 
 fn exec(self: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {

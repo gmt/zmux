@@ -240,6 +240,47 @@ fn prompt_test_teardown(setup: *@TypeOf(prompt_test_setup("unused"))) void {
     opts.options_free(opts.global_w_options);
 }
 
+fn detached_test_setup(name: []const u8) struct {
+    client: T.Client,
+} {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    opts.global_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.global_s_options = opts.options_create(null);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+
+    var client = T.Client{
+        .name = xm.xstrdup(name),
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty.client = &client;
+
+    return .{ .client = client };
+}
+
+fn detached_test_teardown(setup: *@TypeOf(detached_test_setup("unused"))) void {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const server = @import("server.zig");
+
+    status_prompt.status_prompt_clear(&setup.client);
+    env_mod.environ_free(setup.client.environ);
+    if (setup.client.name) |name| xm.allocator.free(@constCast(name));
+    server.server_reset_message_log();
+    env_mod.environ_free(env_mod.global_environ);
+    opts.options_free(opts.global_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_w_options);
+}
+
 fn send_key(client: *T.Client, key: T.key_code, bytes: []const u8) void {
     const server_fn = @import("server-fn.zig");
 
@@ -370,14 +411,8 @@ test "confirm-before skips the command when the client is already exiting" {
 }
 
 test "confirm-before rejection updates detached client retval" {
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
-
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{ .screen = undefined },
-    };
+    var setup = detached_test_setup("confirm-before-detached-reject");
+    defer detached_test_teardown(&setup);
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{
@@ -388,24 +423,18 @@ test "confirm-before rejection updates detached client retval" {
     defer if (cause) |msg| xm.allocator.free(msg);
 
     var item = cmdq.CmdqItem{
-        .client = &client,
+        .client = &setup.client,
     };
 
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
     var event = T.key_event{ .key = 'n', .len = 1, .data = [_]u8{'n'} ++ std.mem.zeroes([15]u8) };
-    try std.testing.expect(status_prompt.status_prompt_handle_key(&client, &event));
-    try std.testing.expectEqual(@as(i32, 1), client.retval);
+    try std.testing.expect(status_prompt.status_prompt_handle_key(&setup.client, &event));
+    try std.testing.expectEqual(@as(i32, 1), setup.client.retval);
 }
 
 test "confirm-before rejects invalid confirm keys" {
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
-
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{ .screen = undefined },
-    };
+    var setup = detached_test_setup("confirm-before-invalid-key");
+    defer detached_test_teardown(&setup);
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{
@@ -418,7 +447,7 @@ test "confirm-before rejects invalid confirm keys" {
     defer if (cause) |msg| xm.allocator.free(msg);
 
     var item = cmdq.CmdqItem{
-        .client = &client,
+        .client = &setup.client,
     };
 
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));

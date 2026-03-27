@@ -444,7 +444,7 @@ fn keyCodeFromCodepoint(value: u32) ?T.key_code {
     @memcpy(ud.data[0..len], buf[0..len]);
     ud.size = @intCast(len);
     ud.have = @intCast(len);
-    ud.width = if (utf8.utf8_cstrwidth(buf[0..len]) == 2) 2 else 1;
+    ud.width = if (utf8.displayWidth(buf[0..len]) == 2) 2 else 1;
 
     var uc: T.utf8_char = 0;
     if (utf8.utf8_from_data(&ud, &uc) != .done) return null;

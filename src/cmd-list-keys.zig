@@ -224,7 +224,7 @@ fn normalize_key(key: T.key_code) T.key_code {
 fn max_key_width(bindings: []const *T.KeyBinding) u32 {
     var width: u32 = 0;
     for (bindings) |binding| {
-        width = @max(width, utf8.utf8_cstrwidth(key_string.key_string_lookup_key(binding.key, 0)));
+        width = @max(width, utf8.displayWidth(key_string.key_string_lookup_key(binding.key, 0)));
     }
     return width;
 }
@@ -257,7 +257,7 @@ test "list-keys renders binding command and notes views" {
     try std.testing.expectEqualStrings("bind-key -T root F1 display-message \"hello world\"", normal);
 
     const note_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("prefix", false).?, T.KEYC_CTRL | 'b').?;
-    const notes = render_binding_line(note_binding, DEFAULT_NOTES_TEMPLATE, .notes_only, "C-b", utf8.utf8_cstrwidth("C-b")).?;
+    const notes = render_binding_line(note_binding, DEFAULT_NOTES_TEMPLATE, .notes_only, "C-b", utf8.displayWidth("C-b")).?;
     defer xm.allocator.free(notes);
     try std.testing.expectEqualStrings("C-b C-b repeat me", notes);
 }
@@ -296,7 +296,7 @@ test "list-keys command honors table selection single key and prefix override" {
     );
     defer xm.allocator.free(prefix_bindings);
     try std.testing.expectEqual(@as(usize, 1), prefix_bindings.len);
-    const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", utf8.utf8_cstrwidth("C-b")).?;
+    const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", utf8.displayWidth("C-b")).?;
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("ZZ C-b prefix-note", line);
 }

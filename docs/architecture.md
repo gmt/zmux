@@ -160,6 +160,12 @@ tmux-shaped `Utf8Data` payload rather than a new ownership layer, and
 this slice is to name the top of the stack explicitly so later work can build
 under it, not to claim that the lower rows are suddenly sealed.
 
+The consumer-adoption rule for that façade is now explicit too: high-level
+formatting and key-name callers should prefer `displayWidth`, `trimDisplay`,
+and `padDisplay` over reaching back to the legacy `utf8_*` helper names. That
+keeps the consumer-facing stack visible in code while the lower tmux-shaped
+implementation remains in place.
+
 The next checkpoint down is now also landed in code:
 
 - `src/grid.zig` stores `GridCell` payloads through a tmux-shaped direct cell

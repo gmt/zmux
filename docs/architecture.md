@@ -8,6 +8,29 @@ built.
 `/goodz/work/agents/zmux/utf8-midgame-brainstorm.md` is background and
 inspiration only. If it disagrees with this file, this file wins.
 
+## Truth split
+
+There are a few different "sources of truth" in this tranche, and they do not
+all answer the same question:
+
+- `/home/greg/src/tmux` is the behavioral oracle. When we need to know what
+  tmux does today, read the C.
+- this file decides the new stack shape, the allowed seams between layers, and
+  the rule against local UTF-8/rendering hacks.
+- `/goodz/work/agents/zmux/porting-planning.md` is the queue and reduced-seam
+  ledger. If the architecture teaches us something material, record it there.
+- `/goodz/work/agents/zmux/TODO.md` is where ugly-but-ported fallout belongs
+  once a slice has landed honestly.
+- `/goodz/work/agents/zmux/utf8-midgame-brainstorm.md` is noncanonical
+  inspiration only.
+- `/goodz/work/agents/zmux/NOTES.md` is archival context only. Do not let it
+  silently regain authority by accretion.
+
+The split matters because the UTF-8 foundation tranche is not deciding whether
+tmux's behavior exists; tmux already answers that. The tranche is deciding
+where that behavior should live in the Zig stack so later slices stop solving
+Unicode problems locally.
+
 ## Current UTF-8 / display problem
 
 The project already has a substantial tmux-shaped UTF-8 substrate:
@@ -98,6 +121,25 @@ The stack beneath the consumer surface should be understood in this order:
 `utf8proc` may be used only as a backend helper for width/property/convert
 behavior. It must not become the semantic model. The semantic model stays
 tmux-shaped.
+
+### Ownership by layer
+
+The stack above is directional. Consumers may depend downward; they should not
+grow their own Unicode sub-engines sideways.
+
+| layer | owns | must not do |
+|---|---|---|
+| consumer-facing operations | `displayWidth`, trim/pad, prompt/status editing contracts, key/glyph-facing APIs | call width/combine logic ad hoc or stash local rendering exceptions |
+| consumer adapters | `status-prompt`, `input-keys`, future `format-draw`/`status` call sites | invent an alternate glyph model or bypass shared cell semantics |
+| grid and screen-write integration | live write-path combination, padding-cell consequences, cell-aware writes | treat text as raw bytes once a glyph/cell payload exists |
+| glyph / cell payload | `Utf8Data`, `utf8_char`, `GridCell.data`, compact cell storage decisions | embed consumer-specific policy or tty capability decisions |
+| width / combine / decode helpers | byte decode, scalar conversion, width cache, `codepoint-widths`, combine checks | patch over missing grid or consumer behavior locally |
+| tty output policy | ACS-versus-UTF-8 output choice and capability-sensitive emission | redefine glyph width/combine semantics owned by the shared stack |
+
+When a consumer needs a missing semantic, add it at the lowest truthful layer
+that can serve every caller above it, then pull the caller onto that shared
+path. Do not fix the immediate consumer in place and promise to clean it up
+later.
 
 ## Seal matrix
 

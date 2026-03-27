@@ -372,6 +372,7 @@ fn prompt_test_setup(name: []const u8) struct {
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     env_mod.global_environ = env_mod.environ_create();
+    status_prompt.status_prompt_history_clear(null);
 
     const s = sess.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
@@ -401,6 +402,7 @@ fn prompt_test_teardown(setup: *@TypeOf(prompt_test_setup("x"))) void {
     const opts = @import("options.zig");
 
     status_prompt.status_prompt_clear(&setup.client);
+    status_prompt.status_prompt_history_clear(null);
     env_mod.environ_free(setup.client.environ);
     if (sess.session_find(setup.session.name)) |_| sess.session_destroy(setup.session, false, "test");
     win.window_remove_ref(setup.window, "test");

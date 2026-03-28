@@ -364,6 +364,8 @@ pub fn server_start(
 
     if (server_fd < 0) {
         log.log_warn("server socket failed: {s}", .{cause orelse "unknown"});
+    } else {
+        server_update_socket();
     }
 
     // Create the initial client connection (fd from the fork socketpair)

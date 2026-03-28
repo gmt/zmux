@@ -8,6 +8,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const args_mod = @import("arguments.zig");
+const colour_mod = @import("colour.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const server = @import("server.zig");
@@ -25,12 +26,14 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.has('c') or args.has('L') or args.has('R') or args.has('U') or args.has('D'))
         return execPanCommand(args, target_client, item);
 
+    if (args.get('r')) |report|
+        updatePaneReportColours(report);
+
     if (unsupportedFlag(args, 'A', item) or
         unsupportedFlag(args, 'B', item) or
         unsupportedFlag(args, 'f', item) or
         unsupportedFlag(args, 'F', item) or
         unsupportedFlag(args, 'l', item) or
-        unsupportedFlag(args, 'r', item) or
         false)
     {
         return .@"error";
@@ -111,6 +114,60 @@ fn execPanCommand(args: *const args_mod.Arguments, target_client: *T.Client, ite
 
     server_client_mod.server_client_force_redraw(target_client);
     return .normal;
+}
+
+const ReportColourSlot = enum {
+    fg,
+    bg,
+};
+
+const ReportColour = struct {
+    slot: ReportColourSlot,
+    colour: i32,
+};
+
+fn updatePaneReportColours(value: []const u8) void {
+    if (value.len < 3 or value[0] != '%') return;
+
+    const split = std.mem.indexOfScalar(u8, value, ':') orelse return;
+    if (split <= 1 or split + 1 > value.len) return;
+
+    const pane_id = std.fmt.parseInt(u32, value[1..split], 10) catch return;
+    const wp = window_mod.window_pane_find_by_id(pane_id) orelse return;
+    const report = parseOscReportColour(value[split + 1 ..]) orelse return;
+
+    switch (report.slot) {
+        .fg => wp.control_fg = report.colour,
+        .bg => wp.control_bg = report.colour,
+    }
+}
+
+fn parseOscReportColour(report: []const u8) ?ReportColour {
+    if (report.len < 5) return null;
+    if (report[0] != '\x1b' or report[1] != ']' or report[2] != '1') return null;
+
+    const slot: ReportColourSlot = switch (report[3]) {
+        '0' => .fg,
+        '1' => .bg,
+        else => return null,
+    };
+    if (report[4] != ';') return null;
+
+    const payload_end = findOscPayloadEnd(report[5..]) orelse return null;
+    const payload = report[5 .. 5 + payload_end];
+    if (payload.len == 0) return null;
+
+    const parsed = colour_mod.colour_parseX11(payload);
+    if (parsed == -1) return null;
+    return .{ .slot = slot, .colour = parsed };
+}
+
+fn findOscPayloadEnd(report: []const u8) ?usize {
+    for (report, 0..) |ch, idx| {
+        if (ch == '\x07') return idx;
+        if (ch == '\\' and idx > 0 and report[idx - 1] == '\x1b') return idx - 1;
+    }
+    return null;
 }
 
 fn unsupportedFlag(args: *const args_mod.Arguments, flag: u8, item: *cmdq.CmdqItem) bool {
@@ -223,7 +280,7 @@ test "refresh-client redraws the target client instead of the queue client" {
     tty_mod.tty_set_size(&target_client.tty, 90, 30, 0, 0);
 
     var cause: ?[]u8 = null;
-    const refresh = try cmd_mod.cmd_parse_one(&.{ "refresh-client" }, null, &cause);
+    const refresh = try cmd_mod.cmd_parse_one(&.{"refresh-client"}, null, &cause);
     defer cmd_mod.cmd_free(refresh);
 
     var item = cmdq.CmdqItem{
@@ -331,6 +388,137 @@ test "refresh-client rejects unsupported panes and non-control size requests" {
     defer cmd_mod.cmd_free(resize);
     var resize_item = cmdq.CmdqItem{ .target_client = &target_client };
     try std.testing.expectEqual(T.CmdRetval.@"error", exec(resize, &resize_item));
+}
+
+test "refresh-client -r stores OSC report colours on the target pane" {
+    const opts = @import("options.zig");
+    const xm = @import("xmalloc.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_mod.window_init_globals(xm.allocator);
+
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        window_mod.window_destroy_all_panes(window);
+        _ = window_mod.windows.remove(window.id);
+        opts.options_free(window.options);
+        xm.allocator.free(window.name);
+        xm.allocator.destroy(window);
+    }
+    const wp = window_mod.window_add_pane(window, null, 80, 24);
+
+    var queue_env = T.Environ.init(std.testing.allocator);
+    defer queue_env.deinit();
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var queue_client = T.Client{
+        .name = "queue",
+        .environ = &queue_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    queue_client.tty.client = &queue_client;
+
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target_client.tty.client = &target_client;
+
+    var fg_buf: [128]u8 = undefined;
+    const fg_report = try std.fmt.bufPrint(&fg_buf, "%{d}:\x1b]10;rgb:01/02/03\x07", .{wp.id});
+    var cause: ?[]u8 = null;
+    const fg_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-r", fg_report }, null, &cause);
+    defer cmd_mod.cmd_free(fg_cmd);
+
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(fg_cmd, &item));
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0x01, 0x02, 0x03), wp.control_fg);
+    try std.testing.expectEqual(@as(i32, -1), wp.control_bg);
+    try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
+
+    target_client.flags = 0;
+    var bg_buf: [128]u8 = undefined;
+    const bg_report = try std.fmt.bufPrint(&bg_buf, "%{d}:\x1b]11;rgb:0a/0b/0c\x1b\\", .{wp.id});
+    const bg_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-r", bg_report }, null, &cause);
+    defer cmd_mod.cmd_free(bg_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(bg_cmd, &item));
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0x0a, 0x0b, 0x0c), wp.control_bg);
+    try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
+}
+
+test "refresh-client -r ignores malformed reports and missing panes" {
+    const opts = @import("options.zig");
+    const xm = @import("xmalloc.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_mod.window_init_globals(xm.allocator);
+
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        window_mod.window_destroy_all_panes(window);
+        _ = window_mod.windows.remove(window.id);
+        opts.options_free(window.options);
+        xm.allocator.free(window.name);
+        xm.allocator.destroy(window);
+    }
+    const wp = window_mod.window_add_pane(window, null, 80, 24);
+    wp.control_fg = colour_mod.colour_join_rgb(0xaa, 0xbb, 0xcc);
+    wp.control_bg = colour_mod.colour_join_rgb(0x11, 0x22, 0x33);
+
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target_client.tty.client = &target_client;
+
+    var bad_buf: [128]u8 = undefined;
+    const bad_report = try std.fmt.bufPrint(&bad_buf, "%{d}:\x1b]10;not-a-colour\x07", .{wp.id});
+    var cause: ?[]u8 = null;
+    const bad_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-r", bad_report }, null, &cause);
+    defer cmd_mod.cmd_free(bad_cmd);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(bad_cmd, &item));
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0xaa, 0xbb, 0xcc), wp.control_fg);
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0x11, 0x22, 0x33), wp.control_bg);
+
+    target_client.flags = 0;
+    var missing_buf: [128]u8 = undefined;
+    const missing_report = try std.fmt.bufPrint(&missing_buf, "%99999:\x1b]11;rgb:de/ad/be\x07", .{});
+    const missing_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-r", missing_report }, null, &cause);
+    defer cmd_mod.cmd_free(missing_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(missing_cmd, &item));
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0xaa, 0xbb, 0xcc), wp.control_fg);
+    try std.testing.expectEqual(colour_mod.colour_join_rgb(0x11, 0x22, 0x33), wp.control_bg);
 }
 
 test "refresh-client pan commands update and clear the target client viewport" {

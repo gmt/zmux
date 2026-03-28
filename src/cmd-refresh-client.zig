@@ -26,6 +26,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.has('c') or args.has('L') or args.has('R') or args.has('U') or args.has('D'))
         return execPanCommand(args, target_client, item);
 
+    if (args.has('l')) {
+        tty_mod.tty_clipboard_query(&target_client.tty);
+        return .normal;
+    }
+
     if (args.get('r')) |report|
         updatePaneReportColours(report);
 
@@ -33,7 +38,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         unsupportedFlag(args, 'B', item) or
         unsupportedFlag(args, 'f', item) or
         unsupportedFlag(args, 'F', item) or
-        unsupportedFlag(args, 'l', item) or
         false)
     {
         return .@"error";
@@ -366,6 +370,75 @@ test "refresh-client -C resizes only control clients" {
     try std.testing.expect(target_client.flags & T.CLIENT_SIZECHANGED != 0);
 }
 
+test "refresh-client -l emits a clipboard query for the target tty" {
+    const c = @import("c.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const xm = @import("xmalloc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "refresh-client-clipboard-query-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var caps = [_][]u8{
+        @constCast("Ms=\x1b]52;%p1%s;%p2%s\x07"),
+    };
+    var target_client = T.Client{
+        .name = "plain",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = caps[0..],
+    };
+    tty_mod.tty_init(&target_client.tty, &target_client);
+    tty_mod.tty_start_tty(&target_client.tty);
+    target_client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = target_client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var cause: ?[]u8 = null;
+    const query = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-l" }, null, &cause);
+    defer cmd_mod.cmd_free(query);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(query, &item));
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+    try std.testing.expectEqualStrings("\x1b]52;;?\x07", payload[@sizeOf(i32)..]);
+}
+
 test "refresh-client rejects unsupported panes and non-control size requests" {
     var target_env = T.Environ.init(std.testing.allocator);
     defer target_env.deinit();
@@ -379,11 +452,6 @@ test "refresh-client rejects unsupported panes and non-control size requests" {
     target_client.tty.client = &target_client;
 
     var cause: ?[]u8 = null;
-    const unsupported = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-l" }, null, &cause);
-    defer cmd_mod.cmd_free(unsupported);
-    var unsupported_item = cmdq.CmdqItem{ .target_client = &target_client };
-    try std.testing.expectEqual(T.CmdRetval.@"error", exec(unsupported, &unsupported_item));
-
     const resize = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-C", "120x40" }, null, &cause);
     defer cmd_mod.cmd_free(resize);
     var resize_item = cmdq.CmdqItem{ .target_client = &target_client };
@@ -599,3 +667,5 @@ test "refresh-client pan commands update and clear the target client viewport" {
     try std.testing.expectEqual(@as(u32, 0), target_client.pan_oy);
     try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
 }
+
+fn test_peer_dispatch(_: ?*@import("c.zig").imsg.imsg, _: ?*anyopaque) callconv(.c) void {}

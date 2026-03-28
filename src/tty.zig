@@ -20,8 +20,10 @@
 //! tty.zig – reduced server-side tty lifecycle and metadata helpers.
 
 const std = @import("std");
+const c = @import("c.zig");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
+const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
@@ -52,6 +54,7 @@ pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
 
 pub fn tty_close(tty: *T.Tty) void {
     tty_stop_tty(tty);
+    freeClipboardTimer(tty);
     tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
 }
 
@@ -62,6 +65,7 @@ pub fn tty_start_tty(tty: *T.Tty) void {
 }
 
 pub fn tty_stop_tty(tty: *T.Tty) void {
+    cancelClipboardQuery(tty);
     tty.flags &= ~@as(i32, @intCast(T.TTY_STARTED | T.TTY_BLOCK));
 }
 
@@ -87,6 +91,18 @@ pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     if (sequence == null) return;
     defer xm.allocator.free(sequence.?);
     tty_write(tty, sequence.?);
+}
+
+pub fn tty_clipboard_query(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) != 0) return;
+
+    const ms = tty_term.stringCapability(tty, "Ms") orelse return;
+    const sequence = formatClipboardCapability(ms, "", "?") orelse return;
+    defer xm.allocator.free(sequence);
+
+    tty_write(tty, sequence);
+    armClipboardTimer(tty);
 }
 
 pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !void {
@@ -155,6 +171,75 @@ fn appendCapabilityToggle(
     const fallback = if (enabled) fallback_enable else fallback_disable;
     const sequence = tty_term.stringCapability(tty, cap_name) orelse fallback;
     try out.appendSlice(xm.allocator, sequence);
+}
+
+fn formatClipboardCapability(template: []const u8, clip: []const u8, value: []const u8) ?[]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    var idx: usize = 0;
+    while (idx < template.len) {
+        if (std.mem.startsWith(u8, template[idx..], "%p1%s")) {
+            out.appendSlice(xm.allocator, clip) catch return null;
+            idx += "%p1%s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, template[idx..], "%p2%s")) {
+            out.appendSlice(xm.allocator, value) catch return null;
+            idx += "%p2%s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, template[idx..], "%%")) {
+            out.append(xm.allocator, '%') catch return null;
+            idx += 2;
+            continue;
+        }
+        if (template[idx] == '%') return null;
+
+        out.append(xm.allocator, template[idx]) catch return null;
+        idx += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch null;
+}
+
+fn armClipboardTimer(tty: *T.Tty) void {
+    const base = proc_mod.libevent orelse return;
+
+    if (tty.clipboard_timer == null) {
+        tty.clipboard_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            tty_clipboard_query_timeout_cb,
+            tty,
+        );
+    }
+    if (tty.clipboard_timer) |ev| {
+        tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
+        var tv = std.posix.timeval{ .sec = 5, .usec = 0 };
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+fn cancelClipboardQuery(tty: *T.Tty) void {
+    if (tty.clipboard_timer) |ev| _ = c.libevent.event_del(ev);
+    tty.flags &= ~@as(i32, @intCast(T.TTY_OSC52QUERY));
+}
+
+fn freeClipboardTimer(tty: *T.Tty) void {
+    cancelClipboardQuery(tty);
+    if (tty.clipboard_timer) |ev| {
+        c.libevent.event_free(ev);
+        tty.clipboard_timer = null;
+    }
+}
+
+export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
+    cancelClipboardQuery(tty);
 }
 
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
@@ -319,3 +404,62 @@ test "tty_set_title honours the reduced title capability seam" {
 
     tty_set_title(&cl.tty, "suppressed");
 }
+
+test "tty_clipboard_query emits the recorded Ms capability query" {
+    const proc_mod_local = @import("proc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "tty-clipboard-query-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var caps = [_][]u8{
+        @constCast("Ms=\x1b]52;c;!\x07\x1b]52;c;%p2%s\x07"),
+    };
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = caps[0..],
+    };
+    tty_init(&cl.tty, &cl);
+    tty_start_tty(&cl.tty);
+    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    tty_clipboard_query(&cl.tty);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(@import("zmux-protocol.zig").MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+    try std.testing.expectEqualStrings("\x1b]52;c;!\x07\x1b]52;c;?\x07", payload[@sizeOf(i32)..]);
+}
+
+fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}

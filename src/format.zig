@@ -4418,6 +4418,17 @@ test "format_expand covers key option-table defaults" {
     try std.testing.expect(std.mem.indexOf(u8, status_format, "#{") == null);
     try std.testing.expect(std.mem.indexOf(u8, status_format, "[defaults]") != null);
 
+    const status_format_panes = format_require_complete(xm.allocator, opts.options_get_array_item(s.options, "status-format", 1).?, &ctx).?;
+    defer xm.allocator.free(status_format_panes);
+    try std.testing.expect(std.mem.indexOf(u8, status_format_panes, "#{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_format_panes, "0[80x24]*") != null);
+
+    const status_format_sessions = format_require_complete(xm.allocator, opts.options_get_array_item(s.options, "status-format", 2).?, &ctx).?;
+    defer xm.allocator.free(status_format_sessions);
+    try std.testing.expect(std.mem.indexOf(u8, status_format_sessions, "#{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_format_sessions, "defaults") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_format_sessions, "*") != null);
+
     const titles = format_require_complete(xm.allocator, "#{T:set-titles-string}", &ctx).?;
     defer xm.allocator.free(titles);
     try std.testing.expect(std.mem.indexOf(u8, titles, "#{") == null);

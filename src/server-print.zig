@@ -133,7 +133,7 @@ pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
         }
     }
     screen_mod.screen_leave_alternate(wp, true);
-    window_mode_runtime.noteModeChange(wp);
+    window_mode_runtime.noteModeRedraw(wp);
 }
 
 fn ensure_view_mode(wp: *T.WindowPane) bool {

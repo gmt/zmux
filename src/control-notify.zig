@@ -67,6 +67,15 @@ pub fn control_notify_session_closed(_s: *T.Session) void {
     for (registry.clients.items) |cl| write_control(cl, "%sessions-changed", .{});
 }
 
+pub fn control_notify_pane_mode_changed(wp: *T.WindowPane) void {
+    for (registry.clients.items) |cl| write_control(cl, "%pane-mode-changed %{d}", .{wp.id});
+}
+
+pub fn control_notify_session_window_changed(s: *T.Session) void {
+    const curw = s.curw orelse return;
+    for (registry.clients.items) |cl| write_control(cl, "%session-window-changed ${d} @{d}", .{ s.id, curw.window.id });
+}
+
 pub fn control_notify_session_renamed(s: *T.Session) void {
     for (registry.clients.items) |cl| write_control(cl, "%session-renamed ${d} {s}", .{ s.id, s.name });
 }

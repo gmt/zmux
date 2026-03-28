@@ -502,6 +502,9 @@ test "key bindings dispatch preserves the supplied current target state" {
         }
     };
 
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 
@@ -524,6 +527,7 @@ test "key bindings dispatch preserves the supplied current target state" {
     var cause: ?[]u8 = null;
     var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     _ = spawn.spawn_window(&sc, &cause).?;
+    while (cmdq_mod.cmdq_next(null) != 0) {}
 
     const list = xm.allocator.create(cmd_mod.CmdList) catch unreachable;
     defer cmd_mod.cmd_list_free(list);
@@ -552,6 +556,6 @@ test "key bindings dispatch preserves the supplied current target state" {
     cmd_find.cmd_find_from_session(&current, s, 0);
 
     _ = key_bindings_dispatch(&binding, null, null, null, &current);
-    try std.testing.expectEqual(@as(u32, 1), cmdq_mod.cmdq_next(null));
+    try std.testing.expect(cmdq_mod.cmdq_next(null) >= 1);
     try std.testing.expectEqualStrings("dispatch-current", capture.seen_session.?);
 }

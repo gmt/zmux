@@ -30,6 +30,7 @@ const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const server = @import("server.zig");
 const server_client = @import("server-client.zig");
 const sort_mod = @import("sort.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -67,6 +68,7 @@ const ClientModeData = struct {
     current: usize = 0,
     offset: usize = 0,
     max_key_label_width: usize = 0,
+    zoomed: i8 = -1,
 };
 
 pub const window_client_mode = T.WindowMode{
@@ -82,6 +84,7 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
     if (window.window_pane_mode(wp)) |wme| {
         if (wme.mode == &window_client_mode) {
             refreshFromArgs(wme, args);
+            maybeZoom(wme.wp, modeData(wme), args);
             rebuildAndDraw(wme);
             return wme;
         }
@@ -100,6 +103,7 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
             .reversed = args.has('r'),
         },
     };
+    maybeZoom(wp, data, args);
 
     const wme = window_mode_runtime.pushMode(wp, &window_client_mode, @ptrCast(data), null);
     rebuildAndDraw(wme);
@@ -237,6 +241,10 @@ fn clientModeClose(wme: *T.WindowModeEntry) void {
     xm.allocator.free(data.key_format);
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
+
+    if (data.zoomed == 0 and window.window_unzoom(wme.wp.window))
+        server.server_redraw_window(wme.wp.window);
+
     xm.allocator.destroy(data);
 
     if (wme.wp.modes.items.len <= 1) {
@@ -268,6 +276,14 @@ fn refreshFromArgs(wme: *T.WindowModeEntry, args: *const args_mod.Arguments) voi
 
     data.sort_crit.order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name;
     data.sort_crit.reversed = args.has('r');
+}
+
+fn maybeZoom(wp: *T.WindowPane, data: *ClientModeData, args: *const args_mod.Arguments) void {
+    if (!args.has('Z') or data.zoomed != -1) return;
+
+    data.zoomed = if (wp.window.flags & T.WINDOW_ZOOMED != 0) 1 else 0;
+    if (data.zoomed == 0 and window.window_zoom(wp))
+        server.server_redraw_window(wp.window);
 }
 
 fn rebuildAndDraw(wme: *T.WindowModeEntry) void {
@@ -852,4 +868,31 @@ test "window-client custom key format chooses the matching client" {
     try std.testing.expect(chosen.session == null);
     try std.testing.expect(first.session != null or second.session != null);
     try std.testing.expect(window.window_pane_mode(setup.pane) == null);
+}
+
+test "window-client -Z zooms for the mode lifetime" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-zoom");
+    defer if (sess.session_find("window-client-zoom") != null) sess.session_destroy(setup.session, false, "test");
+
+    const extra = window.window_add_pane(setup.pane.window, null, 80, 24);
+    setup.pane.window.active = extra;
+
+    var target = makeClient(setup.session, "target", "/dev/pts/340");
+    defer freeClient(&target);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{"-Z"}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    _ = enterMode(setup.pane, &args);
+    try std.testing.expect(setup.pane.window.flags & T.WINDOW_ZOOMED != 0);
+
+    try std.testing.expect(window_mode_runtime.resetMode(setup.pane));
+    try std.testing.expectEqual(@as(u32, 0), setup.pane.window.flags & T.WINDOW_ZOOMED);
 }

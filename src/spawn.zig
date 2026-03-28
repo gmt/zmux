@@ -249,6 +249,9 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     wp.shell = xm.xstrdup(shell);
     wp.cwd = xm.xstrdup(cwd);
 
+    const child_env = build_child_environment(sc, wp, cl, shell);
+    defer env_mod.environ_free(child_env);
+
     // Open PTY
     var master: i32 = -1;
     var slave: i32 = -1;
@@ -274,9 +277,11 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         if (slave > 2) std.posix.close(@intCast(slave));
 
         // Change directory
-        _ = std.c.chdir(alloc.dupeZ(u8, cwd) catch "/");
+        const cwd_z = alloc.dupeZ(u8, cwd) catch unreachable;
+        if (std.c.chdir(cwd_z) == 0)
+            env_mod.environ_set(child_env, "PWD", 0, cwd);
 
-        if (sc.environ) |env| env_mod.environ_push(env);
+        env_mod.environ_push(child_env);
 
         const shell_z = alloc.dupeZ(u8, shell) catch "/bin/sh";
         _ = setenv("SHELL", shell_z, 1);
@@ -310,6 +315,39 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     set_blocking(wp.fd, false);
     pane_io.pane_io_start(wp);
     log.log_debug("new pane %%%{d} pid={d}", .{ wp.id, pid });
+}
+
+fn build_child_environment(
+    sc: *const T.SpawnContext,
+    wp: *T.WindowPane,
+    cl: ?*T.Client,
+    shell: []const u8,
+) *T.Environ {
+    const child = env_mod.environ_create();
+    env_mod.environ_copy(env_mod.global_environ, child);
+    if (sc.s) |session|
+        env_mod.environ_copy(session.environ, child);
+    if (sc.environ) |overlay|
+        env_mod.environ_copy(overlay, child);
+
+    if (cl) |client| {
+        if (client.session == null) {
+            if (env_mod.environ_find(client.environ, "PATH")) |entry| {
+                if (entry.value) |value|
+                    env_mod.environ_set(child, "PATH", 0, value)
+                else
+                    env_mod.environ_clear(child, "PATH");
+            }
+        }
+    }
+    if (env_mod.environ_find(child, "PATH") == null)
+        env_mod.environ_set(child, "PATH", 0, "/usr/bin:/bin");
+
+    var pane_buf: [32]u8 = undefined;
+    const pane_id = std.fmt.bufPrint(&pane_buf, "%{d}", .{wp.id}) catch unreachable;
+    env_mod.environ_set(child, "TMUX_PANE", 0, pane_id);
+    env_mod.environ_set(child, "SHELL", 0, shell);
+    return child;
 }
 
 fn init_empty_pane(wp: *T.WindowPane) void {

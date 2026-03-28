@@ -34,6 +34,7 @@ const cmd_find = @import("cmd-find.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const input_keys = @import("input-keys.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
+const popup = @import("popup.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -214,6 +215,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
     sess.session_update_activity(s, now);
+
+    if (popup.overlay_active(cl)) {
+        if (popup.handle_key(cl, event))
+            return true;
+    }
 
     if (cmd_display_panes.overlay_active(cl)) {
         if (cmd_display_panes.handle_key(cl, event))

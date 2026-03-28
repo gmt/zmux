@@ -97,11 +97,12 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
     const wp = win.window_add_pane(w, null, sx, sy);
     w.active = wp;
 
-    // Always exec the pane shell (even for detached sessions)
     if (sc.flags & T.SPAWN_EMPTY == 0) {
         spawn_pane_exec(wp, sc) catch |err| {
             log.log_warn("spawn_pane_exec failed: {}", .{err});
         };
+    } else {
+        init_empty_pane(wp);
     }
 
     if (w.name.len == 0) {
@@ -130,12 +131,14 @@ pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
     const sx = w.sx;
     const sy = w.sy;
 
-    const wp = win.window_add_pane(w, sc.wp0, sx, sy);
+    const wp = win.window_add_pane_with_flags(w, sc.wp0, sx, sy, sc.flags);
 
     if (sc.flags & T.SPAWN_EMPTY == 0) {
         spawn_pane_exec(wp, sc) catch |err| {
             log.log_warn("spawn_pane_exec failed: {}", .{err});
         };
+    } else {
+        init_empty_pane(wp);
     }
 
     return wp;
@@ -181,6 +184,10 @@ pub fn respawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
 fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     const s = sc.s;
     const alloc = xm.allocator;
+
+    wp.flags &= ~@as(u32, T.PANE_EMPTY);
+    wp.base.mode |= T.MODE_CURSOR;
+    wp.base.mode &= ~@as(i32, T.MODE_CRLF);
 
     const shell = blk: {
         if (sc.flags & T.SPAWN_RESPAWN != 0 and sc.argv == null) {
@@ -272,6 +279,12 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     set_blocking(wp.fd, false);
     pane_io.pane_io_start(wp);
     log.log_debug("new pane %%%{d} pid={d}", .{ wp.id, pid });
+}
+
+fn init_empty_pane(wp: *T.WindowPane) void {
+    wp.flags |= T.PANE_EMPTY;
+    wp.base.mode &= ~@as(i32, T.MODE_CURSOR);
+    wp.base.mode |= T.MODE_CRLF;
 }
 
 fn set_blocking(fd: i32, state: bool) void {

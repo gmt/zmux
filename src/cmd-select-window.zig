@@ -17,6 +17,7 @@ const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const format_mod = @import("format.zig");
 const client_registry = @import("client-registry.zig");
+const resize_mod = @import("resize.zig");
 
 const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
@@ -45,15 +46,35 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     var target: T.CmdFindState = .{};
-    if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, T.CMD_FIND_CANFAIL) != 0)
+    if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, T.CMD_FIND_CANFAIL | T.CMD_FIND_WINDOW_INDEX) != 0)
         return .@"error";
     const s = target.s orelse return .@"error";
+
+    if (args.has('S')) {
+        if (args.get('n')) |raw_name| {
+            if (target.idx == -1) {
+                const existing = find_reusable_window(item, s, raw_name) catch return .@"error";
+                if (existing) |wl| {
+                    if (args.has('d')) return .normal;
+
+                    _ = sess.session_set_current(s, wl);
+                    server_fn.server_redraw_session(s);
+                    if (cmdq.cmdq_get_client(item)) |cl| {
+                        if (cl.session != null)
+                            wl.window.latest = @ptrCast(cl);
+                    }
+                    resize_mod.recalculate_sizes();
+                    return .normal;
+                }
+            }
+        }
+    }
 
     var cause: ?[]u8 = null;
     var sc = T.SpawnContext{
         .item = @ptrCast(item),
         .s = s,
-        .idx = -1,
+        .idx = target.idx,
         .cwd = args.get('c'),
         .name = args.get('n'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
@@ -105,6 +126,24 @@ fn build_overlay_environment(args: *const @import("arguments.zig").Arguments, it
         }
     }
     return env;
+}
+
+fn find_reusable_window(item: *cmdq.CmdqItem, s: *T.Session, raw_name: []const u8) error{AmbiguousName}!?*T.Winlink {
+    const expanded = format_mod.format_single(item, raw_name, cmdq.cmdq_get_client(item), s, null, null);
+    defer xm.allocator.free(expanded);
+
+    var matched: ?*T.Winlink = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |match_entry| {
+        const wl = match_entry.*;
+        if (!std.mem.eql(u8, wl.window.name, expanded)) continue;
+        if (matched != null) {
+            cmdq.cmdq_error(item, "multiple windows named {s}", .{raw_name});
+            return error.AmbiguousName;
+        }
+        matched = wl;
+    }
+    return matched;
 }
 
 fn argv_tail(args: *const @import("arguments.zig").Arguments, start: usize) ?[][]u8 {
@@ -229,4 +268,102 @@ test "new-window synchronizes grouped peers and uses shared group status-only in
     try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWSTATUS != 0);
     try std.testing.expect(leader_client.flags & T.CLIENT_REDRAWWINDOW == 0);
     try std.testing.expect(peer_client.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
+test "new-window -S -n reuses one matching existing window" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-reuse", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-reuse") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const current_wl = spawn_mod.spawn_window(&first_sc, &cause).?;
+    win_mod.window_set_name(current_wl.window, "current");
+
+    var second_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const existing_wl = spawn_mod.spawn_window(&second_sc, &cause).?;
+    win_mod.window_set_name(existing_wl.window, "shared");
+    session.curw = current_wl;
+
+    var client = T.Client{
+        .name = "new-window-reuse-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        if (client.message_string) |message| xm.allocator.free(message);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty.client = &client;
+    client_registry.add(&client);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-S", "-n", "shared" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec_neww(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 2), session.windows.count());
+    try std.testing.expectEqual(existing_wl, session.curw.?);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&client)), existing_wl.window.latest);
+}
+
+test "new-window -S -n errors when multiple windows share the name" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-reuse-ambiguous", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-reuse-ambiguous") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var current_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const current_wl = spawn_mod.spawn_window(&current_sc, &cause).?;
+    win_mod.window_set_name(current_wl.window, "current");
+
+    var first_match_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first_match = spawn_mod.spawn_window(&first_match_sc, &cause).?;
+    win_mod.window_set_name(first_match.window, "dup");
+
+    var second_match_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second_match = spawn_mod.spawn_window(&second_match_sc, &cause).?;
+    win_mod.window_set_name(second_match.window, "dup");
+    session.curw = current_wl;
+
+    var client = T.Client{
+        .name = "new-window-reuse-ambiguous-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        if (client.message_string) |message| xm.allocator.free(message);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty.client = &client;
+    client_registry.add(&client);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-S", "-n", "dup" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", exec_neww(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 3), session.windows.count());
+    try std.testing.expectEqual(current_wl, session.curw.?);
+    try std.testing.expectEqualStrings("Multiple windows named dup", client.message_string.?);
 }

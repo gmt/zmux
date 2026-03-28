@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const grid = @import("grid.zig");
 const opts = @import("options.zig");
+const screen_mod = @import("screen.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
@@ -179,7 +180,7 @@ pub fn backspace(ctx: *T.ScreenWriteCtx) void {
 
 pub fn tab(ctx: *T.ScreenWriteCtx) void {
     const gd = ctx.s.grid;
-    const next_tab = (((ctx.s.cx / 8) + 1) * 8);
+    const next_tab = screen_mod.screen_next_tabstop(ctx.s);
     while (ctx.s.cx < next_tab and ctx.s.cx < gd.sx) putc(ctx, ' ');
 }
 

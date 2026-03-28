@@ -168,13 +168,27 @@ const resolver_table = [_]Resolver{
     .{ .name = "mouse_y", .func = resolve_mouse_y },
 
     .{ .name = "pane_active", .func = resolve_pane_active },
+    .{ .name = "pane_at_bottom", .func = resolve_pane_at_bottom },
+    .{ .name = "pane_at_left", .func = resolve_pane_at_left },
+    .{ .name = "pane_at_right", .func = resolve_pane_at_right },
+    .{ .name = "pane_at_top", .func = resolve_pane_at_top },
+    .{ .name = "pane_bg", .func = resolve_pane_bg },
+    .{ .name = "pane_bottom", .func = resolve_pane_bottom },
     .{ .name = "pane_current_command", .func = resolve_pane_current_command },
+    .{ .name = "pane_current_path", .func = resolve_pane_current_path },
     .{ .name = "pane_dead", .func = resolve_pane_dead },
+    .{ .name = "pane_dead_signal", .func = resolve_pane_dead_signal },
     .{ .name = "pane_dead_status", .func = resolve_pane_dead_status },
+    .{ .name = "pane_dead_time", .func = resolve_pane_dead_time },
+    .{ .name = "pane_fg", .func = resolve_pane_fg },
     .{ .name = "pane_height", .func = resolve_pane_height },
     .{ .name = "pane_id", .func = resolve_pane_id },
     .{ .name = "pane_in_mode", .func = resolve_pane_in_mode },
     .{ .name = "pane_index", .func = resolve_pane_index },
+    .{ .name = "pane_input_off", .func = resolve_pane_input_off },
+    .{ .name = "pane_key_mode", .func = resolve_pane_key_mode },
+    .{ .name = "pane_last", .func = resolve_pane_last },
+    .{ .name = "pane_left", .func = resolve_pane_left },
     .{ .name = "pane_marked", .func = resolve_pane_marked },
     .{ .name = "pane_marked_set", .func = resolve_pane_marked_set },
     .{ .name = "pane_mode", .func = resolve_pane_mode },
@@ -182,9 +196,15 @@ const resolver_table = [_]Resolver{
     .{ .name = "pane_pipe", .func = resolve_pane_pipe },
     .{ .name = "pane_pipe_pid", .func = resolve_pane_pipe_pid },
     .{ .name = "pane_path", .func = resolve_pane_path },
+    .{ .name = "pane_right", .func = resolve_pane_right },
+    .{ .name = "pane_search_string", .func = resolve_pane_search_string },
     .{ .name = "pane_start_command", .func = resolve_pane_start_command },
     .{ .name = "pane_start_path", .func = resolve_pane_start_path },
+    .{ .name = "pane_synchronized", .func = resolve_pane_synchronized },
+    .{ .name = "pane_tabs", .func = resolve_pane_tabs },
+    .{ .name = "pane_top", .func = resolve_pane_top },
     .{ .name = "pane_tty", .func = resolve_pane_tty },
+    .{ .name = "pane_unseen_changes", .func = resolve_pane_unseen_changes },
     .{ .name = "pane_title", .func = resolve_pane_title },
     .{ .name = "pane_width", .func = resolve_pane_width },
 
@@ -2632,6 +2652,75 @@ fn resolve_pane_id(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return xm.xasprintf("%{d}", .{wp.id});
 }
 
+fn resolve_pane_at_top(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const status = opts.options_get_number(wp.window.options, "pane-border-status");
+    const value: []const u8 = if (status == T.PANE_STATUS_TOP) blk: {
+        break :blk if (wp.yoff == 1) "1" else "0";
+    } else blk: {
+        break :blk if (wp.yoff == 0) "1" else "0";
+    };
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_at_bottom(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const w = wp.window;
+    const status = opts.options_get_number(w.options, "pane-border-status");
+    const value: []const u8 = if (status == T.PANE_STATUS_BOTTOM) blk: {
+        break :blk if (wp.yoff + wp.sy == w.sy -| 1) "1" else "0";
+    } else blk: {
+        break :blk if (wp.yoff + wp.sy == w.sy) "1" else "0";
+    };
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_at_left(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if (wp.xoff == 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_pane_at_right(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if (wp.xoff + wp.sx == wp.window.sx) "1" else "0") catch unreachable;
+}
+
+fn resolve_pane_bottom(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    _ = alloc;
+    return xm.xasprintf("{d}", .{wp.yoff + wp.sy -| 1});
+}
+
+fn resolve_pane_top(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    _ = alloc;
+    return xm.xasprintf("{d}", .{wp.yoff});
+}
+
+fn resolve_pane_left(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    _ = alloc;
+    return xm.xasprintf("{d}", .{wp.xoff});
+}
+
+fn resolve_pane_right(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    _ = alloc;
+    return xm.xasprintf("{d}", .{wp.xoff + wp.sx -| 1});
+}
+
+fn resolve_pane_fg(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const colour_value = pane_colour(wp, .fg);
+    return alloc.dupe(u8, colour.colour_tostring(colour_value)) catch unreachable;
+}
+
+fn resolve_pane_bg(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const colour_value = pane_colour(wp, .bg);
+    return alloc.dupe(u8, colour.colour_tostring(colour_value)) catch unreachable;
+}
+
 fn resolve_pane_pid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     _ = alloc;
@@ -2652,9 +2741,12 @@ fn resolve_pane_pipe_pid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
 
 fn resolve_pane_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
-    if (wp.screen.path) |path| return alloc.dupe(u8, path) catch unreachable;
-    if (wp.cwd) |cwd| return alloc.dupe(u8, cwd) catch unreachable;
-    return alloc.dupe(u8, "") catch unreachable;
+    return pane_path_text(alloc, wp, false);
+}
+
+fn resolve_pane_current_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return pane_path_text(alloc, wp, true);
 }
 
 fn resolve_pane_start_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2667,6 +2759,56 @@ fn resolve_pane_start_command(alloc: std.mem.Allocator, ctx: *const FormatContex
 fn resolve_pane_start_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     return alloc.dupe(u8, wp.cwd orelse "") catch unreachable;
+}
+
+fn resolve_pane_input_off(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if (wp.flags & T.PANE_INPUTOFF != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_pane_unseen_changes(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if (wp.flags & T.PANE_UNSEENCHANGES != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_pane_key_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const mode = screen_mod.screen_current(wp).mode & T.EXTENDED_KEY_MODES;
+    const value: []const u8 = switch (mode) {
+        T.MODE_KEYS_EXTENDED => "Ext 1",
+        T.MODE_KEYS_EXTENDED_2 => "Ext 2",
+        else => "VT10x",
+    };
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_last(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const value: []const u8 = if (window_mod.window_get_last_pane(wp.window) == wp) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_search_string(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, "") catch unreachable;
+}
+
+fn resolve_pane_synchronized(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if (opts.options_get_number(wp.options, "synchronize-panes") != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_pane_tabs(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const tabs = wp.base.tabs orelse return alloc.dupe(u8, "") catch unreachable;
+
+    var out: std.ArrayList(u8) = .{};
+    for (0..wp.base.grid.sx) |idx| {
+        if (!tab_stop_set(tabs, @intCast(idx))) continue;
+        if (out.items.len != 0) out.append(alloc, ',') catch unreachable;
+        out.writer(alloc).print("{d}", .{idx}) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
 }
 
 fn resolve_pane_tty(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2715,8 +2857,22 @@ fn resolve_pane_dead(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
 
 fn resolve_pane_dead_status(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
-    if (wp.flags & T.PANE_EXITED == 0) return alloc.dupe(u8, "") catch unreachable;
-    return xm.xasprintf("{d}", .{wp.status});
+    const status = pane_wait_status(wp) orelse return alloc.dupe(u8, "") catch unreachable;
+    if (!std.posix.W.IFEXITED(status)) return alloc.dupe(u8, "") catch unreachable;
+    return xm.xasprintf("{d}", .{std.posix.W.EXITSTATUS(status)});
+}
+
+fn resolve_pane_dead_signal(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const status = pane_wait_status(wp) orelse return alloc.dupe(u8, "") catch unreachable;
+    if (!std.posix.W.IFSIGNALED(status)) return alloc.dupe(u8, "") catch unreachable;
+    return xm.xasprintf("{d}", .{std.posix.W.TERMSIG(status)});
+}
+
+fn resolve_pane_dead_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    if (wp.dead_time == 0) return alloc.dupe(u8, "") catch unreachable;
+    return xm.xasprintf("{d}", .{wp.dead_time});
 }
 
 fn resolve_pane_in_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2752,6 +2908,65 @@ fn resolve_pane_current_command(alloc: std.mem.Allocator, ctx: *const FormatCont
     }
     if (wp.shell) |shell| return names.parse_window_name(shell);
     return alloc.dupe(u8, "") catch unreachable;
+}
+
+const PaneColourSlot = enum {
+    fg,
+    bg,
+};
+
+fn pane_colour(wp: *T.WindowPane, slot: PaneColourSlot) i32 {
+    if (pane_control_colour(wp, slot)) |value| return value;
+    if (pane_attached_colour(wp, slot)) |value| return value;
+    return 8;
+}
+
+fn pane_control_colour(wp: *T.WindowPane, slot: PaneColourSlot) ?i32 {
+    const colour_value = switch (slot) {
+        .fg => wp.control_fg,
+        .bg => wp.control_bg,
+    };
+    if (colour_value == -1) return null;
+
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_CONTROL != 0) return colour_value;
+    }
+    return null;
+}
+
+fn pane_attached_colour(wp: *T.WindowPane, slot: PaneColourSlot) ?i32 {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        const s = cl.session orelse continue;
+        if (!sess.session_has_window(s, wp.window)) continue;
+
+        const colour_value = switch (slot) {
+            .fg => cl.tty.fg,
+            .bg => cl.tty.bg,
+        };
+        if (colour_value != -1) return colour_value;
+    }
+    return null;
+}
+
+fn pane_path_text(alloc: std.mem.Allocator, wp: *T.WindowPane, prefer_current: bool) []u8 {
+    if (prefer_current) {
+        if (screen_mod.screen_current(wp).path) |path| return alloc.dupe(u8, path) catch unreachable;
+    }
+    if (wp.base.path) |path| return alloc.dupe(u8, path) catch unreachable;
+    if (wp.cwd) |cwd| return alloc.dupe(u8, cwd) catch unreachable;
+    return alloc.dupe(u8, "") catch unreachable;
+}
+
+fn pane_wait_status(wp: *T.WindowPane) ?u32 {
+    if ((wp.flags & (T.PANE_STATUSREADY | T.PANE_EXITED)) == 0) return null;
+    return @as(u32, @bitCast(wp.status));
+}
+
+fn tab_stop_set(tabs: []const u8, x: u32) bool {
+    const byte_index: usize = @intCast(x / 8);
+    if (byte_index >= tabs.len) return false;
+    return (tabs[byte_index] & (@as(u8, 1) << @intCast(x % 8))) != 0;
 }
 
 fn resolve_scroll_region_upper(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -3027,6 +3242,143 @@ test "format_expand resolves pane mode and marked flags" {
     ).?;
     defer xm.allocator.free(expanded);
     try std.testing.expectEqualStrings("1:copy-mode:1:1", expanded);
+}
+
+test "format_expand resolves pane runtime keys" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-pane-runtime", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 7, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+
+    const left = window_mod.window_add_pane(w, null, 10, 6);
+    const right = window_mod.window_add_pane(w, null, 9, 6);
+    left.xoff = 0;
+    left.yoff = 1;
+    left.sx = 10;
+    left.sy = 6;
+    right.xoff = 11;
+    right.yoff = 1;
+    right.sx = 9;
+    right.sy = 6;
+
+    w.active = left;
+    try std.testing.expect(window_mod.window_set_active_pane(w, right, false));
+
+    opts.options_set_number(w.options, "pane-border-status", T.PANE_STATUS_TOP);
+    opts.options_set_number(left.options, "synchronize-panes", 1);
+    left.flags |= T.PANE_INPUTOFF | T.PANE_UNSEENCHANGES;
+
+    screen_mod.screen_set_path(&left.base, "/tracked/base");
+    screen_mod.screen_enter_alternate(left, true);
+    screen_mod.screen_set_path(left.screen, "/tracked/current");
+    screen_mod.screen_set_tab(&left.base, 3);
+    screen_mod.screen_current(left).mode |= T.MODE_KEYS_EXTENDED_2;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{
+        .client = &client,
+        .fg = 91,
+        .bg = 96,
+    };
+    client_registry.add(&client);
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = left,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{pane_at_top}:#{pane_at_bottom}:#{pane_at_left}:#{pane_at_right}:#{pane_bottom}:#{pane_top}:#{pane_left}:#{pane_right}:#{pane_current_path}:#{pane_path}:#{pane_fg}:#{pane_bg}:#{pane_input_off}:#{pane_key_mode}:#{pane_last}:#{pane_search_string}:#{pane_synchronized}:#{pane_tabs}:#{pane_unseen_changes}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    try std.testing.expectEqualStrings(
+        "1:1:1:0:6:1:0:9:/tracked/current:/tracked/base:brightred:brightcyan:1:Ext 2:1::1:3,8:1",
+        expanded,
+    );
+}
+
+test "format_expand resolves pane dead status signal and time keys" {
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-pane-dead", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(10, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 10, 3);
+    w.active = wp;
+
+    wp.flags |= T.PANE_EXITED | T.PANE_STATUSREADY;
+    wp.status = 7 << 8;
+    wp.dead_time = 1234567890;
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const exited = format_require_complete(xm.allocator, "#{pane_dead_status}:#{pane_dead_signal}:#{t:pane_dead_time}", &ctx).?;
+    defer xm.allocator.free(exited);
+    const expected_time = format_timestamp_local(xm.allocator, "1234567890", "%Y-%m-%d %H:%M:%S").?;
+    defer xm.allocator.free(expected_time);
+    const expected_exit = try std.fmt.allocPrint(xm.allocator, "7::{s}", .{expected_time});
+    defer xm.allocator.free(expected_exit);
+    try std.testing.expectEqualStrings(expected_exit, exited);
+
+    wp.status = @intCast(std.posix.SIG.TERM);
+    const signaled = format_require_complete(xm.allocator, "#{pane_dead_status}:#{pane_dead_signal}", &ctx).?;
+    defer xm.allocator.free(signaled);
+    try std.testing.expectEqualStrings(":15", signaled);
 }
 
 test "format_expand resolves direct keys and aliases" {
@@ -3439,12 +3791,12 @@ test "format_expand covers key option-table defaults" {
     defer xm.allocator.free(automatic);
     try std.testing.expectEqualStrings("sh", automatic);
 
-    wp.flags |= T.PANE_EXITED;
-    wp.status = 7;
+    wp.flags |= T.PANE_EXITED | T.PANE_STATUSREADY;
+    wp.status = 7 << 8;
     const remain = format_require_complete(xm.allocator, "#{E:remain-on-exit-format}", &ctx).?;
     defer xm.allocator.free(remain);
     try std.testing.expectEqualStrings("Pane is dead (7)", remain);
-    wp.flags &= ~T.PANE_EXITED;
+    wp.flags &= ~(T.PANE_EXITED | T.PANE_STATUSREADY);
 
     const border = format_require_complete(xm.allocator, "#{E:pane-border-format}", &ctx).?;
     defer xm.allocator.free(border);

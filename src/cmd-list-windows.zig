@@ -16,8 +16,16 @@ const sess = @import("session.zig");
 const sort_mod = @import("sort.zig");
 const format_mod = @import("format.zig");
 
-const DEFAULT_TEMPLATE = "#{window_index}: #{window_name}#{?window_flags,#{window_flags}, }#{?window_active, (active),}";
-const DEFAULT_ALL_TEMPLATE = "#{session_name}:#{window_index}: #{window_name}#{?window_flags,#{window_flags}, }#{?window_active, (active),}";
+const DEFAULT_TEMPLATE =
+    "#{window_index}: #{window_name}#{window_raw_flags} " ++
+    "(#{window_panes} panes) " ++
+    "[#{window_width}x#{window_height}] " ++
+    "[layout #{window_layout}] #{window_id}" ++
+    "#{?window_active, (active),}";
+const DEFAULT_ALL_TEMPLATE =
+    "#{session_name}:#{window_index}: #{window_name}#{window_raw_flags} " ++
+    "(#{window_panes} panes) " ++
+    "[#{window_width}x#{window_height}]";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -120,6 +128,7 @@ test "list-windows templates and filters use shared formatter" {
 
     const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     win.window_set_name(w, "editor");
+    _ = win.window_add_pane(w, null, 80, 24);
     var cause: ?[]u8 = null;
     const wl = sess.session_attach(s, w, 3, &cause).?;
     s.curw = wl;
@@ -127,8 +136,12 @@ test "list-windows templates and filters use shared formatter" {
     const ctx = window_context(s, wl);
     const line = format_mod.format_require_complete(xm.allocator, DEFAULT_TEMPLATE, &ctx).?;
     defer xm.allocator.free(line);
-    try std.testing.expect(std.mem.indexOf(u8, line, "3: editor") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "(active)") != null);
+    try std.testing.expect(std.mem.startsWith(u8, line, "3: editor* (1 panes) [80x24] [layout "));
+    try std.testing.expect(std.mem.endsWith(u8, line, "] @0 (active)"));
+
+    const all_line = format_mod.format_require_complete(xm.allocator, DEFAULT_ALL_TEMPLATE, &ctx).?;
+    defer xm.allocator.free(all_line);
+    try std.testing.expectEqualStrings("list-windows-test:3: editor* (1 panes) [80x24]", all_line);
 
     const matched = format_mod.format_filter_match(xm.allocator, "#{window_active}", &ctx).?;
     try std.testing.expect(matched);

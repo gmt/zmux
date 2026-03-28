@@ -47,6 +47,7 @@ pub const posix_sys = @cImport({
     @cInclude("sys/ioctl.h");
     @cInclude("sys/utsname.h");
     @cInclude("fcntl.h");
+    @cInclude("glob.h");
     @cInclude("regex.h");
     @cInclude("string.h");
     @cInclude("termios.h");

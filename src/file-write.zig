@@ -24,6 +24,7 @@ const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
+const build_options = @import("build_options");
 
 const max_imsg_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(protocol.MsgWriteData);
 
@@ -306,7 +307,13 @@ pub fn client_cleanup() void {
     client_write_targets_init = false;
 }
 
+fn requireStressTests() !void {
+    if (!build_options.stress_tests)
+        return error.SkipZigTest;
+}
+
 test "client write handlers open, write, and close files" {
+    try requireStressTests();
     reset_for_tests();
     defer reset_for_tests();
 

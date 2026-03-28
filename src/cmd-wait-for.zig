@@ -233,6 +233,8 @@ fn makeCommandList(argv: []const []const u8, client: ?*T.Client) !*cmd_mod.CmdLi
 }
 
 test "wait-for signal wake token is consumed by the first waiter" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
     defer cmd_wait_for_flush();
 
     var test_client = try newTestClient();
@@ -246,6 +248,8 @@ test "wait-for signal wake token is consumed by the first waiter" {
 }
 
 test "wait-for resumes a queued waiter after signal" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
     defer {
         cmd_wait_for_flush();
         while (cmdq.cmdq_next(null) != 0) {}
@@ -281,6 +285,8 @@ test "wait-for resumes a queued waiter after signal" {
 }
 
 test "wait-for unlock continues the next locker" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
     defer {
         cmd_wait_for_flush();
         while (cmdq.cmdq_next(null) != 0) {}
@@ -323,6 +329,8 @@ test "wait-for unlock continues the next locker" {
 }
 
 test "wait-for flush resumes queued waiters and lockers" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
     defer {
         cmd_wait_for_flush();
         while (cmdq.cmdq_next(null) != 0) {}

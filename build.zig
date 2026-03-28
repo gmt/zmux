@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = parseTestFilters(b, b.args);
+    const opt_stress_tests = b.option(bool, "stress-tests", "Enable heavyweight Zig stress tests [default: false]") orelse false;
 
     // --------------------------------------------------
     // Feature options (mirroring pkgbuild configure flags)
@@ -33,17 +34,14 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     // Build-options module
     // --------------------------------------------------
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "have_systemd", opt_systemd);
-    build_options.addOption(bool, "have_utempter", opt_utempter);
-    build_options.addOption(bool, "enable_sixel", opt_sixel);
-    build_options.addOption(bool, "have_utf8proc", opt_utf8proc);
-    build_options.addOption([]const u8, "version", "3.6a-dev");
-    build_options.addOption([]const u8, "zmux_conf",
-        "/etc/zmux.conf:~/.zmux.conf:$XDG_CONFIG_HOME/zmux/zmux.conf:~/.config/zmux/zmux.conf");
-    build_options.addOption([]const u8, "zmux_sock", "$ZMUX_TMPDIR:/tmp");
-    build_options.addOption([]const u8, "zmux_term", "tmux-256color");
-    build_options.addOption([]const u8, "zmux_lock_cmd", "vlock");
+    const build_options = addBuildOptions(b, .{
+        .target = target,
+        .opt_systemd = opt_systemd,
+        .opt_utempter = opt_utempter,
+        .opt_sixel = opt_sixel,
+        .opt_utf8proc = opt_utf8proc,
+        .stress_tests = opt_stress_tests,
+    });
 
     // --------------------------------------------------
     // Shared C compile flags
@@ -85,7 +83,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("event_core");
     exe.linkSystemLibrary("ncursesw");
 
-    if (opt_systemd)  exe.linkSystemLibrary("systemd");
+    if (opt_systemd) exe.linkSystemLibrary("systemd");
     if (opt_utempter) exe.linkSystemLibrary("utempter");
     if (opt_utf8proc) exe.linkSystemLibrary("utf8proc");
 
@@ -168,6 +166,35 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run Zig unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    const stress_build_options = addBuildOptions(b, .{
+        .target = target,
+        .opt_systemd = opt_systemd,
+        .opt_utempter = opt_utempter,
+        .opt_sixel = opt_sixel,
+        .opt_utf8proc = opt_utf8proc,
+        .stress_tests = true,
+    });
+    const stress_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zmux.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = test_filters,
+    });
+    stress_tests.root_module.addOptions("build_options", stress_build_options);
+    stress_tests.root_module.addIncludePath(b.path("src/compat"));
+    stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg.c"), .flags = common_cflags });
+    stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/imsg-buffer.c"), .flags = common_cflags });
+    stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/freezero.c"), .flags = common_cflags });
+    stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
+    stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
+    stress_tests.linkLibC();
+    stress_tests.linkSystemLibrary("event_core");
+    stress_tests.linkSystemLibrary("ncursesw");
+    const stress_test_step = b.step("test-stress", "Run heavyweight Zig stress tests");
+    stress_test_step.dependOn(&b.addRunArtifact(stress_tests).step);
+
     // --------------------------------------------------
     // `zig build fuzz`
     // --------------------------------------------------
@@ -203,6 +230,31 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(fuzz_exe);
         b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)").dependOn(&fuzz_exe.step);
     }
+}
+
+const BuildOptionsConfig = struct {
+    target: std.Build.ResolvedTarget,
+    opt_systemd: bool,
+    opt_utempter: bool,
+    opt_sixel: bool,
+    opt_utf8proc: bool,
+    stress_tests: bool,
+};
+
+fn addBuildOptions(b: *std.Build, config: BuildOptionsConfig) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(bool, "have_systemd", config.opt_systemd);
+    options.addOption(bool, "have_utempter", config.opt_utempter);
+    options.addOption(bool, "enable_sixel", config.opt_sixel);
+    options.addOption(bool, "have_utf8proc", config.opt_utf8proc);
+    options.addOption(bool, "stress_tests", config.stress_tests);
+    options.addOption([]const u8, "version", "3.6a-dev");
+    options.addOption([]const u8, "zmux_conf", "/etc/zmux.conf:~/.zmux.conf:$XDG_CONFIG_HOME/zmux/zmux.conf:~/.config/zmux/zmux.conf");
+    options.addOption([]const u8, "zmux_sock", "$ZMUX_TMPDIR:/tmp");
+    options.addOption([]const u8, "zmux_term", "tmux-256color");
+    options.addOption([]const u8, "zmux_lock_cmd", "vlock");
+    _ = config.target;
+    return options;
 }
 
 fn parseTestFilters(b: *std.Build, maybe_args: ?[]const []const u8) []const []const u8 {

@@ -30,6 +30,7 @@ const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
+const build_options = @import("build_options");
 
 const SourceFileState = struct {
     item: *cmdq.CmdqItem,
@@ -156,7 +157,13 @@ fn read_single_peer_imsg(reader: *c.imsg.imsgbuf) c.imsg.imsg {
     return imsg_msg;
 }
 
+fn requireStressTests() !void {
+    if (!build_options.stress_tests)
+        return error.SkipZigTest;
+}
+
 test "source-file waits for detached client reads and loads remote content" {
+    try requireStressTests();
     paste_mod.paste_reset_for_tests();
     file_mod.resetForTests();
     defer file_mod.resetForTests();

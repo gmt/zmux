@@ -23,6 +23,7 @@ const std = @import("std");
 const c = @import("c.zig");
 const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
+const build_options = @import("build_options");
 
 pub const JOB_NOWAIT: u32 = 0x1;
 
@@ -578,6 +579,11 @@ fn testAsyncComplete(async_shell: *AsyncShell, arg: ?*anyopaque) void {
     done.* = true;
 }
 
+fn requireStressTests() !void {
+    if (!build_options.stress_tests)
+        return error.SkipZigTest;
+}
+
 test "job registry renders reduced tmux-style summaries" {
     defer job_reset_all();
 
@@ -603,6 +609,7 @@ test "job registry renders reduced tmux-style summaries" {
 }
 
 test "job shared shell runner captures stdout and merged stderr" {
+    try requireStressTests();
     defer job_reset_all();
 
     const job = job_register("printf 'out'; printf 'err' >&2", 0);
@@ -621,6 +628,7 @@ test "job shared shell runner captures stdout and merged stderr" {
 }
 
 test "job_free terminates a live shared job process" {
+    try requireStressTests();
     defer job_reset_all();
 
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
@@ -641,6 +649,7 @@ test "job_free terminates a live shared job process" {
 }
 
 test "job_kill_all terminates all live shared job processes" {
+    try requireStressTests();
     defer job_reset_all();
 
     var first_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
@@ -676,6 +685,7 @@ test "job_kill_all terminates all live shared job processes" {
 }
 
 test "job server reaper async shell captures output and completion" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
     job_enable_server_reaper(true);

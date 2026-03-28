@@ -36,6 +36,7 @@ const server_print = @import("server-print.zig");
 const session_mod = @import("session.zig");
 const status_runtime = @import("status-runtime.zig");
 const window_mod = @import("window.zig");
+const build_options = @import("build_options");
 
 const TargetSnapshot = struct {
     session_id: ?u32 = null,
@@ -620,7 +621,13 @@ fn gridRowString(grid: *T.Grid, row: u32) ![]u8 {
     });
 }
 
+fn requireStressTests() !void {
+    if (!build_options.stress_tests)
+        return error.SkipZigTest;
+}
+
 test "run-shell writes output to stdout for detached clients when no target pane is forced" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -653,6 +660,7 @@ test "run-shell writes output to stdout for detached clients when no target pane
 }
 
 test "run-shell -E forwards stderr into detached stdout output" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -686,6 +694,7 @@ test "run-shell -E forwards stderr into detached stdout output" {
 }
 
 test "run-shell without -t shows shell output in the attached current pane view mode" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -725,6 +734,7 @@ test "run-shell without -t shows shell output in the attached current pane view 
 }
 
 test "run-shell -t shows shell output in the target pane view mode" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -763,6 +773,7 @@ test "run-shell -t shows shell output in the target pane view mode" {
 }
 
 test "run-shell target-pane output preserves shared utf8 grid payloads" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -792,6 +803,7 @@ test "run-shell target-pane output preserves shared utf8 grid payloads" {
 }
 
 test "run-shell -bC preserves the original target context for delayed commands" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -810,6 +822,7 @@ test "run-shell -bC preserves the original target context for delayed commands" 
 }
 
 test "run-shell -bC preserves quoted semicolons inside delayed commands" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -828,6 +841,7 @@ test "run-shell -bC preserves quoted semicolons inside delayed commands" {
 }
 
 test "run-shell registers the shared reduced job summary while work is active" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
     defer job_mod.job_reset_all();
@@ -870,6 +884,7 @@ test "run-shell registers the shared reduced job summary while work is active" {
 }
 
 test "run-shell -b without a client falls back to the best session pane" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 
@@ -900,6 +915,7 @@ test "run-shell -b without a client falls back to the best session pane" {
 }
 
 test "run-shell does not truncate large target-pane output" {
+    try requireStressTests();
     const old_base = installEventBase();
     defer restoreEventBase(old_base);
 

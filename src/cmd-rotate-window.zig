@@ -92,10 +92,14 @@ test "rotate-window rotates pane order in both directions" {
     const first = wl.window.active.?;
     var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    _ = win.window_set_active_pane(wl.window, second, true);
     var third_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const third = spawn.spawn_pane(&third_ctx, &cause).?;
-    _ = win.window_set_active_pane(wl.window, second, true);
     s.curw = wl;
+
+    try std.testing.expectEqual(first, wl.window.panes.items[0]);
+    try std.testing.expectEqual(second, wl.window.panes.items[1]);
+    try std.testing.expectEqual(third, wl.window.panes.items[2]);
 
     var parse_cause: ?[]u8 = null;
     const rotate_up = try cmd_mod.cmd_parse_one(&.{ "rotate-window", "-t", "rotate-window-test:0" }, null, &parse_cause);
@@ -141,12 +145,17 @@ test "rotate-window -Z preserves the reduced zoom flag while rotating" {
     var cause: ?[]u8 = null;
     var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    const first = wl.window.active.?;
     var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    _ = win.window_set_active_pane(wl.window, second, true);
     var third_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     const third = spawn.spawn_pane(&third_ctx, &cause).?;
-    _ = win.window_set_active_pane(wl.window, second, true);
     s.curw = wl;
+
+    try std.testing.expectEqual(first, wl.window.panes.items[0]);
+    try std.testing.expectEqual(second, wl.window.panes.items[1]);
+    try std.testing.expectEqual(third, wl.window.panes.items[2]);
 
     wl.window.flags |= T.WINDOW_ZOOMED;
 

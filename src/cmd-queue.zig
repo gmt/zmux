@@ -200,6 +200,15 @@ fn pop_head(queue: *CmdqList) ?*CmdqItem {
     return item;
 }
 
+fn clear_queue(queue: *CmdqList) void {
+    var item = queue.head;
+    while (item) |it| {
+        item = it.next;
+        destroy_item(it);
+    }
+    queue.* = .{};
+}
+
 fn remove_group(item: *CmdqItem) void {
     if (item.group == 0) return;
 
@@ -504,6 +513,17 @@ pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval
     return cmdq_run_immediate_flags(cl, cmdlist, 0);
 }
 
+pub fn cmdq_reset_for_tests() void {
+    clear_queue(&server_queue);
+    current_running_item = null;
+
+    if (!queues_init) return;
+
+    var it = client_queues.valueIterator();
+    while (it.next()) |queue| clear_queue(queue);
+    client_queues.clearRetainingCapacity();
+}
+
 pub fn cmdq_get_name(item: *CmdqItem) []const u8 {
     if (item.cmd) |cmd| return cmd.entry.name;
     return item.name;
@@ -656,6 +676,8 @@ pub fn cmdq_write_client_data(cl: ?*T.Client, stream: i32, data: []const u8) voi
 
 test "cmdq_append_event preserves the triggering key for queued commands" {
     const env_mod = @import("environ.zig");
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
 
     const capture = struct {
         var seen_key: T.key_code = T.KEYC_NONE;
@@ -704,6 +726,8 @@ test "cmdq_error routes control clients through the shared presenter path" {
     const opts = @import("options.zig");
     const proc_mod = @import("proc.zig");
     const protocol = @import("zmux-protocol.zig");
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -770,6 +794,8 @@ test "cmdq_error routes control clients through the shared presenter path" {
 test "cmdq_error keeps detached non-utf8 clients on the shared sanitized stderr path" {
     const env_mod = @import("environ.zig");
     const opts = @import("options.zig");
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -823,6 +849,9 @@ fn noopDispatch(_imsg: ?*c_mod.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
 }
 
 test "cmdq waiting items block later entries until continued" {
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
+
     const callbacks = struct {
         var waited: u32 = 0;
         var ran_after: u32 = 0;
@@ -860,6 +889,8 @@ test "cmdq waiting items block later entries until continued" {
 test "cmdq logs command execution into the shared message log once config is finished" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
 
     const logged = struct {
         fn exec(_: *cmd_mod.Cmd, _: *CmdqItem) T.CmdRetval {

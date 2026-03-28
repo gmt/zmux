@@ -1184,6 +1184,8 @@ pub const Client = struct {
     term_type: ?[]u8 = null,
     term_caps: ?[][]u8 = null,
     ttyname: ?[]u8 = null,
+    discarded: usize = 0,
+    theme: ClientTheme = .unknown,
 
     tty: Tty,
     status: StatusLine,

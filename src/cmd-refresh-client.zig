@@ -11,6 +11,7 @@ const args_mod = @import("arguments.zig");
 const colour_mod = @import("colour.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const control = @import("control.zig");
 const control_subscriptions = @import("control-subscriptions.zig");
 const resize_mod = @import("resize.zig");
 const server = @import("server.zig");
@@ -46,8 +47,11 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cmdq.cmdq_error(item, "not a control client", .{});
             return .@"error";
         }
-        _ = unsupportedFlag(args, 'A', item);
-        return .@"error";
+        if (args.entry('A')) |flag_entry| {
+            for (flag_entry.values.items) |value|
+                updateControlPaneOffset(target_client, value);
+        }
+        return .normal;
     }
 
     if (args.has('B')) {
@@ -141,6 +145,27 @@ fn updateControlSubscription(target_client: *T.Client, value: []const u8) void {
 fn parseSubscriptionTargetId(value: []const u8, prefix: u8) ?u32 {
     if (value.len < 2 or value[0] != prefix) return null;
     return std.fmt.parseInt(u32, value[1..], 10) catch null;
+}
+
+fn updateControlPaneOffset(target_client: *T.Client, value: []const u8) void {
+    if (value.len < 3 or value[0] != '%') return;
+
+    const split = std.mem.indexOfScalar(u8, value, ':') orelse return;
+    if (split <= 1 or split + 1 > value.len) return;
+
+    const pane_id = std.fmt.parseInt(u32, value[1..split], 10) catch return;
+    const wp = window_mod.window_pane_find_by_id(pane_id) orelse return;
+    const state = value[split + 1 ..];
+
+    if (std.mem.eql(u8, state, "on")) {
+        control.control_set_pane_on(target_client, wp);
+    } else if (std.mem.eql(u8, state, "off")) {
+        control.control_set_pane_off(target_client, wp);
+    } else if (std.mem.eql(u8, state, "continue")) {
+        control.control_continue_pane(target_client, wp);
+    } else if (std.mem.eql(u8, state, "pause")) {
+        control.control_pause_pane(target_client, wp);
+    }
 }
 
 fn execPanCommand(args: *const args_mod.Arguments, target_client: *T.Client, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -243,12 +268,6 @@ fn findOscPayloadEnd(report: []const u8) ?usize {
         if (ch == '\\' and idx > 0 and report[idx - 1] == '\x1b') return idx - 1;
     }
     return null;
-}
-
-fn unsupportedFlag(args: *const args_mod.Arguments, flag: u8, item: *cmdq.CmdqItem) bool {
-    if (!args.has(flag)) return false;
-    cmdq.cmdq_error(item, "refresh-client -{c} is not supported yet", .{flag});
-    return true;
 }
 
 fn parseAdjustment(args: *const args_mod.Arguments, item: *cmdq.CmdqItem) ?u32 {
@@ -675,7 +694,7 @@ test "refresh-client -l emits a clipboard query for the target tty" {
     try std.testing.expectEqualStrings("\x1b]52;;?\x07", payload[@sizeOf(i32)..]);
 }
 
-test "refresh-client rejects unsupported panes and non-control size requests" {
+test "refresh-client rejects control-only flags on non-control clients" {
     var target_env = T.Environ.init(std.testing.allocator);
     defer target_env.deinit();
 
@@ -697,6 +716,161 @@ test "refresh-client rejects unsupported panes and non-control size requests" {
     defer cmd_mod.cmd_free(subscription);
     var subscription_item = cmdq.CmdqItem{ .target_client = &target_client };
     try std.testing.expectEqual(T.CmdRetval.@"error", exec(subscription, &subscription_item));
+
+    const offset = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", "%1:pause" }, null, &cause);
+    defer cmd_mod.cmd_free(offset);
+    var offset_item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.@"error", exec(offset, &offset_item));
+}
+
+test "refresh-client -A tracks control pane state and emits pause transitions" {
+    const c = @import("c.zig");
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const session_mod = @import("session.zig");
+    const xm = @import("xmalloc.zig");
+
+    const helpers = struct {
+        fn expectControlLine(reader: *c.imsg.imsgbuf, expected: []const u8) !void {
+            try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(reader));
+
+            var imsg_msg: c.imsg.imsg = undefined;
+            try std.testing.expect(c.imsg.imsg_get(reader, &imsg_msg) > 0);
+            defer c.imsg.imsg_free(&imsg_msg);
+
+            try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+            const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+            var payload = try xm.allocator.alloc(u8, payload_len);
+            defer xm.allocator.free(payload);
+            try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+            var stream: i32 = 0;
+            @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+            try std.testing.expectEqual(@as(i32, 1), stream);
+            try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
+        }
+    };
+
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = session_mod.session_create(null, "refresh-offsets", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (session_mod.session_find("refresh-offsets") != null) session_mod.session_destroy(session, false, "test");
+
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const pane = window_mod.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+
+    var attach_cause: ?[]u8 = null;
+    const wl = session_mod.session_attach(session, window, -1, &attach_cause).?;
+    session.curw = wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "refresh-client-offset-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(target_client.environ);
+    defer control.control_panes_deinit(&target_client);
+    target_client.tty = .{ .client = &target_client };
+    target_client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = target_client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    pane.offset.used = 17;
+    var off_buf: [64]u8 = undefined;
+    const off_arg = try std.fmt.bufPrint(&off_buf, "%{d}:off", .{pane.id});
+    var cause: ?[]u8 = null;
+    const off_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", off_arg }, null, &cause);
+    defer cmd_mod.cmd_free(off_cmd);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(off_cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), target_client.control_panes.items.len);
+    try std.testing.expectEqual(@as(u8, T.CONTROL_PANE_OFF), target_client.control_panes.items[0].flags);
+    try std.testing.expectEqual(@as(usize, 17), target_client.control_panes.items[0].offset.used);
+    try std.testing.expectEqual(@as(usize, 17), target_client.control_panes.items[0].queued.used);
+
+    pane.offset.used = 29;
+    var on_buf: [64]u8 = undefined;
+    const on_arg = try std.fmt.bufPrint(&on_buf, "%{d}:on", .{pane.id});
+    const on_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", on_arg }, null, &cause);
+    defer cmd_mod.cmd_free(on_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(on_cmd, &item));
+    try std.testing.expectEqual(@as(u8, 0), target_client.control_panes.items[0].flags);
+    try std.testing.expectEqual(@as(usize, 29), target_client.control_panes.items[0].offset.used);
+    try std.testing.expectEqual(@as(usize, 29), target_client.control_panes.items[0].queued.used);
+
+    var missing_buf: [64]u8 = undefined;
+    const missing_arg = try std.fmt.bufPrint(&missing_buf, "%{d}:pause", .{pane.id + 999});
+    const missing_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", missing_arg }, null, &cause);
+    defer cmd_mod.cmd_free(missing_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(missing_cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), target_client.control_panes.items.len);
+
+    pane.offset.used = 41;
+    var pause_buf: [64]u8 = undefined;
+    const pause_arg = try std.fmt.bufPrint(&pause_buf, "%{d}:pause", .{pane.id});
+    const pause_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", pause_arg }, null, &cause);
+    defer cmd_mod.cmd_free(pause_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(pause_cmd, &item));
+    try std.testing.expectEqual(@as(u8, T.CONTROL_PANE_PAUSED), target_client.control_panes.items[0].flags);
+    var expected_pause: [64]u8 = undefined;
+    const expected_pause_line = try std.fmt.bufPrint(&expected_pause, "%pause %{d}\n", .{pane.id});
+    try helpers.expectControlLine(&reader, expected_pause_line);
+
+    pane.offset.used = 55;
+    var continue_buf: [64]u8 = undefined;
+    const continue_arg = try std.fmt.bufPrint(&continue_buf, "%{d}:continue", .{pane.id});
+    const continue_cmd = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-A", continue_arg }, null, &cause);
+    defer cmd_mod.cmd_free(continue_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(continue_cmd, &item));
+    try std.testing.expectEqual(@as(u8, 0), target_client.control_panes.items[0].flags);
+    try std.testing.expectEqual(@as(usize, 55), target_client.control_panes.items[0].offset.used);
+    try std.testing.expectEqual(@as(usize, 55), target_client.control_panes.items[0].queued.used);
+    var expected_continue: [64]u8 = undefined;
+    const expected_continue_line = try std.fmt.bufPrint(&expected_continue, "%continue %{d}\n", .{pane.id});
+    try helpers.expectControlLine(&reader, expected_continue_line);
 }
 
 test "refresh-client -B stores and removes control subscriptions" {

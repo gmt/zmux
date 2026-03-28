@@ -24,12 +24,14 @@ const T = @import("types.zig");
 const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const editor_handoff = @import("editor-handoff.zig");
 const format_mod = @import("format.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const paste_mod = @import("paste.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const server_client = @import("server-client.zig");
 const sort_mod = @import("sort.zig");
 const status_runtime = @import("status-runtime.zig");
 const window = @import("window.zig");
@@ -38,7 +40,7 @@ const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "paste-buffer -p -b '%%'";
 const DEFAULT_FORMAT = "#{t/p:buffer_created}: #{buffer_sample}";
-const HELP_TEXT = "Enter/p paste  arrows move  q cancel";
+const HELP_TEXT = "Enter/p paste  e edit  arrows move  q cancel";
 
 const BufferItem = struct {
     buffer: *paste_mod.PasteBuffer,
@@ -55,6 +57,14 @@ const BufferModeData = struct {
     command: []u8,
     sort_crit: T.SortCriteria = .{},
 };
+
+const EditData = struct {
+    wp_id: u32,
+    name: []u8,
+    pb: *paste_mod.PasteBuffer,
+};
+
+var edit_dispatch_hook: ?*const fn (*T.Client, []const u8) void = null;
 
 pub const window_buffer_mode = T.WindowMode{
     .name = "buffer-mode",
@@ -137,6 +147,10 @@ fn windowBufferCommand(
     }
     if (std.mem.eql(u8, command, "choose") or std.mem.eql(u8, command, "paste")) {
         chooseCurrent(wme, client, session, wl);
+        return;
+    }
+    if (std.mem.eql(u8, command, "edit-selected")) {
+        startEditSelected(wme, client);
         return;
     }
     if (std.mem.eql(u8, command, "cursor-up")) {
@@ -325,6 +339,32 @@ fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client, session: *T.Sessio
     _ = window_mode_runtime.resetMode(wme.wp);
 }
 
+fn startEditSelected(wme: *T.WindowModeEntry, client: ?*T.Client) void {
+    const cl = client orelse return;
+    if ((cl.flags & T.CLIENT_ATTACHED) == 0) return;
+    if (edit_dispatch_hook == null and (cl.session == null or cl.peer == null or (cl.flags & (T.CLIENT_CONTROL | T.CLIENT_SUSPENDED)) != 0))
+        return;
+
+    const data = modeData(wme);
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
+    const initial = paste_mod.paste_buffer_data(item.buffer, null);
+
+    const ed = xm.allocator.create(EditData) catch unreachable;
+    ed.* = .{
+        .wp_id = data.tree.wp.id,
+        .name = xm.xstrdup(paste_mod.paste_buffer_name(item.buffer)),
+        .pb = item.buffer,
+    };
+    const command = editor_handoff.begin(cl, initial, finishEditClose, @ptrCast(ed)) orelse {
+        finishEdit(ed);
+        return;
+    };
+    defer xm.allocator.free(command);
+
+    dispatchEditCommand(cl, command);
+}
+
 fn runCommand(client: ?*T.Client, session: *T.Session, wl: *T.Winlink, template: []const u8, buffer_name: []const u8) void {
     const cl = client orelse return;
     const expanded = templateReplace(template, buffer_name, 1);
@@ -353,6 +393,58 @@ fn runCommand(client: ?*T.Client, session: *T.Session, wl: *T.Winlink, template:
             status_runtime.present_client_message(cl, err);
         },
     }
+}
+
+fn dispatchEditCommand(client: *T.Client, command: []const u8) void {
+    if (edit_dispatch_hook) |hook| {
+        hook(client, command);
+        return;
+    }
+    server_client.server_client_lock(client, command);
+}
+
+fn finishEditClose(buf: ?[]u8, arg: ?*anyopaque) void {
+    const ed: *EditData = @ptrCast(@alignCast(arg.?));
+    defer finishEdit(ed);
+
+    var owned = buf orelse return;
+
+    const pb = paste_mod.paste_get_name(ed.name) orelse {
+        xm.allocator.free(owned);
+        return;
+    };
+    if (pb != ed.pb) {
+        xm.allocator.free(owned);
+        return;
+    }
+
+    const oldbuf = paste_mod.paste_buffer_data(pb, null);
+    var new_len = owned.len;
+    if (oldbuf.len != 0 and oldbuf[oldbuf.len - 1] != '\n' and owned[new_len - 1] == '\n')
+        new_len -= 1;
+
+    if (new_len != 0) {
+        if (new_len != owned.len) {
+            const trimmed = xm.allocator.dupe(u8, owned[0..new_len]) catch unreachable;
+            xm.allocator.free(owned);
+            owned = trimmed;
+        }
+        paste_mod.paste_replace(pb, owned);
+    } else {
+        xm.allocator.free(owned);
+    }
+
+    const wp = window.window_pane_find_by_id(ed.wp_id) orelse return;
+    if (window.window_pane_mode(wp)) |wme| {
+        if (wme.mode == &window_buffer_mode)
+            rebuildAndDraw(wme);
+    }
+    wp.flags |= T.PANE_REDRAW;
+}
+
+fn finishEdit(ed: *EditData) void {
+    xm.allocator.free(ed.name);
+    xm.allocator.destroy(ed);
 }
 
 fn templateReplace(template: []const u8, replacement: []const u8, idx: usize) []u8 {
@@ -492,6 +584,7 @@ fn deinitTestGlobals() void {
     const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");
 
+    editor_handoff.resetForTests();
     paste_mod.paste_reset_for_tests();
     cmdq_mod.cmdq_reset_for_tests();
     env_mod.environ_free(env_mod.global_environ);
@@ -634,4 +727,79 @@ test "window-buffer choose runs the tmux template command for the selected buffe
 
     try std.testing.expectEqualStrings("buffer1", env_mod.environ_find(env_mod.global_environ, "CHOSEN_BUFFER").?.value.?);
     try std.testing.expect(window.window_pane_mode(setup.pane) == null);
+}
+
+test "window-buffer edit-selected updates the selected buffer and rebuilds the mode tree on save" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-buffer-edit");
+    defer if (sess.session_find("window-buffer-edit") != null) sess.session_destroy(setup.session, false, "test");
+
+    paste_mod.paste_add(null, xm.xstrdup("seed"));
+
+    var chooser = makeClient(setup.session, "editor", "/dev/pts/411");
+    defer freeClient(&chooser);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmpdir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmpdir);
+
+    editor_handoff.test_editor_override = "/bin/sh";
+    editor_handoff.test_tmpdir_override = tmpdir;
+
+    const capture = struct {
+        var command: ?[]u8 = null;
+
+        fn dispatch(_: *T.Client, cmd: []const u8) void {
+            if (command) |old| xm.allocator.free(old);
+            command = xm.xstrdup(cmd);
+        }
+    };
+    defer {
+        if (capture.command) |cmd| xm.allocator.free(cmd);
+        edit_dispatch_hook = null;
+    }
+    edit_dispatch_hook = capture.dispatch;
+
+    var cause: ?[]u8 = null;
+    var mode_args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:NO:rt:yZ", 0, 1, &cause);
+    defer mode_args.deinit();
+
+    var fs = T.CmdFindState{
+        .s = setup.session,
+        .wl = setup.session.curw,
+        .w = setup.session.curw.?.window,
+        .wp = setup.pane,
+        .idx = setup.session.curw.?.idx,
+    };
+
+    const wme = enterMode(setup.pane, &fs, &mode_args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    cause = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{"edit-selected"}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowBufferCommand(wme, &chooser, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
+
+    const command = capture.command orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.startsWith(u8, command, "/bin/sh "));
+    const edited = try std.fs.createFileAbsolute(command["/bin/sh ".len..], .{ .truncate = true });
+    defer edited.close();
+    try edited.writeAll("edited\n");
+
+    editor_handoff.handleUnlock(&chooser, 0);
+
+    const pb = paste_mod.paste_get_name("buffer0") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("edited", paste_mod.paste_buffer_data(pb, null));
+    try std.testing.expectEqualStrings("buffer0", mode_tree.getCurrentName(modeData(wme).tree).?);
+
+    const first_item = modeData(wme).items.items[0];
+    try std.testing.expect(std.mem.indexOf(u8, first_item.text, "edited") != null);
 }

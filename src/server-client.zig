@@ -29,6 +29,7 @@ const file_mod = @import("file.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
+const editor_handoff = @import("editor-handoff.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmdq_mod = @import("cmd-queue.zig");
@@ -95,6 +96,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     const was_attached = (cl.flags & T.CLIENT_ATTACHED) != 0;
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
+    editor_handoff.clearClient(cl);
     cmd_display_panes.clear_overlay(cl);
     menu.clear_overlay(cl);
     popup.clear_overlay(cl);
@@ -201,7 +203,15 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .shell => server_client_dispatch_shell(cl, imsg_msg),
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
-        .unlock, .wakeup => server_client_unlock(cl),
+        .unlock => {
+            var unlock_status: i32 = 0;
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (data_len >= @sizeOf(i32) and imsg_msg.data != null)
+                @memcpy(std.mem.asBytes(&unlock_status), @as([*]const u8, @ptrCast(imsg_msg.data.?))[0..@sizeOf(i32)]);
+            editor_handoff.handleUnlock(cl, unlock_status);
+            server_client_unlock(cl);
+        },
+        .wakeup => server_client_unlock(cl),
         .read => file_mod.handleReadData(imsg_msg),
         .read_done => file_mod.handleReadDone(imsg_msg),
         .write_ready => file_mod.handleWriteReady(imsg_msg),

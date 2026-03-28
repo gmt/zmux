@@ -51,10 +51,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
 
     if (cmd.entry == &entry_client) {
-        if (args.has('K')) {
-            cmdq.cmdq_error(item, "choose-client custom key format not supported yet", .{});
-            return .@"error";
-        }
         if (args.has('N') or args.has('Z') or args.has('y')) {
             cmdq.cmdq_error(item, "choose-client preview flags not supported yet", .{});
             return .@"error";
@@ -386,8 +382,9 @@ test "choose-client enters the reduced client mode when clients exist" {
     try std.testing.expectEqual(&window_client.window_client_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
-test "choose-client rejects unsupported custom key format flags" {
+test "choose-client accepts custom key format flags" {
     const sess = @import("session.zig");
+    const win = @import("window.zig");
 
     init_test_globals();
     defer deinit_test_globals();
@@ -431,8 +428,8 @@ test "choose-client rejects unsupported custom key format flags" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &current_client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Choose-client custom key format not supported yet", current_client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_client.window_client_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
 test "choose-tree enters the reduced window-tree mode" {

@@ -25,6 +25,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const paste_mod = @import("paste.zig");
 const sort_mod = @import("sort.zig");
+const window_buffer = @import("window-buffer.zig");
 const window_client = @import("window-client.zig");
 const window_customize = @import("window-customize.zig");
 const window_tree = @import("window-tree.zig");
@@ -63,8 +64,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (cmd.entry == &entry_buffer) {
-        cmdq.cmdq_error(item, "{s} mode not supported yet", .{cmd.entry.name});
-        return .@"error";
+        if (args.has('K')) {
+            cmdq.cmdq_error(item, "choose-buffer custom key format not supported yet", .{});
+            return .@"error";
+        }
+        if (args.has('N') or args.has('y')) {
+            cmdq.cmdq_error(item, "choose-buffer preview flags not supported yet", .{});
+            return .@"error";
+        }
+        _ = window_buffer.enterMode(wp, &target, args);
+        return .normal;
     }
     if (cmd.entry == &entry_customize_mode) {
         _ = window_customize.enterMode(wp, &target, args);
@@ -238,6 +247,82 @@ test "choose-buffer is a no-op when there are no paste buffers" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "choose-buffer enters the reduced buffer mode when paste buffers exist" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+    paste_mod.paste_reset_for_tests();
+    paste_mod.paste_add(null, xm.xstrdup("buffer body"));
+
+    const setup = try test_setup("choose-buffer-live");
+    defer if (sess.session_find("choose-buffer-live") != null) sess.session_destroy(setup.session, false, "test");
+
+    const target = try test_target(xm.allocator, "choose-buffer-live");
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "choose-buffer-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-buffer", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_buffer.window_buffer_mode, win.window_pane_mode(setup.pane).?.mode);
+}
+
+test "choose-buffer rejects unsupported custom key format" {
+    const sess = @import("session.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+    paste_mod.paste_reset_for_tests();
+    paste_mod.paste_add(null, xm.xstrdup("buffer body"));
+
+    const setup = try test_setup("choose-buffer-key-format");
+    defer if (sess.session_find("choose-buffer-key-format") != null) sess.session_destroy(setup.session, false, "test");
+
+    const target = try test_target(xm.allocator, "choose-buffer-key-format");
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "choose-buffer-key-format-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-buffer", "-K", "#{line}", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (client.message_string) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Choose-buffer custom key format not supported yet", client.message_string.?);
 }
 
 test "choose-client is a no-op when there are no clients" {

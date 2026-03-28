@@ -92,6 +92,7 @@ pub fn server_client_create(fd: i32) *T.Client {
 
 pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
+    const was_attached = (cl.flags & T.CLIENT_ATTACHED) != 0;
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
     cmd_display_panes.clear_overlay(cl);
@@ -103,6 +104,8 @@ pub fn server_client_lost(cl: *T.Client) void {
     status.status_free(cl);
     const srv = @import("server.zig");
     srv.server_remove_client(cl);
+    if (was_attached)
+        notify.notify_client("client-detached", cl);
     if (cl.peer) |peer| proc_mod.proc_remove_peer(peer);
     cl.peer = null;
     server_client_cancel_escape_timer(cl);
@@ -132,6 +135,8 @@ pub fn server_client_lost(cl: *T.Client) void {
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
     tty_draw.tty_draw_free(&cl.pane_cache);
+    resize_mod.recalculate_sizes();
+    srv.server_update_socket();
     env_mod.environ_free(cl.environ);
     xm.allocator.destroy(cl);
 }
@@ -1527,6 +1532,90 @@ test "server_client_detach sends detachkill payload and clears session state" {
     defer xm.allocator.free(payload);
     try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
     try std.testing.expectEqualStrings("detach-test", payload[0 .. payload.len - 1]);
+}
+
+test "server_client_lost clears attached socket execute bits" {
+    const srv = @import("server.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const real = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(real);
+
+    const test_socket_path = try std.fs.path.join(xm.allocator, &.{ real, "server.sock" });
+    defer xm.allocator.free(test_socket_path);
+
+    const old_socket_path = srv.socket_path;
+    defer srv.socket_path = old_socket_path;
+    srv.socket_path = test_socket_path;
+
+    const old_server_fd = srv.server_fd;
+    defer srv.server_fd = old_server_fd;
+    srv.server_fd = -1;
+    defer if (srv.server_fd >= 0) std.posix.close(srv.server_fd);
+
+    const old_server_client_flags = srv.server_client_flags;
+    defer srv.server_client_flags = old_server_client_flags;
+    srv.server_client_flags = T.CLIENT_DEFAULTSOCKET;
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const session = sess.session_create(null, "lost-socket-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        if (sess.session_find("lost-socket-test") != null) sess.session_destroy(session, false, "test");
+        win_mod.window_remove_ref(window, "test");
+    }
+
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, -1, &cause).?;
+    const wp = win_mod.window_add_pane(window, null, 80, 24);
+    window.active = wp;
+    session.curw = wl;
+
+    srv.server_fd = srv.server_create_socket(srv.server_client_flags, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+    try std.testing.expect(srv.server_fd >= 0);
+
+    const client = try xm.allocator.create(T.Client);
+    client.* = .{
+        .name = xm.xstrdup("lost-client"),
+        .environ = env_mod.environ_create(),
+        .tty = .{ .client = client },
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    tty_mod.tty_init(&client.tty, client);
+    client_registry.add(client);
+
+    resize_mod.recalculate_sizes();
+    srv.server_update_socket();
+
+    const before = try std.fs.cwd().statFile(srv.socket_path);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o770), before.mode & 0o777);
+    try std.testing.expectEqual(@as(u32, 1), session.attached);
+
+    server_client_lost(client);
+
+    const after = try std.fs.cwd().statFile(srv.socket_path);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o660), after.mode & 0o777);
+    try std.testing.expectEqual(@as(u32, 0), session.attached);
+    try std.testing.expectEqual(@as(usize, 0), client_registry.clients.items.len);
 }
 
 test "server_client_suspend sends suspend message and leaves session attached" {

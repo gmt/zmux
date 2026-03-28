@@ -36,6 +36,20 @@ pub var global_options: *T.Options = undefined;
 pub var global_s_options: *T.Options = undefined;
 pub var global_w_options: *T.Options = undefined;
 
+const empty_array_items = [_]T.OptionsArrayItem{};
+const OptionNameMap = struct {
+    from: []const u8,
+    to: []const u8,
+};
+const option_name_maps = [_]OptionNameMap{
+    .{ .from = "display-panes-color", .to = "display-panes-colour" },
+    .{ .from = "display-panes-active-color", .to = "display-panes-active-colour" },
+    .{ .from = "clock-mode-color", .to = "clock-mode-colour" },
+    .{ .from = "cursor-color", .to = "cursor-colour" },
+    .{ .from = "prompt-cursor-color", .to = "prompt-cursor-colour" },
+    .{ .from = "pane-colors", .to = "pane-colours" },
+};
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 
 /// Create a new options set, optionally inheriting from a parent scope.
@@ -59,7 +73,7 @@ fn free_value(v: *T.OptionsValue) void {
     switch (v.*) {
         .string => |s| xm.allocator.free(s),
         .array => |*arr| {
-            for (arr.items) |item| xm.allocator.free(item);
+            for (arr.items) |item| xm.allocator.free(item.value);
             arr.deinit(xm.allocator);
         },
         else => {},
@@ -98,6 +112,51 @@ pub fn options_get_only(oo: *T.Options, name: []const u8) ?*T.OptionsValue {
     return oo.entries.getPtr(name);
 }
 
+pub fn options_map_name(name: []const u8) []const u8 {
+    for (option_name_maps) |mapping| {
+        if (std.mem.eql(u8, mapping.from, name)) return mapping.to;
+    }
+    return name;
+}
+
+pub fn options_parse(name: []const u8, idx: *?u32) ?[]u8 {
+    idx.* = null;
+    if (name.len == 0) return null;
+
+    const open = std.mem.indexOfScalar(u8, name, '[') orelse return xm.xstrdup(name);
+    const close = std.mem.indexOfScalarPos(u8, name, open + 1, ']') orelse return null;
+    if (close + 1 != name.len or close == open + 1) return null;
+
+    const idx_text = name[open + 1 .. close];
+    for (idx_text) |ch| {
+        if (!std.ascii.isDigit(ch)) return null;
+    }
+    idx.* = std.fmt.parseInt(u32, idx_text, 10) catch return null;
+    return xm.xstrdup(name[0..open]);
+}
+
+pub fn options_match(s: []const u8, idx: *?u32, ambiguous: *bool) ?[]u8 {
+    ambiguous.* = false;
+
+    const parsed = options_parse(s, idx) orelse return null;
+    defer xm.allocator.free(parsed);
+    if (parsed.len != 0 and parsed[0] == '@') return xm.xstrdup(parsed);
+
+    const name = options_map_name(parsed);
+    var found: ?*const T.OptionsTableEntry = null;
+    for (table.options_table) |*oe| {
+        if (std.mem.eql(u8, oe.name, name)) return xm.xstrdup(oe.name);
+        if (std.mem.startsWith(u8, oe.name, name)) {
+            if (found != null) {
+                ambiguous.* = true;
+                return null;
+            }
+            found = oe;
+        }
+    }
+    return if (found) |oe| xm.xstrdup(oe.name) else null;
+}
+
 // ── Typed getters ─────────────────────────────────────────────────────────
 
 /// Get a numeric option value; returns 0 if not found.
@@ -121,13 +180,128 @@ pub fn options_get_string(oo: *T.Options, name: []const u8) []const u8 {
     };
 }
 
-/// Get an array option value; returns an empty slice if not found.
-pub fn options_get_array(oo: *T.Options, name: []const u8) []const []const u8 {
-    const v = options_get(oo, name) orelse return &.{};
+fn array_find_position(items: []const T.OptionsArrayItem, idx: u32) usize {
+    var pos: usize = 0;
+    while (pos < items.len and items[pos].index < idx) : (pos += 1) {}
+    return pos;
+}
+
+fn array_next_free_index(items: []const T.OptionsArrayItem) u32 {
+    var next: u32 = 0;
+    for (items) |item| {
+        if (item.index == next) {
+            next += 1;
+            continue;
+        }
+        if (item.index > next) break;
+    }
+    return next;
+}
+
+fn array_join_values(alloc: std.mem.Allocator, items: []const T.OptionsArrayItem, sep: []const u8) []u8 {
+    if (items.len == 0) return xm.xstrdup("");
+
+    var out: std.ArrayList(u8) = .{};
+    for (items, 0..) |item, idx| {
+        if (idx != 0) out.appendSlice(alloc, sep) catch unreachable;
+        out.appendSlice(alloc, item.value) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn array_clear(arr: *std.ArrayList(T.OptionsArrayItem)) void {
+    for (arr.items) |item| xm.allocator.free(item.value);
+    arr.clearRetainingCapacity();
+}
+
+fn array_set(
+    arr: *std.ArrayList(T.OptionsArrayItem),
+    idx: u32,
+    value: ?[]const u8,
+    append: bool,
+) void {
+    const pos = array_find_position(arr.items, idx);
+    const existing = pos < arr.items.len and arr.items[pos].index == idx;
+    if (value == null) {
+        if (existing) {
+            xm.allocator.free(arr.items[pos].value);
+            _ = arr.orderedRemove(pos);
+        }
+        return;
+    }
+
+    const owned = if (existing and append)
+        xm.xasprintf("{s}{s}", .{ arr.items[pos].value, value.? })
+    else
+        xm.xstrdup(value.?);
+    if (existing) {
+        xm.allocator.free(arr.items[pos].value);
+        arr.items[pos].value = owned;
+        return;
+    }
+    arr.insert(xm.allocator, pos, .{ .index = idx, .value = owned }) catch unreachable;
+}
+
+fn ensure_local_array(oo: *T.Options, name: []const u8) *std.ArrayList(T.OptionsArrayItem) {
+    if (oo.entries.getPtr(name)) |existing| {
+        return switch (existing.*) {
+            .array => |*arr| arr,
+            else => unreachable,
+        };
+    }
+
+    put_value(oo, name, .{ .array = .{} });
+    return &oo.entries.getPtr(name).?.array;
+}
+
+fn array_separator(oe: *const T.OptionsTableEntry) []const u8 {
+    if (oe.separator) |sep| return sep;
+    if (oe.is_hook) return "";
+    return " ,";
+}
+
+fn array_assign(
+    arr: *std.ArrayList(T.OptionsArrayItem),
+    oe: *const T.OptionsTableEntry,
+    value: []const u8,
+) void {
+    const separator = array_separator(oe);
+    if (separator.len == 0) {
+        if (value.len == 0) return;
+        array_set(arr, array_next_free_index(arr.items), value, false);
+        return;
+    }
+    if (value.len == 0) return;
+
+    var it = std.mem.tokenizeAny(u8, value, separator);
+    while (it.next()) |part| {
+        array_set(arr, array_next_free_index(arr.items), part, false);
+    }
+}
+
+/// Get an array option value as indexed items; returns an empty slice if not found.
+pub fn options_get_array_items(oo: *T.Options, name: []const u8) []const T.OptionsArrayItem {
+    const v = options_get(oo, name) orelse return empty_array_items[0..];
     return switch (v.*) {
         .array => |arr| arr.items,
-        else => &.{},
+        else => empty_array_items[0..],
     };
+}
+
+pub fn options_array_get_value(value: *const T.OptionsValue, idx: u32) ?[]const u8 {
+    return switch (value.*) {
+        .array => |arr| blk: {
+            const pos = array_find_position(arr.items, idx);
+            if (pos >= arr.items.len or arr.items[pos].index != idx) break :blk null;
+            break :blk arr.items[pos].value;
+        },
+        else => null,
+    };
+}
+
+pub fn options_get_array_item(oo: *T.Options, name: []const u8, idx: u32) ?[]const u8 {
+    const v = options_get(oo, name) orelse return null;
+    return options_array_get_value(v, idx);
 }
 
 /// Get a raw style option string; returns null if absent or non-string.
@@ -184,8 +358,10 @@ pub fn options_scope_has(scope: T.OptionsScope, oe: *const T.OptionsTableEntry) 
 }
 
 pub fn options_clone_array(value: []const []const u8) T.OptionsValue {
-    var arr: std.ArrayList([]u8) = .{};
-    for (value) |item| arr.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
+    var arr: std.ArrayList(T.OptionsArrayItem) = .{};
+    for (value, 0..) |item, idx| {
+        arr.append(xm.allocator, .{ .index = @intCast(idx), .value = xm.xstrdup(item) }) catch unreachable;
+    }
     return .{ .array = arr };
 }
 
@@ -194,30 +370,8 @@ pub fn options_set_array(oo: *T.Options, name: []const u8, items: []const []cons
 }
 
 pub fn options_append_array(oo: *T.Options, name: []const u8, item: []const u8) void {
-    if (oo.entries.getPtr(name)) |existing| {
-        switch (existing.*) {
-            .array => |*arr| {
-                arr.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
-                return;
-            },
-            else => {},
-        }
-    }
-
-    if (options_get(oo, name)) |effective| {
-        switch (effective.*) {
-            .array => |arr| {
-                var copy: std.ArrayList([]u8) = .{};
-                for (arr.items) |existing_item| copy.append(xm.allocator, xm.xstrdup(existing_item)) catch unreachable;
-                copy.append(xm.allocator, xm.xstrdup(item)) catch unreachable;
-                put_value(oo, name, .{ .array = copy });
-                return;
-            },
-            else => {},
-        }
-    }
-
-    options_set_array(oo, name, &.{item});
+    const arr = ensure_local_array(oo, name);
+    array_set(arr, array_next_free_index(arr.items), item, false);
 }
 
 pub fn options_parse_number(value: []const u8) ?i64 {
@@ -253,6 +407,7 @@ pub fn options_set_from_string(
     oo: *T.Options,
     oe: ?*const T.OptionsTableEntry,
     name: []const u8,
+    idx: ?u32,
     value: ?[]const u8,
     append: bool,
     cause: *?[]u8,
@@ -303,17 +458,17 @@ pub fn options_set_from_string(
             options_set_number(oo, name, if (parsed) 1 else 0);
         },
         .choice => {
-            const idx = options_choice_index(oe.?, value orelse "") orelse {
+            const choice_idx = options_choice_index(oe.?, value orelse "") orelse {
                 cause.* = xm.xasprintf("invalid choice: {s}", .{value orelse ""});
                 return false;
             };
             if (oe.?.choices) |choices| {
-                if (idx >= choices.len) {
+                if (choice_idx >= choices.len) {
                     cause.* = xm.xasprintf("invalid choice: {s}", .{value orelse ""});
                     return false;
                 }
             }
-            options_set_number(oo, name, idx);
+            options_set_number(oo, name, choice_idx);
         },
         .colour => {
             const parsed = colour_mod.colour_fromstring(value orelse "");
@@ -328,10 +483,12 @@ pub fn options_set_from_string(
                 cause.* = xm.xstrdup("empty value");
                 return false;
             }
-            if (append) {
-                options_append_array(oo, name, value.?);
+            const arr = ensure_local_array(oo, name);
+            if (idx) |array_idx| {
+                array_set(arr, array_idx, value.?, append);
             } else {
-                options_set_array(oo, name, &.{value.?});
+                if (!append) array_clear(arr);
+                array_assign(arr, oe.?, value.?);
             }
         },
         .command => {
@@ -367,11 +524,7 @@ pub fn options_value_to_string(_: []const u8, value: *const T.OptionsValue, oe: 
         .colour => |colour| xm.xstrdup(colour_mod.colour_tostring(colour)),
         .style => |_| xm.xstrdup("default"),
         .flag => |b| xm.xstrdup(if (b) "on" else "off"),
-        .array => |arr| blk: {
-            if (arr.items.len == 0) break :blk xm.xstrdup("");
-            const joined = std.mem.join(xm.allocator, ",", arr.items) catch unreachable;
-            break :blk joined;
-        },
+        .array => |arr| array_join_values(xm.allocator, arr.items, " "),
         .command => xm.xstrdup(""),
     };
 }
@@ -400,11 +553,46 @@ pub fn options_default(oo: *T.Options, oe: *const T.OptionsTableEntry) void {
         .array => {
             if (oe.default_arr) |items| {
                 options_set_array(oo, oe.name, items);
+            } else if (oe.default_str) |value| {
+                const arr = ensure_local_array(oo, oe.name);
+                array_clear(arr);
+                array_assign(arr, oe, value);
             }
         },
         .command => {},
     }
     _ = table; // suppress unused import warning until table is referenced
+}
+
+pub fn options_remove_or_default(
+    oo: *T.Options,
+    oe: ?*const T.OptionsTableEntry,
+    name: []const u8,
+    idx: ?u32,
+    global: bool,
+    cause: *?[]u8,
+) bool {
+    if (idx == null) {
+        if (oe != null and global) {
+            options_remove(oo, name);
+            options_default(oo, oe.?);
+        } else {
+            options_remove(oo, name);
+        }
+        return true;
+    }
+
+    const existing = options_get_only(oo, name) orelse return true;
+    switch (existing.*) {
+        .array => |*arr| {
+            array_set(arr, idx.?, null, false);
+            return true;
+        },
+        else => {
+            cause.* = xm.xstrdup("not an array");
+            return false;
+        },
+    }
 }
 
 /// Initialise all options in a scope from the global table.

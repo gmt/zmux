@@ -126,19 +126,19 @@ pub fn environ_unset(env: *T.Environ, name: []const u8) void {
 }
 
 pub fn environ_update(oo: *T.Options, srcenv: *T.Environ, dstenv: *T.Environ) void {
-    const patterns = opts.options_get_array(oo, "update-environment");
+    const patterns = opts.options_get_array_items(oo, "update-environment");
     for (patterns) |pattern| {
         var found = false;
         var it = srcenv.entries.valueIterator();
         while (it.next()) |entry| {
-            if (!environ_match(pattern, entry.name)) continue;
+            if (!environ_match(pattern.value, entry.name)) continue;
             if (entry.value) |value|
                 environ_set(dstenv, entry.name, 0, value)
             else
                 environ_clear(dstenv, entry.name);
             found = true;
         }
-        if (!found) environ_clear(dstenv, pattern);
+        if (!found) environ_clear(dstenv, pattern.value);
     }
 }
 

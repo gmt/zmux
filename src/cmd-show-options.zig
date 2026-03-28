@@ -21,9 +21,11 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const opts = @import("options.zig");
 const cmd_opts = @import("cmd-options.zig");
+const format_mod = @import("format.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -35,8 +37,32 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     else
         .exclude;
 
-    const name = args.value_at(0);
-    if (name) |option_name| {
+    var name: ?[]u8 = null;
+    var idx: ?u32 = null;
+    if (args.value_at(0)) |raw_name| {
+        const current = cmdq.cmdq_get_target(item);
+        const ctx = format_mod.FormatContext{
+            .item = @ptrCast(item),
+            .client = cmdq.cmdq_get_client(item),
+            .session = current.s,
+            .winlink = current.wl,
+            .window = current.w,
+            .pane = current.wp,
+        };
+        const argument = cmd_format.require(item, raw_name, &ctx) orelse return .@"error";
+        defer xm.allocator.free(argument);
+
+        var ambiguous = false;
+        name = opts.options_match(argument, &idx, &ambiguous) orelse {
+            if (args.has('q')) return .normal;
+            if (ambiguous)
+                cmdq.cmdq_error(item, "ambiguous option: {s}", .{argument})
+            else
+                cmdq.cmdq_error(item, "invalid option: {s}", .{argument});
+            return .@"error";
+        };
+        errdefer xm.allocator.free(name.?);
+        const option_name = name.?;
         const oe = opts.options_table_entry(option_name);
         if (oe == null and !cmd_opts.is_custom_option(option_name)) {
             if (args.has('q')) return .normal;
@@ -49,6 +75,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             return .@"error";
         }
     }
+    defer if (name) |option_name| xm.allocator.free(option_name);
 
     const target = (if (name) |option_name|
         cmd_opts.resolve_target_for_name(item, args, cmd.entry == &entry_window, option_name)
@@ -63,7 +90,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    const lines = cmd_opts.collect_lines(target, name, args.has('v'), args.has('A'), hook_mode);
+    const lines = cmd_opts.collect_lines(target, name, idx, args.has('v'), args.has('A'), hook_mode);
     defer free_lines(lines);
     if (name != null and lines.len == 0) {
         if (cmd_opts.is_custom_option(name.?)) {
@@ -206,6 +233,34 @@ test "show-hooks resolves named pane hooks against global window options" {
     const output = try capture_stdout(&.{ "show-hooks", "-g", "pane-focus-out" });
     defer xm.allocator.free(output);
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "pane-focus-out"));
+}
+
+test "show-options prints the requested indexed array entry" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_array(opts.global_s_options, "after-show-options", &.{
+        "display-message zero",
+    });
+
+    var cause: ?[]u8 = null;
+    const set = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options[3]", "display-message three" }, null, &cause);
+    defer cmd_mod.cmd_free(set);
+    defer if (cause) |msg| xm.allocator.free(msg);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set, &item));
+
+    const output = try capture_stdout(&.{ "show-options", "-g", "after-show-options[3]" });
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "after-show-options[3]"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "display-message three"));
 }
 
 test "show-options -gp ignores -g for pane custom options" {

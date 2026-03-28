@@ -544,6 +544,7 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
         w.last_panes.deinit(xm.allocator);
         w.winlinks.deinit(xm.allocator);
         opts.options_free(w.options);
+        if (w.old_layout) |old_layout| xm.allocator.free(old_layout);
         xm.allocator.free(w.name);
         xm.allocator.destroy(w);
     }

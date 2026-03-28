@@ -368,6 +368,13 @@ const default_client_mode_suspend_tagged_argv = [_][]const u8{ "send-keys", "-X"
 const default_client_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
 const default_client_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
 const default_client_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
+const default_buffer_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
+const default_buffer_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
+const default_buffer_mode_paste_argv = [_][]const u8{ "send-keys", "-X", "paste" };
+const default_buffer_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
+const default_buffer_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
+const default_buffer_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
+const default_buffer_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
 const default_tree_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
 const default_tree_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
 const default_tree_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
@@ -2042,6 +2049,114 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .argv = default_client_mode_tag_all_argv[0..],
     },
     .{
+        .table = "buffer-mode",
+        .key = 'q',
+        .note = "Exit buffer mode",
+        .argv = default_buffer_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = T.C0_ESC,
+        .note = "Exit buffer mode",
+        .argv = default_buffer_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = '\r',
+        .note = "Paste selected buffer",
+        .argv = default_buffer_mode_choose_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = 'p',
+        .note = "Paste selected buffer",
+        .argv = default_buffer_mode_paste_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_buffer_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_buffer_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_buffer_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_buffer_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'q',
+        .note = "Exit buffer mode",
+        .argv = default_buffer_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = T.C0_ESC,
+        .note = "Exit buffer mode",
+        .argv = default_buffer_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = '\r',
+        .note = "Paste selected buffer",
+        .argv = default_buffer_mode_choose_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'p',
+        .note = "Paste selected buffer",
+        .argv = default_buffer_mode_paste_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'k',
+        .note = "Move up",
+        .argv = default_buffer_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'j',
+        .note = "Move down",
+        .argv = default_buffer_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_buffer_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_buffer_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_buffer_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_buffer_mode_page_down_argv[0..],
+    },
+    .{
         .table = "tree-mode",
         .key = 'q',
         .note = "Exit tree mode",
@@ -2737,6 +2852,20 @@ test "default options-mode bindings are installed" {
     try std.testing.expect(key_bindings_get(vi, 'h') != null);
     try std.testing.expect(key_bindings_get(vi, 'l') != null);
     try std.testing.expect(key_bindings_get(vi, 'H') != null);
+}
+
+test "default buffer-mode bindings are installed" {
+    key_bindings_init();
+
+    const emacs = key_bindings_get_table("buffer-mode", false).?;
+    try std.testing.expect(key_bindings_get(emacs, 'q') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'p') != null);
+    try std.testing.expect(key_bindings_get(emacs, T.KEYC_DOWN) != null);
+
+    const vi = key_bindings_get_table("buffer-mode-vi", false).?;
+    try std.testing.expect(key_bindings_get(vi, 'q') != null);
+    try std.testing.expect(key_bindings_get(vi, 'j') != null);
+    try std.testing.expect(key_bindings_get(vi, 'p') != null);
 }
 
 test "key bindings dispatch preserves the supplied current target state" {

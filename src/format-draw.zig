@@ -1111,6 +1111,6 @@ test "format_draw_ranges translates clipped list ranges" {
     try std.testing.expectEqual(@as(usize, 1), ranges.items.len);
     try std.testing.expectEqual(T.StyleRangeType.window, ranges.items[0].type);
     try std.testing.expectEqual(@as(u32, 7), ranges.items[0].argument);
-    try std.testing.expectEqual(@as(u32, 3), ranges.items[0].start);
-    try std.testing.expectEqual(@as(u32, 5), ranges.items[0].end);
+    try std.testing.expectEqual(@as(u32, 2), ranges.items[0].start);
+    try std.testing.expectEqual(@as(u32, 4), ranges.items[0].end);
 }

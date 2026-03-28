@@ -85,8 +85,52 @@ const status_format_default_0 =
     "#[pop-default]" ++
     "#[norange default]";
 
+const status_format_default_1 =
+    "#[align=left]#{R: ,#{n:#{session_name}}}P: " ++
+    "#[norange default]" ++
+    "#[list=on align=#{status-justify}]" ++
+    "#[list=left-marker]<#[list=right-marker]>#[list=on]" ++
+    "#{P:" ++
+    "#[range=pane|#{pane_id} #{E:pane-status-style}]" ++
+    "#[push-default]" ++
+    "#P[#{pane_width}x#{pane_height}]" ++
+    "#[pop-default]" ++
+    "#[norange list=on default]  " ++
+    "," ++
+    "#[range=pane|#{pane_id} list=focus " ++
+    "#{?#{!=:#{E:pane-status-current-style},default},#{E:pane-status-current-style},#{E:pane-status-style}}" ++
+    "]" ++
+    "#[push-default]" ++
+    "#P[#{pane_width}x#{pane_height}]*" ++
+    "#[pop-default]" ++
+    "#[norange list=on default] " ++
+    "}";
+
+const status_format_default_2 =
+    "#[align=left]#{R: ,#{n:#{session_name}}}S: " ++
+    "#[norange default]" ++
+    "#[list=on align=#{status-justify}]" ++
+    "#[list=left-marker]<#[list=right-marker]>#[list=on]" ++
+    "#{S:" ++
+    "#[range=session|#{session_id} #{E:session-status-style}]" ++
+    "#[push-default]" ++
+    "#S#{session_alert}" ++
+    "#[pop-default]" ++
+    "#[norange list=on default]  " ++
+    "," ++
+    "#[range=session|#{session_id} list=focus " ++
+    "#{?#{!=:#{E:session-status-current-style},default},#{E:session-status-current-style},#{E:session-status-style}}" ++
+    "]" ++
+    "#[push-default]" ++
+    "#S*#{session_alert}" ++
+    "#[pop-default]" ++
+    "#[norange list=on default] " ++
+    "}";
+
 const status_format_default = [_][]const u8{
     status_format_default_0,
+    status_format_default_1,
+    status_format_default_2,
 };
 
 const copy_mode_position_format_default =
@@ -302,6 +346,8 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "pane-scrollbars", .type = .choice, .scope = WP, .default_num = 0, .choices = &.{ "off", "modal", "always" } },
     .{ .name = "pane-scrollbars-style", .type = .style, .scope = WP, .default_str = "default" },
     .{ .name = "pane-scrollbars-position", .type = .choice, .scope = WP, .default_num = T.PANE_SCROLLBARS_RIGHT, .choices = &.{ "right", "left" } },
+    .{ .name = "pane-status-current-style", .type = .style, .scope = W, .default_str = "default" },
+    .{ .name = "pane-status-style", .type = .style, .scope = W, .default_str = "default" },
     .{ .name = "popup-style", .type = .style, .scope = W, .default_str = "default" },
     .{ .name = "popup-border-style", .type = .style, .scope = W, .default_str = "default" },
     .{ .name = "popup-border-lines", .type = .choice, .scope = W, .default_num = 1, .choices = &.{ "single", "rounded", "double", "heavy", "simple", "padded", "none" } },
@@ -309,6 +355,8 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "remain-on-exit-format", .type = .string, .scope = WP, .default_str = "Pane is dead (#{pane_dead_status})" },
     .{ .name = "scroll-on-clear", .type = .flag, .scope = WP, .default_num = 1 },
     .{ .name = "scroll-speed", .type = .number, .scope = W, .default_num = 3 },
+    .{ .name = "session-status-current-style", .type = .style, .scope = W, .default_str = "default" },
+    .{ .name = "session-status-style", .type = .style, .scope = W, .default_str = "default" },
     .{ .name = "synchronize-panes", .type = .flag, .scope = WP, .default_num = 0 },
     .{ .name = "window-active-style", .type = .style, .scope = WP, .default_str = "default" },
     .{ .name = "window-size", .type = .choice, .scope = W, .default_num = T.WINDOW_SIZE_LATEST, .choices = &.{ "largest", "smallest", "manual", "latest" } },
@@ -350,4 +398,50 @@ test "copy-mode position options keep tmux defaults and scopes" {
     try std.testing.expect(selection_style.scope.window);
     try std.testing.expect(!selection_style.scope.pane);
     try std.testing.expectEqualStrings("#{E:mode-style}", selection_style.default_str.?);
+}
+
+test "status format defaults and status style options keep tmux metadata" {
+    const std = @import("std");
+
+    const status_format = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "status-format")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.array, status_format.type);
+    try std.testing.expect(status_format.scope.session);
+    try std.testing.expectEqual(@as(usize, 3), status_format.default_arr.?.len);
+    try std.testing.expectEqualStrings(status_format_default_0, status_format.default_arr.?[0]);
+    try std.testing.expectEqualStrings(status_format_default_1, status_format.default_arr.?[1]);
+    try std.testing.expectEqualStrings(status_format_default_2, status_format.default_arr.?[2]);
+
+    const pane_current = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "pane-status-current-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, pane_current.type);
+    try std.testing.expect(pane_current.scope.window);
+    try std.testing.expect(!pane_current.scope.pane);
+    try std.testing.expectEqualStrings("default", pane_current.default_str.?);
+
+    const pane_style = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "pane-status-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, pane_style.type);
+    try std.testing.expect(pane_style.scope.window);
+    try std.testing.expect(!pane_style.scope.pane);
+    try std.testing.expectEqualStrings("default", pane_style.default_str.?);
+
+    const session_current = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "session-status-current-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, session_current.type);
+    try std.testing.expect(session_current.scope.window);
+    try std.testing.expect(!session_current.scope.pane);
+    try std.testing.expectEqualStrings("default", session_current.default_str.?);
+
+    const session_style = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "session-status-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, session_style.type);
+    try std.testing.expect(session_style.scope.window);
+    try std.testing.expect(!session_style.scope.pane);
+    try std.testing.expectEqualStrings("default", session_style.default_str.?);
 }

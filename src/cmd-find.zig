@@ -26,6 +26,7 @@ const xm = @import("xmalloc.zig");
 const sess = @import("session.zig");
 const sort_mod = @import("sort.zig");
 const win_mod = @import("window.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const opts = @import("options.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
@@ -106,11 +107,16 @@ pub fn cmd_find_target(
 
     cmd_find_clear_state(fs, flags);
 
-    var current = resolve_current_state(item, flags) orelse {
-        if (flags & T.CMD_FIND_QUIET == 0)
-            cmdq_mod.cmdq_error(item, "no current target", .{});
-        return fail_target(fs, flags);
-    };
+    var current: T.CmdFindState = .{ .flags = flags, .idx = -1 };
+    if (flags & T.CMD_FIND_DEFAULT_MARKED != 0 and marked_pane_mod.check()) {
+        cmd_find_copy_state(&current, &marked_pane_mod.marked_pane);
+    } else {
+        current = resolve_current_state(item, flags) orelse {
+            if (flags & T.CMD_FIND_QUIET == 0)
+                cmdq_mod.cmdq_error(item, "no current target", .{});
+            return fail_target(fs, flags);
+        };
+    }
 
     if (target == null or target.?.len == 0) {
         cmd_find_copy_state(fs, &current);
@@ -171,9 +177,13 @@ pub fn cmd_find_target(
         return fail_target(fs, flags);
     }
     if (std.mem.eql(u8, raw_target, "~") or std.mem.eql(u8, raw_target, "{marked}")) {
-        if (flags & T.CMD_FIND_QUIET == 0)
-            cmdq_mod.cmdq_error(item, "marked target not supported yet", .{});
-        return fail_target(fs, flags);
+        if (!marked_pane_mod.check()) {
+            if (flags & T.CMD_FIND_QUIET == 0)
+                cmdq_mod.cmdq_error(item, "no marked target", .{});
+            return fail_target(fs, flags);
+        }
+        cmd_find_copy_state(fs, &marked_pane_mod.marked_pane);
+        return 0;
     }
 
     var parsed = parse_target(raw_target, find_type);

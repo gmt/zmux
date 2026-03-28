@@ -29,6 +29,7 @@ const pane_io = @import("pane-io.zig");
 const style_mod = @import("style.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const c = @import("c.zig");
 const utf8 = @import("utf8.zig");
 
@@ -42,6 +43,7 @@ var next_window_pane_id: u32 = 0;
 pub fn window_init_globals(alloc: std.mem.Allocator) void {
     windows = std.AutoHashMap(u32, *T.Window).init(alloc);
     all_window_panes = std.AutoHashMap(u32, *T.WindowPane).init(alloc);
+    marked_pane_mod.clear();
 }
 
 // ── Window comparators ────────────────────────────────────────────────────
@@ -132,6 +134,7 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
 }
 
 pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
+    marked_pane_mod.clear_if_pane(wp);
     _ = window_detach_pane(w, wp);
     _ = all_window_panes.remove(wp.id);
     window_pane_destroy(wp);
@@ -687,17 +690,23 @@ pub fn window_pane_synchronize_key_bytes(wp: *T.WindowPane, key: T.key_code, byt
 }
 
 /// Push current zoom state.
-pub fn window_push_zoom(_w: *T.Window, _ignore: bool, _zoom: bool) bool {
-    _ = _w;
-    _ = _ignore;
-    _ = _zoom;
-    return false;
+pub fn window_push_zoom(w: *T.Window, always: bool, zoom: bool) bool {
+    if (zoom and (always or (w.flags & T.WINDOW_ZOOMED != 0)))
+        w.flags |= T.WINDOW_WASZOOMED
+    else
+        w.flags &= ~@as(u32, T.WINDOW_WASZOOMED);
+
+    if (w.flags & T.WINDOW_ZOOMED == 0) return false;
+    w.flags &= ~@as(u32, T.WINDOW_ZOOMED);
+    return true;
 }
 
 /// Pop zoom state.
-pub fn window_pop_zoom(_w: *T.Window) bool {
-    _ = _w;
-    return false;
+pub fn window_pop_zoom(w: *T.Window) bool {
+    if (w.flags & T.WINDOW_WASZOOMED == 0) return false;
+    w.flags &= ~@as(u32, T.WINDOW_WASZOOMED);
+    w.flags |= T.WINDOW_ZOOMED;
+    return true;
 }
 
 pub fn window_redraw_active_switch(_w: *T.Window, _wp: *T.WindowPane) void {

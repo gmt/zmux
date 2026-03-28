@@ -31,6 +31,7 @@ const cmd_display_panes = @import("cmd-display-panes.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
 const cmd_find = @import("cmd-find.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const input_keys = @import("input-keys.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const server_client_mod = @import("server-client.zig");
@@ -161,6 +162,7 @@ pub fn server_link_window(
     }
 
     const new_wl = sess.session_attach(dst, srcwl.window, actual_idx, cause) orelse return -1;
+    marked_pane_mod.rebind_winlink(srcwl, new_wl);
     if (actual_select) dst.curw = new_wl;
     server_redraw_session_group(dst);
     return 0;
@@ -790,6 +792,7 @@ test "server_link_window replaces occupied destination with -k and server_unlink
     var cause: ?[]u8 = null;
     var src_ctx: T.SpawnContext = .{ .s = src, .idx = -1, .flags = T.SPAWN_EMPTY };
     const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    marked_pane_mod.set(src, src_wl, src_wl.window.active.?);
     var dst_ctx: T.SpawnContext = .{ .s = dst, .idx = -1, .flags = T.SPAWN_EMPTY };
     _ = spawn.spawn_window(&dst_ctx, &cause).?;
     dst.curw = sess.winlink_find_by_index(&dst.windows, 0).?;
@@ -797,6 +800,7 @@ test "server_link_window replaces occupied destination with -k and server_unlink
     try std.testing.expectEqual(@as(i32, 0), server_link_window(src, src_wl, dst, 0, true, true, &cause));
     try std.testing.expectEqual(src_wl.window, dst.curw.?.window);
     try std.testing.expectEqual(@as(u32, 2), sess.session_window_link_count(src_wl.window));
+    try std.testing.expectEqual(dst.curw.?, marked_pane_mod.marked_pane.wl.?);
 
     const linked = sess.winlink_find_by_window(&dst.windows, src_wl.window).?;
     server_unlink_window(dst, linked);

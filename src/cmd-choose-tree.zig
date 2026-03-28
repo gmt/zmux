@@ -26,6 +26,7 @@ const cmdq = @import("cmd-queue.zig");
 const paste_mod = @import("paste.zig");
 const sort_mod = @import("sort.zig");
 const window_client = @import("window-client.zig");
+const window_tree = @import("window-tree.zig");
 const xm = @import("xmalloc.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -60,8 +61,33 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    cmdq.cmdq_error(item, "{s} mode not supported yet", .{cmd.entry.name});
-    return .@"error";
+    if (cmd.entry == &entry_buffer or cmd.entry == &entry_customize_mode) {
+        cmdq.cmdq_error(item, "{s} mode not supported yet", .{cmd.entry.name});
+        return .@"error";
+    }
+    if (args.has('K')) {
+        cmdq.cmdq_error(item, "choose-tree custom key format not supported yet", .{});
+        return .@"error";
+    }
+
+    _ = window_tree.enterMode(wp, .{
+        .fs = &target,
+        .kind = if (args.has('s'))
+            .session
+        else if (args.has('w'))
+            .window
+        else
+            .pane,
+        .format = args.get('F'),
+        .filter = args.get('f'),
+        .command = args.value_at(0),
+        .sort_crit = .{
+            .order = order,
+            .reversed = args.has('r'),
+        },
+        .squash_groups = !args.has('G'),
+    });
+    return .normal;
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -294,16 +320,17 @@ test "choose-client rejects unsupported custom key format flags" {
     try std.testing.expectEqualStrings("Choose-client custom key format not supported yet", current_client.message_string.?);
 }
 
-test "choose-tree reports the reduced missing mode runtime" {
+test "choose-tree enters the reduced window-tree mode" {
     const sess = @import("session.zig");
+    const win = @import("window.zig");
 
     init_test_globals();
     defer deinit_test_globals();
 
-    const setup = try test_setup("choose-tree-error");
-    defer if (sess.session_find("choose-tree-error") != null) sess.session_destroy(setup.session, false, "test");
+    const setup = try test_setup("choose-tree-live");
+    defer if (sess.session_find("choose-tree-live") != null) sess.session_destroy(setup.session, false, "test");
 
-    const target = try test_target(xm.allocator, "choose-tree-error");
+    const target = try test_target(xm.allocator, "choose-tree-live");
     defer xm.allocator.free(target);
 
     var env = T.Environ.init(xm.allocator);
@@ -322,12 +349,11 @@ test "choose-tree reports the reduced missing mode runtime" {
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-tree", "-t", target }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
-    defer if (client.message_string) |msg| xm.allocator.free(msg);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Choose-tree mode not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_tree.window_tree_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
 test "choose-tree rejects invalid sort order before the reduced mode error" {
@@ -364,4 +390,40 @@ test "choose-tree rejects invalid sort order before the reduced mode error" {
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("Invalid sort order", client.message_string.?);
+}
+
+test "choose-tree rejects unsupported custom key format" {
+    const sess = @import("session.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("choose-tree-key-format");
+    defer if (sess.session_find("choose-tree-key-format") != null) sess.session_destroy(setup.session, false, "test");
+
+    const target = try test_target(xm.allocator, "choose-tree-key-format");
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "choose-tree-key-format-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-tree", "-K", "#{line}", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (client.message_string) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Choose-tree custom key format not supported yet", client.message_string.?);
 }

@@ -94,12 +94,25 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (wp == wl.window.active) return .normal;
+    const cl = cmdq.cmdq_get_client(item);
+    const use_client_active_pane = if (cl) |c|
+        c.session != null and (c.flags & T.CLIENT_ACTIVEPANE) != 0
+    else
+        false;
+    const active_pane = if (use_client_active_pane)
+        server_client_mod.server_client_get_pane(cl.?)
+    else
+        wl.window.active;
+    if (active_pane == wp) return .normal;
+
     _ = win.window_push_zoom(wl.window, false, args.has('Z'));
     defer _ = win.window_pop_zoom(wl.window);
-    _ = win.window_set_active_pane(wl.window, wp, true);
+    win.window_redraw_active_switch(wl.window, wp);
+    if (use_client_active_pane)
+        server_client_mod.server_client_set_pane(cl.?, wp)
+    else
+        _ = win.window_set_active_pane(wl.window, wp, true);
 
-    const cl = cmdq.cmdq_get_client(item);
     if (cl) |c| {
         if (c.session == s) server_client_mod.server_client_apply_session_size(c, s);
     }
@@ -236,10 +249,14 @@ pub const entry_last: cmd_mod.CmdEntry = .{
 };
 
 test "select-pane switches active pane and last-pane switches back" {
+    const client_registry = @import("client-registry.zig");
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
     const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
 
     sess_mod.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -282,6 +299,88 @@ test "select-pane switches active pane and last-pane switches back" {
     defer cmd_mod.cmd_free(last_cmd);
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(last_cmd, &item));
     try std.testing.expectEqual(wl.window.panes.items[0], wl.window.active.?);
+}
+
+test "select-pane uses the client-local active pane when active-pane is set" {
+    const client_registry = @import("client-registry.zig");
+    const opts_mod = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess_mod = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    sess_mod.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess_mod.session_create(null, "select-pane-client-active", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-client-active") != null) sess_mod.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    s.curw = wl;
+    const first = wl.window.active.?;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_ACTIVEPANE,
+        .session = s,
+    };
+    defer {
+        client_registry.remove(&client);
+        client.client_windows.deinit(xm.allocator);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{
+        .client = &client,
+        .sx = 80,
+        .sy = 24,
+        .xpixel = T.DEFAULT_XPIXEL,
+        .ypixel = T.DEFAULT_YPIXEL,
+    };
+    client_registry.add(&client);
+
+    const second_target = xm.xasprintf("%{d}", .{second.id});
+    defer xm.allocator.free(second_target);
+    const first_target = xm.xasprintf("%{d}", .{first.id});
+    defer xm.allocator.free(first_target);
+
+    var parse_cause: ?[]u8 = null;
+    const second_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-t", second_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(second_cmd);
+    const first_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-t", first_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(first_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    try std.testing.expectEqual(first, server_client_mod.server_client_get_pane(&client).?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(second_cmd, &item));
+    try std.testing.expectEqual(first, wl.window.active.?);
+    try std.testing.expectEqual(second, server_client_mod.server_client_get_pane(&client).?);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(first_cmd, &item));
+    try std.testing.expectEqual(first, wl.window.active.?);
+    try std.testing.expectEqual(first, server_client_mod.server_client_get_pane(&client).?);
 }
 
 test "select-pane can set pane title" {

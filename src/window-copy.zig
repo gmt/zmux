@@ -48,6 +48,11 @@ pub const window_copy_mode = T.WindowMode{
     .get_screen = copyModeGetScreen,
 };
 
+pub const MouseFormatSource = struct {
+    screen: *const T.Screen,
+    row: u32,
+};
+
 pub fn enterMode(wp: *T.WindowPane, swp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowModeEntry {
     if (window.window_pane_mode(wp)) |wme| {
         if (wme.mode == &window_copy_mode) {
@@ -91,6 +96,19 @@ pub fn pageDown(wp: *T.WindowPane, half_page: bool, scroll_exit: bool) void {
         return;
     }
     redraw(wme);
+}
+
+pub fn mouseFormatSource(wp: *T.WindowPane, y: u32) ?MouseFormatSource {
+    const wme = window.window_pane_mode(wp) orelse return null;
+    if (wme.mode != &window_copy_mode) return null;
+
+    const data = modeData(wme);
+    const row = data.top + y;
+    if (row >= data.backing.grid.sy) return null;
+    return .{
+        .screen = data.backing,
+        .row = row,
+    };
 }
 
 fn copyModeKeyTable(wme: *T.WindowModeEntry) []const u8 {

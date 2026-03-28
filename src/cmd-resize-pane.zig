@@ -19,11 +19,13 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const args_mod = @import("arguments.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const grid_mod = @import("grid.zig");
+const layout_mod = @import("layout.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
 
@@ -51,19 +53,59 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         server_fn.server_status_window(w);
         return .normal;
     }
+    _ = win.window_unzoom(w);
 
-    if (has_layout_resize_request(args)) {
-        cmdq.cmdq_error(item, "layout resize not supported yet", .{});
-        return .@"error";
+    const adjust = parse_adjustment(args.value_at(0), item) orelse return .@"error";
+
+    if (args.has('x')) {
+        var cause: ?[]u8 = null;
+        defer if (cause) |msg| xm.allocator.free(msg);
+        const width = args_mod.args_percentage(args, 'x', 0, std.math.maxInt(i32), w.sx, &cause);
+        if (cause != null) {
+            cmdq.cmdq_error(item, "width {s}", .{cause.?});
+            return .@"error";
+        }
+        _ = layout_mod.resize_pane_to(wp, .leftright, @intCast(width));
+    }
+    if (args.has('y')) {
+        var cause: ?[]u8 = null;
+        defer if (cause) |msg| xm.allocator.free(msg);
+        const height = args_mod.args_percentage(args, 'y', 0, std.math.maxInt(i32), w.sy, &cause);
+        if (cause != null) {
+            cmdq.cmdq_error(item, "height {s}", .{cause.?});
+            return .@"error";
+        }
+        _ = layout_mod.resize_pane_to(wp, .topbottom, @intCast(height));
     }
 
-    server_fn.server_status_window(wl.window);
+    if (args.has('L'))
+        _ = layout_mod.resize_pane(wp, .leftright, -@as(i32, @intCast(adjust)), true)
+    else if (args.has('R'))
+        _ = layout_mod.resize_pane(wp, .leftright, @intCast(adjust), true)
+    else if (args.has('U'))
+        _ = layout_mod.resize_pane(wp, .topbottom, -@as(i32, @intCast(adjust)), true)
+    else if (args.has('D'))
+        _ = layout_mod.resize_pane(wp, .topbottom, @intCast(adjust), true);
+
+    server_fn.server_redraw_window(wl.window);
     return .normal;
 }
 
-fn has_layout_resize_request(args: *const @import("arguments.zig").Arguments) bool {
-    return args.has('x') or args.has('y') or
-        args.has('L') or args.has('R') or args.has('U') or args.has('D');
+fn parse_adjustment(raw: ?[]const u8, item: *cmdq.CmdqItem) ?u32 {
+    const text = raw orelse return 1;
+    const value = std.fmt.parseInt(i64, text, 10) catch {
+        cmdq.cmdq_error(item, "adjustment invalid", .{});
+        return null;
+    };
+    if (value < 1) {
+        cmdq.cmdq_error(item, "adjustment too small", .{});
+        return null;
+    }
+    if (value > std.math.maxInt(i32)) {
+        cmdq.cmdq_error(item, "adjustment too large", .{});
+        return null;
+    }
+    return @intCast(value);
 }
 
 fn trim_history(wp: *T.WindowPane) bool {
@@ -194,7 +236,14 @@ test "resize-pane -T is a no-op while a pane mode is active" {
     try std.testing.expectEqual(@as(u32, 0), wp.flags & T.PANE_REDRAW);
 }
 
-test "resize-pane rejects layout-dependent geometry changes" {
+fn set_pane_geometry(wp: *T.WindowPane, xoff: u32, yoff: u32, sx: u32, sy: u32) void {
+    wp.xoff = xoff;
+    wp.yoff = yoff;
+    wp.sx = sx;
+    wp.sy = sy;
+}
+
+test "resize-pane -R grows only the matching horizontal branch" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
@@ -209,21 +258,136 @@ test "resize-pane rejects layout-dependent geometry changes" {
     var cause: ?[]u8 = null;
     var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&ctx, &cause).?;
-    const wp = wl.window.active.?;
-    const old_sx = wp.sx;
-    const old_sy = wp.sy;
+    const top_left = wl.window.active.?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const top_right = spawn.spawn_pane(&right_ctx, &cause).?;
+    var bottom_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const bottom = spawn.spawn_pane(&bottom_ctx, &cause).?;
+    s.curw = wl;
 
-    const target = std.fmt.allocPrint(xm.allocator, "%{d}", .{wp.id}) catch unreachable;
-    defer xm.allocator.free(target);
+    set_pane_geometry(top_left, 0, 0, 40, 12);
+    set_pane_geometry(top_right, 41, 0, 39, 12);
+    set_pane_geometry(bottom, 0, 13, 80, 11);
 
     var parse_cause: ?[]u8 = null;
-    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-t", target, "-x", "70", "-L", "2" }, null, &parse_cause);
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-R", "-t", "resize-pane-layout:0.0", "5" }, null, &parse_cause);
     defer cmd_mod.cmd_free(resize_cmd);
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(resize_cmd, &item));
-    try std.testing.expectEqual(old_sx, wp.sx);
-    try std.testing.expectEqual(old_sy, wp.sy);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 45), top_left.sx);
+    try std.testing.expectEqual(@as(u32, 46), top_right.xoff);
+    try std.testing.expectEqual(@as(u32, 34), top_right.sx);
+    try std.testing.expectEqual(@as(u32, 0), bottom.xoff);
+    try std.testing.expectEqual(@as(u32, 13), bottom.yoff);
+    try std.testing.expectEqual(@as(u32, 80), bottom.sx);
+    try std.testing.expectEqual(@as(u32, 11), bottom.sy);
+}
+
+test "resize-pane -R grows the whole left column when horizontal resize climbs past a vertical split" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-column", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-column") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const top_left = wl.window.active.?;
+    var bottom_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const bottom_left = spawn.spawn_pane(&bottom_ctx, &cause).?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const right = spawn.spawn_pane(&right_ctx, &cause).?;
+    s.curw = wl;
+
+    set_pane_geometry(top_left, 0, 0, 39, 11);
+    set_pane_geometry(bottom_left, 0, 12, 39, 12);
+    set_pane_geometry(right, 40, 0, 40, 24);
+
+    var parse_cause: ?[]u8 = null;
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-R", "-t", "resize-pane-column:0.0", "3" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(resize_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 42), top_left.sx);
+    try std.testing.expectEqual(@as(u32, 42), bottom_left.sx);
+    try std.testing.expectEqual(@as(u32, 43), right.xoff);
+    try std.testing.expectEqual(@as(u32, 37), right.sx);
+}
+
+test "resize-pane -x resizes the last pane by moving its left border" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-width", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-width") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const left = wl.window.active.?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const right = spawn.spawn_pane(&right_ctx, &cause).?;
+    s.curw = wl;
+
+    set_pane_geometry(left, 0, 0, 40, 24);
+    set_pane_geometry(right, 41, 0, 39, 24);
+
+    var parse_cause: ?[]u8 = null;
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-x", "30", "-t", "resize-pane-width:0.1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(resize_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 49), left.sx);
+    try std.testing.expectEqual(@as(u32, 50), right.xoff);
+    try std.testing.expectEqual(@as(u32, 30), right.sx);
+}
+
+test "resize-pane -y adjusts a vertical split to the requested height" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-height", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-height") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const top = wl.window.active.?;
+    var bottom_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const bottom = spawn.spawn_pane(&bottom_ctx, &cause).?;
+    s.curw = wl;
+
+    set_pane_geometry(top, 0, 0, 80, 12);
+    set_pane_geometry(bottom, 0, 13, 80, 11);
+
+    var parse_cause: ?[]u8 = null;
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-y", "8", "-t", "resize-pane-height:0.0" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(resize_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 8), top.sy);
+    try std.testing.expectEqual(@as(u32, 9), bottom.yoff);
+    try std.testing.expectEqual(@as(u32, 15), bottom.sy);
 }
 
 test "resize-pane -Z is a no-op for a single-pane window" {

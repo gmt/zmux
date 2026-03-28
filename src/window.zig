@@ -201,6 +201,7 @@ pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
 
 pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
     remove_last_pane_reference(w, wp);
+    window_clear_client_pane_reference(w, wp);
     const removed_geometry = pane_geometry(wp);
     for (w.panes.items, 0..) |p, i| {
         if (p == wp) {
@@ -951,6 +952,20 @@ fn remove_last_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
     }
 }
 
+fn window_clear_client_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
+    for (client_registry.clients.items) |cl| {
+        var i: usize = 0;
+        while (i < cl.client_windows.items.len) {
+            const cw = cl.client_windows.items[i];
+            if (cw.window == w.id and cw.pane == wp) {
+                _ = cl.client_windows.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+}
+
 fn pane_geometry(wp: *T.WindowPane) PaneGeometry {
     return .{
         .xoff = wp.xoff,
@@ -1241,6 +1256,51 @@ test "window_detach_pane promotes the last active pane and marks it changed" {
     try std.testing.expectEqual(second, w.active.?);
     try std.testing.expectEqual(first, window_get_last_pane(w).?);
     try std.testing.expect((second.flags & T.PANE_CHANGED) != 0);
+}
+
+test "window_detach_pane clears client-local active pane references" {
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    _ = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    defer {
+        client_registry.remove(&client);
+        client.client_windows.deinit(xm.allocator);
+    }
+    try client.client_windows.append(xm.allocator, .{ .window = w.id, .pane = second });
+    client_registry.add(&client);
+
+    try std.testing.expect(window_detach_pane(w, second));
+    try std.testing.expectEqual(@as(usize, 0), client.client_windows.items.len);
 }
 
 test "window_set_active_pane updates active metadata, focus hooks, and redraw flags" {

@@ -163,7 +163,7 @@ fn session_group_synchronize1(target: *T.Session, s: *T.Session) void {
     for (target_indices.items) |idx| {
         const target_wl = winlink_find_by_index(&target.windows, idx) orelse continue;
         var cause: ?[]u8 = null;
-        const new_wl = session_attach(s, target_wl.window, idx, &cause) orelse unreachable;
+        const new_wl = session_attach_internal(s, target_wl.window, idx, &cause, false) orelse unreachable;
         new_wl.flags |= target_wl.flags & T.WINLINK_ALERTFLAGS;
     }
 
@@ -323,6 +323,16 @@ pub fn session_rebind_winlink(wl: *T.Winlink, w: *T.Window) void {
 
 /// Add a window to a session at the given index (or next free index).
 pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.Winlink {
+    return session_attach_internal(s, w, idx, cause, true);
+}
+
+fn session_attach_internal(
+    s: *T.Session,
+    w: *T.Window,
+    idx: i32,
+    cause: *?[]u8,
+    synchronize_group: bool,
+) ?*T.Winlink {
     _ = cause;
     const actual_idx = if (idx == -1) blk: {
         break :blk session_next_index(s);
@@ -334,7 +344,8 @@ pub fn session_attach(s: *T.Session, w: *T.Window, idx: i32, cause: *?[]u8) ?*T.
     window_add_winlink(w, wl);
     w.references += 1;
     notify.notify_session_window("window-linked", s, w);
-    session_group_synchronize_from(s);
+    if (synchronize_group)
+        session_group_synchronize_from(s);
     return wl;
 }
 

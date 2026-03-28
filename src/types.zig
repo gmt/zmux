@@ -927,6 +927,11 @@ pub const OptionsTableEntry = struct {
     separator: ?[]const u8 = null,
 };
 
+pub const OptionsArrayItem = struct {
+    index: u32,
+    value: []u8,
+};
+
 pub const OptionsValue = union(OptionsType) {
     string: []u8,
     number: i64,
@@ -935,7 +940,7 @@ pub const OptionsValue = union(OptionsType) {
     colour: i32,
     style: Style,
     flag: bool,
-    array: std.ArrayList([]u8),
+    array: std.ArrayList(OptionsArrayItem),
     command: ?*anyopaque, // cmd_list pointer, opaque for now
 };
 

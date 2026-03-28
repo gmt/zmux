@@ -703,8 +703,8 @@ pub fn padDisplay(bytes: []const u8, alignment: DisplayAlignment, width: u32) []
 
 pub fn utf8_update_width_cache() void {
     resetWidthCache();
-    for (opts.options_get_array(opts.global_options, "codepoint-widths")) |entry| {
-        utf8_add_to_width_cache(entry);
+    for (opts.options_get_array_items(opts.global_options, "codepoint-widths")) |entry| {
+        utf8_add_to_width_cache(entry.value);
     }
 }
 

@@ -261,6 +261,70 @@ pub fn window_get_last_pane(w: *T.Window) ?*T.WindowPane {
     return w.last_panes.items[w.last_panes.items.len - 1];
 }
 
+pub fn window_pane_search(wp: *T.WindowPane, term: []const u8, regex: bool, ignore: bool) u32 {
+    const s = &wp.base;
+
+    if (!regex) {
+        const pattern = std.fmt.allocPrint(xm.allocator, "*{s}*", .{term}) catch unreachable;
+        defer xm.allocator.free(pattern);
+
+        const match_pattern = if (ignore)
+            std.ascii.allocLowerString(xm.allocator, pattern) catch unreachable
+        else
+            xm.xstrdup(pattern);
+        defer xm.allocator.free(match_pattern);
+
+        const pattern_z = xm.xm_dupeZ(match_pattern);
+        defer xm.allocator.free(pattern_z);
+
+        var row: u32 = 0;
+        while (row < s.grid.sy) : (row += 1) {
+            const line = grid_mod.string_cells(s.grid, row, s.grid.sx, .{});
+            defer xm.allocator.free(line);
+
+            const trimmed = trim_trailing_ascii_whitespace(line);
+            const haystack = if (ignore)
+                std.ascii.allocLowerString(xm.allocator, trimmed) catch unreachable
+            else
+                xm.xstrdup(trimmed);
+            defer xm.allocator.free(haystack);
+
+            const haystack_z = xm.xm_dupeZ(haystack);
+            defer xm.allocator.free(haystack_z);
+
+            if (c.posix_sys.fnmatch(pattern_z.ptr, haystack_z.ptr, 0) == 0)
+                return row + 1;
+        }
+        return 0;
+    }
+
+    const re = c.posix_sys.zmux_regex_new() orelse return 0;
+    defer c.posix_sys.zmux_regex_free(re);
+
+    var flags: c_int = c.posix_sys.REG_EXTENDED | c.posix_sys.REG_NOSUB;
+    if (ignore) flags |= c.posix_sys.REG_ICASE;
+
+    const term_z = xm.xm_dupeZ(term);
+    defer xm.allocator.free(term_z);
+    if (c.posix_sys.zmux_regex_compile(re, term_z.ptr, flags) != 0)
+        return 0;
+
+    var row: u32 = 0;
+    while (row < s.grid.sy) : (row += 1) {
+        const line = grid_mod.string_cells(s.grid, row, s.grid.sx, .{});
+        defer xm.allocator.free(line);
+
+        const trimmed = trim_trailing_ascii_whitespace(line);
+        const line_z = xm.xm_dupeZ(trimmed);
+        defer xm.allocator.free(line_z);
+
+        if (c.posix_sys.zmux_regex_exec(re, line_z.ptr, 0, null) == 0)
+            return row + 1;
+    }
+
+    return 0;
+}
+
 pub fn window_pane_find_up(wp: *T.WindowPane) ?*T.WindowPane {
     const w = wp.window;
     const status = opts.options_get_number(w.options, "pane-border-status");
@@ -1067,6 +1131,12 @@ fn pane_ranges_overlap(left: u32, right: u32, cand_left: u32, cand_right: u32) b
     return !(cand_right < left or cand_left > right);
 }
 
+fn trim_trailing_ascii_whitespace(text: []const u8) []const u8 {
+    var end = text.len;
+    while (end > 0 and std.ascii.isWhitespace(text[end - 1])) : (end -= 1) {}
+    return text[0..end];
+}
+
 fn choose_better_pane(best: ?*T.WindowPane, candidate: *T.WindowPane) *T.WindowPane {
     if (best == null) return candidate;
     if (candidate.active_point > best.?.active_point) return candidate;
@@ -1224,6 +1294,47 @@ test "window_set_active_pane tracks last pane history and detach prunes it" {
 
     try std.testing.expect(window_detach_pane(w, second));
     try std.testing.expect(window_get_last_pane(w) == null);
+}
+
+fn write_test_line(gd: *T.Grid, row: u32, text: []const u8) void {
+    for (text, 0..) |ch, col| {
+        grid_mod.set_ascii(gd, row, @intCast(col), ch);
+    }
+}
+
+test "window_pane_search matches visible base rows with tmux-style flags" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(24, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = window_add_pane(w, null, 24, 3);
+    write_test_line(wp.base.grid, 0, "zero");
+    write_test_line(wp.base.grid, 1, "Alpha Beta   ");
+    write_test_line(wp.base.grid, 2, "Gamma");
+
+    try std.testing.expectEqual(@as(u32, 2), window_pane_search(wp, "Beta", false, false));
+    try std.testing.expectEqual(@as(u32, 2), window_pane_search(wp, "beta", false, true));
+    try std.testing.expectEqual(@as(u32, 2), window_pane_search(wp, "^alpha beta$", true, true));
+    try std.testing.expectEqual(@as(u32, 0), window_pane_search(wp, "^alpha beta$", true, false));
+
+    screen_mod.screen_enter_alternate(wp, true);
+    write_test_line(wp.screen.grid, 0, "alternate only");
+    try std.testing.expectEqual(@as(u32, 0), window_pane_search(wp, "alternate", false, false));
 }
 
 test "window_detach_pane promotes the last active pane and marks it changed" {

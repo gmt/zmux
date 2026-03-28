@@ -32,6 +32,8 @@ const utf8 = @import("utf8.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
+    const entry_ptr = cmd_mod.cmd_get_entry(cmd);
+    const hook_command = entry_ptr == &entry_hook;
     const option_name = args.value_at(0) orelse {
         cmdq.cmdq_error(item, "invalid option", .{});
         return .@"error";
@@ -43,13 +45,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
         return .@"error";
     }
-    if (oe != null and oe.?.is_hook) {
-        if (args.has('q')) return .normal;
-        cmdq.cmdq_error(item, "hook options not supported yet", .{});
+    if (hook_command and args.has('R')) {
+        cmdq.cmdq_error(item, "hook execution not supported yet", .{});
+        return .@"error";
+    }
+    if (hook_command and (oe == null or !oe.?.is_hook)) {
+        cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
         return .@"error";
     }
 
-    const target = cmd_opts.resolve_target(item, args, cmd.entry == &entry_window) orelse return .@"error";
+    const target = cmd_opts.resolve_target_for_name(item, args, entry_ptr == &entry_window, option_name) orelse return .@"error";
     if (!cmd_opts.option_allowed(oe, target.kind)) {
         if (args.has('q')) return .normal;
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
@@ -166,6 +171,16 @@ pub const entry_window: cmd_mod.CmdEntry = .{
     .exec = exec,
 };
 
+pub const entry_hook: cmd_mod.CmdEntry = .{
+    .name = "set-hook",
+    .usage = "[-agpRuw] [-t target-pane] hook [command]",
+    .template = "agpRt:uw",
+    .lower = 1,
+    .upper = 2,
+    .flags = T.CMD_STARTSERVER | T.CMD_AFTERHOOK,
+    .exec = exec,
+};
+
 test "set-option -p stores pane local custom options and updates consumers" {
     const sess = @import("session.zig");
     const colour_mod = @import("colour.zig");
@@ -224,7 +239,7 @@ test "set-option -p stores pane local custom options and updates consumers" {
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x02, 0x03, 0x04), colour_mod.colour_palette_get(&wp.palette, 1));
 }
 
-test "set-option rejects hook options until hook commands land" {
+test "set-option stores session hook options" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
     opts.global_s_options = opts.options_create(null);
@@ -237,6 +252,65 @@ test "set-option rejects hook options until hook commands land" {
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options", "display-message hi" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    const hook = opts.options_get_array(opts.global_s_options, "after-show-options");
+    try std.testing.expectEqual(@as(usize, 1), hook.len);
+    try std.testing.expectEqualStrings("display-message hi", hook[0]);
+}
+
+test "set-hook stores window-scoped hooks in global window options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-hook", "-g", "pane-focus-out", "display-message bye" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    const hook = opts.options_get_array(opts.global_w_options, "pane-focus-out");
+    try std.testing.expectEqual(@as(usize, 1), hook.len);
+    try std.testing.expectEqualStrings("display-message bye", hook[0]);
+}
+
+test "set-hook rejects non-hook options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-hook", "-g", "status-left", "nope" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "set-hook -R reports the missing runtime honestly" {
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-hook", "-R", "after-show-options" }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
     defer if (cause) |msg| xm.allocator.free(msg);
 

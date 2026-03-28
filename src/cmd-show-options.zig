@@ -50,7 +50,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    const target = cmd_opts.resolve_target(item, args, cmd.entry == &entry_window) orelse return .@"error";
+    const target = (if (name) |option_name|
+        cmd_opts.resolve_target_for_name(item, args, cmd.entry == &entry_window, option_name)
+    else
+        cmd_opts.resolve_target(item, args, cmd.entry == &entry_window)) orelse return .@"error";
     if (name) |option_name| {
         const oe = opts.options_table_entry(option_name);
         if (!cmd_opts.option_allowed(oe, target.kind)) {
@@ -187,4 +190,20 @@ test "show-hooks -g only prints hook options" {
     defer xm.allocator.free(output);
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "after-show-options"));
     try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, output, "status-left "));
+}
+
+test "show-hooks resolves named pane hooks against global window options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const output = try capture_stdout(&.{ "show-hooks", "-g", "pane-focus-out" });
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "pane-focus-out"));
 }

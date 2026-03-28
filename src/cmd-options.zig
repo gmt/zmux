@@ -59,6 +59,41 @@ pub fn resolve_target(
     window_default: bool,
 ) ?ResolvedTarget {
     const kind = requested_scope(args, window_default);
+    return resolve_target_kind(item, args, kind, false);
+}
+
+pub fn resolve_target_for_name(
+    item: *cmdq.CmdqItem,
+    args: *const @import("arguments.zig").Arguments,
+    window_default: bool,
+    name: []const u8,
+) ?ResolvedTarget {
+    if (is_custom_option(name)) return resolve_target(item, args, window_default);
+
+    const oe = opts.options_table_entry(name) orelse {
+        cmdq.cmdq_error(item, "invalid option: {s}", .{name});
+        return null;
+    };
+
+    if (oe.scope.server) return resolve_target_kind(item, args, .server, false);
+    if (oe.scope.session) return resolve_target_kind(item, args, .session, false);
+    if (oe.scope.window and oe.scope.pane) {
+        if (args.has('p')) return resolve_target_kind(item, args, .pane, true);
+        return resolve_target_kind(item, args, .window, false);
+    }
+    if (oe.scope.window) return resolve_target_kind(item, args, .window, false);
+    if (oe.scope.pane) return resolve_target_kind(item, args, .pane, false);
+
+    cmdq.cmdq_error(item, "invalid option: {s}", .{name});
+    return null;
+}
+
+fn resolve_target_kind(
+    item: *cmdq.CmdqItem,
+    args: *const @import("arguments.zig").Arguments,
+    kind: ScopeKind,
+    ignore_global_pane: bool,
+) ?ResolvedTarget {
     switch (kind) {
         .server => return .{ .kind = .server, .options = opts.global_options, .global = true },
         .session => {
@@ -102,7 +137,7 @@ pub fn resolve_target(
             };
         },
         .pane => {
-            if (args.has('g')) {
+            if (args.has('g') and !ignore_global_pane) {
                 cmdq.cmdq_error(item, "global pane options not supported yet", .{});
                 return null;
             }

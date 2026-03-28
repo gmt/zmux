@@ -199,7 +199,7 @@ fn copyModeKey(
             redraw(wme);
         },
         T.KEYC_WHEELDOWN => {
-            if (scrollDownLines(wme, 3, modeData(wme).scroll_exit)) {
+            if (scrollViewportDownLines(wme, 3, modeData(wme).scroll_exit)) {
                 _ = window_mode_runtime.resetMode(wme.wp);
                 return;
             }
@@ -251,7 +251,12 @@ fn copyModeCommand(
     } else if (std.mem.eql(u8, command, "cursor-up")) {
         scrollLines(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "cursor-down")) {
-        if (scrollDownLines(wme, count, false)) unreachable;
+        cursorDownLines(wme, count);
+    } else if (std.mem.eql(u8, command, "cursor-down-and-cancel")) {
+        if (cursorDownAndCancel(wme, count)) {
+            _ = window_mode_runtime.resetMode(wme.wp);
+            return;
+        }
     } else if (std.mem.eql(u8, command, "page-up")) {
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) pageUpMode(wme, false);
@@ -259,6 +264,14 @@ fn copyModeCommand(
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) {
             if (pageDownMode(wme, false, modeData(wme).scroll_exit)) {
+                _ = window_mode_runtime.resetMode(wme.wp);
+                return;
+            }
+        }
+    } else if (std.mem.eql(u8, command, "page-down-and-cancel")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) {
+            if (pageDownMode(wme, false, true)) {
                 _ = window_mode_runtime.resetMode(wme.wp);
                 return;
             }
@@ -273,6 +286,24 @@ fn copyModeCommand(
                 _ = window_mode_runtime.resetMode(wme.wp);
                 return;
             }
+        }
+    } else if (std.mem.eql(u8, command, "halfpage-down-and-cancel")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) {
+            if (pageDownMode(wme, true, true)) {
+                _ = window_mode_runtime.resetMode(wme.wp);
+                return;
+            }
+        }
+    } else if (std.mem.eql(u8, command, "scroll-down")) {
+        if (scrollViewportDownLines(wme, count, modeData(wme).scroll_exit)) {
+            _ = window_mode_runtime.resetMode(wme.wp);
+            return;
+        }
+    } else if (std.mem.eql(u8, command, "scroll-down-and-cancel")) {
+        if (scrollViewportDownLines(wme, count, true)) {
+            _ = window_mode_runtime.resetMode(wme.wp);
+            return;
         }
     } else if (std.mem.eql(u8, command, "history-top")) {
         setAbsoluteCursorRow(wme, 0);
@@ -593,15 +624,15 @@ fn scrollLines(wme: *T.WindowModeEntry, delta: i32) void {
             }
         }
     } else {
-        _ = scrollDownLines(wme, @intCast(delta), false);
+        cursorDownLines(wme, @intCast(delta));
     }
     clampCursorX(wme);
 }
 
-fn scrollDownLines(wme: *T.WindowModeEntry, count: u32, scroll_exit: bool) bool {
+fn cursorDownLines(wme: *T.WindowModeEntry, count: u32) void {
     const data = modeData(wme);
     const backing_rows = rowCount(data.backing);
-    if (backing_rows == 0) return false;
+    if (backing_rows == 0) return;
 
     var remaining = count;
     while (remaining > 0) : (remaining -= 1) {
@@ -617,7 +648,30 @@ fn scrollDownLines(wme: *T.WindowModeEntry, count: u32, scroll_exit: bool) bool 
     }
 
     clampCursorX(wme);
-    return scroll_exit and absoluteCursorRow(wme) + 1 >= backing_rows and data.top == maxTop(data.backing, wme.wp);
+}
+
+fn cursorDownAndCancel(wme: *T.WindowModeEntry, count: u32) bool {
+    const data = modeData(wme);
+    const start_top = data.top;
+    const start_cy = data.cy;
+
+    cursorDownLines(wme, count);
+    return data.top == start_top and data.cy == start_cy and data.top == maxTop(data.backing, wme.wp);
+}
+
+fn scrollViewportDownLines(wme: *T.WindowModeEntry, count: u32, scroll_exit: bool) bool {
+    const data = modeData(wme);
+    const backing_rows = rowCount(data.backing);
+    if (backing_rows == 0) return false;
+
+    const max_top = maxTop(data.backing, wme.wp);
+    const advance = @min(count, max_top - data.top);
+    data.top += advance;
+
+    const max_visible = backingBottomVisibleRow(wme);
+    if (data.cy > max_visible) data.cy = max_visible;
+    clampCursorX(wme);
+    return scroll_exit and data.top == max_top;
 }
 
 fn pageStep(view_rows: u32, half_page: bool) u32 {
@@ -657,7 +711,7 @@ fn pageDownMode(wme: *T.WindowModeEntry, half_page: bool, scroll_exit: bool) boo
         data.cy = @min(data.cy + remainder, max_visible);
     }
     clampCursorX(wme);
-    return scroll_exit and data.top == max_top and absoluteCursorRow(wme) + 1 >= backing_rows;
+    return scroll_exit and data.top == max_top;
 }
 
 fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
@@ -677,6 +731,13 @@ fn setGridLineText(gd: *T.Grid, row: u32, text: []const u8) void {
         cell.data.data[0] = text[col];
         grid.set_cell(gd, row, col, &cell);
     }
+}
+
+fn runCopyModeTestCommand(wme: *T.WindowModeEntry, command: []const u8) !void {
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    try args.values.append(xm.allocator, xm.xstrdup(command));
+    copyModeCommand(wme, null, undefined, undefined, @ptrCast(&args), null);
 }
 
 test "window-copy snapshots the source pane and refresh-from-pane updates it" {
@@ -876,6 +937,117 @@ test "window-copy navigation commands move through a taller source snapshot" {
     copyModeCommand(wme, null, undefined, undefined, @ptrCast(&page_args), null);
     try std.testing.expectEqual(@as(u32, 1), modeData(wme).top);
     try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
+}
+
+test "window-copy downward commands keep viewport scrolling separate from cancel variants" {
+    const source_grid = grid.grid_create(6, 8, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 5, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 8, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 5, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 50,
+        .name = xm.xstrdup("copy-source-downward"),
+        .sx = 6,
+        .sy = 8,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 51,
+        .name = xm.xstrdup("copy-target-downward"),
+        .sx = 6,
+        .sy = 5,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 52,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 8,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 7 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 53,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 5,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 4 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    var row: u32 = 0;
+    while (row < 8) : (row += 1) {
+        setGridLineText(source.base.grid, row, "line");
+        source.base.grid.linedata[row].cellused = 4;
+    }
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+
+    var wme = enterMode(&target, &source, &args);
+    try runCopyModeTestCommand(wme, "scroll-down");
+    try std.testing.expectEqual(@as(u32, 1), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
+
+    try runCopyModeTestCommand(wme, "cursor-down");
+    try std.testing.expectEqual(@as(u32, 1), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 1), modeData(wme).cy);
+
+    _ = window_mode_runtime.resetMode(&target);
+    try std.testing.expect(window.window_pane_mode(&target) == null);
+
+    wme = enterMode(&target, &source, &args);
+    wme.prefix = 3;
+    try runCopyModeTestCommand(wme, "scroll-down-and-cancel");
+    try std.testing.expect(window.window_pane_mode(&target) == null);
+
+    wme = enterMode(&target, &source, &args);
+    try runCopyModeTestCommand(wme, "page-down-and-cancel");
+    try std.testing.expect(window.window_pane_mode(&target) == null);
+
+    wme = enterMode(&target, &source, &args);
+    try runCopyModeTestCommand(wme, "halfpage-down");
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).top);
+    try runCopyModeTestCommand(wme, "halfpage-down-and-cancel");
+    try std.testing.expect(window.window_pane_mode(&target) == null);
+
+    wme = enterMode(&target, &source, &args);
+    try runCopyModeTestCommand(wme, "history-bottom");
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+    try runCopyModeTestCommand(wme, "cursor-down-and-cancel");
+    try std.testing.expect(window.window_pane_mode(&target) == null);
 }
 
 test "window-copy startDrag keeps the cursor under reduced mouse drags" {

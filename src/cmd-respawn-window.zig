@@ -37,12 +37,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const wl = target.wl orelse return .@"error";
     const w = target.w orelse return .@"error";
 
-    if (w.panes.items.len != 1) {
-        cmdq.cmdq_error(item, "multi-pane respawn-window not supported yet", .{});
-        return .@"error";
-    }
-    const wp = w.active orelse w.panes.items[0];
-
     const overlay = respawn_pane.build_overlay_environment(args, item) catch return .@"error";
     defer if (overlay) |env| env_mod.environ_free(env);
 
@@ -53,7 +47,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .item = @ptrCast(item),
         .s = s,
         .wl = wl,
-        .wp0 = wp,
         .argv = argv,
         .environ = overlay,
         .cwd = args.get('c'),
@@ -63,7 +56,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     var cause: ?[]u8 = null;
     defer if (cause) |msg| xm.allocator.free(msg);
-    _ = spawn_mod.respawn_pane(&sc, &cause) orelse {
+    _ = spawn_mod.spawn_window(&sc, &cause) orelse {
         cmdq.cmdq_error(item, "respawn window failed: {s}", .{cause orelse "unknown"});
         return .@"error";
     };
@@ -84,7 +77,7 @@ pub const entry: cmd_mod.CmdEntry = .{
     .exec = exec,
 };
 
-test "respawn-window rejects multi-pane windows" {
+test "respawn-window collapses a multi-pane window onto the first pane" {
     const opts = @import("options.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
@@ -112,6 +105,7 @@ test "respawn-window rejects multi-pane windows" {
     var cause: ?[]u8 = null;
     var first: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&first, &cause).?;
+    const pane_id = wl.window.panes.items[0].id;
     var second: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
     _ = spawn.spawn_pane(&second, &cause).?;
 
@@ -120,7 +114,14 @@ test "respawn-window rejects multi-pane windows" {
     defer cmd_mod.cmd_free(cmd);
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    std.Thread.sleep(500 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), wl.window.panes.items.len);
+    try std.testing.expectEqual(pane_id, wl.window.active.?.id);
+    const output = respawn_pane.read_pane_output(wl.window.active.?);
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "nope") != null);
 }
 
 test "respawn-window restarts the only pane in a window" {

@@ -82,6 +82,24 @@ pub const ScrollbarLayout = struct {
     slider_h: u32,
 };
 
+pub const PaneGeometry = struct {
+    xoff: u32,
+    yoff: u32,
+    sx: u32,
+    sy: u32,
+};
+
+pub const SplitPanePlan = struct {
+    target_before: PaneGeometry,
+    target_after: PaneGeometry,
+    new_pane: PaneGeometry,
+};
+
+pub const SplitPaneError = error{
+    NoSpace,
+    FullSizeNeedsLayout,
+};
+
 // ── Window creation / destruction ─────────────────────────────────────────
 
 pub fn window_create(sx: u32, sy: u32, _xpixel: u32, _ypixel: u32) *T.Window {
@@ -102,8 +120,44 @@ pub fn window_create(sx: u32, sy: u32, _xpixel: u32, _ypixel: u32) *T.Window {
 }
 
 pub fn window_add_pane(w: *T.Window, before: ?*T.WindowPane, sx: u32, sy: u32) *T.WindowPane {
+    return window_add_pane_with_flags(w, before, sx, sy, 0);
+}
+
+pub fn window_add_pane_with_flags(w: *T.Window, before: ?*T.WindowPane, sx: u32, sy: u32, flags: u32) *T.WindowPane {
     const wp = window_pane_create(w, sx, sy);
-    window_adopt_pane_before(w, wp, before);
+    const anchor = before orelse w.active;
+
+    if (w.panes.items.len == 0) {
+        window_adopt_pane_before(w, wp, null);
+        return wp;
+    }
+
+    if (flags & T.SPAWN_BEFORE != 0) {
+        if (flags & T.SPAWN_FULLSIZE != 0) {
+            window_adopt_pane_before(w, wp, w.panes.items[0]);
+        } else {
+            window_adopt_pane_before(w, wp, anchor);
+        }
+        return wp;
+    }
+
+    if (flags & T.SPAWN_FULLSIZE != 0) {
+        window_adopt_pane_before(w, wp, null);
+        return wp;
+    }
+
+    if (anchor) |target| {
+        for (w.panes.items, 0..) |pane, idx| {
+            if (pane != target) continue;
+            if (idx + 1 >= w.panes.items.len)
+                window_adopt_pane_before(w, wp, null)
+            else
+                window_adopt_pane_before(w, wp, w.panes.items[idx + 1]);
+            return wp;
+        }
+    }
+
+    window_adopt_pane_before(w, wp, null);
     return wp;
 }
 
@@ -296,6 +350,77 @@ pub fn window_pane_index(w: *T.Window, wp: *T.WindowPane) ?usize {
         if (pane == wp) return idx;
     }
     return null;
+}
+
+pub fn window_plan_split(
+    wp: *T.WindowPane,
+    type_: T.LayoutType,
+    size: i32,
+    flags: u32,
+) SplitPaneError!SplitPanePlan {
+    if (type_ != .leftright and type_ != .topbottom)
+        return error.NoSpace;
+
+    if (flags & T.SPAWN_FULLSIZE != 0 and wp.window.panes.items.len > 1)
+        return error.FullSizeNeedsLayout;
+
+    const original = pane_geometry(wp);
+    const saved_size: u32 = if (type_ == .leftright) original.sx else original.sy;
+    if (saved_size < T.PANE_MINIMUM * 2 + 1)
+        return error.NoSpace;
+
+    var size2: u32 = if (size < 0)
+        ((saved_size + 1) / 2) - 1
+    else if (flags & T.SPAWN_BEFORE != 0)
+        saved_size - @as(u32, @intCast(size)) - 1
+    else
+        @intCast(size);
+
+    if (size2 < T.PANE_MINIMUM)
+        size2 = T.PANE_MINIMUM
+    else if (size2 > saved_size - 2)
+        size2 = saved_size - 2;
+
+    const size1 = saved_size - 1 - size2;
+
+    var target_after = original;
+    var new_pane = original;
+    if (type_ == .leftright) {
+        if (flags & T.SPAWN_BEFORE != 0) {
+            target_after.xoff = original.xoff + size1 + 1;
+            target_after.sx = size2;
+            new_pane.sx = size1;
+        } else {
+            target_after.sx = size1;
+            new_pane.xoff = original.xoff + size1 + 1;
+            new_pane.sx = size2;
+        }
+    } else {
+        if (flags & T.SPAWN_BEFORE != 0) {
+            target_after.yoff = original.yoff + size1 + 1;
+            target_after.sy = size2;
+            new_pane.sy = size1;
+        } else {
+            target_after.sy = size1;
+            new_pane.yoff = original.yoff + size1 + 1;
+            new_pane.sy = size2;
+        }
+    }
+
+    return .{
+        .target_before = original,
+        .target_after = target_after,
+        .new_pane = new_pane,
+    };
+}
+
+pub fn window_apply_split_plan(target: *T.WindowPane, new_pane: *T.WindowPane, plan: SplitPanePlan) void {
+    apply_pane_geometry(target, plan.target_after);
+    apply_pane_geometry(new_pane, plan.new_pane);
+}
+
+pub fn window_restore_split_plan(target: *T.WindowPane, plan: SplitPanePlan) void {
+    apply_pane_geometry(target, plan.target_before);
 }
 
 pub fn window_pane_at_index(w: *T.Window, idx: usize) ?*T.WindowPane {
@@ -737,6 +862,22 @@ fn remove_last_pane_reference(w: *T.Window, wp: *T.WindowPane) void {
     }
 }
 
+fn pane_geometry(wp: *T.WindowPane) PaneGeometry {
+    return .{
+        .xoff = wp.xoff,
+        .yoff = wp.yoff,
+        .sx = wp.sx,
+        .sy = wp.sy,
+    };
+}
+
+fn apply_pane_geometry(wp: *T.WindowPane, geometry: PaneGeometry) void {
+    wp.xoff = geometry.xoff;
+    wp.yoff = geometry.yoff;
+    wp.sx = geometry.sx;
+    wp.sy = geometry.sy;
+}
+
 pub const PaneDrawBounds = struct {
     xoff: u32,
     yoff: u32,
@@ -948,4 +1089,65 @@ test "window_rotate_panes rotates order and active pane" {
     try std.testing.expectEqual(second, w.panes.items[1]);
     try std.testing.expectEqual(third, w.panes.items[2]);
     try std.testing.expectEqual(second, w.active.?);
+}
+
+test "window_plan_split computes reduced split geometry for horizontal and before splits" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = window_add_pane(w, null, 80, 24);
+
+    const after_plan = try window_plan_split(wp, .leftright, 25, 0);
+    try std.testing.expectEqual(@as(u32, 54), after_plan.target_after.sx);
+    try std.testing.expectEqual(@as(u32, 0), after_plan.target_after.xoff);
+    try std.testing.expectEqual(@as(u32, 25), after_plan.new_pane.sx);
+    try std.testing.expectEqual(@as(u32, 55), after_plan.new_pane.xoff);
+
+    const before_plan = try window_plan_split(wp, .topbottom, 6, T.SPAWN_BEFORE);
+    try std.testing.expectEqual(@as(u32, 17), before_plan.target_after.sy);
+    try std.testing.expectEqual(@as(u32, 7), before_plan.target_after.yoff);
+    try std.testing.expectEqual(@as(u32, 6), before_plan.new_pane.sy);
+    try std.testing.expectEqual(@as(u32, 0), before_plan.new_pane.yoff);
+}
+
+test "window_plan_split rejects full-size reduced splits once a window already has multiple panes" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    _ = window_add_pane(w, null, 80, 24);
+
+    try std.testing.expectError(error.FullSizeNeedsLayout, window_plan_split(first, .leftright, -1, T.SPAWN_FULLSIZE));
 }

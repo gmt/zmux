@@ -25,10 +25,8 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
-const file_mod = @import("file.zig");
 const format_mod = @import("format.zig");
-const pane_io = @import("pane-io.zig");
-const server = @import("server.zig");
+const pane_empty_input = @import("pane-empty-input.zig");
 const server_print = @import("server-print.zig");
 const status_runtime = @import("status-runtime.zig");
 
@@ -61,68 +59,9 @@ pub fn target_context(target: *const T.CmdFindState) format_mod.FormatContext {
     };
 }
 
-const DisplayMessageInputState = struct {
-    item: *cmdq.CmdqItem,
-    wp: *T.WindowPane,
-};
-
 fn cmd_display_message_each(key: []const u8, value: []const u8, arg: ?*anyopaque) void {
     const item: *cmdq.CmdqItem = @ptrCast(@alignCast(arg orelse return));
     cmdq.cmdq_print(item, "{s}={s}", .{ key, value });
-}
-
-fn displayMessageInputDone(path: []const u8, errno_value: c_int, data: []const u8, cbdata: ?*anyopaque) void {
-    const state: *DisplayMessageInputState = @ptrCast(@alignCast(cbdata orelse return));
-    defer xm.allocator.destroy(state);
-
-    if (errno_value != 0) {
-        cmdq.cmdq_error(state.item, "{s}: {s}", .{ file_mod.strerror(errno_value), path });
-    } else if (data.len != 0) {
-        pane_io.pane_io_display(state.wp, data);
-        server.server_redraw_window(state.wp.window);
-    }
-
-    cmdq.cmdq_continue(state.item);
-}
-
-fn startPaneInput(item: *cmdq.CmdqItem, wp: *T.WindowPane) T.CmdRetval {
-    if ((wp.flags & T.PANE_EMPTY) == 0) {
-        cmdq.cmdq_error(item, "pane is not empty", .{});
-        return .@"error";
-    }
-
-    const client = cmdq.cmdq_get_client(item) orelse return .normal;
-    if ((client.flags & T.CLIENT_EXIT) != 0) return .normal;
-    if (client.session != null) return .normal;
-
-    if (file_mod.shouldUseRemotePathIO(client)) {
-        const state = xm.allocator.create(DisplayMessageInputState) catch unreachable;
-        state.* = .{ .item = item, .wp = wp };
-
-        switch (file_mod.startRemoteRead(client, "-", displayMessageInputDone, state)) {
-            .wait => return .wait,
-            .err => |errno_value| {
-                xm.allocator.destroy(state);
-                cmdq.cmdq_error(item, "{s}: -", .{file_mod.strerror(errno_value)});
-                return .@"error";
-            },
-        }
-    }
-
-    switch (file_mod.readResolvedPathAlloc(client, "-")) {
-        .data => |data| {
-            defer xm.allocator.free(data);
-            if (data.len != 0) {
-                pane_io.pane_io_display(wp, data);
-                server.server_redraw_window(wp.window);
-            }
-            return .normal;
-        },
-        .err => |errno_value| {
-            cmdq.cmdq_error(item, "{s}: -", .{file_mod.strerror(errno_value)});
-            return .@"error";
-        },
-    }
 }
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -134,7 +73,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.has('I')) {
         const wp = target.wp orelse return .normal;
-        return startPaneInput(item, wp);
+        return pane_empty_input.start(item, wp);
     }
 
     if (args.has('F') and args.count() != 0) {

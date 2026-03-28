@@ -30,6 +30,8 @@ const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
+const word_whitespace = "\t ";
+
 const CopyModeData = struct {
     backing: *T.Screen,
     top: u32 = 0,
@@ -212,12 +214,11 @@ fn copyModeKey(
 fn copyModeCommand(
     wme: *T.WindowModeEntry,
     client: ?*T.Client,
-    _session: *T.Session,
+    session: *T.Session,
     _wl: *T.Winlink,
     raw_args: *const anyopaque,
     _mouse: ?*const T.MouseEvent,
 ) void {
-    _ = _session;
     _ = _wl;
 
     const args: *const args_mod.Arguments = @ptrCast(@alignCast(raw_args));
@@ -248,6 +249,27 @@ fn copyModeCommand(
         moveCursorX(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "cursor-right")) {
         moveCursorX(wme, @intCast(count));
+    } else if (std.mem.eql(u8, command, "next-space")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, "");
+    } else if (std.mem.eql(u8, command, "next-space-end")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(wme, "");
+    } else if (std.mem.eql(u8, command, "next-word")) {
+        const separators = opts.options_get_string(session.options, "word-separators");
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, separators);
+    } else if (std.mem.eql(u8, command, "next-word-end")) {
+        const separators = opts.options_get_string(session.options, "word-separators");
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(wme, separators);
+    } else if (std.mem.eql(u8, command, "previous-space")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorPreviousWord(wme, "", true);
+    } else if (std.mem.eql(u8, command, "previous-word")) {
+        const separators = opts.options_get_string(session.options, "word-separators");
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) cursorPreviousWord(wme, separators, true);
     } else if (std.mem.eql(u8, command, "cursor-up")) {
         scrollLines(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "cursor-down")) {
@@ -508,6 +530,56 @@ fn repeatCount(wme: *T.WindowModeEntry) u32 {
     return if (wme.prefix == 0) 1 else wme.prefix;
 }
 
+fn copyModeUsesViKeys(wme: *T.WindowModeEntry) bool {
+    return opts.options_get_number(wme.wp.window.options, "mode-keys") == T.MODEKEY_VI;
+}
+
+fn startWordMotionReader(wme: *T.WindowModeEntry, gr: *T.GridReader) bool {
+    if (rowCount(modeData(wme).backing) == 0) return false;
+    grid.grid_reader_start(gr, modeData(wme).backing.grid, modeData(wme).cx, absoluteCursorRow(wme));
+    return true;
+}
+
+fn applyWordMotionReader(wme: *T.WindowModeEntry, gr: *const T.GridReader) void {
+    var cx: u32 = 0;
+    var cy: u32 = 0;
+    grid.grid_reader_get_cursor(gr, &cx, &cy);
+    setAbsoluteCursorRow(wme, cy);
+    modeData(wme).cx = cx;
+    clampCursorX(wme);
+}
+
+fn cursorNextWord(wme: *T.WindowModeEntry, separators: []const u8) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_next_word(&gr, separators);
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorNextWordEnd(wme: *T.WindowModeEntry, separators: []const u8) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    if (copyModeUsesViKeys(wme)) {
+        if (grid.grid_reader_in_set(&gr, word_whitespace) == 0)
+            grid.grid_reader_cursor_right(&gr, false, false);
+        grid.grid_reader_cursor_next_word_end(&gr, separators);
+        grid.grid_reader_cursor_left(&gr, true);
+    } else {
+        grid.grid_reader_cursor_next_word_end(&gr, separators);
+    }
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorPreviousWord(wme: *T.WindowModeEntry, separators: []const u8, already: bool) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_previous_word(&gr, separators, already, !copyModeUsesViKeys(wme));
+    applyWordMotionReader(wme, &gr);
+}
+
 fn absoluteCursorRow(wme: *T.WindowModeEntry) u32 {
     const data = modeData(wme);
     return data.top + data.cy;
@@ -740,6 +812,13 @@ fn runCopyModeTestCommand(wme: *T.WindowModeEntry, command: []const u8) !void {
     copyModeCommand(wme, null, undefined, undefined, @ptrCast(&args), null);
 }
 
+fn runCopyModeTestCommandWithSession(wme: *T.WindowModeEntry, session: *T.Session, command: []const u8) !void {
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    try args.values.append(xm.allocator, xm.xstrdup(command));
+    copyModeCommand(wme, null, session, undefined, @ptrCast(&args), null);
+}
+
 test "window-copy snapshots the source pane and refresh-from-pane updates it" {
     const source_grid = grid.grid_create(6, 2, 0);
     defer grid.grid_free(source_grid);
@@ -937,6 +1016,133 @@ test "window-copy navigation commands move through a taller source snapshot" {
     copyModeCommand(wme, null, undefined, undefined, @ptrCast(&page_args), null);
     try std.testing.expectEqual(@as(u32, 1), modeData(wme).top);
     try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
+}
+
+test "window-copy word and space motions use session separators and mode keys" {
+    const opts_mod = @import("options.zig");
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_options = opts_mod.options_create(opts_mod.global_s_options);
+    defer opts_mod.options_free(session_options);
+    opts_mod.options_set_string(session_options, false, "word-separators", ",");
+
+    var session = T.Session{
+        .id = 60,
+        .name = xm.xstrdup("copy-word-session"),
+        .cwd = "/",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = session_options,
+        .environ = &env,
+    };
+    defer xm.allocator.free(session.name);
+    defer session.lastw.deinit(xm.allocator);
+    defer session.windows.deinit();
+
+    var window_ = T.Window{
+        .id = 61,
+        .name = xm.xstrdup("copy-word-window"),
+        .sx = 14,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 62,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 63,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "foo,  bar baz");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandWithSession(wme, &session, "next-word");
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), absoluteCursorRow(wme));
+
+    try runCopyModeTestCommandWithSession(wme, &session, "next-word");
+    try std.testing.expectEqual(@as(u32, 6), modeData(wme).cx);
+
+    try runCopyModeTestCommandWithSession(wme, &session, "previous-word");
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).cx);
+
+    modeData(wme).cx = 0;
+    try runCopyModeTestCommandWithSession(wme, &session, "next-space");
+    try std.testing.expectEqual(@as(u32, 6), modeData(wme).cx);
+
+    try runCopyModeTestCommandWithSession(wme, &session, "previous-space");
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cx);
+
+    modeData(wme).cx = 6;
+    try runCopyModeTestCommandWithSession(wme, &session, "next-word-end");
+    try std.testing.expectEqual(@as(u32, 9), modeData(wme).cx);
+
+    opts_mod.options_set_number(window_.options, "mode-keys", T.MODEKEY_VI);
+
+    modeData(wme).cx = 0;
+    try runCopyModeTestCommandWithSession(wme, &session, "next-word-end");
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).cx);
+
+    modeData(wme).cx = 0;
+    try runCopyModeTestCommandWithSession(wme, &session, "next-space-end");
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).cx);
 }
 
 test "window-copy downward commands keep viewport scrolling separate from cancel variants" {

@@ -41,7 +41,7 @@ const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "paste-buffer -p -b '%%'";
 const DEFAULT_FORMAT = "#{t/p:buffer_created}: #{buffer_sample}";
-const HELP_TEXT = "Enter/p paste  d/D delete  t/T/^T tags  e edit  arrows move  q cancel";
+const HELP_TEXT = "Enter/p/P paste  d/D delete  t/T/^T tags  e edit  arrows move  q cancel";
 
 const BufferItem = struct {
     buffer: *paste_mod.PasteBuffer,
@@ -179,6 +179,10 @@ fn windowBufferCommand(
     }
     if (std.mem.eql(u8, command, "delete-tagged")) {
         deleteTagged(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "paste-tagged")) {
+        pasteTagged(wme, client, session, wl);
         return;
     }
     if (std.mem.eql(u8, command, "filter")) {
@@ -431,10 +435,28 @@ fn deleteTagged(wme: *T.WindowModeEntry) void {
     rebuildAfterDelete(wme);
 }
 
+fn pasteTagged(wme: *T.WindowModeEntry, client: ?*T.Client, session: *T.Session, wl: *T.Winlink) void {
+    const data = modeData(wme);
+    data.fs.s = session;
+    data.fs.wl = wl;
+    data.fs.w = wl.window;
+    data.fs.wp = wl.window.active;
+    data.fs.idx = wl.idx;
+    mode_tree.eachTagged(data.tree, pasteTaggedCallback, client, T.KEYC_NONE, false);
+    _ = window_mode_runtime.resetMode(wme.wp);
+}
+
 fn deleteTaggedCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, _: ?*T.Client, _: T.key_code) void {
     const data: *BufferModeData = @ptrCast(@alignCast(tree.modedata.?));
     const item_ptr = itemdata orelse return;
     deleteItem(data, item_ptr);
+}
+
+fn pasteTaggedCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, client: ?*T.Client, _: T.key_code) void {
+    const data: *BufferModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item_ptr = itemdata orelse return;
+    const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
+    runCommand(client, data.fs.s.?, data.fs.wl.?, data.command, item.name);
 }
 
 fn deleteItem(data: *BufferModeData, item_ptr: *anyopaque) void {
@@ -948,6 +970,66 @@ test "window-buffer delete-tagged removes tagged buffers and keeps the untagged 
     try std.testing.expect(paste_mod.paste_get_name("buffer1") != null);
     try std.testing.expectEqual(@as(usize, 1), modeData(wme).items.items.len);
     try std.testing.expectEqualStrings("buffer1", mode_tree.getCurrentName(modeData(wme).tree).?);
+}
+
+test "window-buffer paste-tagged runs the command for every tagged buffer and exits mode" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-buffer-paste-tagged");
+    defer if (sess.session_find("window-buffer-paste-tagged") != null) sess.session_destroy(setup.session, false, "test");
+
+    paste_mod.paste_add(null, xm.xstrdup("older"));
+    paste_mod.paste_add(null, xm.xstrdup("middle"));
+    paste_mod.paste_add(null, xm.xstrdup("newest"));
+
+    var chooser = makeClient(setup.session, "chooser", "/dev/pts/413");
+    defer freeClient(&chooser);
+
+    var cause: ?[]u8 = null;
+    var mode_args = try args_mod.args_parse(
+        xm.allocator,
+        &.{"set-environment -g HIT_%% yes"},
+        "F:f:NO:rt:yZ",
+        0,
+        1,
+        &cause,
+    );
+    defer mode_args.deinit();
+
+    var fs = T.CmdFindState{
+        .s = setup.session,
+        .wl = setup.session.curw,
+        .w = setup.session.curw.?.window,
+        .wp = setup.pane,
+        .idx = setup.session.curw.?.idx,
+    };
+
+    const wme = enterMode(setup.pane, &fs, &mode_args);
+
+    cause = null;
+    var tag_args = try args_mod.args_parse(xm.allocator, &.{"tag"}, "", 0, -1, &cause);
+    defer tag_args.deinit();
+    cause = null;
+    var paste_tagged_args = try args_mod.args_parse(xm.allocator, &.{"paste-tagged"}, "", 0, -1, &cause);
+    defer paste_tagged_args.deinit();
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&tag_args), null);
+    _ = mode_tree.down(modeData(wme).tree, false);
+    _ = mode_tree.down(modeData(wme).tree, false);
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&tag_args), null);
+
+    windowBufferCommand(wme, &chooser, setup.session, setup.session.curw.?, @ptrCast(&paste_tagged_args), null);
+
+    while (cmdq.cmdq_next(&chooser) != 0) {}
+
+    try std.testing.expect(env_mod.environ_find(env_mod.global_environ, "HIT_buffer0") != null);
+    try std.testing.expect(env_mod.environ_find(env_mod.global_environ, "HIT_buffer2") != null);
+    try std.testing.expect(env_mod.environ_find(env_mod.global_environ, "HIT_buffer1") == null);
+    try std.testing.expect(window.window_pane_mode(setup.pane) == null);
 }
 
 test "window-buffer edit-selected updates the selected buffer and rebuilds the mode tree on save" {

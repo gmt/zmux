@@ -416,7 +416,7 @@ fn cmd_find_inside_pane(cl: *T.Client) ?*T.WindowPane {
         }
     }
 
-    const entry = env_mod.environ_find(cl.environ, "TMUX_PANE") orelse return null;
+    const entry = env_mod.environ_find(cl.environ, "ZMUX_PANE") orelse return null;
     const value = entry.value orelse return null;
     if (value.len <= 1 or value[0] != '%') return null;
     const id = std.fmt.parseUnsigned(u32, value[1..], 10) catch return null;
@@ -1339,7 +1339,7 @@ test "cmd_find_target uses unattached inside-pane context to choose a session" {
     try std.testing.expectEqual(current_wl.window.active.?, target.wp.?);
 }
 
-test "cmd_find_target uses TMUX_PANE for unattached clients without tty matches" {
+test "cmd_find_target uses ZMUX_PANE for unattached clients without tty matches" {
     const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
@@ -1360,8 +1360,8 @@ test "cmd_find_target uses TMUX_PANE for unattached clients without tty matches"
     env_mod.global_environ = env_mod.environ_create();
     defer env_mod.environ_free(env_mod.global_environ);
 
-    const s = sess.session_create(null, "tmux-pane-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
-    defer if (sess.session_find("tmux-pane-session") != null) sess.session_destroy(s, false, "test");
+    const s = sess.session_create(null, "zmux-pane-session", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("zmux-pane-session") != null) sess.session_destroy(s, false, "test");
 
     var cause: ?[]u8 = null;
     var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
@@ -1372,7 +1372,7 @@ test "cmd_find_target uses TMUX_PANE for unattached clients without tty matches"
     defer env_mod.environ_free(client_env);
     const pane_id = try std.fmt.allocPrint(xm.allocator, "%{d}", .{wl.window.panes.items[0].id});
     defer xm.allocator.free(pane_id);
-    env_mod.environ_set(client_env, "TMUX_PANE", 0, pane_id);
+    env_mod.environ_set(client_env, "ZMUX_PANE", 0, pane_id);
 
     var client = T.Client{
         .environ = client_env,

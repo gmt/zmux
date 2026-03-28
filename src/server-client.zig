@@ -723,11 +723,9 @@ pub fn server_client_get_cwd(cl: ?*T.Client, s: ?*T.Session) []const u8 {
 }
 
 fn client_has_nested_marker(cl: *T.Client) bool {
-    inline for ([_][]const u8{ "ZMUX", "TMUX" }) |name| {
-        if (env_mod.environ_find(cl.environ, name)) |entry| {
-            if (entry.value) |value| {
-                if (value.len != 0) return true;
-            }
+    if (env_mod.environ_find(cl.environ, "ZMUX")) |entry| {
+        if (entry.value) |value| {
+            if (value.len != 0) return true;
         }
     }
     return false;
@@ -1259,7 +1257,7 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
 }
 
-test "server_client_check_nested requires a marker and a live pane tty match" {
+test "server_client_check_nested requires ZMUX and a live pane tty match" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
     opts.global_s_options = opts.options_create(null);
@@ -1303,8 +1301,7 @@ test "server_client_check_nested requires a marker and a live pane tty match" {
     try std.testing.expect(server_client_check_nested(&client));
 
     env_mod.environ_set(client.environ, "ZMUX", 0, "");
-    env_mod.environ_set(client.environ, "TMUX", 0, "/tmp/tmux.sock,1,0");
-    try std.testing.expect(server_client_check_nested(&client));
+    try std.testing.expect(!server_client_check_nested(&client));
 
     xm.allocator.free(client.ttyname.?);
     client.ttyname = xm.xstrdup("/dev/pts/server-client-other");

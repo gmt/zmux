@@ -368,6 +368,62 @@ test "set-option -p stores pane local custom options and updates consumers" {
     try std.testing.expectEqual(colour_mod.colour_join_rgb(0x02, 0x03, 0x04), colour_mod.colour_palette_get(&wp.palette, 1));
 }
 
+test "set-option -p stores pane local copy-mode position format overrides" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "copy-mode-position-format", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &attach_cause).?;
+    const wp = win.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    s.curw = sess.winlink_find_by_window(&s.windows, w).?;
+
+    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{wp.id});
+    defer xm.allocator.free(target);
+
+    const before = opts.options_get_string(wp.options, "copy-mode-position-format");
+    try std.testing.expectEqualStrings(
+        "#[align=right]#{t/p:top_line_time}#{?#{e|>:#{top_line_time},0}, ,}[#{scroll_position}/#{history_size}]#{?search_timed_out, (timed out),#{?search_count, (#{search_count}#{?search_count_partial,+,} results),}}",
+        before,
+    );
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-p", "-t", target, "copy-mode-position-format", "#[align=left]#{scroll_position}" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("#[align=left]#{scroll_position}", opts.options_get_string(wp.options, "copy-mode-position-format"));
+    try std.testing.expectEqualStrings(
+        "#[align=right]#{t/p:top_line_time}#{?#{e|>:#{top_line_time},0}, ,}[#{scroll_position}/#{history_size}]#{?search_timed_out, (timed out),#{?search_count, (#{search_count}#{?search_count_partial,+,} results),}}",
+        opts.options_get_string(w.options, "copy-mode-position-format"),
+    );
+}
+
 test "set-option -gp ignores -g for pane custom options" {
     const sess = @import("session.zig");
     const env_mod = @import("environ.zig");

@@ -46,10 +46,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
     if (args.has('Z')) {
-        if (win.window_count_panes(w) > 1) {
-            cmdq.cmdq_error(item, "zoom resize not supported yet", .{});
-            return .@"error";
-        }
+        if (!win.window_unzoom(w)) _ = win.window_zoom(wp);
+        server_fn.server_redraw_window(w);
         server_fn.server_status_window(w);
         return .normal;
     }
@@ -252,4 +250,45 @@ test "resize-pane -Z is a no-op for a single-pane window" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(win.window_count_panes(wl.window))));
     try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_ZOOMED);
+}
+
+test "resize-pane -Z toggles the reduced zoom flag and targets the requested pane" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-zoom-toggle", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-zoom-toggle") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var root_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&root_ctx, &cause).?;
+    const first = wl.window.active.?;
+    var split_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&split_ctx, &cause).?;
+
+    const target = std.fmt.allocPrint(xm.allocator, "%{d}", .{second.id}) catch unreachable;
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    const zoom_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-t", target, "-Z" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(zoom_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(zoom_cmd, &item));
+    try std.testing.expectEqual(second, wl.window.active.?);
+    try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
+    try std.testing.expect(!win.window_pane_visible(first));
+    try std.testing.expect(win.window_pane_visible(second));
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(zoom_cmd, &item));
+    try std.testing.expectEqual(second, wl.window.active.?);
+    try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_ZOOMED);
+    try std.testing.expect(win.window_pane_visible(first));
+    try std.testing.expect(win.window_pane_visible(second));
 }

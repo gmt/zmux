@@ -49,6 +49,7 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, T.CMD_FIND_CANFAIL | T.CMD_FIND_WINDOW_INDEX) != 0)
         return .@"error";
     const s = target.s orelse return .@"error";
+    var idx = target.idx;
 
     if (args.has('S')) {
         if (args.get('n')) |raw_name| {
@@ -70,11 +71,18 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
+    const before = args.has('b');
+    if (args.has('a') or before) {
+        idx = sess.winlink_shuffle_up(s, target.wl, before);
+        if (idx == -1)
+            idx = target.idx;
+    }
+
     var cause: ?[]u8 = null;
     var sc = T.SpawnContext{
         .item = @ptrCast(item),
         .s = s,
-        .idx = target.idx,
+        .idx = idx,
         .cwd = args.get('c'),
         .name = args.get('n'),
         .flags = 0,
@@ -425,4 +433,78 @@ test "new-window -d -k replaces the current target slot and selects the replacem
     try std.testing.expectEqual(@as(usize, 2), session.windows.count());
     try std.testing.expect(replacement.window.id != replaced_window_id);
     try std.testing.expectEqual(replacement, session.curw.?);
+}
+
+test "new-window -d -a inserts after the target window and shifts following indexes" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-after-target", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-after-target") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first_wl = spawn_mod.spawn_window(&first_sc, &cause).?;
+    var second_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second_wl = spawn_mod.spawn_window(&second_sc, &cause).?;
+    var third_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const third_wl = spawn_mod.spawn_window(&third_sc, &cause).?;
+    session.curw = second_wl;
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-d", "-a", "-t", "new-window-after-target:0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const inserted = sess.winlink_find_by_index(&session.windows, 1).?;
+    try std.testing.expectEqual(@as(usize, 4), session.windows.count());
+    try std.testing.expect(inserted != first_wl);
+    try std.testing.expect(inserted != second_wl);
+    try std.testing.expect(inserted != third_wl);
+    try std.testing.expectEqual(@as(i32, 0), first_wl.idx);
+    try std.testing.expectEqual(@as(i32, 2), second_wl.idx);
+    try std.testing.expectEqual(@as(i32, 3), third_wl.idx);
+    try std.testing.expectEqual(second_wl, session.curw.?);
+}
+
+test "new-window -d -b inserts before the target window and shifts that slot upward" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-before-target", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-before-target") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first_wl = spawn_mod.spawn_window(&first_sc, &cause).?;
+    var second_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second_wl = spawn_mod.spawn_window(&second_sc, &cause).?;
+    var third_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const third_wl = spawn_mod.spawn_window(&third_sc, &cause).?;
+    session.curw = second_wl;
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-d", "-b", "-t", "new-window-before-target:1" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const inserted = sess.winlink_find_by_index(&session.windows, 1).?;
+    try std.testing.expectEqual(@as(usize, 4), session.windows.count());
+    try std.testing.expect(inserted != first_wl);
+    try std.testing.expect(inserted != second_wl);
+    try std.testing.expect(inserted != third_wl);
+    try std.testing.expectEqual(@as(i32, 0), first_wl.idx);
+    try std.testing.expectEqual(@as(i32, 2), second_wl.idx);
+    try std.testing.expectEqual(@as(i32, 3), third_wl.idx);
+    try std.testing.expectEqual(second_wl, session.curw.?);
 }

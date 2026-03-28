@@ -224,6 +224,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .s = s,
         .idx = -1,
         .cwd = args.get('c'),
+        .name = args.get('n'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
     };
     const argv = argv_tail(args, 0);
@@ -586,6 +587,34 @@ test "new-session -c stores the session cwd and resolves the first pane from the
     const created_wp = created_wl.window.active.?;
     try std.testing.expectEqualStrings("child", created.cwd);
     try std.testing.expectEqualStrings(expected_pane_cwd, created_wp.cwd.?);
+}
+
+test "new-session -n names the initial window and disables automatic rename" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-s",
+        "new-session-named-window",
+        "-n",
+        "seed-window",
+    }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const created = sess.session_find("new-session-named-window").?;
+    defer if (sess.session_find("new-session-named-window") != null)
+        sess.session_destroy(created, false, "test");
+
+    const created_wl = created.curw.?;
+    try std.testing.expectEqualStrings("seed-window", created_wl.window.name);
+    try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(created_wl.window.options, "automatic-rename"));
 }
 
 test "new-session seeds the session environment from update-environment and repeated -e overrides" {

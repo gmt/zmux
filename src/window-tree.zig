@@ -90,6 +90,14 @@ const WindowTreeModeData = struct {
     sort_crit: T.SortCriteria = .{},
     kind: DisplayKind = .pane,
     squash_groups: bool = true,
+    preview_offset: i32 = 0,
+    preview_left: i32 = -1,
+    preview_right: i32 = -1,
+    preview_start: u32 = 0,
+    preview_end: u32 = 0,
+    preview_each: u32 = 0,
+    preview_top: u32 = 0,
+    preview_bottom: u32 = 0,
 };
 
 pub const window_tree_mode = T.WindowMode{
@@ -155,14 +163,13 @@ fn windowTreeCommand(
     raw_args: *const anyopaque,
     mouse: ?*const T.MouseEvent,
 ) void {
-    _ = mouse;
-
     const args: *const args_mod.Arguments = @ptrCast(@alignCast(raw_args));
     if (args.count() == 0) return;
 
     const command = args.value_at(0).?;
     const data = modeData(wme);
     const repeat = repeatCount(wme);
+    _ = mouse;
 
     if (std.mem.eql(u8, command, "cancel")) {
         _ = window_mode_runtime.resetMode(wme.wp);
@@ -173,27 +180,35 @@ fn windowTreeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "cursor-up")) {
+        const previous_tag = currentTag(data.tree);
         var remaining = repeat;
         while (remaining > 0) : (remaining -= 1) mode_tree.up(data.tree, false);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
         redraw(wme);
         wme.prefix = 1;
         return;
     }
     if (std.mem.eql(u8, command, "cursor-down")) {
+        const previous_tag = currentTag(data.tree);
         var remaining = repeat;
         while (remaining > 0) : (remaining -= 1) _ = mode_tree.down(data.tree, false);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
         redraw(wme);
         wme.prefix = 1;
         return;
     }
     if (std.mem.eql(u8, command, "page-up")) {
+        const previous_tag = currentTag(data.tree);
         pageUp(data.tree, viewRows(wme.wp), repeat);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
         redraw(wme);
         wme.prefix = 1;
         return;
     }
     if (std.mem.eql(u8, command, "page-down")) {
+        const previous_tag = currentTag(data.tree);
         pageDown(data.tree, viewRows(wme.wp), repeat);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
         redraw(wme);
         wme.prefix = 1;
         return;
@@ -229,7 +244,23 @@ fn windowTreeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "home-target")) {
+        const previous_tag = currentTag(data.tree);
         focusTarget(data);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
+        redraw(wme);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "scroll-left")) {
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) data.preview_offset -= 1;
+        redraw(wme);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "scroll-right")) {
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) data.preview_offset += 1;
         redraw(wme);
         wme.prefix = 1;
         return;
@@ -248,23 +279,53 @@ fn windowTreeKey(
     key: T.key_code,
     mouse: ?*const T.MouseEvent,
 ) void {
-    if (mouse != null) return;
-
     const data = modeData(wme);
+    if (mouse) |event| {
+        if (windowTreeMouse(data, key, event)) |translated| {
+            switch (translated) {
+                '<' => {
+                    data.preview_offset -= 1;
+                    redraw(wme);
+                    return;
+                },
+                '>' => {
+                    data.preview_offset += 1;
+                    redraw(wme);
+                    return;
+                },
+                else => {},
+            }
+        }
+    }
+
     if (shortcutLineForKey(data.tree, key)) |line_index| {
+        const previous_tag = currentTag(data.tree);
         data.tree.current = line_index;
         adjustOffsetForCurrent(data.tree);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
         chooseCurrent(wme, client, session, wl);
         return;
     }
 
     switch (key) {
         T.KEYC_WHEELUP => {
+            const previous_tag = currentTag(data.tree);
             mode_tree.up(data.tree, false);
+            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
             redraw(wme);
         },
         T.KEYC_WHEELDOWN => {
+            const previous_tag = currentTag(data.tree);
             _ = mode_tree.down(data.tree, false);
+            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
+            redraw(wme);
+        },
+        '<' => {
+            data.preview_offset -= 1;
+            redraw(wme);
+        },
+        '>' => {
+            data.preview_offset += 1;
             redraw(wme);
         },
         else => {},
@@ -327,7 +388,9 @@ fn redraw(wme: *T.WindowModeEntry) void {
     const tree = data.tree;
     const view = tree.getScreen();
     const rows = view.grid.sy;
-    const body_rows = viewRows(wme.wp);
+    const help_row = if (rows > 0) rows - 1 else 0;
+    const body_rows = if (rows > 0) @min(tree.height, help_row) else 0;
+    const preview_rows = if (rows > body_rows + 1) rows - body_rows - 1 else 0;
 
     screen.screen_reset_active(view);
     view.mode &= ~@as(i32, T.MODE_CURSOR | T.MODE_WRAP);
@@ -347,6 +410,8 @@ fn redraw(wme: *T.WindowModeEntry) void {
         screen_write.putn(&ctx, rendered);
     }
 
+    drawPreview(data, &ctx, body_rows, preview_rows);
+
     if (rows > 0) {
         screen_write.cursor_to(&ctx, rows - 1, 0);
         screen_write.erase_line(&ctx);
@@ -360,6 +425,249 @@ fn redraw(wme: *T.WindowModeEntry) void {
     }
 
     window_mode_runtime.noteModeRedraw(wme.wp);
+}
+
+const PreviewLayout = struct {
+    start: u32,
+    end: u32,
+    each: u32,
+    remaining: u32,
+    left: bool,
+    right: bool,
+};
+
+fn drawPreview(data: *WindowTreeModeData, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
+    data.preview_left = -1;
+    data.preview_right = -1;
+    data.preview_start = 0;
+    data.preview_end = 0;
+    data.preview_each = 0;
+    data.preview_top = top;
+    data.preview_bottom = top;
+
+    if (height == 0) return;
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    const item: *TreeItem = @ptrCast(@alignCast(item_ptr));
+
+    data.preview_bottom = top + height;
+    switch (item.item_type) {
+        .session => drawSessionPreview(data, item.session, ctx, top, height),
+        .window => drawWindowPreview(data, item.winlink.?.window, ctx, top, height),
+        .pane => drawPanePreview(item.pane.?, ctx, top, height),
+    }
+}
+
+fn drawPanePreview(pane: *T.WindowPane, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
+    const width = ctx.s.grid.sx;
+    if (width == 0 or height == 0) return;
+    screen_write.cursor_to(ctx, top, 0);
+    screen_write.preview(ctx, &pane.base, width, height);
+}
+
+fn drawSessionPreview(data: *WindowTreeModeData, session_ptr: *T.Session, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
+    const windows = sort_mod.sorted_winlinks_session(session_ptr, .{ .order = .index });
+    defer xm.allocator.free(windows);
+
+    const current_index = sessionCurrentIndex(session_ptr, windows);
+    const layout = beginPreviewLayout(data, ctx, top, height, @intCast(windows.len), @intCast(current_index)) orelse return;
+
+    var visual_index: u32 = 0;
+    var loop = layout.start;
+    while (loop < layout.end) : (loop += 1) {
+        const wl = windows[@intCast(loop)];
+        const x = previewTileOffset(layout, visual_index);
+        const width = previewTileWidth(layout, loop);
+        if (width == 0) {
+            visual_index += 1;
+            continue;
+        }
+
+        screen_write.cursor_to(ctx, top, x);
+        screen_write.preview(ctx, &wl.window.active.?.base, width, height);
+
+        var label = xm.xasprintf(" {d}:{s} ", .{ wl.idx, wl.window.name });
+        if (label.len > width) {
+            xm.allocator.free(label);
+            label = xm.xasprintf(" {d} ", .{wl.idx});
+        }
+        defer xm.allocator.free(label);
+        drawCenteredText(ctx, top, x, width, height, label);
+
+        if (loop != layout.end - 1)
+            drawVerticalLine(ctx, x + width, top, height);
+        visual_index += 1;
+    }
+}
+
+fn drawWindowPreview(data: *WindowTreeModeData, w: *T.Window, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
+    const current_index = windowCurrentPaneIndex(w);
+    const layout = beginPreviewLayout(data, ctx, top, height, @intCast(w.panes.items.len), @intCast(current_index)) orelse return;
+
+    var visual_index: u32 = 0;
+    var loop = layout.start;
+    while (loop < layout.end) : (loop += 1) {
+        const pane = w.panes.items[@intCast(loop)];
+        const x = previewTileOffset(layout, visual_index);
+        const width = previewTileWidth(layout, loop);
+        if (width == 0) {
+            visual_index += 1;
+            continue;
+        }
+
+        screen_write.cursor_to(ctx, top, x);
+        screen_write.preview(ctx, &pane.base, width, height);
+
+        const label = xm.xasprintf(" {d} ", .{paneIndex(w, pane)});
+        defer xm.allocator.free(label);
+        drawCenteredText(ctx, top, x, width, height, label);
+
+        if (loop != layout.end - 1)
+            drawVerticalLine(ctx, x + width, top, height);
+        visual_index += 1;
+    }
+}
+
+fn beginPreviewLayout(
+    data: *WindowTreeModeData,
+    ctx: *T.ScreenWriteCtx,
+    top: u32,
+    height: u32,
+    total: u32,
+    current: u32,
+) ?PreviewLayout {
+    const sx = ctx.s.grid.sx;
+    if (sx == 0 or total == 0) return null;
+
+    var visible: u32 = if (sx / total < 24) sx / 24 else total;
+    if (visible == 0) visible = 1;
+
+    var start: u32 = 0;
+    var end: u32 = 0;
+    if (current < visible) {
+        start = 0;
+        end = visible;
+    } else if (current >= total - visible) {
+        start = total - visible;
+        end = total;
+    } else {
+        start = current - (visible / 2);
+        end = start + visible;
+    }
+
+    const min_offset = -@as(i32, @intCast(start));
+    const max_offset = @as(i32, @intCast(total - end));
+    if (data.preview_offset < min_offset) data.preview_offset = min_offset;
+    if (data.preview_offset > max_offset) data.preview_offset = max_offset;
+
+    start = @intCast(@as(i32, @intCast(start)) + data.preview_offset);
+    end = @intCast(@as(i32, @intCast(end)) + data.preview_offset);
+
+    var left = start != 0;
+    var right = end != total;
+    if (((left and right) and sx <= 6) or ((left or right) and sx <= 3)) {
+        left = false;
+        right = false;
+    }
+
+    var each: u32 = 0;
+    var remaining: u32 = 0;
+    if (left and right) {
+        each = (sx - 6) / visible;
+        remaining = (sx - 6) - (visible * each);
+    } else if (left or right) {
+        each = (sx - 3) / visible;
+        remaining = (sx - 3) - (visible * each);
+    } else {
+        each = sx / visible;
+        remaining = sx - (visible * each);
+    }
+    if (each == 0) return null;
+
+    if (left) {
+        data.preview_left = 2;
+        drawVerticalLine(ctx, 2, top, height);
+        drawCenteredText(ctx, top, 0, 1, height, "<");
+    }
+    if (right) {
+        data.preview_right = @as(i32, @intCast(sx)) - 3;
+        drawVerticalLine(ctx, sx - 3, top, height);
+        drawCenteredText(ctx, top, sx - 1, 1, height, ">");
+    }
+
+    data.preview_start = start;
+    data.preview_end = end;
+    data.preview_each = each;
+    return .{
+        .start = start,
+        .end = end,
+        .each = each,
+        .remaining = remaining,
+        .left = left,
+        .right = right,
+    };
+}
+
+fn previewTileOffset(layout: PreviewLayout, visual_index: u32) u32 {
+    return if (layout.left) 3 + (visual_index * layout.each) else visual_index * layout.each;
+}
+
+fn previewTileWidth(layout: PreviewLayout, loop: u32) u32 {
+    return if (loop == layout.end - 1) layout.each + layout.remaining else layout.each -| 1;
+}
+
+fn drawVerticalLine(ctx: *T.ScreenWriteCtx, col: u32, top: u32, height: u32) void {
+    var row: u32 = 0;
+    while (row < height and top + row < ctx.s.grid.sy) : (row += 1) {
+        screen_write.cursor_to(ctx, top + row, col);
+        screen_write.putc(ctx, '|');
+    }
+}
+
+fn drawCenteredText(ctx: *T.ScreenWriteCtx, top: u32, left: u32, width: u32, height: u32, text: []const u8) void {
+    if (width == 0 or height == 0 or text.len > width) return;
+    const row = top + height / 2;
+    const col = left + (width - @as(u32, @intCast(text.len))) / 2;
+    if (row >= ctx.s.grid.sy or col >= ctx.s.grid.sx) return;
+    screen_write.cursor_to(ctx, row, col);
+    screen_write.putn(ctx, text);
+}
+
+fn sessionCurrentIndex(session_ptr: *T.Session, windows: []*T.Winlink) usize {
+    const current = session_ptr.curw orelse return 0;
+    for (windows, 0..) |wl, idx| {
+        if (wl == current) return idx;
+    }
+    return 0;
+}
+
+fn windowCurrentPaneIndex(w: *T.Window) usize {
+    const current = w.active orelse return 0;
+    for (w.panes.items, 0..) |pane, idx| {
+        if (pane == current) return idx;
+    }
+    return 0;
+}
+
+fn currentTag(tree: *const mode_tree.Data) ?u64 {
+    if (tree.line_list.items.len == 0 or tree.current >= tree.line_list.items.len) return null;
+    return tree.line_list.items[tree.current].item.tag;
+}
+
+fn resetPreviewOffsetIfSelectionChanged(data: *WindowTreeModeData, previous_tag: ?u64) void {
+    const previous = previous_tag orelse return;
+    const current = currentTag(data.tree) orelse {
+        data.preview_offset = 0;
+        return;
+    };
+    if (current != previous) data.preview_offset = 0;
+}
+
+fn windowTreeMouse(data: *const WindowTreeModeData, key: T.key_code, mouse: *const T.MouseEvent) ?T.key_code {
+    if (!mouse.valid or key != T.keycMouse(T.KEYC_MOUSEDOWN1, .pane)) return null;
+    if (mouse.y < data.preview_top or mouse.y >= data.preview_bottom) return null;
+    if (data.preview_left != -1 and mouse.x <= @as(u32, @intCast(data.preview_left))) return '<';
+    if (data.preview_right != -1 and mouse.x >= @as(u32, @intCast(data.preview_right))) return '>';
+    return null;
 }
 
 fn buildTree(tree: *mode_tree.Data) void {
@@ -1056,4 +1364,181 @@ test "window-tree custom key format renders labels and chooses the matching line
 
     try std.testing.expect(wl.window.active == extra);
     try std.testing.expect(window.window_pane_mode(extra) == null);
+}
+
+test "window-tree preview scroll commands page current window previews" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-preview-scroll", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-preview-scroll") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    var sw = T.ScreenWriteCtx{ .s = &wl.window.active.?.base };
+    screen_write.putn(&sw, "pane-0");
+
+    var idx: usize = 1;
+    while (idx < 4) : (idx += 1) {
+        const pane = window.window_add_pane(wl.window, null, 24, 12);
+        var pane_ctx = T.ScreenWriteCtx{ .s = &pane.base };
+        switch (idx) {
+            1 => screen_write.putn(&pane_ctx, "pane-1"),
+            2 => screen_write.putn(&pane_ctx, "pane-2"),
+            else => screen_write.putn(&pane_ctx, "pane-3"),
+        }
+    }
+    wl.window.active = wl.window.panes.items[2];
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = wl.window.active,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(wl.window.active.?, .{
+        .fs = &target,
+        .kind = .window,
+    });
+    defer {
+        if (window.window_pane_mode(wl.window.active.?) != null)
+            _ = window_mode_runtime.resetMode(wl.window.active.?);
+    }
+
+    const data = modeData(wme);
+    const current_line = blk: {
+        for (data.tree.line_list.items, 0..) |line, line_index| {
+            const item: *TreeItem = @ptrCast(@alignCast(line.item.itemdata.?));
+            if (item.item_type == .window and item.winlink == wl)
+                break :blk @as(u32, @intCast(line_index));
+        }
+        return error.TestUnexpectedResult;
+    };
+    data.tree.current = current_line;
+    mode_tree.resize(data.tree, 24, 24);
+    redraw(wme);
+    try std.testing.expectEqual(@as(u32, 2), data.preview_start);
+    try std.testing.expectEqual(@as(u32, 3), data.preview_end);
+    try std.testing.expect(data.preview_left != -1);
+    try std.testing.expect(data.preview_right != -1);
+
+    var args_cause: ?[]u8 = null;
+    var left_args = try args_mod.args_parse(xm.allocator, &.{"scroll-left"}, "", 1, 1, &args_cause);
+    defer left_args.deinit();
+    windowTreeCommand(wme, null, session_ptr, wl, @ptrCast(&left_args), null);
+    try std.testing.expectEqual(@as(u32, 1), data.preview_start);
+    try std.testing.expectEqual(@as(u32, 2), data.preview_end);
+
+    var right_args = try args_mod.args_parse(xm.allocator, &.{"scroll-right"}, "", 1, 1, &args_cause);
+    defer right_args.deinit();
+    windowTreeCommand(wme, null, session_ptr, wl, @ptrCast(&right_args), null);
+    try std.testing.expectEqual(@as(u32, 2), data.preview_start);
+    try std.testing.expectEqual(@as(u32, 3), data.preview_end);
+}
+
+test "window-tree preview arrows translate pane clicks into scroll actions" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-preview-mouse", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-preview-mouse") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    var idx: usize = 0;
+    while (idx < 3) : (idx += 1) {
+        _ = window.window_add_pane(wl.window, null, 24, 12);
+    }
+    wl.window.active = wl.window.panes.items[2];
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = wl.window.active,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(wl.window.active.?, .{
+        .fs = &target,
+        .kind = .window,
+    });
+    defer {
+        if (window.window_pane_mode(wl.window.active.?) != null)
+            _ = window_mode_runtime.resetMode(wl.window.active.?);
+    }
+
+    const data = modeData(wme);
+    const current_line = blk: {
+        for (data.tree.line_list.items, 0..) |line, line_index| {
+            const item: *TreeItem = @ptrCast(@alignCast(line.item.itemdata.?));
+            if (item.item_type == .window and item.winlink == wl)
+                break :blk @as(u32, @intCast(line_index));
+        }
+        return error.TestUnexpectedResult;
+    };
+    data.tree.current = current_line;
+    mode_tree.resize(data.tree, 24, 24);
+    redraw(wme);
+    try std.testing.expectEqual(@as(u32, 2), data.preview_start);
+
+    const left_mouse = T.MouseEvent{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+        .x = 0,
+        .y = data.preview_top,
+    };
+    windowTreeKey(wme, null, session_ptr, wl, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), &left_mouse);
+    try std.testing.expectEqual(@as(u32, 1), data.preview_start);
+
+    const right_mouse = T.MouseEvent{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+        .x = @intCast(data.preview_right + 1),
+        .y = data.preview_top,
+    };
+    windowTreeKey(wme, null, session_ptr, wl, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), &right_mouse);
+    try std.testing.expectEqual(@as(u32, 2), data.preview_start);
 }

@@ -24,6 +24,7 @@ const cmd_find = @import("cmd-find.zig");
 const cmdq = @import("cmd-queue.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const window_clock = @import("window-clock.zig");
+const window_copy = @import("window-copy.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -55,11 +56,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         target_wp = target.wp orelse return .@"error";
     }
 
+    var source_wp: ?*T.WindowPane = null;
     if (args.has('s')) {
         var source: T.CmdFindState = .{};
         if (cmd_find.cmd_find_target(&source, item, args.get('s'), .pane, 0) != 0)
             return .@"error";
-        _ = source.wp orelse return .@"error";
+        source_wp = source.wp orelse return .@"error";
     }
 
     if (is_clock) {
@@ -67,8 +69,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    cmdq.cmdq_error(item, "{s} mode not supported yet", .{"window-copy"});
-    return .@"error";
+    _ = window_copy.enterMode(target_wp, source_wp orelse target_wp, args);
+    if (args.has('u')) window_copy.pageUp(target_wp, false);
+    if (args.has('d')) window_copy.pageDown(target_wp, false, args.has('e'));
+    return .normal;
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -179,9 +183,11 @@ test "copy-mode -q clears the reduced pane mode stack" {
     try std.testing.expect(!screen_mod.screen_alternate_active(setup.pane));
 }
 
-test "copy-mode reports the reduced missing window-copy runtime" {
+test "copy-mode enters the reduced window-copy runtime" {
     const sess = @import("session.zig");
     const xm = @import("xmalloc.zig");
+    const screen_mod = @import("screen.zig");
+    const win = @import("window.zig");
 
     init_test_globals();
     defer deinit_test_globals();
@@ -212,8 +218,10 @@ test "copy-mode reports the reduced missing window-copy runtime" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Window-copy mode not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.message_string == null);
+    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+    try std.testing.expectEqual(&window_copy.window_copy_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
 test "clock-mode enters the shared window clock mode" {

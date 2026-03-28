@@ -65,6 +65,10 @@ pub fn server_status_window(w: *T.Window) void {
     srv.server_status_window(w);
 }
 
+pub fn server_redraw_window(w: *T.Window) void {
+    srv.server_redraw_window(w);
+}
+
 pub fn server_redraw_window_borders(w: *T.Window) void {
     srv.server_redraw_window_borders(w);
 }

@@ -665,6 +665,7 @@ pub const TTY_NOCURSOR: u32 = 0x0001;
 pub const TTY_FREEZE: u32 = 0x0002;
 pub const TTY_STARTED: u32 = 0x0010;
 pub const TTY_OPENED: u32 = 0x0020;
+pub const TTY_OSC52QUERY: u32 = 0x0040;
 pub const TTY_BLOCK: u32 = 0x0080;
 
 pub const Tty = struct {
@@ -692,6 +693,7 @@ pub const Tty = struct {
     mouse_drag_flag: u32 = 0,
     mouse_scrolling_flag: bool = false,
     mouse_slider_mpos: i32 = -1,
+    clipboard_timer: ?*c.libevent.event = null,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────

@@ -536,6 +536,7 @@ fn eval_modified_expr(
 ) FormatExpandResult {
     var compare: CompareKind = .none;
     var match_flags: ?[]const u8 = null;
+    var search_flags: ?[]const u8 = null;
     var bool_and: ?bool = null;
     var negate = false;
     var truthy_only = false;
@@ -586,6 +587,8 @@ fn eval_modified_expr(
             negate = true;
         } else if (std.mem.eql(u8, modifier.name, "m")) {
             match_flags = if (modifier.args.len != 0) modifier.args[0] else "";
+        } else if (std.mem.eql(u8, modifier.name, "C")) {
+            search_flags = if (modifier.args.len != 0) modifier.args[0] else "";
         } else if (std.mem.eql(u8, modifier.name, "!!")) {
             truthy_only = true;
         } else if (std.mem.eql(u8, modifier.name, "R")) {
@@ -655,6 +658,27 @@ fn eval_modified_expr(
     const value = blk: {
         if (loop_kind != .none) break :blk eval_loop_expr(alloc, original_expr, copy, loop_kind, loop_sort, ctx, depth + 1);
         if (name_check != .none) break :blk eval_name_check_expr(alloc, original_expr, copy, name_check, ctx, depth + 1);
+        if (search_flags) |flags| {
+            const term = expand_template(alloc, copy, ctx, depth + 1);
+            defer alloc.free(term.text);
+            if (!term.complete) break :blk unresolved_expr(alloc, original_expr);
+
+            const wp = ctx_pane(ctx) orelse break :blk FormatExpandResult{
+                .text = alloc.dupe(u8, "0") catch unreachable,
+                .complete = true,
+            };
+            break :blk FormatExpandResult{
+                .text = xm.xasprintf("{d}", .{
+                    window_mod.window_pane_search(
+                        wp,
+                        term.text,
+                        std.mem.indexOfScalar(u8, flags, 'r') != null,
+                        std.mem.indexOfScalar(u8, flags, 'i') != null,
+                    ),
+                }),
+                .complete = true,
+            };
+        }
 
         if (repeat_output) {
             const parts = split_top_level_2(copy, ',') orelse break :blk unresolved_expr(alloc, original_expr);
@@ -1392,7 +1416,7 @@ fn build_modifiers(alloc: std.mem.Allocator, expr: []const u8) ?ParsedModifiers 
         }
 
         if (pos + 1 < expr.len and modifier_is_end(expr[pos + 1])) {
-            if (std.mem.indexOfScalar(u8, "labcdnwETSWPL!<>Rqmes", expr[pos]) != null) {
+            if (std.mem.indexOfScalar(u8, "labcdnwETSWPLC!<>Rqmes", expr[pos]) != null) {
                 list.append(alloc, .{ .name = expr[pos .. pos + 1], .args = alloc.alloc([]const u8, 0) catch unreachable }) catch unreachable;
                 pos += 1;
                 continue;
@@ -1415,7 +1439,7 @@ fn build_modifiers(alloc: std.mem.Allocator, expr: []const u8) ?ParsedModifiers 
             }
         }
 
-        if (std.mem.indexOfScalar(u8, "Ntp=qmes", expr[pos]) == null) return null;
+        if (std.mem.indexOfScalar(u8, "CNtp=qmes", expr[pos]) == null) return null;
         const name = expr[pos .. pos + 1];
 
         if (pos + 1 >= expr.len) return null;
@@ -4117,6 +4141,80 @@ test "format_expand handles width, pad, repeat, and comparisons" {
     defer xm.allocator.free(rendered.text);
     try std.testing.expect(rendered.complete);
     try std.testing.expectEqualStrings("abcd|abcdef|demo|/tmp|a\\ b|xyxyxy|1|1", rendered.text);
+}
+
+fn write_format_test_line(gd: *T.Grid, row: u32, text: []const u8) void {
+    for (text, 0..) |ch, col| {
+        grid.set_ascii(gd, row, @intCast(col), ch);
+    }
+}
+
+test "format_expand handles pane search modifiers" {
+    const base_grid = grid.grid_create(24, 3, 0);
+    defer grid.grid_free(base_grid);
+
+    const alt_screen = screen_mod.screen_init(24, 3, 0);
+    defer {
+        screen_mod.screen_free(alt_screen);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var base = T.Screen{
+        .grid = base_grid,
+        .mode = T.MODE_CURSOR | T.MODE_WRAP,
+        .rlower = 2,
+    };
+    screen_mod.screen_reset_tabs(&base);
+    screen_mod.screen_reset_hyperlinks(&base);
+    defer {
+        if (base.tabs) |tabs| xm.allocator.free(tabs);
+        if (base.hyperlinks) |hl| hyperlinks.hyperlinks_free(hl);
+    }
+
+    var w = T.Window{
+        .id = 7,
+        .name = xm.xstrdup("search"),
+        .sx = 24,
+        .sy = 3,
+        .options = undefined,
+    };
+    defer {
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        w.winlinks.deinit(xm.allocator);
+        xm.allocator.free(w.name);
+    }
+
+    var wp = T.WindowPane{
+        .id = 9,
+        .window = &w,
+        .options = undefined,
+        .sx = 24,
+        .sy = 3,
+        .screen = alt_screen,
+        .base = base,
+    };
+    w.active = &wp;
+    w.panes.append(xm.allocator, &wp) catch unreachable;
+
+    write_format_test_line(wp.base.grid, 0, "zero");
+    write_format_test_line(wp.base.grid, 1, "Alpha Beta   ");
+    write_format_test_line(wp.base.grid, 2, "Gamma");
+
+    const ctx = FormatContext{ .window = &w, .pane = &wp };
+    const out = format_expand(
+        xm.allocator,
+        "#{C:Beta} #{C/i:beta} #{C/r:^alpha beta$} #{C/ri:^alpha beta$}",
+        &ctx,
+    );
+    defer xm.allocator.free(out.text);
+    try std.testing.expect(out.complete);
+    try std.testing.expectEqualStrings("2 2 0 2", out.text);
+
+    const no_pane = format_expand(xm.allocator, "#{C:Beta}", &FormatContext{});
+    defer xm.allocator.free(no_pane.text);
+    try std.testing.expect(no_pane.complete);
+    try std.testing.expectEqualStrings("0", no_pane.text);
 }
 
 test "format_expand handles match and arithmetic modifiers" {

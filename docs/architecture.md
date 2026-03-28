@@ -20,6 +20,20 @@ file into a planner blob.
 - `/goodz/work/agents/zmux/TODO.md` is elegance debt only
 - `/goodz/work/agents/zmux/NOTES.md` is archival context only
 
+## Identity And Independence
+
+- tmux is tmux. It does things called tmux.
+- zmux is zmux. It does things called zmux.
+- zmux is a clone of tmux, but it is meant to be independent and distinct.
+- it should be possible to nest tmux inside zmux and zmux inside tmux.
+- that should come from each program behaving like itself, not from bespoke
+  cross-tool awareness.
+- when choosing names, messages, environment variables, and user-visible
+  behavior in zmux, prefer `zmux` names unless the text is explicitly about
+  tmux itself.
+- tmux should not be modeled as explicitly aware of zmux; because zmux is
+  unreleased, there is no way for tmux to know anything about zmux anyway.
+
 ## Stack Shape
 
 ### Text And Cells

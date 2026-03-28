@@ -353,7 +353,7 @@ fn build_child_environment(
 
     var pane_buf: [32]u8 = undefined;
     const pane_id = std.fmt.bufPrint(&pane_buf, "%{d}", .{wp.id}) catch unreachable;
-    env_mod.environ_set(child, "TMUX_PANE", 0, pane_id);
+    env_mod.environ_set(child, "ZMUX_PANE", 0, pane_id);
     env_mod.environ_set(child, "SHELL", 0, shell);
     return child;
 }
@@ -512,8 +512,10 @@ test "build_child_environment carries the zmux session marker into pane children
 
     const expected = xm.xasprintf("{s},{d},{d}", .{ server_mod.socket_path, std.c.getpid(), s.id });
     defer xm.allocator.free(expected);
+    const expected_pane = try std.fmt.allocPrint(xm.allocator, "%{d}", .{wp.id});
+    defer xm.allocator.free(expected_pane);
 
     try std.testing.expectEqualStrings(expected, env_mod.environ_find(child, "ZMUX").?.value.?);
     try std.testing.expectEqualStrings("/bin/sh", env_mod.environ_find(child, "SHELL").?.value.?);
-    try std.testing.expectEqualStrings("%0", env_mod.environ_find(child, "TMUX_PANE").?.value.?);
+    try std.testing.expectEqualStrings(expected_pane, env_mod.environ_find(child, "ZMUX_PANE").?.value.?);
 }

@@ -17,6 +17,7 @@ const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const format_mod = @import("format.zig");
 const client_registry = @import("client-registry.zig");
+const notify = @import("notify.zig");
 const resize_mod = @import("resize.zig");
 
 const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
@@ -120,6 +121,11 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         defer xm.allocator.free(rendered);
         cmdq.cmdq_print(item, "{s}", .{rendered});
     }
+
+    var hook_state: T.CmdFindState = .{ .idx = -1 };
+    std.debug.assert(cmd_find.cmd_find_from_winlink(&hook_state, wl, 0));
+    notify.notify_hook(item, "after-new-window", &hook_state);
+
     return .normal;
 }
 
@@ -507,4 +513,53 @@ test "new-window -d -b inserts before the target window and shifts that slot upw
     try std.testing.expectEqual(@as(i32, 2), second_wl.idx);
     try std.testing.expectEqual(@as(i32, 3), third_wl.idx);
     try std.testing.expectEqual(second_wl, session.curw.?);
+}
+
+test "new-window queues after-new-window hook with the new window context" {
+    const opts = @import("options.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    init_test_state();
+    defer deinit_test_state();
+
+    opts.options_set_array(opts.global_s_options, "after-new-window", &.{
+        "set-environment -g -F NEW_WINDOW_HOOK '#{session_name}:#{window_name}:#{window_index}'",
+    });
+
+    const session = sess.session_create(null, "new-window-hook", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("new-window-hook") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var initial_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const initial_wl = spawn_mod.spawn_window(&initial_sc, &cause).?;
+    session.curw = initial_wl;
+
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    const list = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "new-window-hook", "-n", "hooked-window" }, null, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    cmdq.cmdq_append(null, list);
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    var hooked_wl: ?*T.Winlink = null;
+    var it = session.windows.valueIterator();
+    while (it.next()) |match| {
+        if (std.mem.eql(u8, match.*.window.name, "hooked-window")) {
+            hooked_wl = match.*;
+            break;
+        }
+    }
+
+    const wl = hooked_wl orelse return error.TestExpectedEqual;
+    const expected = try std.fmt.allocPrint(xm.allocator, "{s}:{s}:{d}", .{
+        session.name,
+        wl.window.name,
+        wl.idx,
+    });
+    defer xm.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, env_mod.environ_find(env_mod.global_environ, "NEW_WINDOW_HOOK").?.value.?);
 }

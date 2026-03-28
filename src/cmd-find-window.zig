@@ -23,6 +23,7 @@ const args_mod = @import("arguments.zig");
 const cmd_find = @import("cmd-find.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const window_tree = @import("window-tree.zig");
 const xm = @import("xmalloc.zig");
 
 const ModeIntent = struct {
@@ -36,14 +37,18 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     var target: T.CmdFindState = .{};
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
         return .@"error";
-    _ = target.wp orelse return .@"error";
+    const wp = target.wp orelse return .@"error";
 
     const intent = buildModeIntent(args);
     defer xm.allocator.free(intent.filter);
     _ = intent.zoom;
 
-    cmdq.cmdq_error(item, "window-tree mode not supported yet", .{});
-    return .@"error";
+    _ = window_tree.enterMode(wp, .{
+        .fs = &target,
+        .kind = .pane,
+        .filter = intent.filter,
+    });
+    return .normal;
 }
 
 fn buildModeIntent(args: *const args_mod.Arguments) ModeIntent {
@@ -214,14 +219,15 @@ test "find-window builds tmux-style filter strings" {
     );
 }
 
-test "find-window reports the reduced missing window-tree runtime" {
+test "find-window enters the reduced window-tree runtime" {
     const sess = @import("session.zig");
+    const win = @import("window.zig");
 
     init_test_globals();
     defer deinit_test_globals();
 
-    const setup = try test_setup("find-window-missing");
-    defer if (sess.session_find("find-window-missing") != null)
+    const setup = try test_setup("find-window-live");
+    defer if (sess.session_find("find-window-live") != null)
         sess.session_destroy(setup.session, false, "test");
 
     const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
@@ -239,7 +245,6 @@ test "find-window reports the reduced missing window-tree runtime" {
         .session = setup.session,
     };
     client.tty = .{ .client = &client };
-    defer if (client.message_string) |msg| xm.allocator.free(msg);
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "find-window", "-t", target, "sh" }, null, &cause);
@@ -247,6 +252,6 @@ test "find-window reports the reduced missing window-tree runtime" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Window-tree mode not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_tree.window_tree_mode, win.window_pane_mode(setup.pane).?.mode);
 }

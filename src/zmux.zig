@@ -367,5 +367,6 @@ test {
     _ = @import("tty.zig");
     _ = @import("tty-draw.zig");
     _ = @import("input-keys.zig");
+    _ = @import("mode-tree.zig");
     _ = @import("utf8.zig");
 }

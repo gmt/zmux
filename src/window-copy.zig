@@ -379,9 +379,11 @@ fn copyModeCommand(
         const rows = viewRows(wme.wp);
         alignCursor(wme, if (rows == 0) 0 else rows - 1);
     } else if (std.mem.eql(u8, command, "start-of-line")) {
-        modeData(wme).cx = 0;
+        cursorStartOfLine(wme);
+    } else if (std.mem.eql(u8, command, "back-to-indentation")) {
+        cursorBackToIndentation(wme);
     } else if (std.mem.eql(u8, command, "end-of-line")) {
-        modeData(wme).cx = lineMaxX(modeData(wme).backing, absoluteCursorRow(wme), wme.wp.screen.grid.sx);
+        cursorEndOfLine(wme);
     } else {
         unsupportedCommand(client, command);
         wme.prefix = 1;
@@ -603,13 +605,13 @@ fn repeatJump(wme: *T.WindowModeEntry, jump_type: JumpType) void {
     }
 }
 
-fn startWordMotionReader(wme: *T.WindowModeEntry, gr: *T.GridReader) bool {
+fn startMotionReader(wme: *T.WindowModeEntry, gr: *T.GridReader) bool {
     if (rowCount(modeData(wme).backing) == 0) return false;
     grid.grid_reader_start(gr, modeData(wme).backing.grid, modeData(wme).cx, absoluteCursorRow(wme));
     return true;
 }
 
-fn applyWordMotionReader(wme: *T.WindowModeEntry, gr: *const T.GridReader) void {
+fn applyMotionReader(wme: *T.WindowModeEntry, gr: *const T.GridReader) void {
     var cx: u32 = 0;
     var cy: u32 = 0;
     grid.grid_reader_get_cursor(gr, &cx, &cy);
@@ -620,54 +622,54 @@ fn applyWordMotionReader(wme: *T.WindowModeEntry, gr: *const T.GridReader) void 
 
 fn cursorNextWord(wme: *T.WindowModeEntry, separators: []const u8) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     grid.grid_reader_cursor_next_word(&gr, separators);
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorJump(wme: *T.WindowModeEntry) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     gr.cx = modeData(wme).cx + 1;
     if (!grid.grid_reader_cursor_jump(&gr, &modeData(wme).jump_char)) return;
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorJumpBack(wme: *T.WindowModeEntry) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     grid.grid_reader_cursor_left(&gr, false);
     if (!grid.grid_reader_cursor_jump_back(&gr, &modeData(wme).jump_char)) return;
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorJumpTo(wme: *T.WindowModeEntry) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     gr.cx = modeData(wme).cx + 2;
     if (!grid.grid_reader_cursor_jump(&gr, &modeData(wme).jump_char)) return;
     grid.grid_reader_cursor_left(&gr, true);
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorJumpToBack(wme: *T.WindowModeEntry) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     grid.grid_reader_cursor_left(&gr, false);
     grid.grid_reader_cursor_left(&gr, false);
     if (!grid.grid_reader_cursor_jump_back(&gr, &modeData(wme).jump_char)) return;
     grid.grid_reader_cursor_right(&gr, true, false);
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorNextWordEnd(wme: *T.WindowModeEntry, separators: []const u8) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     if (copyModeUsesViKeys(wme)) {
         if (grid.grid_reader_in_set(&gr, word_whitespace) == 0)
@@ -677,15 +679,39 @@ fn cursorNextWordEnd(wme: *T.WindowModeEntry, separators: []const u8) void {
     } else {
         grid.grid_reader_cursor_next_word_end(&gr, separators);
     }
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
 }
 
 fn cursorPreviousWord(wme: *T.WindowModeEntry, separators: []const u8, already: bool) void {
     var gr: T.GridReader = undefined;
-    if (!startWordMotionReader(wme, &gr)) return;
+    if (!startMotionReader(wme, &gr)) return;
 
     grid.grid_reader_cursor_previous_word(&gr, separators, already, !copyModeUsesViKeys(wme));
-    applyWordMotionReader(wme, &gr);
+    applyMotionReader(wme, &gr);
+}
+
+fn cursorStartOfLine(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_start_of_line(&gr, true);
+    applyMotionReader(wme, &gr);
+}
+
+fn cursorBackToIndentation(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_back_to_indentation(&gr);
+    applyMotionReader(wme, &gr);
+}
+
+fn cursorEndOfLine(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_end_of_line(&gr, true, false);
+    applyMotionReader(wme, &gr);
 }
 
 fn absoluteCursorRow(wme: *T.WindowModeEntry) u32 {
@@ -929,7 +955,16 @@ fn runCopyModeTestCommandArgs(wme: *T.WindowModeEntry, session: ?*T.Session, val
     copyModeCommand(wme, null, if (session) |s| s else undefined, undefined, @ptrCast(&args), null);
 }
 
+fn initWindowCopyTestGlobals() void {
+    const sess = @import("session.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+}
+
 test "window-copy snapshots the source pane and refresh-from-pane updates it" {
+    initWindowCopyTestGlobals();
+
     const source_grid = grid.grid_create(6, 2, 0);
     defer grid.grid_free(source_grid);
     const target_grid = grid.grid_create(6, 2, 0);
@@ -1031,6 +1066,8 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
 }
 
 test "window-copy navigation commands move through a taller source snapshot" {
+    initWindowCopyTestGlobals();
+
     const source_grid = grid.grid_create(6, 4, 0);
     defer grid.grid_free(source_grid);
     const target_grid = grid.grid_create(6, 2, 0);
@@ -1128,8 +1165,97 @@ test "window-copy navigation commands move through a taller source snapshot" {
     try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
 }
 
+test "window-copy wrapped line motions follow the shared grid reader" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(5, 2, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(5, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(5, 2, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(5, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 14,
+        .name = xm.xstrdup("copy-window-wrapped"),
+        .sx = 5,
+        .sy = 2,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 15,
+        .window = &window_,
+        .options = undefined,
+        .sx = 5,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 16,
+        .window = &window_,
+        .options = undefined,
+        .sx = 5,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    grid.set_ascii(source.base.grid, 0, 0, ' ');
+    grid.set_ascii(source.base.grid, 0, 1, ' ');
+    grid.set_ascii(source.base.grid, 0, 2, 'a');
+    grid.set_ascii(source.base.grid, 0, 3, 'b');
+    source.base.grid.linedata[0].flags |= T.GRID_LINE_WRAPPED;
+    grid.set_ascii(source.base.grid, 1, 0, ' ');
+    grid.set_ascii(source.base.grid, 1, 1, 'c');
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+
+    modeData(wme).cx = 1;
+    modeData(wme).cy = 1;
+    try runCopyModeTestCommand(wme, "back-to-indentation");
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), absoluteCursorRow(wme));
+
+    modeData(wme).cx = 1;
+    modeData(wme).cy = 1;
+    try runCopyModeTestCommand(wme, "start-of-line");
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), absoluteCursorRow(wme));
+
+    modeData(wme).cx = 0;
+    modeData(wme).cy = 0;
+    try runCopyModeTestCommand(wme, "end-of-line");
+    try std.testing.expectEqual(@as(u32, 1), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 1), absoluteCursorRow(wme));
+}
+
 test "window-copy word and space motions use session separators and mode keys" {
     const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
 
     opts_mod.global_options = opts_mod.options_create(null);
     defer opts_mod.options_free(opts_mod.global_options);
@@ -1256,6 +1382,8 @@ test "window-copy word and space motions use session separators and mode keys" {
 }
 
 test "window-copy jump char motions remember direction and target character" {
+    initWindowCopyTestGlobals();
+
     const source_grid = grid.grid_create(16, 1, 0);
     defer grid.grid_free(source_grid);
     const target_grid = grid.grid_create(16, 1, 0);
@@ -1343,6 +1471,8 @@ test "window-copy jump char motions remember direction and target character" {
 }
 
 test "window-copy downward commands keep viewport scrolling separate from cancel variants" {
+    initWindowCopyTestGlobals();
+
     const source_grid = grid.grid_create(6, 8, 0);
     defer grid.grid_free(source_grid);
     const target_grid = grid.grid_create(6, 5, 0);
@@ -1455,6 +1585,8 @@ test "window-copy downward commands keep viewport scrolling separate from cancel
 
 test "window-copy startDrag keeps the cursor under reduced mouse drags" {
     const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
 
     opts_mod.global_options = opts_mod.options_create(null);
     defer opts_mod.options_free(opts_mod.global_options);
@@ -1580,6 +1712,8 @@ test "window-copy startDrag keeps the cursor under reduced mouse drags" {
 
 test "window-copy scrollToMouse maps the reduced viewport onto scrollbar drags" {
     const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
 
     opts_mod.global_options = opts_mod.options_create(null);
     defer opts_mod.options_free(opts_mod.global_options);

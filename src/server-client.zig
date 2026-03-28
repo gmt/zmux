@@ -149,6 +149,7 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
 
     switch (msg_type) {
         .command => server_client_dispatch_command(cl, imsg_msg),
+        .shell => server_client_dispatch_shell(cl, imsg_msg),
         .resize => server_client_dispatch_resize(cl, imsg_msg),
         .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
         .unlock, .wakeup => server_client_unlock(cl),
@@ -267,6 +268,22 @@ pub fn server_client_exec(cl: *T.Client, cmd: []const u8) void {
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, .exec, -1, payload.items.ptr, payload.items.len);
     }
+}
+
+fn server_client_send_shell(cl: *T.Client) void {
+    const peer = cl.peer orelse return;
+    const shell = server_client_exec_shell(null);
+    _ = proc_mod.proc_send(peer, .shell, -1, shell.ptr, shell.len + 1);
+    proc_mod.proc_kill_peer(peer);
+}
+
+fn server_client_dispatch_shell(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    if (data_len != 0) {
+        if (cl.peer) |peer| proc_mod.proc_kill_peer(peer);
+        return;
+    }
+    server_client_send_shell(cl);
 }
 
 fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_type: protocol.MsgType) void {
@@ -1346,6 +1363,66 @@ test "server_client_exec sends command and shell payload" {
     try std.testing.expectEqualStrings("printf exec", payload[0.."printf exec".len]);
     try std.testing.expectEqual(@as(u8, 0), payload["printf exec".len]);
     try std.testing.expectEqualStrings("/bin/sh", payload["printf exec".len + 1 .. payload.len - 1]);
+}
+
+test "server_client_send_shell returns default shell over shell message" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_string(opts.global_s_options, false, "default-shell", "/bin/sh");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-shell-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .pane_cache = .{},
+        .stdin_pending = .{},
+    };
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        env_mod.environ_free(client.environ);
+        client.stdin_pending.deinit(xm.allocator);
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    server_client_send_shell(&client);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.shell))), c.imsg.imsg_get_type(&imsg_msg));
+    const data_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqualStrings("/bin/sh", payload[0 .. payload.len - 1]);
+    try std.testing.expectEqual(@as(u8, 0), payload[payload.len - 1]);
 }
 
 test "build_client_draw_payload keeps multi-pane status-only redraw off the full-clear body path" {

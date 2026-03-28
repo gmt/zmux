@@ -1107,6 +1107,9 @@ pub const Client = struct {
     flags: u64 = 0,
     session: ?*Session = null,
     last_session: ?*Session = null,
+    pan_window: ?*Window = null,
+    pan_ox: u32 = 0,
+    pan_oy: u32 = 0,
 
     exit_reason: ClientExitReason = .none,
     exit_message: ?[]u8 = null,

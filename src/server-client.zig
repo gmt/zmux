@@ -120,11 +120,27 @@ pub fn server_client_lost(cl: *T.Client) void {
     if (cl.title) |title| xm.allocator.free(title);
     if (cl.path) |path| xm.allocator.free(path);
     if (cl.key_table_name) |name| xm.allocator.free(name);
+    cl.client_windows.deinit(xm.allocator);
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
     tty_draw.tty_draw_free(&cl.pane_cache);
     env_mod.environ_free(cl.environ);
     xm.allocator.destroy(cl);
+}
+
+pub fn server_client_get_client_window(cl: *T.Client, id: u32) ?*T.ClientWindow {
+    for (cl.client_windows.items) |*cw| {
+        if (cw.window == id) return cw;
+    }
+    return null;
+}
+
+pub fn server_client_add_client_window(cl: *T.Client, id: u32) *T.ClientWindow {
+    if (server_client_get_client_window(cl, id)) |cw|
+        return cw;
+
+    cl.client_windows.append(xm.allocator, .{ .window = id }) catch unreachable;
+    return &cl.client_windows.items[cl.client_windows.items.len - 1];
 }
 
 export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void {

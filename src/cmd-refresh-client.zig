@@ -11,6 +11,7 @@ const args_mod = @import("arguments.zig");
 const colour_mod = @import("colour.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const resize_mod = @import("resize.zig");
 const server = @import("server.zig");
 const server_client_mod = @import("server-client.zig");
 const tty_mod = @import("tty.zig");
@@ -54,12 +55,29 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             return .@"error";
         }
         const size = parseControlSize(item, size_str) orelse return .@"error";
-        tty_mod.tty_resize(&target_client.tty, size.sx, size.sy, target_client.tty.xpixel, target_client.tty.ypixel);
-        target_client.flags |= T.CLIENT_SIZECHANGED;
-        if (target_client.session) |session|
-            server_client_mod.server_client_apply_session_size(target_client, session)
-        else
-            server_client_mod.server_client_force_redraw(target_client);
+        switch (size) {
+            .global => |global_size| {
+                tty_mod.tty_resize(&target_client.tty, global_size.sx, global_size.sy, target_client.tty.xpixel, target_client.tty.ypixel);
+                target_client.flags |= T.CLIENT_SIZECHANGED;
+                if (target_client.session) |session|
+                    server_client_mod.server_client_apply_session_size(target_client, session)
+                else
+                    server_client_mod.server_client_force_redraw(target_client);
+            },
+            .window => |window_size| {
+                if (window_size.size) |dims| {
+                    const cw = server_client_mod.server_client_add_client_window(target_client, window_size.window);
+                    cw.sx = dims.sx;
+                    cw.sy = dims.sy;
+                    target_client.flags |= T.CLIENT_WINDOWSIZECHANGED;
+                    resize_mod.recalculate_sizes_now(true);
+                } else if (server_client_mod.server_client_get_client_window(target_client, window_size.window)) |cw| {
+                    cw.sx = 0;
+                    cw.sy = 0;
+                    resize_mod.recalculate_sizes_now(true);
+                }
+            },
+        }
         return .normal;
     }
 
@@ -218,33 +236,79 @@ fn windowVisibleHeight(w: *T.Window) u32 {
     return height;
 }
 
-const ControlSize = struct {
+const GlobalControlSize = struct {
     sx: u32,
     sy: u32,
 };
 
+const WindowControlSize = struct {
+    window: u32,
+    size: ?GlobalControlSize,
+};
+
+const ControlSize = union(enum) {
+    global: GlobalControlSize,
+    window: WindowControlSize,
+};
+
+const ParseControlDimensionsError = error{
+    Invalid,
+    OutOfRange,
+};
+
 fn parseControlSize(item: *cmdq.CmdqItem, raw: []const u8) ?ControlSize {
-    if (raw.len != 0 and raw[0] == '@') {
-        cmdq.cmdq_error(item, "refresh-client window-specific control sizes are not supported yet", .{});
+    if (raw.len != 0 and raw[0] == '@')
+        return parseWindowControlSize(item, raw);
+
+    const size = parseGlobalControlSize(item, raw, ",x") orelse return null;
+    return .{ .global = size };
+}
+
+fn parseWindowControlSize(item: *cmdq.CmdqItem, raw: []const u8) ?ControlSize {
+    const colon = std.mem.indexOfScalar(u8, raw, ':') orelse {
+        cmdq.cmdq_error(item, "bad size argument", .{});
+        return null;
+    };
+    if (colon <= 1) {
+        cmdq.cmdq_error(item, "bad size argument", .{});
         return null;
     }
 
-    const sep = std.mem.indexOfAny(u8, raw, ",x") orelse {
+    const window_id = std.fmt.parseInt(u32, raw[1..colon], 10) catch {
         cmdq.cmdq_error(item, "bad size argument", .{});
         return null;
     };
-    const sx = std.fmt.parseInt(u32, raw[0..sep], 10) catch {
-        cmdq.cmdq_error(item, "bad size argument", .{});
+    const value = raw[colon + 1 ..];
+    if (value.len == 0)
+        return .{ .window = .{ .window = window_id, .size = null } };
+
+    const size = parseControlDimensions(value, "x") catch |err| switch (err) {
+        error.Invalid => return .{ .window = .{ .window = window_id, .size = null } },
+        error.OutOfRange => {
+            cmdq.cmdq_error(item, "size too small or too big", .{});
+            return null;
+        },
+    };
+
+    return .{ .window = .{ .window = window_id, .size = size } };
+}
+
+fn parseGlobalControlSize(item: *cmdq.CmdqItem, raw: []const u8, separators: []const u8) ?GlobalControlSize {
+    return parseControlDimensions(raw, separators) catch |err| {
+        switch (err) {
+            error.Invalid => cmdq.cmdq_error(item, "bad size argument", .{}),
+            error.OutOfRange => cmdq.cmdq_error(item, "size too small or too big", .{}),
+        }
         return null;
     };
-    const sy = std.fmt.parseInt(u32, raw[sep + 1 ..], 10) catch {
-        cmdq.cmdq_error(item, "bad size argument", .{});
-        return null;
-    };
-    if (sx < T.WINDOW_MINIMUM or sx > T.WINDOW_MAXIMUM or sy < T.WINDOW_MINIMUM or sy > T.WINDOW_MAXIMUM) {
-        cmdq.cmdq_error(item, "size too small or too big", .{});
-        return null;
-    }
+}
+
+fn parseControlDimensions(raw: []const u8, separators: []const u8) ParseControlDimensionsError!GlobalControlSize {
+    const sep = std.mem.indexOfAny(u8, raw, separators) orelse return error.Invalid;
+    const sx = std.fmt.parseInt(u32, raw[0..sep], 10) catch return error.Invalid;
+    const sy = std.fmt.parseInt(u32, raw[sep + 1 ..], 10) catch return error.Invalid;
+    if (sx < T.WINDOW_MINIMUM or sx > T.WINDOW_MAXIMUM or sy < T.WINDOW_MINIMUM or sy > T.WINDOW_MAXIMUM)
+        return error.OutOfRange;
     return .{ .sx = sx, .sy = sy };
 }
 
@@ -368,6 +432,63 @@ test "refresh-client -C resizes only control clients" {
     try std.testing.expectEqual(@as(u32, 120), target_client.tty.sx);
     try std.testing.expectEqual(@as(u32, 40), target_client.tty.sy);
     try std.testing.expect(target_client.flags & T.CLIENT_SIZECHANGED != 0);
+}
+
+test "refresh-client -C stores and clears per-window control sizes" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const xm = @import("xmalloc.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    var queue_env = T.Environ.init(std.testing.allocator);
+    defer queue_env.deinit();
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var queue_client = T.Client{
+        .name = "queue",
+        .environ = &queue_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    queue_client.tty.client = &queue_client;
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_CONTROL,
+    };
+    defer target_client.client_windows.deinit(xm.allocator);
+    target_client.tty.client = &target_client;
+    tty_mod.tty_set_size(&target_client.tty, 80, 24, 0, 0);
+
+    var cause: ?[]u8 = null;
+    const set_size = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-C", "@7:120x40" }, null, &cause);
+    defer cmd_mod.cmd_free(set_size);
+
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(set_size, &item));
+    try std.testing.expectEqual(@as(u32, 80), target_client.tty.sx);
+    try std.testing.expectEqual(@as(u32, 24), target_client.tty.sy);
+    try std.testing.expect(target_client.flags & T.CLIENT_WINDOWSIZECHANGED != 0);
+
+    const cw = server_client_mod.server_client_get_client_window(&target_client, 7) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 120), cw.sx);
+    try std.testing.expectEqual(@as(u32, 40), cw.sy);
+
+    const clear_size = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-C", "@7:" }, null, &cause);
+    defer cmd_mod.cmd_free(clear_size);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(clear_size, &item));
+    try std.testing.expectEqual(@as(u32, 0), cw.sx);
+    try std.testing.expectEqual(@as(u32, 0), cw.sy);
 }
 
 test "refresh-client -l emits a clipboard query for the target tty" {

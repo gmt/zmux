@@ -179,7 +179,7 @@ fn insertHookCommands(
     switch (value.*) {
         .array => |arr| {
             for (arr.items) |command|
-                tail = enqueueHookCommand(tail, name, command, state);
+                tail = enqueueHookCommand(tail, name, command.value, state);
         },
         .string => |command| {
             if (name.len != 0 and name[0] == '@')

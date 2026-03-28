@@ -175,12 +175,13 @@ pub fn is_custom_option(name: []const u8) bool {
 pub fn collect_lines(
     target: ResolvedTarget,
     name: ?[]const u8,
+    idx: ?u32,
     values_only: bool,
     include_inherited: bool,
     hook_mode: HookMode,
 ) [][]u8 {
     if (name) |single_name| {
-        return collect_single(target, single_name, values_only, include_inherited);
+        return collect_single(target, single_name, idx, values_only, include_inherited);
     }
 
     var lines: std.ArrayList([]u8) = .{};
@@ -194,10 +195,13 @@ pub fn collect_lines(
     return lines.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
-fn collect_single(target: ResolvedTarget, name: []const u8, values_only: bool, include_inherited: bool) [][]u8 {
+fn collect_single(target: ResolvedTarget, name: []const u8, idx: ?u32, values_only: bool, include_inherited: bool) [][]u8 {
     const collected = lookup_value(target.options, name, include_inherited) orelse return xm.allocator.alloc([]u8, 0) catch unreachable;
     var lines: std.ArrayList([]u8) = .{};
-    append_lines(&lines, name, collected.value, opts.options_table_entry(name), values_only, collected.inherited);
+    if (idx) |array_idx|
+        append_indexed_line(&lines, name, array_idx, collected.value, opts.options_table_entry(name), values_only, collected.inherited)
+    else
+        append_lines(&lines, name, collected.value, opts.options_table_entry(name), values_only, collected.inherited);
     return lines.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
@@ -245,18 +249,18 @@ fn append_lines(
                 }
                 return;
             }
-            for (arr.items, 0..) |item, idx| {
+            for (arr.items) |item| {
                 const rendered = if (values_only)
-                    xm.xstrdup(item)
+                    xm.xstrdup(item.value)
                 else
-                    args_mod.args_escape(item);
+                    args_mod.args_escape(item.value);
                 defer xm.allocator.free(rendered);
                 const line = if (values_only)
                     xm.xstrdup(rendered)
                 else if (inherited)
-                    xm.xasprintf("{s}[{d}]* {s}", .{ name, idx, rendered })
+                    xm.xasprintf("{s}[{d}]* {s}", .{ name, item.index, rendered })
                 else
-                    xm.xasprintf("{s}[{d}] {s}", .{ name, idx, rendered });
+                    xm.xasprintf("{s}[{d}] {s}", .{ name, item.index, rendered });
                 lines.append(xm.allocator, line) catch unreachable;
             }
         },
@@ -278,6 +282,42 @@ fn append_lines(
             lines.append(xm.allocator, line) catch unreachable;
         },
     }
+}
+
+fn append_indexed_line(
+    lines: *std.ArrayList([]u8),
+    name: []const u8,
+    idx: u32,
+    value: *const T.OptionsValue,
+    oe: ?*const T.OptionsTableEntry,
+    values_only: bool,
+    inherited: bool,
+) void {
+    const rendered = switch (value.*) {
+        .array => blk: {
+            const item = opts.options_array_get_value(value, idx);
+            if (values_only) break :blk xm.xstrdup(item orelse "");
+            if (item) |text| break :blk args_mod.args_escape(text);
+            break :blk xm.xstrdup("");
+        },
+        else => blk: {
+            const value_text = opts.options_value_to_string(name, value, oe);
+            defer xm.allocator.free(value_text);
+            if (values_only) break :blk xm.xstrdup(value_text);
+            if (should_escape_value(value, oe))
+                break :blk args_mod.args_escape(value_text);
+            break :blk xm.xstrdup(value_text);
+        },
+    };
+    defer xm.allocator.free(rendered);
+
+    const line = if (values_only)
+        xm.xstrdup(rendered)
+    else if (inherited)
+        xm.xasprintf("{s}[{d}]* {s}", .{ name, idx, rendered })
+    else
+        xm.xasprintf("{s}[{d}] {s}", .{ name, idx, rendered });
+    lines.append(xm.allocator, line) catch unreachable;
 }
 
 fn lookup_value(oo: *T.Options, name: []const u8, include_inherited: bool) ?CollectedValue {
@@ -358,7 +398,7 @@ test "resolve_target and collect_lines support pane scoped options" {
     const resolved = resolve_target(&item, cmd_mod.cmd_get_args(cmd), false).?;
     try std.testing.expectEqual(wp, resolved.pane.?);
 
-    const lines = collect_lines(resolved, "@pane-note", false, false, .exclude);
+    const lines = collect_lines(resolved, "@pane-note", null, false, false, .exclude);
     defer {
         for (lines) |line| xm.allocator.free(line);
         xm.allocator.free(lines);
@@ -400,11 +440,11 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
         .session = s,
     };
 
-    const local_builtin = collect_lines(target, "status-left", false, false, .exclude);
+    const local_builtin = collect_lines(target, "status-left", null, false, false, .exclude);
     defer xm.allocator.free(local_builtin);
     try std.testing.expectEqual(@as(usize, 0), local_builtin.len);
 
-    const inherited_builtin = collect_lines(target, "status-left", false, true, .exclude);
+    const inherited_builtin = collect_lines(target, "status-left", null, false, true, .exclude);
     defer {
         for (inherited_builtin) |line| xm.allocator.free(line);
         xm.allocator.free(inherited_builtin);
@@ -412,7 +452,7 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
     try std.testing.expectEqual(@as(usize, 1), inherited_builtin.len);
     try std.testing.expectEqualStrings("status-left* \"global left\"", inherited_builtin[0]);
 
-    const inherited_custom = collect_lines(target, "@theme", false, true, .exclude);
+    const inherited_custom = collect_lines(target, "@theme", null, false, true, .exclude);
     defer {
         for (inherited_custom) |line| xm.allocator.free(line);
         xm.allocator.free(inherited_custom);
@@ -420,7 +460,7 @@ test "collect_lines keeps builtins local-only unless -A requests inherited value
     try std.testing.expectEqual(@as(usize, 1), inherited_custom.len);
     try std.testing.expectEqualStrings("@theme* \"solarized dark\"", inherited_custom[0]);
 
-    const all_with_inherited = collect_lines(target, null, false, true, .exclude);
+    const all_with_inherited = collect_lines(target, null, null, false, true, .exclude);
     defer {
         for (all_with_inherited) |line| xm.allocator.free(line);
         xm.allocator.free(all_with_inherited);

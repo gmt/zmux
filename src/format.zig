@@ -30,10 +30,12 @@ const hyperlinks = @import("hyperlinks.zig");
 const log = @import("log.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
 const screen_mod = @import("screen.zig");
 const sort_mod = @import("sort.zig");
 const srv = @import("server.zig");
 const regsub_mod = @import("regsub.zig");
+const tty_features = @import("tty-features.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const client_registry = @import("client-registry.zig");
@@ -105,14 +107,29 @@ const resolver_table = [_]Resolver{
     .{ .name = "hook_window_name", .func = resolve_hook_window_name },
     .{ .name = "hook_pane", .func = resolve_hook_pane },
 
+    .{ .name = "client_activity", .func = resolve_client_activity },
+    .{ .name = "client_cell_height", .func = resolve_client_cell_height },
+    .{ .name = "client_cell_width", .func = resolve_client_cell_width },
     .{ .name = "client_control_mode", .func = resolve_client_control_mode },
+    .{ .name = "client_created", .func = resolve_client_created },
+    .{ .name = "client_discarded", .func = resolve_client_discarded },
+    .{ .name = "client_flags", .func = resolve_client_flags },
     .{ .name = "client_height", .func = resolve_client_height },
     .{ .name = "client_key_table", .func = resolve_client_key_table },
+    .{ .name = "client_last_session", .func = resolve_client_last_session },
+    .{ .name = "client_name", .func = resolve_client_name },
+    .{ .name = "client_pid", .func = resolve_client_pid },
     .{ .name = "client_prefix", .func = resolve_client_prefix },
     .{ .name = "client_readonly", .func = resolve_client_readonly },
+    .{ .name = "client_session", .func = resolve_client_session },
     .{ .name = "client_session_name", .func = resolve_client_session_name },
+    .{ .name = "client_termfeatures", .func = resolve_client_termfeatures },
     .{ .name = "client_tty", .func = resolve_client_tty },
     .{ .name = "client_termname", .func = resolve_client_termname },
+    .{ .name = "client_termtype", .func = resolve_client_termtype },
+    .{ .name = "client_theme", .func = resolve_client_theme },
+    .{ .name = "client_uid", .func = resolve_client_uid },
+    .{ .name = "client_user", .func = resolve_client_user },
     .{ .name = "client_utf8", .func = resolve_client_utf8 },
     .{ .name = "client_width", .func = resolve_client_width },
 
@@ -2013,26 +2030,128 @@ fn resolve_hook_pane(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
     return resolve_hook_value(alloc, ctx, "hook_pane");
 }
 
+fn client_tty_started(cl: *const T.Client) bool {
+    return (cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0;
+}
+
+fn resolve_client_activity(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(cl.activity_time)});
+}
+
+fn resolve_client_cell_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    if (!client_tty_started(cl)) return null;
+    return xm.xasprintf("{d}", .{cl.tty.ypixel});
+}
+
+fn resolve_client_cell_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    if (!client_tty_started(cl)) return null;
+    return xm.xasprintf("{d}", .{cl.tty.xpixel});
+}
+
 fn resolve_client_control_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const cl = ctx.client orelse return null;
     return alloc.dupe(u8, if (cl.flags & T.CLIENT_CONTROL != 0) "1" else "0") catch unreachable;
 }
 
+fn resolve_client_created(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(cl.creation_time)});
+}
+
+fn resolve_client_discarded(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    return xm.xasprintf("{d}", .{cl.discarded});
+}
+
+fn append_client_flag(out: *std.ArrayList(u8), alloc: std.mem.Allocator, flag: []const u8) void {
+    if (out.items.len != 0)
+        out.append(alloc, ',') catch unreachable;
+    out.appendSlice(alloc, flag) catch unreachable;
+}
+
+fn resolve_client_flags(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+
+    var out: std.ArrayList(u8) = .{};
+    if (cl.flags & T.CLIENT_ATTACHED != 0)
+        append_client_flag(&out, alloc, "attached");
+    if (cl.flags & T.CLIENT_FOCUSED != 0)
+        append_client_flag(&out, alloc, "focused");
+    if (cl.flags & T.CLIENT_CONTROL != 0)
+        append_client_flag(&out, alloc, "control-mode");
+    if (cl.flags & T.CLIENT_IGNORESIZE != 0)
+        append_client_flag(&out, alloc, "ignore-size");
+    if (cl.flags & T.CLIENT_NO_DETACH_ON_DESTROY != 0)
+        append_client_flag(&out, alloc, "no-detach-on-destroy");
+    if (cl.flags & T.CLIENT_CONTROL_NOOUTPUT != 0)
+        append_client_flag(&out, alloc, "no-output");
+    if (cl.flags & T.CLIENT_CONTROL_WAITEXIT != 0)
+        append_client_flag(&out, alloc, "wait-exit");
+    if (cl.flags & T.CLIENT_CONTROL_PAUSEAFTER != 0) {
+        const pause_after = std.fmt.allocPrint(alloc, "pause-after={d}", .{@divTrunc(cl.pause_age, 1000)}) catch unreachable;
+        defer alloc.free(pause_after);
+        append_client_flag(&out, alloc, pause_after);
+    }
+    if (cl.flags & T.CLIENT_READONLY != 0)
+        append_client_flag(&out, alloc, "read-only");
+    if (cl.flags & T.CLIENT_ACTIVEPANE != 0)
+        append_client_flag(&out, alloc, "active-pane");
+    if (cl.flags & T.CLIENT_SUSPENDED != 0)
+        append_client_flag(&out, alloc, "suspended");
+    if (cl.flags & T.CLIENT_UTF8 != 0)
+        append_client_flag(&out, alloc, "UTF-8");
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_client_last_session(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    const last = cl.last_session orelse return null;
+    if (!sess.session_alive(last)) return null;
+    return alloc.dupe(u8, last.name) catch unreachable;
+}
+
+fn resolve_client_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    return alloc.dupe(u8, cl.name orelse return null) catch unreachable;
+}
+
+fn resolve_client_pid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    return xm.xasprintf("{d}", .{cl.pid});
+}
+
 fn resolve_client_tty(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const cl = ctx.client orelse return null;
-    return alloc.dupe(u8, cl.ttyname orelse "/dev/unknown") catch unreachable;
+    return alloc.dupe(u8, cl.ttyname orelse return null) catch unreachable;
 }
 
 fn resolve_client_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sx});
 }
 
 fn resolve_client_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sy});
+}
+
+fn resolve_client_session(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    const s = cl.session orelse return null;
+    return alloc.dupe(u8, s.name) catch unreachable;
 }
 
 fn resolve_client_session_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2058,6 +2177,44 @@ fn resolve_client_readonly(alloc: std.mem.Allocator, ctx: *const FormatContext) 
 fn resolve_client_termname(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const cl = ctx.client orelse return null;
     return alloc.dupe(u8, cl.term_name orelse "") catch unreachable;
+}
+
+fn resolve_client_termfeatures(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    return tty_features.featureString(alloc, cl.term_features);
+}
+
+fn resolve_client_termtype(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    return alloc.dupe(u8, cl.term_type orelse "") catch unreachable;
+}
+
+fn resolve_client_theme(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    const theme = switch (cl.theme) {
+        .light => "light",
+        .dark => "dark",
+        .unknown => return null,
+    };
+    return alloc.dupe(u8, theme) catch unreachable;
+}
+
+fn resolve_client_uid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    const peer = cl.peer orelse return null;
+    const uid = proc_mod.proc_get_peer_uid(peer);
+    if (uid == std.math.maxInt(std.posix.uid_t)) return null;
+    return std.fmt.allocPrint(alloc, "{d}", .{uid}) catch unreachable;
+}
+
+fn resolve_client_user(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const cl = ctx.client orelse return null;
+    const peer = cl.peer orelse return null;
+    const uid = proc_mod.proc_get_peer_uid(peer);
+    if (uid == std.math.maxInt(std.posix.uid_t)) return null;
+
+    const pw = c.posix_sys.getpwuid(uid) orelse return null;
+    return alloc.dupe(u8, std.mem.span(@as([*:0]const u8, @ptrCast(pw.*.pw_name)))) catch unreachable;
 }
 
 fn resolve_client_utf8(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -4242,4 +4399,111 @@ test "format_expand resolves session, window, and global parity extras" {
     defer xm.allocator.free(expanded);
 
     try std.testing.expectEqualStrings("1 3 $2 2 123456789 #!~ 2 alpha,beta 3 alpha,beta,gamma 1 2 234567890", expanded);
+}
+
+test "format_expand resolves tmux-style client metadata keys" {
+    const env_mod = @import("environ.zig");
+    const win_mod = @import("window.zig");
+
+    const dispatch = struct {
+        fn call(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
+            _ = _imsg;
+            _ = _arg;
+        }
+    }.call;
+
+    const uid: std.posix.uid_t = @intCast(std.os.linux.getuid());
+    const pw = c.posix_sys.getpwuid(uid) orelse return error.SkipZigTest;
+    const user_name = std.mem.span(@as([*:0]const u8, @ptrCast(pw.*.pw_name)));
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const current = sess.session_create(null, "current", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(current, false, "test");
+    const previous = sess.session_create(null, "previous", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(previous, false, "test");
+
+    var proc = T.ZmuxProc{ .name = "format-client-keys-test" };
+    var peer = T.ZmuxPeer{
+        .parent = &proc,
+        .ibuf = undefined,
+        .uid = uid,
+        .dispatchcb = dispatch,
+    };
+
+    var client = T.Client{
+        .name = xm.xstrdup("client-42"),
+        .peer = &peer,
+        .creation_time = 98_765_432_000,
+        .activity_time = 123_456_789_000,
+        .pid = 4321,
+        .environ = env_mod.environ_create(),
+        .term_name = xm.xstrdup("xterm-256color"),
+        .term_features = tty_features.featureBit(.@"256") | tty_features.featureBit(.clipboard) | tty_features.featureBit(.focus),
+        .term_type = xm.xstrdup("screen"),
+        .ttyname = xm.xstrdup("/dev/pts/42"),
+        .discarded = 42,
+        .theme = .dark,
+        .tty = .{
+            .client = undefined,
+            .sx = 90,
+            .sy = 30,
+            .xpixel = 11,
+            .ypixel = 24,
+            .flags = @as(i32, @intCast(T.TTY_STARTED)),
+        },
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED |
+            T.CLIENT_FOCUSED |
+            T.CLIENT_CONTROL |
+            T.CLIENT_IGNORESIZE |
+            T.CLIENT_NO_DETACH_ON_DESTROY |
+            T.CLIENT_CONTROL_NOOUTPUT |
+            T.CLIENT_CONTROL_WAITEXIT |
+            T.CLIENT_CONTROL_PAUSEAFTER |
+            T.CLIENT_READONLY |
+            T.CLIENT_ACTIVEPANE |
+            T.CLIENT_SUSPENDED |
+            T.CLIENT_UTF8,
+        .session = current,
+        .last_session = previous,
+        .pause_age = 3_000,
+    };
+    defer env_mod.environ_free(client.environ);
+    defer xm.allocator.free(@constCast(client.name.?));
+    defer xm.allocator.free(client.term_name.?);
+    defer xm.allocator.free(client.term_type.?);
+    defer xm.allocator.free(client.ttyname.?);
+    client.tty.client = &client;
+
+    const ctx = FormatContext{ .client = &client };
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{client_activity} #{client_cell_height} #{client_cell_width} #{client_created} #{client_discarded} #{client_flags} #{client_last_session} #{client_name} #{client_pid} #{client_session} #{client_termfeatures} #{client_termtype} #{client_theme} #{client_tty} #{client_uid} #{client_user} #{client_width} #{client_height}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    const expected = std.fmt.allocPrint(
+        xm.allocator,
+        "123456789 24 11 98765432 42 attached,focused,control-mode,ignore-size,no-detach-on-destroy,no-output,wait-exit,pause-after=3,read-only,active-pane,suspended,UTF-8 previous client-42 4321 current 256,clipboard,focus screen dark /dev/pts/42 {d} {s} 90 30",
+        .{ uid, user_name },
+    ) catch unreachable;
+    defer xm.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, expanded);
 }

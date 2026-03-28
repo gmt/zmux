@@ -275,6 +275,16 @@ pub fn session_update_activity(s: *T.Session, from: ?i64) void {
     s.activity_time = from orelse std.time.milliTimestamp();
 }
 
+pub fn session_theme_changed(s: ?*T.Session) void {
+    const session = s orelse return;
+
+    var it = session.windows.valueIterator();
+    while (it.next()) |wl| {
+        for (wl.*.window.panes.items) |wp|
+            wp.flags |= T.PANE_THEMECHANGED;
+    }
+}
+
 pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
     _ = _notify;
     _ = _from;

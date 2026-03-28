@@ -40,6 +40,7 @@ const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const client_registry = @import("client-registry.zig");
+const notify_mod = @import("notify.zig");
 
 pub fn server_lock() void {
     for (client_registry.clients.items) |cl| {
@@ -216,6 +217,22 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     cl.last_activity_time = cl.activity_time;
     cl.activity_time = now;
     sess.session_update_activity(s, now);
+
+    switch (event.key) {
+        T.KEYC_REPORT_LIGHT_THEME => {
+            cl.theme = .light;
+            notify_mod.notify_client("client-light-theme", cl);
+            sess.session_theme_changed(s);
+            return true;
+        },
+        T.KEYC_REPORT_DARK_THEME => {
+            cl.theme = .dark;
+            notify_mod.notify_client("client-dark-theme", cl);
+            sess.session_theme_changed(s);
+            return true;
+        },
+        else => {},
+    }
 
     if (popup.overlay_active(cl)) {
         if (popup.handle_key(cl, event))
@@ -560,6 +577,58 @@ test "server_client_handle_key forwards unbound keys to pane" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
+test "server_client_handle_key records reported client theme before overlays" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "key-theme-report", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-theme-report") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    var dark = T.key_event{ .key = T.KEYC_REPORT_DARK_THEME };
+    try std.testing.expect(server_client_handle_key(&cl, &dark));
+    try std.testing.expectEqual(T.ClientTheme.dark, cl.theme);
+    try std.testing.expect(wp.flags & T.PANE_THEMECHANGED != 0);
+
+    wp.flags &= ~@as(u32, T.PANE_THEMECHANGED);
+    var light = T.key_event{ .key = T.KEYC_REPORT_LIGHT_THEME };
+    try std.testing.expect(server_client_handle_key(&cl, &light));
+    try std.testing.expectEqual(T.ClientTheme.light, cl.theme);
+    try std.testing.expect(wp.flags & T.PANE_THEMECHANGED != 0);
 }
 
 test "server_client_handle_key routes through the status-message runtime before pane input" {

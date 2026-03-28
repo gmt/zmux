@@ -248,7 +248,9 @@ pub fn notify_session(name: []const u8, s: *T.Session) void {
     else if (std.mem.eql(u8, name, "session-created"))
         control_notify.control_notify_session_created(s)
     else if (std.mem.eql(u8, name, "session-closed"))
-        control_notify.control_notify_session_closed(s);
+        control_notify.control_notify_session_closed(s)
+    else if (std.mem.eql(u8, name, "session-window-changed"))
+        control_notify.control_notify_session_window_changed(s);
 
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (sess.session_alive(s))
@@ -292,6 +294,9 @@ pub fn notify_window(name: []const u8, w: *T.Window) void {
 
 pub fn notify_pane(name: []const u8, wp: *T.WindowPane) void {
     if (notificationsSuppressed()) return;
+
+    if (std.mem.eql(u8, name, "pane-mode-changed"))
+        control_notify.control_notify_pane_mode_changed(wp);
 
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (!cmd_find.cmd_find_from_pane(&fs, wp, 0))
@@ -520,6 +525,114 @@ test "notify_window emits %layout-change to matching control clients" {
     try std.testing.expectEqual(@as(i32, 1), stream);
 
     const expected = xm.xasprintf("%layout-change @{d} {s} {s} *\n", .{ window.id, dumped, dumped });
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
+}
+
+test "session_set_current emits %session-window-changed to control clients" {
+    const c = @import("c.zig");
+    const env_mod = @import("environ.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const win = @import("window.zig");
+    const registry = @import("client-registry.zig");
+
+    const helpers = struct {
+        fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+    };
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    registry.clients.clearRetainingCapacity();
+    defer registry.clients.clearRetainingCapacity();
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "notify-session-window-control", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("notify-session-window-control") != null) sess.session_destroy(session, false, "test");
+
+    const first = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const first_pane = win.window_add_pane(first, null, 80, 24);
+    first.active = first_pane;
+
+    const second = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const second_pane = win.window_add_pane(second, null, 80, 24);
+    second.active = second_pane;
+
+    var cause: ?[]u8 = null;
+    const first_wl = sess.session_attach(session, first, -1, &cause).?;
+    const second_wl = sess.session_attach(session, second, -1, &cause).?;
+    session.curw = first_wl;
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "notify-session-window-control-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = "session-window-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], helpers.noopDispatch, null);
+    defer {
+        registry.remove(&client);
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+    registry.add(&client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    try std.testing.expect(sess.session_set_current(session, second_wl));
+    try std.testing.expectEqual(second_wl, session.curw.?);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const expected = xm.xasprintf("%session-window-changed ${d} @{d}\n", .{ session.id, second.id });
     defer xm.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }

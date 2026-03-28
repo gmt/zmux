@@ -405,8 +405,9 @@ fn stop_pane_process(wp: *T.WindowPane) void {
 }
 
 fn prepare_pane_for_respawn(wp: *T.WindowPane) void {
-    wp.flags &= ~(T.PANE_EXITED | T.PANE_EMPTY);
+    wp.flags &= ~(T.PANE_EXITED | T.PANE_STATUSREADY | T.PANE_STATUSDRAWN | T.PANE_EMPTY);
     wp.status = 0;
+    wp.dead_time = 0;
     win.window_pane_reset_contents(wp);
 }
 

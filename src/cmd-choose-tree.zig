@@ -91,6 +91,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             .reversed = args.has('r'),
         },
         .squash_groups = !args.has('G'),
+        .zoom = args.has('Z'),
     });
     return .normal;
 }
@@ -383,6 +384,49 @@ test "choose-tree enters the reduced window-tree mode" {
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqual(&window_tree.window_tree_mode, win.window_pane_mode(setup.pane).?.mode);
+}
+
+test "choose-tree -Z passes zoom through to the reduced tree mode" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const window_mode_runtime = @import("window-mode-runtime.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("choose-tree-zoom");
+    defer if (sess.session_find("choose-tree-zoom") != null) sess.session_destroy(setup.session, false, "test");
+
+    const extra = win.window_add_pane(setup.pane.window, null, 80, 24);
+    setup.pane.window.active = extra;
+
+    const target = try test_target(xm.allocator, "choose-tree-zoom");
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "choose-tree-zoom-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-tree", "-Z", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(setup.pane.window.flags & T.WINDOW_ZOOMED != 0);
+
+    try std.testing.expect(window_mode_runtime.resetMode(setup.pane));
+    try std.testing.expectEqual(@as(u32, 0), setup.pane.window.flags & T.WINDOW_ZOOMED);
 }
 
 test "choose-tree rejects invalid sort order before the reduced mode error" {

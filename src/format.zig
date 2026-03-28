@@ -33,6 +33,7 @@ const srv = @import("server.zig");
 const regsub_mod = @import("regsub.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
+const client_registry = @import("client-registry.zig");
 const key_string = @import("key-string.zig");
 const names = @import("names.zig");
 const paste_mod = @import("paste.zig");
@@ -129,6 +130,8 @@ const resolver_table = [_]Resolver{
     .{ .name = "host_short", .func = resolve_host_short },
 
     .{ .name = "pid", .func = resolve_pid },
+    .{ .name = "next_session_id", .func = resolve_next_session_id },
+    .{ .name = "server_sessions", .func = resolve_server_sessions },
     .{ .name = "socket_path", .func = resolve_socket_path },
     .{ .name = "start_time", .func = resolve_start_time },
 
@@ -166,16 +169,26 @@ const resolver_table = [_]Resolver{
     .{ .name = "scroll_region_upper", .func = resolve_scroll_region_upper },
 
     .{ .name = "session_active", .func = resolve_session_active },
-    .{ .name = "session_attached", .func = resolve_session_attached },
+    .{ .name = "session_activity", .func = resolve_session_activity },
+    .{ .name = "session_alert", .func = resolve_session_alert },
     .{ .name = "session_alerts", .func = resolve_session_alerts },
+    .{ .name = "session_attached", .func = resolve_session_attached },
+    .{ .name = "session_attached_list", .func = resolve_session_attached_list },
     .{ .name = "session_created", .func = resolve_session_created },
     .{ .name = "session_group", .func = resolve_session_group },
+    .{ .name = "session_group_attached", .func = resolve_session_group_attached },
+    .{ .name = "session_group_attached_list", .func = resolve_session_group_attached_list },
     .{ .name = "session_group_list", .func = resolve_session_group_list },
+    .{ .name = "session_group_many_attached", .func = resolve_session_group_many_attached },
+    .{ .name = "session_group_size", .func = resolve_session_group_size },
     .{ .name = "session_grouped", .func = resolve_session_grouped },
     .{ .name = "session_id", .func = resolve_session_id },
+    .{ .name = "session_last_attached", .func = resolve_session_last_attached },
     .{ .name = "session_name", .func = resolve_session_name },
     .{ .name = "session_windows", .func = resolve_session_windows },
 
+    .{ .name = "active_window_index", .func = resolve_active_window_index },
+    .{ .name = "last_window_index", .func = resolve_last_window_index },
     .{ .name = "window_active", .func = resolve_window_active },
     .{ .name = "window_activity_flag", .func = resolve_window_activity_flag },
     .{ .name = "window_bell_flag", .func = resolve_window_bell_flag },
@@ -1480,6 +1493,12 @@ fn format_strftime_now(alloc: std.mem.Allocator, fmt: []const u8) ?[]u8 {
     return format_strftime_tm(alloc, fmt, &tm_value);
 }
 
+fn normalize_format_time(value: i64) i64 {
+    if (value > 10_000_000_000 or value < -10_000_000_000)
+        return @divTrunc(value, 1000);
+    return value;
+}
+
 fn format_strftime_tm(alloc: std.mem.Allocator, fmt: []const u8, tm_value: *c.posix_sys.struct_tm) ?[]u8 {
     var cap: usize = 128;
     while (cap <= 4096) : (cap *= 2) {
@@ -1959,9 +1978,55 @@ fn resolve_session_active(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
 }
 
 fn resolve_session_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
     const s = ctx_session(ctx) orelse return null;
-    const value: []const u8 = if (s.attached > 0) "1" else "0";
-    return alloc.dupe(u8, value) catch unreachable;
+    return xm.xasprintf("{d}", .{s.attached});
+}
+
+fn resolve_session_attached_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+
+    var out: std.ArrayList(u8) = .{};
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != s) continue;
+        const name = cl.name orelse continue;
+        if (out.items.len != 0)
+            out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, name) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_session_activity(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(s.activity_time)});
+}
+
+fn resolve_session_alert(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    const items = sort_mod.sorted_winlinks_session(s, .{});
+    defer xm.allocator.free(items);
+
+    var out: std.ArrayList(u8) = .{};
+    var alerted: u32 = 0;
+    for (items) |wl| {
+        if ((wl.flags & T.WINLINK_ALERTFLAGS) == 0)
+            continue;
+        if ((alerted & T.WINLINK_ACTIVITY) == 0 and (wl.flags & T.WINLINK_ACTIVITY) != 0) {
+            out.append(alloc, '#') catch unreachable;
+            alerted |= T.WINLINK_ACTIVITY;
+        }
+        if ((alerted & T.WINLINK_BELL) == 0 and (wl.flags & T.WINLINK_BELL) != 0) {
+            out.append(alloc, '!') catch unreachable;
+            alerted |= T.WINLINK_BELL;
+        }
+        if ((alerted & T.WINLINK_SILENCE) == 0 and (wl.flags & T.WINLINK_SILENCE) != 0) {
+            out.append(alloc, '~') catch unreachable;
+            alerted |= T.WINLINK_SILENCE;
+        }
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
 }
 
 fn resolve_session_alerts(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -1989,7 +2054,7 @@ fn resolve_session_alerts(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
 fn resolve_session_created(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const s = ctx_session(ctx) orelse return null;
-    return xm.xasprintf("{d}", .{s.created});
+    return xm.xasprintf("{d}", .{normalize_format_time(s.created)});
 }
 
 fn resolve_session_grouped(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2004,6 +2069,36 @@ fn resolve_session_group(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
     return alloc.dupe(u8, group.name) catch unreachable;
 }
 
+fn resolve_session_group_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+    const group = sess.session_group_contains(s) orelse return xm.xasprintf("{d}", .{@as(u32, 0)});
+    return xm.xasprintf("{d}", .{sess.session_group_attached_count(group)});
+}
+
+fn resolve_session_group_attached_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    const group = sess.session_group_contains(s) orelse return alloc.dupe(u8, "") catch unreachable;
+
+    var out: std.ArrayList(u8) = .{};
+    for (client_registry.clients.items) |cl| {
+        const client_session = cl.session orelse continue;
+        var in_group = false;
+        for (group.sessions.items) |member| {
+            if (member == client_session) {
+                in_group = true;
+                break;
+            }
+        }
+        if (!in_group) continue;
+        const name = cl.name orelse continue;
+        if (out.items.len != 0)
+            out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, name) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
 fn resolve_session_group_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const s = ctx_session(ctx) orelse return null;
     const group = sess.session_group_contains(s) orelse return alloc.dupe(u8, "") catch unreachable;
@@ -2016,15 +2111,68 @@ fn resolve_session_group_list(alloc: std.mem.Allocator, ctx: *const FormatContex
     return out.toOwnedSlice(alloc) catch unreachable;
 }
 
+fn resolve_session_group_many_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    const group = sess.session_group_contains(s) orelse return alloc.dupe(u8, "0") catch unreachable;
+    const value: []const u8 = if (sess.session_group_attached_count(group) > 1) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_session_group_size(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+    const group = sess.session_group_contains(s) orelse return xm.xasprintf("{d}", .{@as(u32, 0)});
+    return xm.xasprintf("{d}", .{sess.session_group_count(group)});
+}
+
 fn resolve_session_id(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const s = ctx_session(ctx) orelse return null;
     return xm.xasprintf("${d}", .{s.id});
 }
 
+fn resolve_session_last_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(s.last_attached_time)});
+}
+
+fn resolve_active_window_index(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+    const wl = s.curw orelse return null;
+    return xm.xasprintf("{d}", .{wl.idx});
+}
+
+fn resolve_last_window_index(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const s = ctx_session(ctx) orelse return null;
+
+    var max_idx: ?i32 = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        if (max_idx == null or wl.*.idx > max_idx.?)
+            max_idx = wl.*.idx;
+    }
+    const idx = max_idx orelse return null;
+    return xm.xasprintf("{d}", .{idx});
+}
+
 fn resolve_window_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const w = ctx_window(ctx) orelse return null;
     return alloc.dupe(u8, w.name) catch unreachable;
+}
+
+fn resolve_next_session_id(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    _ = ctx;
+    return xm.xasprintf("${d}", .{sess.session_next_id_peek()});
+}
+
+fn resolve_server_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    _ = ctx;
+    return xm.xasprintf("{d}", .{sess.sessions.count()});
 }
 
 fn resolve_window_index(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2731,4 +2879,124 @@ test "format_expand covers key option-table defaults" {
     defer xm.allocator.free(status_right);
     try std.testing.expect(std.mem.indexOf(u8, status_right, "#{") == null);
     try std.testing.expect(std.mem.indexOf(u8, status_right, "pane-title") != null);
+}
+
+test "format_expand resolves session, window, and global parity extras" {
+    const env_mod = @import("environ.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const primary = sess.session_create(null, "primary", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(primary, false, "test");
+    const peer = sess.session_create(null, "peer", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(peer, false, "test");
+
+    var cause: ?[]u8 = null;
+
+    const main_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(main_window.name);
+    main_window.name = xm.xstrdup("main");
+    const main_wl = sess.session_attach(primary, main_window, 1, &cause).?;
+    primary.curw = main_wl;
+    main_window.active = win_mod.window_add_pane(main_window, null, 80, 24);
+    main_wl.flags = T.WINLINK_ACTIVITY;
+
+    const alert_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(alert_window.name);
+    alert_window.name = xm.xstrdup("alert");
+    const alert_wl = sess.session_attach(primary, alert_window, 3, &cause).?;
+    alert_window.active = win_mod.window_add_pane(alert_window, null, 80, 24);
+    alert_wl.flags = T.WINLINK_BELL | T.WINLINK_SILENCE;
+
+    const peer_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(peer_window.name);
+    peer_window.name = xm.xstrdup("peer");
+    const peer_wl = sess.session_attach(peer, peer_window, 2, &cause).?;
+    peer.curw = peer_wl;
+    peer_window.active = win_mod.window_add_pane(peer_window, null, 80, 24);
+
+    primary.activity_time = 123_456_789_000;
+    primary.last_attached_time = 234_567_890_000;
+    primary.attached = 2;
+    peer.attached = 1;
+
+    const group = sess.session_group_new("shared");
+    sess.session_group_add(group, primary);
+    sess.session_group_add(group, peer);
+
+    var alpha = T.Client{
+        .name = xm.xstrdup("alpha"),
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = primary,
+    };
+    defer {
+        env_mod.environ_free(alpha.environ);
+        xm.allocator.free(@constCast(alpha.name.?));
+    }
+    alpha.tty.client = &alpha;
+
+    var beta = T.Client{
+        .name = xm.xstrdup("beta"),
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = primary,
+    };
+    defer {
+        env_mod.environ_free(beta.environ);
+        xm.allocator.free(@constCast(beta.name.?));
+    }
+    beta.tty.client = &beta;
+
+    var gamma = T.Client{
+        .name = xm.xstrdup("gamma"),
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = peer,
+    };
+    defer {
+        env_mod.environ_free(gamma.environ);
+        xm.allocator.free(@constCast(gamma.name.?));
+    }
+    gamma.tty.client = &gamma;
+
+    client_registry.add(&alpha);
+    client_registry.add(&beta);
+    client_registry.add(&gamma);
+
+    const ctx = FormatContext{
+        .session = primary,
+        .winlink = main_wl,
+        .window = main_window,
+        .pane = main_window.active.?,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{active_window_index} #{last_window_index} #{next_session_id} #{server_sessions} #{session_activity} #{session_alert} #{session_attached} #{session_attached_list} #{session_group_attached} #{session_group_attached_list} #{session_group_many_attached} #{session_group_size} #{session_last_attached}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    try std.testing.expectEqualStrings("1 3 $2 2 123456789 #!~ 2 alpha,beta 3 alpha,beta,gamma 1 2 234567890", expanded);
 }

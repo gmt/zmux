@@ -23,6 +23,10 @@ const notify = @import("notify.zig");
 const proc_mod = @import("proc.zig");
 const server_client_mod = @import("server-client.zig");
 const protocol = @import("zmux-protocol.zig");
+const c_mod = @import("c.zig");
+const tty_mod = @import("tty.zig");
+
+fn detach_test_peer_dispatch(_: ?*c_mod.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
 fn detach_other_clients(invoker: *T.Client, s: *T.Session, msg_type: protocol.MsgType) void {
     for (client_registry.clients.items) |loop| {
@@ -116,8 +120,19 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
 fn exec_detach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
+    const entry_ptr = cmd_mod.cmd_get_entry(cmd);
     const exec_command = args.get('E');
     const msg_type: protocol.MsgType = if (args.has('P')) .detachkill else .detach;
+    const tc = cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item);
+
+    if (entry_ptr == &entry_suspend) {
+        const target_client = tc orelse {
+            cmdq.cmdq_error(item, "no client", .{});
+            return .@"error";
+        };
+        server_client_mod.server_client_suspend(target_client);
+        return .normal;
+    }
 
     if (args.has('s')) {
         var target = cmdq.cmdq_get_target(item);
@@ -135,7 +150,6 @@ fn exec_detach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .stop;
     }
 
-    const tc = cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item);
     if (args.has('a')) {
         for (client_registry.clients.items) |loop| {
             if (loop.session == null or loop == tc) continue;
@@ -178,6 +192,17 @@ pub const entry_detach: cmd_mod.CmdEntry = .{
     .lower = 0,
     .upper = 0,
     .flags = T.CMD_READONLY | T.CMD_CLIENT_TFLAG,
+    .exec = exec_detach,
+};
+
+pub const entry_suspend: cmd_mod.CmdEntry = .{
+    .name = "suspend-client",
+    .alias = "suspendc",
+    .usage = "[-t target-client]",
+    .template = "t:",
+    .lower = 0,
+    .upper = 0,
+    .flags = T.CMD_CLIENT_TFLAG,
     .exec = exec_detach,
 };
 
@@ -478,4 +503,49 @@ test "detach-client -s detaches every client in the target session" {
     try std.testing.expect(session_member_a.session == null);
     try std.testing.expect(session_member_b.session == null);
     try std.testing.expect(outsider.session == other_setup.session);
+}
+
+test "suspend-client -t resolves target-client and marks it suspended" {
+    detach_test_init();
+    defer detach_test_finish();
+
+    var session_setup = detach_test_make_session("suspend-target");
+    defer detach_test_free_session(&session_setup);
+
+    var invoker = detach_test_client("invoker", session_setup.session);
+    defer detach_test_free_client(&invoker);
+    invoker.flags |= T.CLIENT_TERMINAL;
+    var target = detach_test_client("target", session_setup.session);
+    defer detach_test_free_client(&target);
+    target.flags |= T.CLIENT_TERMINAL;
+    tty_mod.tty_init(&target.tty, &target);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+    var proc = T.ZmuxProc{ .name = "cmd-suspend-client-test" };
+    defer proc.peers.deinit(xm.allocator);
+    target.peer = proc_mod.proc_add_peer(&proc, pair[0], detach_test_peer_dispatch, null);
+    defer {
+        const peer = target.peer.?;
+        c_mod.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        std.posix.close(pair[1]);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        target.peer = null;
+    }
+
+    client_registry.add(&invoker);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "suspend-client", "-t", "target" }, &invoker, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &invoker, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(invoker.flags & T.CLIENT_SUSPENDED == 0);
+    try std.testing.expect(target.flags & T.CLIENT_SUSPENDED != 0);
+    try std.testing.expect(target.session == session_setup.session);
 }

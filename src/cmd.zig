@@ -134,6 +134,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_new_session.entry_start,
     &cmd_attach_session.entry,
     &cmd_attach_session.entry_detach,
+    &cmd_attach_session.entry_suspend,
     &cmd_kill_session.entry,
     &cmd_kill_server.entry,
     &cmd_lock_server.entry,

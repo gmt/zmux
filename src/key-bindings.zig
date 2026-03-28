@@ -375,6 +375,7 @@ const default_buffer_mode_delete_tagged_argv = [_][]const u8{ "send-keys", "-X",
 const default_buffer_mode_edit_selected_argv = [_][]const u8{ "send-keys", "-X", "edit-selected" };
 const default_buffer_mode_filter_argv = [_][]const u8{ "send-keys", "-X", "filter" };
 const default_buffer_mode_paste_argv = [_][]const u8{ "send-keys", "-X", "paste" };
+const default_buffer_mode_paste_tagged_argv = [_][]const u8{ "send-keys", "-X", "paste-tagged" };
 const default_buffer_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
 const default_buffer_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
 const default_buffer_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
@@ -2083,6 +2084,12 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "buffer-mode",
+        .key = 'P',
+        .note = "Paste tagged buffers",
+        .argv = default_buffer_mode_paste_tagged_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
         .key = 'e',
         .note = "Edit selected buffer",
         .argv = default_buffer_mode_edit_selected_argv[0..],
@@ -2170,6 +2177,12 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = 'p',
         .note = "Paste selected buffer",
         .argv = default_buffer_mode_paste_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'P',
+        .note = "Paste tagged buffers",
+        .argv = default_buffer_mode_paste_tagged_argv[0..],
     },
     .{
         .table = "buffer-mode-vi",
@@ -2981,6 +2994,7 @@ test "default buffer-mode bindings are installed" {
     const emacs = key_bindings_get_table("buffer-mode", false).?;
     try std.testing.expect(key_bindings_get(emacs, 'q') != null);
     try std.testing.expect(key_bindings_get(emacs, 'p') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'P') != null);
     try std.testing.expect(key_bindings_get(emacs, 'd') != null);
     try std.testing.expect(key_bindings_get(emacs, 'D') != null);
     try std.testing.expect(key_bindings_get(emacs, 'e') != null);
@@ -2994,6 +3008,7 @@ test "default buffer-mode bindings are installed" {
     try std.testing.expect(key_bindings_get(vi, 'q') != null);
     try std.testing.expect(key_bindings_get(vi, 'j') != null);
     try std.testing.expect(key_bindings_get(vi, 'p') != null);
+    try std.testing.expect(key_bindings_get(vi, 'P') != null);
     try std.testing.expect(key_bindings_get(vi, 'd') != null);
     try std.testing.expect(key_bindings_get(vi, 'D') != null);
     try std.testing.expect(key_bindings_get(vi, 'e') != null);

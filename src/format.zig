@@ -76,6 +76,15 @@ pub const FormatContext = struct {
     command_name: ?[]const u8 = null,
     command_alias: ?[]const u8 = null,
     command_usage: ?[]const u8 = null,
+
+    is_option: ?bool = null,
+    is_key: ?bool = null,
+    option_name: ?[]const u8 = null,
+    option_value: ?[]const u8 = null,
+    option_scope: ?[]const u8 = null,
+    option_unit: ?[]const u8 = null,
+    option_is_global: ?bool = null,
+    option_inherited: ?bool = null,
 };
 
 pub const FormatExpandResult = struct {
@@ -136,6 +145,14 @@ const resolver_table = [_]Resolver{
     .{ .name = "command_alias", .func = resolve_command_alias },
     .{ .name = "command_name", .func = resolve_command_name },
     .{ .name = "command_usage", .func = resolve_command_usage },
+    .{ .name = "is_key", .func = resolve_is_key },
+    .{ .name = "is_option", .func = resolve_is_option },
+    .{ .name = "option_inherited", .func = resolve_option_inherited },
+    .{ .name = "option_is_global", .func = resolve_option_is_global },
+    .{ .name = "option_name", .func = resolve_option_name },
+    .{ .name = "option_scope", .func = resolve_option_scope },
+    .{ .name = "option_unit", .func = resolve_option_unit },
+    .{ .name = "option_value", .func = resolve_option_value },
 
     .{ .name = "key_command", .func = resolve_key_command },
     .{ .name = "key_has_repeat", .func = resolve_key_has_repeat },
@@ -2236,6 +2253,38 @@ fn resolve_command_usage(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
     _ = alloc;
     if (ctx.command_name == null) return null;
     return xm.xstrdup(ctx.command_usage orelse "");
+}
+
+fn resolve_is_key(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, if (ctx.is_key orelse return null) "1" else "0") catch unreachable;
+}
+
+fn resolve_is_option(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, if (ctx.is_option orelse return null) "1" else "0") catch unreachable;
+}
+
+fn resolve_option_inherited(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, if (ctx.option_inherited orelse return null) "1" else "0") catch unreachable;
+}
+
+fn resolve_option_is_global(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, if (ctx.option_is_global orelse return null) "1" else "0") catch unreachable;
+}
+
+fn resolve_option_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.option_name orelse return null) catch unreachable;
+}
+
+fn resolve_option_scope(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.option_scope orelse return null) catch unreachable;
+}
+
+fn resolve_option_unit(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.option_unit orelse return null) catch unreachable;
+}
+
+fn resolve_option_value(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.option_value orelse return null) catch unreachable;
 }
 
 fn resolve_key_binding(ctx: *const FormatContext) ?*const T.KeyBinding {

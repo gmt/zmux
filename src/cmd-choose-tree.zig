@@ -26,6 +26,7 @@ const cmdq = @import("cmd-queue.zig");
 const paste_mod = @import("paste.zig");
 const sort_mod = @import("sort.zig");
 const window_client = @import("window-client.zig");
+const window_customize = @import("window-customize.zig");
 const window_tree = @import("window-tree.zig");
 const xm = @import("xmalloc.zig");
 
@@ -61,9 +62,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (cmd.entry == &entry_buffer or cmd.entry == &entry_customize_mode) {
+    if (cmd.entry == &entry_buffer) {
         cmdq.cmdq_error(item, "{s} mode not supported yet", .{cmd.entry.name});
         return .@"error";
+    }
+    if (cmd.entry == &entry_customize_mode) {
+        _ = window_customize.enterMode(wp, &target, args);
+        return .normal;
     }
     if (args.has('K')) {
         cmdq.cmdq_error(item, "choose-tree custom key format not supported yet", .{});
@@ -186,6 +191,30 @@ test "choose-tree family commands are registered" {
     try std.testing.expectEqual(&entry_client, cmd_mod.cmd_find_entry("choose-client").?);
     try std.testing.expectEqual(&entry_buffer, cmd_mod.cmd_find_entry("choose-buffer").?);
     try std.testing.expectEqual(&entry_customize_mode, cmd_mod.cmd_find_entry("customize-mode").?);
+}
+
+test "customize-mode enters the reduced options mode" {
+    const sess = @import("session.zig");
+    const window = @import("window.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("customize-mode-live");
+    defer if (sess.session_find("customize-mode-live") != null) sess.session_destroy(setup.session, false, "test");
+
+    const target = try test_target(xm.allocator, "customize-mode-live");
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "customize-mode", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(window.window_pane_mode(setup.pane) != null);
+    try std.testing.expectEqual(&window_customize.window_customize_mode, window.window_pane_mode(setup.pane).?.mode);
 }
 
 test "choose-buffer is a no-op when there are no paste buffers" {

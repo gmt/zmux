@@ -380,6 +380,15 @@ const default_tree_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
 const default_tree_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
 const default_tree_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
 const default_tree_mode_home_target_argv = [_][]const u8{ "send-keys", "-X", "home-target" };
+const default_options_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
+const default_options_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
+const default_options_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
+const default_options_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
+const default_options_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
+const default_options_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
+const default_options_mode_expand_argv = [_][]const u8{ "send-keys", "-X", "expand" };
+const default_options_mode_collapse_argv = [_][]const u8{ "send-keys", "-X", "collapse" };
+const default_options_mode_toggle_hide_inherited_argv = [_][]const u8{ "send-keys", "-X", "toggle-hide-inherited" };
 const default_session_menu =
     " 'Next' 'n' {switch-client -n}" ++
     " 'Previous' 'p' {switch-client -p}" ++
@@ -2212,6 +2221,150 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .note = "Jump to the target item",
         .argv = default_tree_mode_home_target_argv[0..],
     },
+    .{
+        .table = "options-mode",
+        .key = 'q',
+        .note = "Exit options mode",
+        .argv = default_options_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.C0_ESC,
+        .note = "Exit options mode",
+        .argv = default_options_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = '\r',
+        .note = "Inspect selected option",
+        .argv = default_options_mode_choose_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_options_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_options_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_options_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_options_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_LEFT,
+        .note = "Collapse current section",
+        .argv = default_options_mode_collapse_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = T.KEYC_RIGHT,
+        .note = "Expand current section",
+        .argv = default_options_mode_expand_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = 'H',
+        .note = "Toggle inherited options",
+        .argv = default_options_mode_toggle_hide_inherited_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'q',
+        .note = "Exit options mode",
+        .argv = default_options_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.C0_ESC,
+        .note = "Exit options mode",
+        .argv = default_options_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = '\r',
+        .note = "Inspect selected option",
+        .argv = default_options_mode_choose_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'k',
+        .note = "Move up",
+        .argv = default_options_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'j',
+        .note = "Move down",
+        .argv = default_options_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_options_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_options_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_options_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_options_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'h',
+        .note = "Collapse current section",
+        .argv = default_options_mode_collapse_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'l',
+        .note = "Expand current section",
+        .argv = default_options_mode_expand_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_LEFT,
+        .note = "Collapse current section",
+        .argv = default_options_mode_collapse_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = T.KEYC_RIGHT,
+        .note = "Expand current section",
+        .argv = default_options_mode_expand_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'H',
+        .note = "Toggle inherited options",
+        .argv = default_options_mode_toggle_hide_inherited_argv[0..],
+    },
 };
 
 fn seed_default_bindings() void {
@@ -2570,6 +2723,20 @@ test "key bindings retain shared cmdlists across default restores" {
 
     key_bindings_reset_table("prefix");
     try std.testing.expectEqual(@as(u32, 2), list.references);
+}
+
+test "default options-mode bindings are installed" {
+    key_bindings_init();
+
+    const emacs = key_bindings_get_table("options-mode", false).?;
+    try std.testing.expect(key_bindings_get(emacs, 'q') != null);
+    try std.testing.expect(key_bindings_get(emacs, T.KEYC_RIGHT) != null);
+    try std.testing.expect(key_bindings_get(emacs, 'H') != null);
+
+    const vi = key_bindings_get_table("options-mode-vi", false).?;
+    try std.testing.expect(key_bindings_get(vi, 'h') != null);
+    try std.testing.expect(key_bindings_get(vi, 'l') != null);
+    try std.testing.expect(key_bindings_get(vi, 'H') != null);
 }
 
 test "key bindings dispatch preserves the supplied current target state" {

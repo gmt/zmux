@@ -55,6 +55,7 @@ pub const FormatContext = struct {
     command_prompt: ?bool = null,
 
     key_binding: ?*const T.KeyBinding = null,
+    key_has_repeat: ?bool = null,
     key_note: ?[]const u8 = null,
     key_command: ?[]const u8 = null,
     key_prefix: ?[]const u8 = null,
@@ -1792,13 +1793,17 @@ fn resolve_key_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u
 }
 
 fn resolve_key_has_repeat(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    const binding = resolve_key_binding(ctx) orelse return null;
-    const value: []const u8 = if (binding.flags & T.KEY_BINDING_REPEAT != 0) "1" else "0";
-    return alloc.dupe(u8, value) catch unreachable;
+    if (ctx.key_has_repeat) |has_repeat| {
+        const value: []const u8 = if (has_repeat) "1" else "0";
+        return alloc.dupe(u8, value) catch unreachable;
+    }
+    return resolve_key_repeat(alloc, ctx);
 }
 
 fn resolve_key_repeat(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    return resolve_key_has_repeat(alloc, ctx);
+    const binding = resolve_key_binding(ctx) orelse return null;
+    const value: []const u8 = if (binding.flags & T.KEY_BINDING_REPEAT != 0) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
 }
 
 fn resolve_key_prefix(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

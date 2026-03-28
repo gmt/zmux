@@ -25,7 +25,10 @@ const c = @import("c.zig");
 const cmd_render = @import("cmd-render.zig");
 const cmdq = @import("cmd-queue.zig");
 const colour = @import("colour.zig");
+const grid = @import("grid.zig");
+const hyperlinks = @import("hyperlinks.zig");
 const log = @import("log.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const sort_mod = @import("sort.zig");
@@ -40,6 +43,7 @@ const paste_mod = @import("paste.zig");
 const layout_mod = @import("layout.zig");
 const sess = @import("session.zig");
 const window_mod = @import("window.zig");
+const window_copy = @import("window-copy.zig");
 
 pub const FormatContext = struct {
     item: ?*anyopaque = null,
@@ -48,6 +52,7 @@ pub const FormatContext = struct {
     winlink: ?*T.Winlink = null,
     window: ?*T.Window = null,
     pane: ?*T.WindowPane = null,
+    mouse_event: ?*const T.MouseEvent = null,
     paste_buffer: ?*paste_mod.PasteBuffer = null,
 
     message_text: ?[]const u8 = null,
@@ -146,6 +151,20 @@ const resolver_table = [_]Resolver{
     .{ .name = "cursor_flag", .func = resolve_cursor_flag },
     .{ .name = "cursor_x", .func = resolve_cursor_x },
     .{ .name = "cursor_y", .func = resolve_cursor_y },
+    .{ .name = "mouse_all_flag", .func = resolve_mouse_all_flag },
+    .{ .name = "mouse_any_flag", .func = resolve_mouse_any_flag },
+    .{ .name = "mouse_button_flag", .func = resolve_mouse_button_flag },
+    .{ .name = "mouse_hyperlink", .func = resolve_mouse_hyperlink },
+    .{ .name = "mouse_line", .func = resolve_mouse_line },
+    .{ .name = "mouse_pane", .func = resolve_mouse_pane },
+    .{ .name = "mouse_sgr_flag", .func = resolve_mouse_sgr_flag },
+    .{ .name = "mouse_standard_flag", .func = resolve_mouse_standard_flag },
+    .{ .name = "mouse_status_line", .func = resolve_mouse_status_line },
+    .{ .name = "mouse_status_range", .func = resolve_mouse_status_range },
+    .{ .name = "mouse_utf8_flag", .func = resolve_mouse_utf8_flag },
+    .{ .name = "mouse_word", .func = resolve_mouse_word },
+    .{ .name = "mouse_x", .func = resolve_mouse_x },
+    .{ .name = "mouse_y", .func = resolve_mouse_y },
 
     .{ .name = "pane_active", .func = resolve_pane_active },
     .{ .name = "pane_current_command", .func = resolve_pane_current_command },
@@ -1672,6 +1691,194 @@ fn ctx_buffer(ctx: *const FormatContext) ?*paste_mod.PasteBuffer {
     return ctx.paste_buffer;
 }
 
+const MousePoint = struct {
+    x: u32,
+    y: u32,
+};
+
+const MouseScreenRow = struct {
+    screen: *const T.Screen,
+    row: u32,
+};
+
+fn ctx_mouse_event(ctx: *const FormatContext) ?*const T.MouseEvent {
+    if (ctx.mouse_event) |mouse| return mouse;
+    const raw = ctx.item orelse return null;
+    const item: *cmdq.CmdqItem = @ptrCast(@alignCast(raw));
+    const event = cmdq.cmdq_get_event(item);
+    if (!event.m.valid) return null;
+    return &event.m;
+}
+
+fn mouse_status_point(ctx: *const FormatContext, mouse: *const T.MouseEvent) ?MousePoint {
+    const cl = ctx.client orelse return null;
+    if ((cl.tty.flags & T.TTY_STARTED) == 0) return null;
+
+    if (mouse.statusat == 0 and mouse.y < mouse.statuslines) {
+        return .{ .x = mouse.x, .y = mouse.y };
+    }
+    if (mouse.statusat > 0 and mouse.y >= @as(u32, @intCast(mouse.statusat))) {
+        return .{
+            .x = mouse.x,
+            .y = mouse.y - @as(u32, @intCast(mouse.statusat)),
+        };
+    }
+    return null;
+}
+
+fn mouse_pane_point(wp: *T.WindowPane, mouse: *const T.MouseEvent, last: bool) ?MousePoint {
+    const x = (if (last) mouse.lx else mouse.x) + mouse.ox;
+    var y = (if (last) mouse.ly else mouse.y) + mouse.oy;
+
+    if (mouse.statusat == 0 and y >= mouse.statuslines)
+        y -= mouse.statuslines;
+
+    if (x < wp.xoff or x >= wp.xoff + wp.sx) return null;
+    if (y < wp.yoff or y >= wp.yoff + wp.sy) return null;
+
+    return .{
+        .x = x - wp.xoff,
+        .y = y - wp.yoff,
+    };
+}
+
+fn mouse_screen_row(wp: *T.WindowPane, y: u32) ?MouseScreenRow {
+    if (window_copy.mouseFormatSource(wp, y)) |source| {
+        return .{
+            .screen = source.screen,
+            .row = source.row,
+        };
+    }
+    if (window_mod.window_pane_mode(wp) != null) return null;
+
+    const current = screen_mod.screen_current(wp);
+    const row = y;
+    if (row >= current.grid.linedata.len) return null;
+    return .{
+        .screen = current,
+        .row = row,
+    };
+}
+
+fn grid_line_wrapped_local(gd: *const T.Grid, row: u32) bool {
+    return row < gd.linedata.len and (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0;
+}
+
+fn grid_word_separator(gd: *T.Grid, row: u32, col: u32, separators: []const u8) bool {
+    var gc: T.GridCell = undefined;
+    grid.get_cell(gd, row, col, &gc);
+    if (grid.grid_in_set(gd, row, col, separators) != 0) return true;
+    if ((gc.flags & T.GRID_FLAG_TAB) != 0) return true;
+    return gc.data.size == 1 and gc.data.data[0] == ' ';
+}
+
+fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y: u32, separators: []const u8) ?[]u8 {
+    if (start_y >= gd.linedata.len) return null;
+
+    var x = start_x;
+    var y = start_y;
+    var found_separator = false;
+    while (true) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, y, x, &gc);
+        if (!gc.isPadding() and grid_word_separator(gd, y, x, separators)) {
+            found_separator = true;
+            break;
+        }
+
+        if (x == 0) {
+            if (y == 0) break;
+            if (!grid_line_wrapped_local(gd, y - 1)) break;
+            y -= 1;
+            x = grid.line_length(gd, y);
+            if (x == 0) break;
+        }
+        x -= 1;
+    }
+
+    var cells: std.ArrayList(T.Utf8Data) = .{};
+    while (true) {
+        if (found_separator) {
+            const end = grid.line_length(gd, y);
+            if (end == 0 or x == end - 1) {
+                if (y + 1 >= gd.linedata.len) break;
+                if (!grid_line_wrapped_local(gd, y)) break;
+                y += 1;
+                x = 0;
+            } else {
+                x += 1;
+            }
+        }
+        found_separator = true;
+
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, y, x, &gc);
+        if (gc.isPadding()) continue;
+        if (grid_word_separator(gd, y, x, separators)) break;
+        cells.append(alloc, gc.data) catch unreachable;
+    }
+
+    if (cells.items.len == 0) {
+        cells.deinit(alloc);
+        return null;
+    }
+    cells.append(alloc, std.mem.zeroes(T.Utf8Data)) catch unreachable;
+    defer cells.deinit(alloc);
+    return utf8.utf8_tocstr(cells.items);
+}
+
+fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
+    if (row >= gd.linedata.len) return null;
+
+    var cells: std.ArrayList(T.Utf8Data) = .{};
+    const length = grid.line_length(gd, row);
+    var x: u32 = 0;
+    while (x < length) : (x += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, row, x, &gc);
+        if (gc.isPadding()) continue;
+
+        if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
+            var tab = std.mem.zeroes(T.Utf8Data);
+            utf8.utf8_set(&tab, '\t');
+            cells.append(alloc, tab) catch unreachable;
+        } else {
+            cells.append(alloc, gc.data) catch unreachable;
+        }
+    }
+
+    if (cells.items.len == 0) {
+        cells.deinit(alloc);
+        return null;
+    }
+    cells.append(alloc, std.mem.zeroes(T.Utf8Data)) catch unreachable;
+    defer cells.deinit(alloc);
+    return utf8.utf8_tocstr(cells.items);
+}
+
+fn format_grid_hyperlink(screen: *const T.Screen, x_in: u32, row: u32) ?[]u8 {
+    const hl = screen.hyperlinks orelse return null;
+    var x = x_in;
+    while (true) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(screen.grid, row, x, &gc);
+        if (!gc.isPadding()) {
+            if (gc.link == 0) return null;
+            var uri: []const u8 = undefined;
+            if (!hyperlinks.hyperlinks_get(hl, gc.link, &uri, null, null)) return null;
+            return xm.xstrdup(uri);
+        }
+        if (x == 0) return null;
+        x -= 1;
+    }
+}
+
+fn mouse_mode_flag(alloc: std.mem.Allocator, ctx: *const FormatContext, flag: i32) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const current = screen_mod.screen_current(wp);
+    return alloc.dupe(u8, if ((current.mode & flag) != 0) "1" else "0") catch unreachable;
+}
+
 fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
 }
@@ -1958,6 +2165,118 @@ fn resolve_cursor_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     const screen = screen_mod.screen_current(wp);
     return xm.xasprintf("{d}", .{screen.cy});
+}
+
+fn resolve_mouse_all_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.MODE_MOUSE_ALL);
+}
+
+fn resolve_mouse_any_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.ALL_MOUSE_MODES);
+}
+
+fn resolve_mouse_button_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.MODE_MOUSE_BUTTON);
+}
+
+fn resolve_mouse_hyperlink(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const wp = mouse_runtime.cmd_mouse_pane(mouse, null, null) orelse return null;
+    const point = mouse_pane_point(wp, mouse, false) orelse return null;
+    const source = mouse_screen_row(wp, point.y) orelse return null;
+    return format_grid_hyperlink(source.screen, point.x, source.row);
+}
+
+fn resolve_mouse_line(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const wp = mouse_runtime.cmd_mouse_pane(mouse, null, null) orelse return null;
+    const point = mouse_pane_point(wp, mouse, false) orelse return null;
+    const source = mouse_screen_row(wp, point.y) orelse return null;
+    return format_grid_line(alloc, source.screen.grid, source.row);
+}
+
+fn resolve_mouse_pane(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const wp = mouse_runtime.cmd_mouse_pane(mouse, null, null) orelse return null;
+    return xm.xasprintf("%{d}", .{wp.id});
+}
+
+fn resolve_mouse_sgr_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.MODE_MOUSE_SGR);
+}
+
+fn resolve_mouse_standard_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.MODE_MOUSE_STANDARD);
+}
+
+fn resolve_mouse_status_line(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const point = mouse_status_point(ctx, mouse) orelse return null;
+    return xm.xasprintf("{d}", .{point.y});
+}
+
+fn resolve_mouse_status_range(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const point = mouse_status_point(ctx, mouse) orelse return null;
+    const cl = ctx.client orelse return null;
+    const range = if (point.y < cl.status.entries.len)
+        cl.status.entries[point.y].ranges.items
+    else
+        return null;
+
+    for (range) |entry| {
+        if (point.x < entry.start or point.x >= entry.end) continue;
+        return switch (entry.type) {
+            .none => null,
+            .left => alloc.dupe(u8, "left") catch unreachable,
+            .right => alloc.dupe(u8, "right") catch unreachable,
+            .pane => alloc.dupe(u8, "pane") catch unreachable,
+            .window => alloc.dupe(u8, "window") catch unreachable,
+            .session => alloc.dupe(u8, "session") catch unreachable,
+            .user => alloc.dupe(u8, c_string_bytes(entry.string[0..])) catch unreachable,
+        };
+    }
+    return null;
+}
+
+fn resolve_mouse_utf8_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return mouse_mode_flag(alloc, ctx, T.MODE_MOUSE_UTF8);
+}
+
+fn resolve_mouse_word(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    const wp = mouse_runtime.cmd_mouse_pane(mouse, null, null) orelse return null;
+    const point = mouse_pane_point(wp, mouse, false) orelse return null;
+    const source = mouse_screen_row(wp, point.y) orelse return null;
+    const separators = opts.options_get_string(opts.global_s_options, "word-separators");
+    return format_grid_word(alloc, source.screen.grid, point.x, source.row, separators);
+}
+
+fn resolve_mouse_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    if (mouse_runtime.cmd_mouse_pane(mouse, null, null)) |wp| {
+        if (mouse_pane_point(wp, mouse, false)) |point|
+            return xm.xasprintf("{d}", .{point.x});
+    }
+    if (mouse_status_point(ctx, mouse)) |point|
+        return xm.xasprintf("{d}", .{point.x});
+    return null;
+}
+
+fn resolve_mouse_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const mouse = ctx_mouse_event(ctx) orelse return null;
+    if (mouse_runtime.cmd_mouse_pane(mouse, null, null)) |wp| {
+        if (mouse_pane_point(wp, mouse, false)) |point|
+            return xm.xasprintf("{d}", .{point.y});
+    }
+    if (mouse_status_point(ctx, mouse)) |point|
+        return xm.xasprintf("{d}", .{point.y});
+    return null;
 }
 
 fn resolve_session_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2430,6 +2749,212 @@ fn resolve_scroll_region_lower(alloc: std.mem.Allocator, ctx: *const FormatConte
 fn resolve_version(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
     return alloc.dupe(u8, T.ZMUX_VERSION) catch unreachable;
+}
+
+test "format_expand resolves mouse pane keys from queued item state" {
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-mouse-pane", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 20, 6);
+    w.active = wp;
+    wp.base.mode |= T.MODE_MOUSE_ALL | T.MODE_MOUSE_SGR | T.MODE_MOUSE_UTF8;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{
+        .client = &client,
+        .sx = 20,
+        .sy = 6,
+        .flags = T.TTY_STARTED,
+    };
+
+    var event = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    event.m = .{
+        .valid = true,
+        .key = T.KEYC_MOUSE,
+        .x = 3,
+        .y = 1,
+        .s = @intCast(s.id),
+        .w = @intCast(w.id),
+        .wp = @intCast(wp.id),
+    };
+
+    const state = cmdq.cmdq_new_state(null, &event, 0);
+    defer cmdq.cmdq_free_state(state);
+    var item = cmdq.CmdqItem{ .state = state };
+
+    const ctx = FormatContext{
+        .item = @ptrCast(&item),
+        .client = &client,
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{mouse_pane} #{mouse_x} #{mouse_y} #{mouse_all_flag} #{mouse_any_flag} #{mouse_button_flag} #{mouse_sgr_flag} #{mouse_standard_flag} #{mouse_utf8_flag}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    const expected = try std.fmt.allocPrint(
+        xm.allocator,
+        "%{d} 3 1 1 1 0 1 0 1",
+        .{wp.id},
+    );
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, expanded);
+}
+
+test "format_expand resolves mouse status range from explicit mouse context" {
+    var client = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    client.tty = .{
+        .client = &client,
+        .flags = T.TTY_STARTED,
+    };
+    defer client.status.entries[0].ranges.deinit(xm.allocator);
+
+    var user_string = std.mem.zeroes([16]u8);
+    @memcpy(user_string[0..4], "menu");
+    client.status.entries[0].ranges.append(xm.allocator, .{
+        .type = .user,
+        .string = user_string,
+        .start = 0,
+        .end = 4,
+    }) catch unreachable;
+
+    var mouse = T.MouseEvent{
+        .valid = true,
+        .statusat = 0,
+        .statuslines = 1,
+        .x = 1,
+        .y = 0,
+    };
+
+    const ctx = FormatContext{
+        .client = &client,
+        .mouse_event = &mouse,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{mouse_status_line}:#{mouse_status_range}:#{mouse_x}:#{mouse_y}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+    try std.testing.expectEqualStrings("0:menu:1:0", expanded);
+}
+
+test "format_expand resolves mouse word line and hyperlink in copy mode" {
+    const args_mod = @import("arguments.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-mouse-copy", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(12, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 12, 3);
+    w.active = wp;
+
+    var cell = T.grid_default_cell;
+    inline for ("alpha beta", 0..) |ch, idx| {
+        utf8.utf8_set(&cell.data, ch);
+        grid.set_cell(wp.base.grid, 0, @intCast(idx), &cell);
+    }
+
+    var link_cell = T.grid_default_cell;
+    utf8.utf8_set(&link_cell.data, 'L');
+    link_cell.link = hyperlinks.hyperlinks_put(wp.base.hyperlinks.?, "https://example.com/docs", "copy");
+    grid.set_cell(wp.base.grid, 1, 0, &link_cell);
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = window_copy.enterMode(wp, wp, &args);
+
+    var word_mouse = T.MouseEvent{
+        .valid = true,
+        .x = 1,
+        .y = 0,
+        .s = @intCast(s.id),
+        .w = @intCast(w.id),
+        .wp = @intCast(wp.id),
+    };
+    var link_mouse = T.MouseEvent{
+        .valid = true,
+        .x = 0,
+        .y = 1,
+        .s = @intCast(s.id),
+        .w = @intCast(w.id),
+        .wp = @intCast(wp.id),
+    };
+
+    const word_ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+        .mouse_event = &word_mouse,
+    };
+    const word_line = format_require_complete(xm.allocator, "#{mouse_word}|#{mouse_line}", &word_ctx).?;
+    defer xm.allocator.free(word_line);
+    try std.testing.expectEqualStrings("alpha|alpha beta", word_line);
+
+    const link_ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+        .mouse_event = &link_mouse,
+    };
+    const hyperlink = format_require_complete(xm.allocator, "#{mouse_hyperlink}", &link_ctx).?;
+    defer xm.allocator.free(hyperlink);
+    try std.testing.expectEqualStrings("https://example.com/docs", hyperlink);
 }
 
 test "format_expand resolves direct keys and aliases" {

@@ -36,8 +36,9 @@ file into a planner blob.
 - `src/server-print.zig` and `src/cmd-queue.zig` route attached, detached, and
   control-client output through shared lower seams instead of command-local
   writers
-- `src/control-notify.zig` and `src/control-subscriptions.zig` own the reduced
-  control-client notify and `%subscription-changed` polling path
+- `src/control.zig`, `src/control-notify.zig`, and
+  `src/control-subscriptions.zig` own the reduced control-client pane-offset
+  bookkeeping, notify, and `%subscription-changed` polling path
 
 ### Mouse, Redraw, And TTY Runtime
 

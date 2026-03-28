@@ -383,6 +383,58 @@ fn server_client_build_name(cl: *const T.Client) []const u8 {
     return xm.xasprintf("client-{d}", .{cl.pid});
 }
 
+fn server_client_control_flags(cl: *T.Client, next: []const u8) u64 {
+    if (std.mem.eql(u8, next, "pause-after")) {
+        cl.pause_age = 0;
+        return T.CLIENT_CONTROL_PAUSEAFTER;
+    }
+    if (std.mem.startsWith(u8, next, "pause-after=")) {
+        const seconds = std.fmt.parseInt(u32, next["pause-after=".len..], 10) catch return 0;
+        cl.pause_age = std.math.mul(u32, seconds, 1000) catch std.math.maxInt(u32);
+        return T.CLIENT_CONTROL_PAUSEAFTER;
+    }
+    if (std.mem.eql(u8, next, "no-output")) return T.CLIENT_CONTROL_NOOUTPUT;
+    if (std.mem.eql(u8, next, "wait-exit")) return T.CLIENT_CONTROL_WAITEXIT;
+    return 0;
+}
+
+pub fn server_client_set_flags(cl: *T.Client, flags_text: []const u8) void {
+    var it = std.mem.splitScalar(u8, flags_text, ',');
+    while (it.next()) |raw_flag| {
+        if (raw_flag.len == 0) continue;
+
+        const negate = raw_flag[0] == '!';
+        const next = if (negate) raw_flag[1..] else raw_flag;
+        if (next.len == 0) continue;
+
+        var flag: u64 = if (cl.flags & T.CLIENT_CONTROL != 0)
+            server_client_control_flags(cl, next)
+        else
+            0;
+        if (std.mem.eql(u8, next, "read-only"))
+            flag = T.CLIENT_READONLY
+        else if (std.mem.eql(u8, next, "ignore-size"))
+            flag = T.CLIENT_IGNORESIZE
+        else if (std.mem.eql(u8, next, "active-pane"))
+            flag = T.CLIENT_ACTIVEPANE
+        else if (std.mem.eql(u8, next, "no-detach-on-destroy"))
+            flag = T.CLIENT_NO_DETACH_ON_DESTROY;
+        if (flag == 0) continue;
+
+        if (negate) {
+            if (cl.flags & T.CLIENT_READONLY != 0)
+                flag &= ~@as(u64, T.CLIENT_READONLY);
+            cl.flags &= ~flag;
+        } else {
+            cl.flags |= flag;
+        }
+    }
+
+    if (cl.peer) |peer| {
+        _ = proc_mod.proc_send(peer, .flags, -1, std.mem.asBytes(&cl.flags).ptr, @sizeOf(u64));
+    }
+}
+
 fn server_client_resolve_cwd(candidate: []const u8) []const u8 {
     if (server_client_cwd_exists(candidate)) return candidate;
     if (std.posix.getenv("HOME")) |home| return home;

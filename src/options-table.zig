@@ -36,6 +36,17 @@ const WP = T.OptionsScope{ .window = true, .pane = true };
 const empty_array = [_][]const u8{};
 
 const OT = T.OptionsType;
+const update_environment_default = [_][]const u8{
+    "DISPLAY",
+    "KRB5CCNAME",
+    "MSYSTEM",
+    "SSH_ASKPASS",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "SSH_CONNECTION",
+    "WINDOWID",
+    "XAUTHORITY",
+};
 
 const status_format_default_0 =
     "#[align=left range=left #{E:status-left-style}]" ++
@@ -160,7 +171,12 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "prompt-cursor-colour", .type = .colour, .scope = Ss, .default_num = -1 },
     .{ .name = "prompt-cursor-style", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "default", "blinking-block", "block", "blinking-underline", "underline", "blinking-bar", "bar" } },
     .{ .name = "prompt-command-cursor-style", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "default", "blinking-block", "block", "blinking-underline", "underline", "blinking-bar", "bar" } },
-    .{ .name = "update-environment", .type = .array, .scope = Ss },
+    .{
+        .name = "update-environment",
+        .type = .array,
+        .scope = Ss,
+        .default_arr = update_environment_default[0..],
+    },
     .{ .name = "visual-activity", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "off", "on", "both" } },
     .{ .name = "visual-bell", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "off", "on", "both" } },
     .{ .name = "visual-silence", .type = .choice, .scope = Ss, .default_num = 0, .choices = &.{ "off", "on", "both" } },

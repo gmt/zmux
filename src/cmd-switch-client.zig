@@ -53,13 +53,32 @@ fn switchClientTargetLookup(tflag: ?[]const u8) TargetLookup {
     };
 }
 
+fn switchClientResetKeyTable(item: *cmdq.CmdqItem, cl: *T.Client) void {
+    if ((cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_REPEAT) == 0)
+        server_client_mod.server_client_set_key_table(cl, null);
+}
+
+fn switchClientFinish(item: *cmdq.CmdqItem, args: *const @import("arguments.zig").Arguments, cl: *T.Client, s: *T.Session) T.CmdRetval {
+    const same_session = cl.session == s;
+
+    if (!args.has('E'))
+        env_mod.environ_update(s.options, cl.environ, s.environ);
+
+    server_client_mod.server_client_set_session(cl, s);
+    switchClientResetKeyTable(item, cl);
+    if (same_session)
+        server_client_mod.server_client_force_redraw(cl);
+    server_fn.server_redraw_session(s);
+    return .normal;
+}
+
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    const tc = cmdq.cmdq_get_target_client(item);
-    const cl = tc orelse cmdq.cmdq_get_client(item);
+    const tc = cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item);
+    const cl = cmdq.cmdq_get_client(item);
 
     if (args.has('r')) {
-        if (cl) |c| toggleReadonlyFlags(c);
+        if (tc) |c| toggleReadonlyFlags(c);
     }
 
     if (args.get('T')) |tablename| {
@@ -67,7 +86,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cmdq.cmdq_error(item, "table {s} doesn't exist", .{tablename});
             return .@"error";
         };
-        if (cl) |c| server_client_mod.server_client_set_key_table(c, table.name);
+        if (tc) |c| server_client_mod.server_client_set_key_table(c, table.name);
         return .normal;
     }
 
@@ -87,82 +106,68 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    const s = target.s orelse {
+    var s = target.s orelse {
         cmdq.cmdq_error(item, "no session", .{});
         return .@"error";
     };
     const wl = target.wl;
     const wp = target.wp;
 
-    // -n: next session
     if (args.has('n')) {
-        const cur_s = if (cl) |c| c.session else null;
-        if (cur_s) |cs| {
-            if (sess.session_next_session(cs, &sort_crit)) |next| {
-                if (cl) |c| {
-                    server_client_mod.server_client_set_session(c, next);
-                    server_client_mod.server_client_set_key_table(c, null);
-                    server_client_mod.server_client_force_redraw(c);
-                }
-                server_fn.server_redraw_session(next);
-                return .normal;
+        const cur_s = if (tc) |c| c.session else null;
+        s = if (cur_s) |cs|
+            sess.session_next_session(cs, &sort_crit) orelse {
+                cmdq.cmdq_error(item, "can't find next session", .{});
+                return .@"error";
             }
-        }
-        cmdq.cmdq_error(item, "can't find next session", .{});
-        return .@"error";
-    }
-
-    // -p: previous session
-    if (args.has('p')) {
-        const cur_s = if (cl) |c| c.session else null;
-        if (cur_s) |cs| {
-            if (sess.session_previous_session(cs, &sort_crit)) |prev| {
-                if (cl) |c| {
-                    server_client_mod.server_client_set_session(c, prev);
-                    server_client_mod.server_client_set_key_table(c, null);
-                    server_client_mod.server_client_force_redraw(c);
-                }
-                server_fn.server_redraw_session(prev);
-                return .normal;
+        else {
+            cmdq.cmdq_error(item, "can't find next session", .{});
+            return .@"error";
+        };
+    } else if (args.has('p')) {
+        const cur_s = if (tc) |c| c.session else null;
+        s = if (cur_s) |cs|
+            sess.session_previous_session(cs, &sort_crit) orelse {
+                cmdq.cmdq_error(item, "can't find previous session", .{});
+                return .@"error";
             }
-        }
-        cmdq.cmdq_error(item, "can't find previous session", .{});
-        return .@"error";
-    }
-
-    // -l: last session
-    if (args.has('l')) {
-        if (cl) |c| {
+        else {
+            cmdq.cmdq_error(item, "can't find previous session", .{});
+            return .@"error";
+        };
+    } else if (args.has('l')) {
+        const last_session = if (tc) |c| blk: {
             if (c.last_session) |ls| {
-                if (sess.session_alive(ls)) {
-                    server_client_mod.server_client_set_session(c, ls);
-                    server_client_mod.server_client_set_key_table(c, null);
-                    server_client_mod.server_client_force_redraw(c);
-                    server_fn.server_redraw_session(ls);
-                    return .normal;
-                }
+                if (sess.session_alive(ls))
+                    break :blk ls;
             }
-        }
-        cmdq.cmdq_error(item, "can't find last session", .{});
-        return .@"error";
-    }
+            break :blk null;
+        } else null;
+        s = last_session orelse {
+            cmdq.cmdq_error(item, "can't find last session", .{});
+            return .@"error";
+        };
+    } else {
+        if (cl == null)
+            return .normal;
 
-    // Switch pane if pane was specified
-    if (wl != null and wp != null) {
-        const w = wl.?.window;
-        if (wp.? != w.active) {
+        if (wl != null and wp != null and wp.? != wl.?.window.active) {
+            const w = wl.?.window;
+            if (win_mod.window_push_zoom(w, false, args.has('Z')))
+                server_fn.server_redraw_window(w);
+            win_mod.window_redraw_active_switch(w, wp.?);
             _ = win_mod.window_set_active_pane(w, wp.?, true);
+            if (win_mod.window_pop_zoom(w))
+                server_fn.server_redraw_window(w);
+        }
+        if (wl) |target_wl| {
+            _ = sess.session_set_current(s, target_wl);
+            cmd_find.cmd_find_from_session(&cmdq.cmdq_get_state(item).current, s, 0);
         }
     }
 
-    if (wl) |target_wl| s.curw = target_wl;
-    if (cl) |c| {
-        server_client_mod.server_client_set_session(c, s);
-        server_client_mod.server_client_set_key_table(c, null);
-        server_client_mod.server_client_force_redraw(c);
-    }
-    server_fn.server_redraw_session(s);
-    return .normal;
+    const target_client = tc orelse return .normal;
+    return switchClientFinish(item, args, target_client, s);
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -500,4 +505,108 @@ test "switch-client -t = uses the hovered pane target" {
 
     try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
     try std.testing.expectEqual(second, setup.window.active.?);
+}
+
+test "switch-client -n updates environment and preserves key table for repeat items" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var alpha = switchClientTestMakeSession("switch-client-repeat-alpha");
+    defer switchClientTestFreeSession(&alpha);
+    var beta = switchClientTestMakeSession("switch-client-repeat-beta");
+    defer switchClientTestFreeSession(&beta);
+
+    opts.options_set_array(beta.session.options, "update-environment", &.{"DISPLAY"});
+    env_mod.environ_set(beta.session.environ, "DISPLAY", 0, ":0");
+
+    var queue_client = switchClientTestMakeClient("switch-client-repeat-queue-client", alpha.session);
+    defer switchClientTestFreeClient(&queue_client);
+    var target_client = switchClientTestMakeClient("switch-client-repeat-target-client", alpha.session);
+    defer switchClientTestFreeClient(&target_client);
+    target_client.key_table_name = xm.xstrdup("copy-mode");
+    env_mod.environ_set(target_client.environ, "DISPLAY", 0, ":1");
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-n" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+        .cmdlist = &list,
+        .state_flags = T.CMDQ_STATE_REPEAT,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expectEqual(beta.session, target_client.session.?);
+    try std.testing.expectEqualStrings("copy-mode", target_client.key_table_name.?);
+    try std.testing.expectEqualStrings(":1", env_mod.environ_find(beta.session.environ, "DISPLAY").?.value.?);
+}
+
+test "switch-client without -Z drops zoom when switching panes" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-drop-zoom");
+    defer switchClientTestFreeSession(&setup);
+    const first = setup.window.active.?;
+    const second = win_mod.window_add_pane(setup.window, null, 80, 24);
+
+    try std.testing.expect(win_mod.window_zoom(first));
+
+    const pane_target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{second.id});
+    defer xm.allocator.free(pane_target);
+
+    var client = switchClientTestMakeClient("switch-client-drop-zoom-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-t", pane_target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expectEqual(second, setup.window.active.?);
+    try std.testing.expect(setup.window.flags & T.WINDOW_ZOOMED == 0);
+    try std.testing.expect(setup.window.flags & T.WINDOW_WASZOOMED == 0);
+}
+
+test "switch-client -Z preserves zoom and refreshes active-pane redraw state" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-preserve-zoom");
+    defer switchClientTestFreeSession(&setup);
+    const first = setup.window.active.?;
+    const second = win_mod.window_add_pane(setup.window, null, 80, 24);
+
+    try std.testing.expect(win_mod.window_zoom(first));
+
+    const pane_target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{second.id});
+    defer xm.allocator.free(pane_target);
+
+    var client = switchClientTestMakeClient("switch-client-preserve-zoom-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-Z", "-t", pane_target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var state = cmdq.CmdqState{};
+    cmd_find.cmd_find_from_session(&state.current, setup.session, 0);
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list, .state = &state };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expectEqual(second, setup.window.active.?);
+    try std.testing.expect(setup.window.flags & T.WINDOW_ZOOMED != 0);
+    try std.testing.expect(setup.window.flags & T.WINDOW_WASZOOMED == 0);
+    try std.testing.expect(first.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(second.flags & T.PANE_REDRAW != 0);
+    try std.testing.expectEqual(setup.session, state.current.s.?);
+    try std.testing.expectEqual(setup.session.curw.?, state.current.wl.?);
+    try std.testing.expectEqual(second, state.current.wp.?);
 }

@@ -907,8 +907,16 @@ pub fn window_pop_zoom(w: *T.Window) bool {
 }
 
 pub fn window_redraw_active_switch(_w: *T.Window, _wp: *T.WindowPane) void {
-    _ = _w;
-    _ = _wp;
+    const w = _w;
+    const wp = _wp;
+    const active = w.active orelse return;
+
+    if (wp == active) return;
+
+    // The reduced renderer does not cache separate active/inactive pane body
+    // styles, so mark both panes dirty whenever the active pane changes.
+    wp.flags |= T.PANE_REDRAW;
+    active.flags |= T.PANE_REDRAW;
 }
 
 pub fn window_has_pane(w: *T.Window, wp: *T.WindowPane) bool {

@@ -24,6 +24,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const format_mod = @import("format.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const server_client_mod = @import("server-client.zig");
@@ -34,14 +35,6 @@ const win = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('m') or args.has('M')) {
-        cmdq.cmdq_error(item, "marked pane support not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('Z')) {
-        cmdq.cmdq_error(item, "zoom-aware pane selection not supported yet", .{});
-        return .@"error";
-    }
 
     if (cmd.entry == &entry_last or args.has('l')) {
         return exec_last_pane(item, args);
@@ -54,6 +47,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = target.s orelse return .@"error";
     var wp = target.wp orelse return .@"error";
 
+    if (args.has('m') or args.has('M'))
+        return exec_marked_pane(args, s, wl, wp);
+
     if (args.get('P')) |style| {
         if (!set_pane_style(item, wp, style))
             return .@"error";
@@ -64,13 +60,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (args.has('L')) {
-        wp = win.window_pane_find_left(wp) orelse return .normal;
+        wp = select_directional_pane(wp, .left) orelse return .normal;
     } else if (args.has('R')) {
-        wp = win.window_pane_find_right(wp) orelse return .normal;
+        wp = select_directional_pane(wp, .right) orelse return .normal;
     } else if (args.has('U')) {
-        wp = win.window_pane_find_up(wp) orelse return .normal;
+        wp = select_directional_pane(wp, .up) orelse return .normal;
     } else if (args.has('D')) {
-        wp = win.window_pane_find_down(wp) orelse return .normal;
+        wp = select_directional_pane(wp, .down) orelse return .normal;
     }
 
     if (args.has('e')) {
@@ -99,6 +95,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (wp == wl.window.active) return .normal;
+    _ = win.window_push_zoom(wl.window, false, args.has('Z'));
+    defer _ = win.window_pop_zoom(wl.window);
     _ = win.window_set_active_pane(wl.window, wp, true);
 
     const cl = cmdq.cmdq_get_client(item);
@@ -123,15 +121,19 @@ fn exec_last_pane(item: *cmdq.CmdqItem, args: *const @import("arguments.zig").Ar
 
     if (args.has('e')) {
         last.flags &= ~T.PANE_INPUTOFF;
+        server_fn.server_redraw_window_borders(last.window);
         server_fn.server_status_window(wl.window);
         return .normal;
     }
     if (args.has('d')) {
         last.flags |= T.PANE_INPUTOFF;
+        server_fn.server_redraw_window_borders(last.window);
         server_fn.server_status_window(wl.window);
         return .normal;
     }
 
+    _ = win.window_push_zoom(wl.window, false, args.has('Z'));
+    defer _ = win.window_pop_zoom(wl.window);
     if (!win.window_set_active_pane(wl.window, last, true)) return .normal;
 
     const cl = cmdq.cmdq_get_client(item);
@@ -141,6 +143,48 @@ fn exec_last_pane(item: *cmdq.CmdqItem, args: *const @import("arguments.zig").Ar
     server_fn.server_redraw_session(s);
     server_fn.server_status_window(wl.window);
     return .normal;
+}
+
+fn exec_marked_pane(args: *const @import("arguments.zig").Arguments, s: *T.Session, wl: *T.Winlink, wp: *T.WindowPane) T.CmdRetval {
+    if (args.has('m') and !win.window_pane_visible(wp)) return .normal;
+
+    const previous = if (marked_pane_mod.check()) marked_pane_mod.marked_pane.wp else null;
+    if (args.has('M') or marked_pane_mod.is_marked(s, wl, wp))
+        marked_pane_mod.clear()
+    else
+        marked_pane_mod.set(s, wl, wp);
+    const current = if (marked_pane_mod.check()) marked_pane_mod.marked_pane.wp else null;
+
+    redraw_marked_pane(previous);
+    redraw_marked_pane(current);
+    return .normal;
+}
+
+fn redraw_marked_pane(wp: ?*T.WindowPane) void {
+    const pane = wp orelse return;
+    pane.flags |= T.PANE_REDRAW | T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
+    server_fn.server_redraw_window_borders(pane.window);
+    server_fn.server_status_window(pane.window);
+}
+
+const Direction = enum {
+    left,
+    right,
+    up,
+    down,
+};
+
+fn select_directional_pane(wp: *T.WindowPane, direction: Direction) ?*T.WindowPane {
+    const w = wp.window;
+    _ = win.window_push_zoom(w, false, true);
+    defer _ = win.window_pop_zoom(w);
+
+    return switch (direction) {
+        .left => win.window_pane_find_left(wp),
+        .right => win.window_pane_find_right(wp),
+        .up => win.window_pane_find_up(wp),
+        .down => win.window_pane_find_down(wp),
+    };
 }
 
 fn set_pane_style(item: *cmdq.CmdqItem, wp: *T.WindowPane, raw: []const u8) bool {
@@ -443,4 +487,111 @@ test "select-pane rejects invalid pane styles" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(select_cmd, &item));
+}
+
+test "select-pane can mark panes and resolve the marked target" {
+    const opts_mod = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess_mod = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess_mod.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess_mod.session_create(null, "select-pane-marked", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-marked") != null) sess_mod.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    const first = wl.window.active.?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    s.curw = wl;
+
+    var parse_cause: ?[]u8 = null;
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    const mark_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-m", "-t", "select-pane-marked:0.0" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(mark_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(mark_cmd, &item));
+    try std.testing.expect(marked_pane_mod.is_marked(s, wl, first));
+
+    const select_second = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-t", "select-pane-marked:0.1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(select_second);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_second, &item));
+    try std.testing.expectEqual(second, wl.window.active.?);
+
+    const select_marked = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-t", "~" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(select_marked);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_marked, &item));
+    try std.testing.expectEqual(first, wl.window.active.?);
+}
+
+test "select-pane -Z switches panes while preserving the reduced zoom flag" {
+    const opts_mod = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess_mod = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess_mod.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess_mod.session_create(null, "select-pane-zoom", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-zoom") != null) sess_mod.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    const first = wl.window.active.?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    s.curw = wl;
+
+    first.xoff = 0;
+    first.yoff = 0;
+    first.sx = 40;
+    first.sy = 12;
+    second.xoff = 41;
+    second.yoff = 0;
+    second.sx = 39;
+    second.sy = 12;
+    wl.window.flags |= T.WINDOW_ZOOMED;
+
+    var parse_cause: ?[]u8 = null;
+    const select_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-Z", "-R", "-t", "select-pane-zoom:0.0" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(select_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_cmd, &item));
+    try std.testing.expectEqual(second, wl.window.active.?);
+    try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
+    try std.testing.expect(wl.window.flags & T.WINDOW_WASZOOMED == 0);
 }

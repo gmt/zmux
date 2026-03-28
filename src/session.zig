@@ -27,6 +27,7 @@ const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const sort_mod = @import("sort.zig");
 const win = @import("window.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const notify = @import("notify.zig");
 const utf8 = @import("utf8.zig");
 
@@ -415,6 +416,7 @@ pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
 pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) bool {
     if (s.windows.fetchRemove(idx)) |kv| {
         const wl = kv.value;
+        marked_pane_mod.clear_if_winlink(wl);
         if (s.curw == wl) s.curw = null;
         session_remove_lastw_reference(s, wl);
         window_remove_winlink(wl.window, wl);
@@ -511,6 +513,8 @@ pub fn session_renumber_windows(s: *T.Session) void {
     s.windows = new_windows;
     s.curw = if (new_current_idx) |idx| s.windows.get(idx) else session_first_winlink(s);
     session_prune_lastw(s);
+    if (marked_pane_mod.marked_pane.s == s and marked_pane_mod.marked_pane.wl != null)
+        marked_pane_mod.marked_pane.idx = marked_pane_mod.marked_pane.wl.?.idx;
 }
 
 pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {

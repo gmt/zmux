@@ -96,6 +96,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "command-alias", .type = .array, .scope = S, .separator = "," },
     .{ .name = "codepoint-widths", .type = .array, .scope = S, .separator = "," },
     .{ .name = "copy-command", .type = .string, .scope = S, .default_str = "" },
+    .{ .name = "default-client-command", .type = .command, .scope = S, .default_str = "new-session" },
     .{ .name = "default-terminal", .type = .string, .scope = S, .default_str = "tmux-256color" },
     .{ .name = "editor", .type = .string, .scope = S, .default_str = "/usr/bin/vi" },
     .{ .name = "escape-time", .type = .number, .scope = S, .default_num = 500, .minimum = 0 },

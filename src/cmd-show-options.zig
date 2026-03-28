@@ -263,6 +263,23 @@ test "show-options prints the requested indexed array entry" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "display-message three"));
 }
 
+test "show-options escapes command option values" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_command(opts.global_options, "default-client-command", "display-message hello world");
+
+    const output = try capture_stdout(&.{ "show-options", "-s", "default-client-command" });
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "default-client-command \"display-message hello world\""));
+}
+
 test "show-options -gp ignores -g for pane custom options" {
     const sess = @import("session.zig");
     const win = @import("window.zig");

@@ -33,6 +33,7 @@ const key_string = @import("key-string.zig");
 const cmd_find = @import("cmd-find.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const input_keys = @import("input-keys.zig");
+const menu = @import("menu.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const popup = @import("popup.zig");
 const server_client_mod = @import("server-client.zig");
@@ -218,6 +219,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
 
     if (popup.overlay_active(cl)) {
         if (popup.handle_key(cl, event))
+            return true;
+    }
+
+    if (menu.overlay_active(cl)) {
+        if (menu.handle_key(cl, event))
             return true;
     }
 

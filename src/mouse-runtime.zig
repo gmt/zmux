@@ -27,6 +27,7 @@ const screen_mod = @import("screen.zig");
 const sess = @import("session.zig");
 const status_mod = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
+const menu = @import("menu.zig");
 const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
@@ -75,6 +76,9 @@ pub fn client_outer_tty_mode(cl: *const T.Client) i32 {
 
     if (options_mod.options_get_number(session.options, "focus-events") != 0)
         mode |= T.MODE_FOCUSON;
+
+    if (menu.overlay_wants_mouse(cl))
+        return mode | T.MODE_MOUSE_ALL | T.MODE_MOUSE_BUTTON;
 
     if (options_mod.options_get_number(session.options, "mouse") == 0) return mode;
 

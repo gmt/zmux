@@ -46,3 +46,13 @@ pub fn popMode(wp: *T.WindowPane, wme: *T.WindowModeEntry) bool {
     if (popped) noteModeChange(wp);
     return popped;
 }
+
+pub fn resetModeAll(wp: *T.WindowPane) void {
+    var changed = false;
+    while (window.window_pane_mode(wp)) |wme| {
+        if (wme.mode.close) |close_mode| close_mode(wme);
+        _ = window.window_pane_pop_mode(wp, wme);
+        changed = true;
+    }
+    if (changed) noteModeChange(wp);
+}

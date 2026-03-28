@@ -34,6 +34,7 @@ const xm = @import("xmalloc.zig");
 const server_print_view_mode = T.WindowMode{
     .name = "server-print-view",
     .key = server_print_view_key,
+    .close = server_print_view_close,
     .get_screen = server_print_view_get_screen,
 };
 
@@ -126,7 +127,9 @@ pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) b
 pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
     if (window_mod.window_pane_mode(wp)) |wme| {
         if (wme.mode == &server_print_view_mode) {
+            server_print_view_close(wme);
             _ = window_mode_runtime.popMode(wp, wme);
+            return;
         }
     }
     screen_mod.screen_leave_alternate(wp, true);
@@ -173,6 +176,10 @@ fn server_print_view_key(
     _ = _key;
     _ = _mouse;
     server_client_close_view_mode(wme.wp);
+}
+
+fn server_print_view_close(wme: *T.WindowModeEntry) void {
+    screen_mod.screen_leave_alternate(wme.wp, true);
 }
 
 fn server_print_view_get_screen(wme: *T.WindowModeEntry) *T.Screen {

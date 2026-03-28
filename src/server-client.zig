@@ -722,9 +722,34 @@ pub fn server_client_get_cwd(cl: ?*T.Client, s: ?*T.Session) []const u8 {
     return "/";
 }
 
+fn client_has_nested_marker(cl: *T.Client) bool {
+    inline for ([_][]const u8{ "ZMUX", "TMUX" }) |name| {
+        if (env_mod.environ_find(cl.environ, name)) |entry| {
+            if (entry.value) |value| {
+                if (value.len != 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn pane_tty_name(wp: *T.WindowPane) []const u8 {
+    const len = std.mem.indexOfScalar(u8, &wp.tty_name, 0) orelse wp.tty_name.len;
+    return wp.tty_name[0..len];
+}
+
 pub fn server_client_check_nested(cl: *T.Client) bool {
-    if (cl.environ.entries.get("ZMUX")) |entry| {
-        if (entry.value != null) return true;
+    if (!client_has_nested_marker(cl)) return false;
+
+    const ttyname = cl.ttyname orelse return false;
+    if (ttyname.len == 0) return false;
+
+    var panes = win_mod.all_window_panes.valueIterator();
+    while (panes.next()) |entry| {
+        const wp = entry.*;
+        if (wp.fd == -1) continue;
+        if (std.mem.eql(u8, pane_tty_name(wp), ttyname))
+            return true;
     }
     return false;
 }
@@ -1232,6 +1257,58 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
 
     cl.flags = T.CLIENT_CONTROL;
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
+}
+
+test "server_client_check_nested requires a marker and a live pane tty match" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-nested-check", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-nested-check") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const wp = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    const tty = "/dev/pts/server-client-nested";
+    @memset(wp.tty_name[0..], 0);
+    @memcpy(wp.tty_name[0..tty.len], tty);
+    wp.fd = try std.posix.dup(std.posix.STDERR_FILENO);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .ttyname = xm.xstrdup(tty),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    defer env_mod.environ_free(client.environ);
+    defer xm.allocator.free(client.ttyname.?);
+    client.tty = .{ .client = &client };
+
+    try std.testing.expect(!server_client_check_nested(&client));
+
+    env_mod.environ_set(client.environ, "ZMUX", 0, "/tmp/zmux.sock,1,0");
+    try std.testing.expect(server_client_check_nested(&client));
+
+    env_mod.environ_set(client.environ, "ZMUX", 0, "");
+    env_mod.environ_set(client.environ, "TMUX", 0, "/tmp/tmux.sock,1,0");
+    try std.testing.expect(server_client_check_nested(&client));
+
+    xm.allocator.free(client.ttyname.?);
+    client.ttyname = xm.xstrdup("/dev/pts/server-client-other");
+    try std.testing.expect(!server_client_check_nested(&client));
 }
 
 fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}

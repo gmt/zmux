@@ -22,7 +22,9 @@
 const std = @import("std");
 const key_string = @import("key-string.zig");
 const screen = @import("screen.zig");
+const server = @import("server.zig");
 const T = @import("types.zig");
+const window = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
 pub const SearchDir = enum {
@@ -77,6 +79,7 @@ pub const EachCallback = *const fn (*Data, ?*anyopaque, ?*T.Client, T.key_code) 
 pub const Config = struct {
     modedata: ?*anyopaque = null,
     preview: Preview = .normal,
+    zoom: bool = false,
     buildcb: BuildCallback,
     searchcb: ?SearchCallback = null,
     heightcb: ?HeightCallback = null,
@@ -113,6 +116,7 @@ pub const Data = struct {
     screen: *T.Screen,
 
     preview: Preview,
+    zoomed: i8 = -1,
     search: ?[]u8 = null,
     filter: ?[]u8 = null,
     no_matches: bool = false,
@@ -141,10 +145,14 @@ pub fn start(wp: *T.WindowPane, config: Config) *Data {
         .screen = screen_ptr,
         .preview = config.preview,
     };
+    zoom(mtd, config.zoom);
     return mtd;
 }
 
 pub fn free(mtd: *Data) void {
+    if (mtd.zoomed == 0 and window.window_unzoom(mtd.wp.window))
+        server.server_redraw_window(mtd.wp.window);
+
     freeItems(&mtd.children);
     freeItems(&mtd.saved);
     clearLines(mtd);
@@ -165,6 +173,17 @@ pub fn resize(mtd: *Data, sx: u32, sy: u32) void {
 
     build(mtd);
     mtd.wp.flags |= T.PANE_REDRAW;
+}
+
+pub fn zoom(mtd: *Data, enabled: bool) void {
+    if (!enabled) {
+        mtd.zoomed = -1;
+        return;
+    }
+
+    mtd.zoomed = if (mtd.wp.window.flags & T.WINDOW_ZOOMED != 0) 1 else 0;
+    if (mtd.zoomed == 0 and window.window_zoom(mtd.wp))
+        server.server_redraw_window(mtd.wp.window);
 }
 
 pub fn setFilter(mtd: *Data, filter: ?[]const u8) void {
@@ -779,8 +798,8 @@ fn initTestPane() *T.WindowPane {
     const base_grid = @import("grid.zig").grid_create(80, 24, 2000);
     const alt_screen = screen.screen_init(80, 24, 2000);
 
-    const window = xm.allocator.create(T.Window) catch unreachable;
-    window.* = .{
+    const test_window = xm.allocator.create(T.Window) catch unreachable;
+    test_window.* = .{
         .id = 1,
         .name = xm.xstrdup("mode-tree"),
         .sx = 80,
@@ -791,7 +810,7 @@ fn initTestPane() *T.WindowPane {
     const pane = xm.allocator.create(T.WindowPane) catch unreachable;
     pane.* = .{
         .id = 2,
-        .window = window,
+        .window = test_window,
         .options = undefined,
         .sx = 80,
         .sy = 24,
@@ -799,13 +818,13 @@ fn initTestPane() *T.WindowPane {
         .base = .{ .grid = base_grid, .rlower = 23 },
     };
 
-    window.panes.append(xm.allocator, pane) catch unreachable;
-    window.active = pane;
+    test_window.panes.append(xm.allocator, pane) catch unreachable;
+    test_window.active = pane;
     return pane;
 }
 
 fn freeTestPane(pane: *T.WindowPane) void {
-    const window = pane.window;
+    const test_window = pane.window;
     screen.screen_free(pane.screen);
     xm.allocator.destroy(pane.screen);
     @import("grid.zig").grid_free(pane.base.grid);
@@ -813,11 +832,11 @@ fn freeTestPane(pane: *T.WindowPane) void {
     pane.input_pending.deinit(xm.allocator);
     xm.allocator.destroy(pane);
 
-    window.panes.deinit(xm.allocator);
-    window.last_panes.deinit(xm.allocator);
-    window.winlinks.deinit(xm.allocator);
-    xm.allocator.free(window.name);
-    xm.allocator.destroy(window);
+    test_window.panes.deinit(xm.allocator);
+    test_window.last_panes.deinit(xm.allocator);
+    test_window.winlinks.deinit(xm.allocator);
+    xm.allocator.free(test_window.name);
+    xm.allocator.destroy(test_window);
 }
 
 test "mode-tree build preserves saved expanded and tagged state by tag" {

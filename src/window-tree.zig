@@ -54,6 +54,7 @@ pub const EnterConfig = struct {
     command: ?[]const u8 = null,
     sort_crit: T.SortCriteria = .{},
     squash_groups: bool = true,
+    zoom: bool = false,
 };
 
 const ItemType = enum {
@@ -95,6 +96,8 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
     if (window.window_pane_mode(wp)) |wme| {
         if (wme.mode == &window_tree_mode) {
             refreshFromConfig(wme, config);
+            if (config.zoom)
+                mode_tree.zoom(modeData(wme).tree, true);
             rebuildAndDraw(wme);
             return wme;
         }
@@ -116,6 +119,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
 
     data.tree = mode_tree.start(wp, .{
         .modedata = @ptrCast(data),
+        .zoom = config.zoom,
         .buildcb = buildTree,
         .searchcb = searchItem,
     });
@@ -432,12 +436,11 @@ fn renderItemText(data: *const WindowTreeModeData, item_type: ItemType, session_
     const ctx = formatContext(session_ptr, wl, pane);
     const template = if (data.format.len != 0)
         data.format
-    else
-        switch (item_type) {
-            .session => DEFAULT_SESSION_FORMAT,
-            .window => DEFAULT_WINDOW_FORMAT,
-            .pane => DEFAULT_PANE_FORMAT,
-        };
+    else switch (item_type) {
+        .session => DEFAULT_SESSION_FORMAT,
+        .window => DEFAULT_WINDOW_FORMAT,
+        .pane => DEFAULT_PANE_FORMAT,
+    };
     return format_mod.format_require_complete(xm.allocator, template, &ctx) orelse fallbackText(item_type, session_ptr, wl, pane);
 }
 
@@ -874,7 +877,7 @@ test "window-tree choose runs the command template for the selected target" {
 
     wl.window.active = wl.window.panes.items[0];
     var args_cause: ?[]u8 = null;
-    var args = try args_mod.args_parse(xm.allocator, &.{ "choose" }, "", 1, 1, &args_cause);
+    var args = try args_mod.args_parse(xm.allocator, &.{"choose"}, "", 1, 1, &args_cause);
     defer args.deinit();
     windowTreeCommand(wme, &client, session_ptr, wl, @ptrCast(&args), null);
     while (cmdq_mod.cmdq_next(null) != 0) {}

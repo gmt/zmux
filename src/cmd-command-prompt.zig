@@ -125,7 +125,8 @@ fn collect_command_candidates(candidates: *std.ArrayList([]u8), word: []const u8
         }
     }
 
-    for (opts_mod.options_get_array(opts_mod.global_options, "command-alias")) |value| {
+    for (opts_mod.options_get_array_items(opts_mod.global_options, "command-alias")) |item| {
+        const value = item.value;
         const eq = std.mem.indexOfScalar(u8, value, '=') orelse continue;
         const alias = value[0..eq];
         if (std.mem.startsWith(u8, alias, word))

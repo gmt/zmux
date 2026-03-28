@@ -1496,7 +1496,15 @@ fn format_strftime_tm(alloc: std.mem.Allocator, fmt: []const u8, tm_value: *c.po
 fn lookup_option_value(alloc: std.mem.Allocator, name: []const u8, ctx: *const FormatContext) ?[]u8 {
     const found = find_option_value(name, ctx) orelse return null;
     return switch (found.value.*) {
-        .array => |arr| std.mem.join(alloc, " ", arr.items) catch unreachable,
+        .array => |arr| blk: {
+            if (arr.items.len == 0) break :blk xm.xstrdup("");
+            var out: std.ArrayList(u8) = .{};
+            for (arr.items, 0..) |item, idx| {
+                if (idx != 0) out.appendSlice(alloc, " ") catch unreachable;
+                out.appendSlice(alloc, item.value) catch unreachable;
+            }
+            break :blk out.toOwnedSlice(alloc) catch unreachable;
+        },
         else => opts.options_value_to_string(name, found.value, found.entry),
     };
 }
@@ -2709,7 +2717,7 @@ test "format_expand covers key option-table defaults" {
     defer xm.allocator.free(status_left_length);
     try std.testing.expectEqualStrings("10", status_left_length);
 
-    const status_format = format_require_complete(xm.allocator, opts.options_get_array(s.options, "status-format")[0], &ctx).?;
+    const status_format = format_require_complete(xm.allocator, opts.options_get_array_item(s.options, "status-format", 0).?, &ctx).?;
     defer xm.allocator.free(status_format);
     try std.testing.expect(std.mem.indexOf(u8, status_format, "#{") == null);
     try std.testing.expect(std.mem.indexOf(u8, status_format, "[defaults]") != null);

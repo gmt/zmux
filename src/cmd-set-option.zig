@@ -36,15 +36,43 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const entry_ptr = cmd_mod.cmd_get_entry(cmd);
     const hook_command = entry_ptr == &entry_hook;
-    const option_name = args.value_at(0) orelse {
+    const raw_option_name = args.value_at(0) orelse {
         cmdq.cmdq_error(item, "invalid option", .{});
         return .@"error";
     };
+    const current = cmdq.cmdq_get_target(item);
+    const option_ctx = format_mod.FormatContext{
+        .item = @ptrCast(item),
+        .client = cmdq.cmdq_get_client(item),
+        .session = current.s,
+        .winlink = current.wl,
+        .window = current.w,
+        .pane = current.wp,
+    };
+    const expanded_option = cmd_format.require(item, raw_option_name, &option_ctx) orelse return .@"error";
+    defer xm.allocator.free(expanded_option);
+
+    var idx: ?u32 = null;
+    var ambiguous = false;
+    const option_name = opts.options_match(expanded_option, &idx, &ambiguous) orelse {
+        if (args.has('q')) return .normal;
+        if (ambiguous)
+            cmdq.cmdq_error(item, "ambiguous option: {s}", .{expanded_option})
+        else
+            cmdq.cmdq_error(item, "invalid option: {s}", .{expanded_option});
+        return .@"error";
+    };
+    defer xm.allocator.free(option_name);
+
     const oe = opts.options_table_entry(option_name);
     const custom = cmd_opts.is_custom_option(option_name);
     if (oe == null and !custom) {
         if (args.has('q')) return .normal;
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
+        return .@"error";
+    }
+    if (idx != null and (custom or oe == null or oe.?.type != .array)) {
+        cmdq.cmdq_error(item, "not an array: {s}", .{expanded_option});
         return .@"error";
     }
     if (hook_command and (oe == null or !oe.?.is_hook)) {
@@ -65,16 +93,26 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    if (!args.has('u') and args.has('o') and option_is_set_locally(target.options, option_name)) {
+    if (!args.has('u') and args.has('o') and option_is_set_locally(target.options, option_name, idx)) {
         if (args.has('q')) return .normal;
-        cmdq.cmdq_error(item, "already set: {s}", .{option_name});
+        cmdq.cmdq_error(item, "already set: {s}", .{expanded_option});
         return .@"error";
     }
 
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
     if (args.has('u') or args.has('U')) {
-        if (args.has('U') and target.kind == .window)
-            clear_window_option_overrides(target, option_name);
-        unset_option(target, option_name, oe);
+        if (args.has('U') and target.kind == .window) {
+            if (!clear_window_option_overrides(target, option_name, oe, idx, &cause)) {
+                cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option"});
+                return .@"error";
+            }
+        }
+        if (!unset_option(target, option_name, oe, idx, &cause)) {
+            cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option"});
+            return .@"error";
+        }
         apply_target_side_effects(target, option_name);
         return .normal;
     }
@@ -99,9 +137,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    var cause: ?[]u8 = null;
-    defer if (cause) |msg| xm.allocator.free(msg);
-    if (!opts.options_set_from_string(target.options, oe, option_name, value, args.has('a'), &cause)) {
+    if (!opts.options_set_from_string(target.options, oe, option_name, idx, value, args.has('a'), &cause)) {
         if (args.has('q')) return .normal;
         cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option value"});
         return .@"error";
@@ -110,30 +146,36 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
-fn option_is_set_locally(oo: *T.Options, name: []const u8) bool {
-    return opts.options_get_only(oo, name) != null;
+fn option_is_set_locally(oo: *T.Options, name: []const u8, idx: ?u32) bool {
+    const value = opts.options_get_only(oo, name) orelse return false;
+    if (idx) |array_idx| return opts.options_array_get_value(value, array_idx) != null;
+    return true;
 }
 
-fn unset_option(target: cmd_opts.ResolvedTarget, name: []const u8, oe: ?*const T.OptionsTableEntry) void {
-    if (oe == null) {
-        opts.options_remove(target.options, name);
-        return;
-    }
-    if (target.global) {
-        opts.options_remove(target.options, name);
-        opts.options_default(target.options, oe.?);
-    } else {
-        opts.options_remove(target.options, name);
-    }
+fn unset_option(
+    target: cmd_opts.ResolvedTarget,
+    name: []const u8,
+    oe: ?*const T.OptionsTableEntry,
+    idx: ?u32,
+    cause: *?[]u8,
+) bool {
+    return opts.options_remove_or_default(target.options, oe, name, idx, target.global, cause);
 }
 
-fn clear_window_option_overrides(target: cmd_opts.ResolvedTarget, name: []const u8) void {
-    const w = target.window orelse return;
+fn clear_window_option_overrides(
+    target: cmd_opts.ResolvedTarget,
+    name: []const u8,
+    oe: ?*const T.OptionsTableEntry,
+    idx: ?u32,
+    cause: *?[]u8,
+) bool {
+    const w = target.window orelse return true;
     for (w.panes.items) |wp| {
         if (opts.options_get_only(wp.options, name) == null) continue;
-        opts.options_remove(wp.options, name);
+        if (!opts.options_remove_or_default(wp.options, oe, name, idx, false, cause)) return false;
         win.window_pane_options_changed(wp, name);
     }
+    return true;
 }
 
 fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) void {
@@ -308,9 +350,10 @@ test "set-option stores session hook options" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
-    const hook = opts.options_get_array(opts.global_s_options, "after-show-options");
+    const hook = opts.options_get_array_items(opts.global_s_options, "after-show-options");
     try std.testing.expectEqual(@as(usize, 1), hook.len);
-    try std.testing.expectEqualStrings("display-message hi", hook[0]);
+    try std.testing.expectEqual(@as(u32, 0), hook[0].index);
+    try std.testing.expectEqualStrings("display-message hi", hook[0].value);
 }
 
 test "set-hook stores window-scoped hooks in global window options" {
@@ -332,9 +375,10 @@ test "set-hook stores window-scoped hooks in global window options" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
-    const hook = opts.options_get_array(opts.global_w_options, "pane-focus-out");
+    const hook = opts.options_get_array_items(opts.global_w_options, "pane-focus-out");
     try std.testing.expectEqual(@as(usize, 1), hook.len);
-    try std.testing.expectEqualStrings("display-message bye", hook[0]);
+    try std.testing.expectEqual(@as(u32, 0), hook[0].index);
+    try std.testing.expectEqualStrings("display-message bye", hook[0].value);
 }
 
 test "set-hook rejects non-hook options" {
@@ -390,6 +434,125 @@ test "set-hook -R runs the stored hook immediately" {
     cmdq.cmdq_append(null, list);
     try std.testing.expectEqual(@as(u32, 2), cmdq.cmdq_next(null));
     try std.testing.expectEqualStrings("fired", env_mod.environ_find(env_mod.global_environ, "HOOK_RESULT").?.value.?);
+}
+
+test "set-option preserves explicit array indexes and appends at the first free slot" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const indexed = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options[3]", "display-message high" }, null, &cause);
+    defer cmd_mod.cmd_free(indexed);
+    const appended = try cmd_mod.cmd_parse_one(&.{ "set-option", "-ag", "after-show-options", "display-message low" }, null, &cause);
+    defer cmd_mod.cmd_free(appended);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(indexed, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(appended, &item));
+
+    const hook = opts.options_get_array_items(opts.global_s_options, "after-show-options");
+    try std.testing.expectEqual(@as(usize, 2), hook.len);
+    try std.testing.expectEqual(@as(u32, 0), hook[0].index);
+    try std.testing.expectEqualStrings("display-message low", hook[0].value);
+    try std.testing.expectEqual(@as(u32, 3), hook[1].index);
+    try std.testing.expectEqualStrings("display-message high", hook[1].value);
+}
+
+test "set-option -o checks indexed array elements independently" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const first = try cmd_mod.cmd_parse_one(&.{ "set-option", "-go", "after-show-options[2]", "display-message first" }, null, &cause);
+    defer cmd_mod.cmd_free(first);
+    const second = try cmd_mod.cmd_parse_one(&.{ "set-option", "-go", "after-show-options[2]", "display-message second" }, null, &cause);
+    defer cmd_mod.cmd_free(second);
+    const other = try cmd_mod.cmd_parse_one(&.{ "set-option", "-go", "after-show-options[1]", "display-message other" }, null, &cause);
+    defer cmd_mod.cmd_free(other);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(first, &item));
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(second, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(other, &item));
+
+    const hook = opts.options_get_array_items(opts.global_s_options, "after-show-options");
+    try std.testing.expectEqual(@as(usize, 2), hook.len);
+    try std.testing.expectEqual(@as(u32, 1), hook[0].index);
+    try std.testing.expectEqual(@as(u32, 2), hook[1].index);
+}
+
+test "set-option -u removes a single indexed array element" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const first = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options[0]", "display-message zero" }, null, &cause);
+    defer cmd_mod.cmd_free(first);
+    const second = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "after-show-options[3]", "display-message three" }, null, &cause);
+    defer cmd_mod.cmd_free(second);
+    const unset = try cmd_mod.cmd_parse_one(&.{ "set-option", "-gu", "after-show-options[0]" }, null, &cause);
+    defer cmd_mod.cmd_free(unset);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(first, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(second, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(unset, &item));
+
+    const hook = opts.options_get_array_items(opts.global_s_options, "after-show-options");
+    try std.testing.expectEqual(@as(usize, 1), hook.len);
+    try std.testing.expectEqual(@as(u32, 3), hook[0].index);
+    try std.testing.expectEqualStrings("display-message three", hook[0].value);
+}
+
+test "set-option rejects indexes on non-array options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const builtin = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "status-left[0]", "bad" }, null, &cause);
+    defer cmd_mod.cmd_free(builtin);
+    const custom = try cmd_mod.cmd_parse_one(&.{ "set-option", "@local[1]", "bad" }, null, &cause);
+    defer cmd_mod.cmd_free(custom);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(builtin, &item));
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(custom, &item));
 }
 
 test "set-option -w -U clears pane local overrides before unsetting window options" {

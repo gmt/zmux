@@ -235,16 +235,18 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
     }
 
     var ctx = format_context(c);
-    const formats = opts.options_get_array(s.options, "status-format");
     var left_gc = base_gc;
     var swctx = T.ScreenWriteCtx{ .s = screen };
     row = 0;
     while (row < rows) : (row += 1) {
         const row_index: usize = @intCast(row);
-        if (row_index >= formats.len) break;
+        const format_text = opts.options_get_array_item(s.options, "status-format", row) orelse {
+            clear_cached_status_entry(&c.status.entries[row_index]);
+            continue;
+        };
         const entry = &c.status.entries[row_index];
         style_mod.style_apply(&left_gc, s.options, "status-style", null);
-        const expanded = format_mod.format_expand(xm.allocator, formats[row_index], &ctx);
+        const expanded = format_mod.format_expand(xm.allocator, format_text, &ctx);
         defer xm.allocator.free(expanded.text);
         replace_cached_status_entry(entry, expanded.text);
         entry.ranges.clearRetainingCapacity();

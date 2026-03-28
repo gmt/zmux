@@ -994,7 +994,12 @@ pub const CLIENT_DEFAULTSOCKET: u64 = 0x200000;
 pub const CLIENT_SIZECHANGED: u64 = 0x400000;
 pub const CLIENT_STATUSOFF: u64 = 0x800000;
 pub const CLIENT_SUSPENDED: u64 = 0x1000000;
+pub const CLIENT_CONTROL_NOOUTPUT: u64 = 0x4000000;
+pub const CLIENT_ACTIVEPANE: u64 = 0x80000000;
+pub const CLIENT_CONTROL_PAUSEAFTER: u64 = 0x100000000;
+pub const CLIENT_CONTROL_WAITEXIT: u64 = 0x200000000;
 pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
+pub const CLIENT_NO_DETACH_ON_DESTROY: u64 = 0x8000000000;
 
 pub const ClientExitReason = enum {
     none,
@@ -1127,6 +1132,7 @@ pub const Client = struct {
     click_target: ?KeyMouseTarget = null,
     click_wp: i32 = -1,
     click_state: MouseClickState = .none,
+    pause_age: u32 = 0,
 };
 
 // ── IPC proc layer ────────────────────────────────────────────────────────

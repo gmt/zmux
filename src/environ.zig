@@ -24,9 +24,11 @@
 //! The RB_TREE from tmux is replaced by std.StringHashMap.
 
 const std = @import("std");
+const c = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
+const opts = @import("options.zig");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
@@ -122,6 +124,23 @@ pub fn environ_unset(env: *T.Environ, name: []const u8) void {
     }
 }
 
+pub fn environ_update(oo: *T.Options, srcenv: *T.Environ, dstenv: *T.Environ) void {
+    const patterns = opts.options_get_array(oo, "update-environment");
+    for (patterns) |pattern| {
+        var found = false;
+        var it = srcenv.entries.valueIterator();
+        while (it.next()) |entry| {
+            if (!environ_match(pattern, entry.name)) continue;
+            if (entry.value) |value|
+                environ_set(dstenv, entry.name, 0, value)
+            else
+                environ_clear(dstenv, entry.name);
+            found = true;
+        }
+        if (!found) environ_clear(dstenv, pattern);
+    }
+}
+
 /// Push all non-hidden variables with a value into the process environment
 /// (call after fork, before exec).
 pub fn environ_push(env: *T.Environ) void {
@@ -158,6 +177,14 @@ pub fn environ_sorted_entries(env: *T.Environ) []*T.EnvironEntry {
 
 fn less_than_entry(_: void, a: *T.EnvironEntry, b: *T.EnvironEntry) bool {
     return std.mem.lessThan(u8, a.name, b.name);
+}
+
+fn environ_match(pattern: []const u8, name: []const u8) bool {
+    const pattern_z = xm.xm_dupeZ(pattern);
+    defer xm.allocator.free(pattern_z);
+    const name_z = xm.xm_dupeZ(name);
+    defer xm.allocator.free(name_z);
+    return c.posix_sys.fnmatch(pattern_z.ptr, name_z.ptr, 0) == 0;
 }
 
 test "environ_sorted_entries returns alphabetical order" {

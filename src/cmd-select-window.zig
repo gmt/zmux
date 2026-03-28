@@ -213,8 +213,8 @@ pub const entry: cmd_mod.CmdEntry = .{
 pub const entry_neww: cmd_mod.CmdEntry = .{
     .name = "new-window",
     .alias = "neww",
-    .usage = "[-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-session] [shell-command]",
-    .template = "abc:dF:kn:St:P",
+    .usage = "[-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-window] [shell-command]",
+    .template = "abc:de:F:kn:PSt:",
     .lower = 0,
     .upper = -1,
     .flags = 0,
@@ -562,4 +562,47 @@ test "new-window queues after-new-window hook with the new window context" {
     defer xm.allocator.free(expected);
 
     try std.testing.expectEqualStrings(expected, env_mod.environ_find(env_mod.global_environ, "NEW_WINDOW_HOOK").?.value.?);
+}
+
+test "new-window applies repeated -e overlays to the spawned pane" {
+    const opts = @import("options.zig");
+    const respawn_cmd = @import("cmd-respawn-pane.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+
+    const session = sess.session_create(null, "new-window-env", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("new-window-env") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var root_ctx: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn_mod.spawn_window(&root_ctx, &cause).?;
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-window",
+        "-d",
+        "-n",
+        "env-window",
+        "-e",
+        "FOO=first",
+        "-e",
+        "FOO=second",
+        "-e",
+        "BAR=ok",
+        "-t",
+        "new-window-env",
+        "printf '%s %s' \"$FOO\" \"$BAR\"",
+    }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    std.Thread.sleep(500 * std.time.ns_per_ms);
+    const wl = sess.winlink_find_by_index(&session.windows, 1).?;
+    try std.testing.expectEqualStrings("env-window", wl.window.name);
+    const output = respawn_cmd.read_pane_output(wl.window.active.?);
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "second ok") != null);
 }

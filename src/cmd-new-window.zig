@@ -14,8 +14,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "new-window",
     .alias = "neww",
-    .usage = "[-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-session] [shell-command]",
-    .template = "abc:dF:kn:St:P",
+    .usage = "[-abdkPS] [-c start-directory] [-e environment] [-F format] [-n window-name] [-t target-window] [shell-command]",
+    .template = "abc:de:F:kn:PSt:",
     .lower = 0,
     .upper = -1,
     .flags = 0,

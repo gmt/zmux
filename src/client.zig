@@ -488,13 +488,13 @@ fn client_handle_lock_command(cmd: []const u8) void {
 
     const cmd_z = xm.xm_dupeZ(cmd);
     defer xm.allocator.free(cmd_z);
-    _ = system(cmd_z.ptr);
+    const status = system(cmd_z.ptr);
 
     if (was_attached) {
         client_enter_attached_mode();
         client_send_resize();
     }
-    if (client_peer) |peer| _ = proc_mod.proc_send(peer, .unlock, -1, null, 0);
+    if (client_peer) |peer| _ = proc_mod.proc_send(peer, .unlock, -1, std.mem.asBytes(&status).ptr, @sizeOf(i32));
 }
 
 fn client_set_tstp_handler(sig_handler: ?*const fn (i32) callconv(.c) void) void {
@@ -845,6 +845,11 @@ test "client lock command runs shell command then sends unlock" {
     try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
     defer c.imsg.imsg_free(&imsg_msg);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.unlock))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(usize, @sizeOf(i32)), c.imsg.imsg_get_len(&imsg_msg));
+
+    var unlock_status: i32 = -1;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, std.mem.asBytes(&unlock_status).ptr, @sizeOf(i32)));
+    try std.testing.expectEqual(@as(i32, 0), unlock_status);
 }
 
 fn client_test_suspend_hook() void {}

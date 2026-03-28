@@ -1041,6 +1041,50 @@ pub const ClientWindow = struct {
     sy: u32 = 0,
 };
 
+pub const ControlSubType = enum {
+    session,
+    pane,
+    all_panes,
+    window,
+    all_windows,
+};
+
+pub const ControlSubscriptionPane = struct {
+    pane: u32,
+    idx: i32,
+    last: ?[]u8 = null,
+};
+
+pub const ControlSubscriptionWindow = struct {
+    window: u32,
+    idx: i32,
+    last: ?[]u8 = null,
+};
+
+pub const ControlSubscription = struct {
+    name: []u8,
+    format: []u8,
+    sub_type: ControlSubType,
+    id: u32 = 0,
+    last: ?[]u8 = null,
+    panes: std.ArrayListUnmanaged(ControlSubscriptionPane) = .{},
+    windows: std.ArrayListUnmanaged(ControlSubscriptionWindow) = .{},
+
+    pub fn deinit(self: *ControlSubscription, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.format);
+        if (self.last) |last| alloc.free(last);
+        for (self.panes.items) |pane| {
+            if (pane.last) |last| alloc.free(last);
+        }
+        self.panes.deinit(alloc);
+        for (self.windows.items) |window| {
+            if (window.last) |last| alloc.free(last);
+        }
+        self.windows.deinit(alloc);
+    }
+};
+
 pub const ClientPaneCache = struct {
     pane_id: ?u32 = null,
     sx: u32 = 0,
@@ -1125,6 +1169,8 @@ pub const Client = struct {
     session: ?*Session = null,
     last_session: ?*Session = null,
     client_windows: std.ArrayListUnmanaged(ClientWindow) = .{},
+    control_subscriptions: std.ArrayListUnmanaged(ControlSubscription) = .{},
+    control_subs_timer: ?*c.libevent.event = null,
     pan_window: ?*Window = null,
     pan_ox: u32 = 0,
     pan_oy: u32 = 0,

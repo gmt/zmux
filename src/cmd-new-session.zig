@@ -44,10 +44,16 @@ fn attach_existing_session(
     s: *T.Session,
     detach_other: bool,
     kill_other: bool,
+    cwd_template: ?[]const u8,
 ) T.CmdRetval {
     var cause: ?[]u8 = null;
 
     if (cl) |c| {
+        if (cwd_template) |working_directory| {
+            const expanded = format_mod.format_single(@ptrCast(item), working_directory, c, s, null, null);
+            xm.allocator.free(@constCast(s.cwd));
+            s.cwd = expanded;
+        }
         if ((c.flags & T.CLIENT_CONTROL) == 0 and (c.flags & T.CLIENT_TERMINAL) == 0) {
             cmdq.cmdq_error(item, "not a terminal", .{});
             return .@"error";
@@ -117,7 +123,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // If name exists and -A flag set, attach instead
     if (args.has('A')) {
         if (find_existing_attach_session(item, session_name, args.get('t'))) |existing|
-            return attach_existing_session(item, cl, existing, args.has('D'), args.has('X'));
+            return attach_existing_session(item, cl, existing, args.has('D'), args.has('X'), args.get('c'));
     }
 
     if (session_name) |n| {
@@ -149,8 +155,14 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (sx == 0) sx = 1;
     if (sy == 0) sy = 1;
 
-    // Determine CWD
-    const cwd = server_client_mod.server_client_get_cwd(cl, null);
+    // Determine session CWD. tmux stores the formatted -c value on the session
+    // but passes the raw -c argument to spawn for initial-pane resolution.
+    const session_cwd_owned = if (args.get('c')) |working_directory|
+        format_mod.format_single(@ptrCast(item), working_directory, cl, null, null, null)
+    else
+        null;
+    defer if (session_cwd_owned) |cwd| xm.allocator.free(cwd);
+    const session_cwd = session_cwd_owned orelse server_client_mod.server_client_get_cwd(cl, null);
 
     if (!args.has('d') and !no_attach) {
         if (cl) |c| {
@@ -200,7 +212,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const s = sess.session_create(
         group_prefix,
         session_name,
-        cwd,
+        session_cwd,
         new_env,
         sess_opts,
         null,
@@ -212,7 +224,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .item = @ptrCast(item),
         .s = s,
         .idx = -1,
-        .cwd = cwd,
+        .cwd = args.get('c'),
         .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
     };
     const argv = argv_tail(args, 0);
@@ -401,7 +413,13 @@ fn new_session_test_client(name: []const u8, session: ?*T.Session) T.Client {
     var client = T.Client{
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{
+            .client = undefined,
+            .sx = 80,
+            .sy = 24,
+            .xpixel = T.DEFAULT_XPIXEL,
+            .ypixel = T.DEFAULT_YPIXEL,
+        },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_TERMINAL | if (session != null) T.CLIENT_ATTACHED else 0,
         .session = session,
@@ -415,6 +433,7 @@ fn new_session_test_free_client(client: *T.Client) void {
     env_mod.environ_free(client.environ);
     if (client.message_string) |message| xm.allocator.free(message);
     if (client.name) |name| xm.allocator.free(@constCast(name));
+    if (client.cwd) |cwd| xm.allocator.free(@constCast(cwd));
     if (client.exit_session) |name| xm.allocator.free(name);
 }
 
@@ -440,6 +459,43 @@ test "new-session -A attaches to an existing named session" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqual(existing_setup.session, client.session.?);
     try std.testing.expectEqual(current_setup.session, client.last_session.?);
+}
+
+test "new-session -A -c updates the attached session cwd" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("new-session-attach-cwd-current");
+    defer new_session_test_free_session(&current_setup);
+    var existing_setup = new_session_test_make_session("new-session-attach-cwd-existing");
+    defer new_session_test_free_session(&existing_setup);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("attach-cwd");
+    const attach_cwd = try tmp.dir.realpathAlloc(xm.allocator, "attach-cwd");
+    defer xm.allocator.free(attach_cwd);
+
+    var client = new_session_test_client("new-session-attach-cwd-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-A",
+        "-c",
+        attach_cwd,
+        "-s",
+        "new-session-attach-cwd-existing",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(existing_setup.session, client.session.?);
+    try std.testing.expectEqualStrings(attach_cwd, existing_setup.session.cwd);
 }
 
 test "new-session -A -t attaches to the target session and detaches peers with -D" {
@@ -476,6 +532,45 @@ test "new-session -A -t attaches to the target session and detaches peers with -
     try std.testing.expect(peer.session == null);
     try std.testing.expectEqual(T.ClientExitReason.detached, peer.exit_reason);
     try std.testing.expectEqualStrings("new-session-target-existing", peer.exit_session.?);
+}
+
+test "new-session -c stores the session cwd and resolves the first pane from the client cwd" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("client-root/child");
+    const client_root = try tmp.dir.realpathAlloc(xm.allocator, "client-root");
+    defer xm.allocator.free(client_root);
+    const expected_pane_cwd = try tmp.dir.realpathAlloc(xm.allocator, "client-root/child");
+    defer xm.allocator.free(expected_pane_cwd);
+
+    var client = new_session_test_client("new-session-cwd-client", null);
+    defer new_session_test_free_client(&client);
+    client.cwd = xm.xstrdup(client_root);
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-c",
+        "child",
+        "-s",
+        "new-session-cwd-relative",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const created = sess.session_find("new-session-cwd-relative").?;
+    const created_wl = created.curw.?;
+    const created_wp = created_wl.window.active.?;
+    try std.testing.expectEqualStrings("child", created.cwd);
+    try std.testing.expectEqualStrings(expected_pane_cwd, created_wp.cwd.?);
 }
 
 test "new-session -t creates a fresh session group when the target name does not exist" {

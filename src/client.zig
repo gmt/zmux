@@ -46,6 +46,7 @@ var client_exitsession: ?[]u8 = null;
 var client_exitmessage: ?[]u8 = null;
 var client_exec_command: ?[]u8 = null;
 var client_exec_shell: ?[]u8 = null;
+var client_shell_command: ?[]u8 = null;
 var client_retval: i32 = 0;
 var client_stdin_event: ?*c.libevent.event = null;
 var client_control_input: std.ArrayList(u8) = .{};
@@ -250,6 +251,16 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             file_mod.clientHandleWriteOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
         },
         .write_close => file_mod.clientHandleWriteClose(imsg_msg),
+        .shell => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (data_len == 0 or imsg_msg.data == null) return;
+            const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+            if (raw[data_len - 1] != 0) return;
+
+            const command = client_shell_command orelse return;
+            client_shell_command = null;
+            client_exec(raw[0 .. data_len - 1], command);
+        },
         .exited => {
             proc_mod.proc_exit(client_proc.?);
         },
@@ -285,6 +296,16 @@ fn client_clear_exec_request() void {
     if (client_exec_shell) |shell| xm.allocator.free(shell);
     client_exec_command = null;
     client_exec_shell = null;
+}
+
+fn client_clear_shell_command() void {
+    if (client_shell_command) |cmd| xm.allocator.free(cmd);
+    client_shell_command = null;
+}
+
+fn client_set_shell_command(shell_command: ?[]const u8) void {
+    client_clear_shell_command();
+    if (shell_command) |cmd| client_shell_command = xm.xstrdup(cmd);
 }
 
 fn client_record_detach(msg_type: protocol.MsgType, data: []const u8) bool {
@@ -402,6 +423,11 @@ fn client_send_command(argv: anytype) void {
     _ = proc_mod.proc_send(peer, .command, -1, buf.items.ptr, buf.items.len);
 }
 
+fn client_send_shell_request() void {
+    const peer = client_peer orelse return;
+    _ = proc_mod.proc_send(peer, .shell, -1, null, 0);
+}
+
 fn client_send_control_line(line: []const u8) void {
     var argv = cmd_mod.split_command_words(xm.allocator, line) catch {
         log.log_warn("control command parse failed: {s}", .{line});
@@ -501,18 +527,20 @@ export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
 
 pub fn client_main(
     base: *c.libevent.event_base,
+    shell_command: ?[]const u8,
     argc: i32,
     argv: [*]const [*:0]const u8,
     flags: u64,
     feat: i32,
 ) i32 {
     var client_mode_flags = flags;
-    // Determine what message to send
-    var msg_type: protocol.MsgType = .command;
     var start_server = false;
+    client_set_shell_command(shell_command);
+    defer client_clear_shell_command();
 
-    if (argc == 0) {
-        msg_type = .command;
+    if (client_shell_command != null) {
+        start_server = true;
+    } else if (argc == 0) {
         start_server = true;
     } else {
         // Parse to see if the command requests server start
@@ -555,7 +583,9 @@ pub fn client_main(
     client_send_identify(feat);
 
     // Send the command
-    if (argc > 0) {
+    if (client_shell_command != null) {
+        client_send_shell_request();
+    } else if (argc > 0) {
         var argv_slice: std.ArrayList([]const u8) = .{};
         defer argv_slice.deinit(xm.allocator);
 
@@ -634,6 +664,43 @@ test "client exec payload preserves command and shell" {
     try std.testing.expect(client_record_exec("printf exec\x00/bin/sh\x00"));
     try std.testing.expectEqualStrings("printf exec", client_exec_command.?);
     try std.testing.expectEqualStrings("/bin/sh", client_exec_shell.?);
+}
+
+test "client shell request uses shell message" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-shell-request-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+        client_proc = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    client_send_shell_request();
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.shell))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(usize, 0), c.imsg.imsg_get_len(&imsg_msg));
 }
 
 test "client lock command runs shell command then sends unlock" {

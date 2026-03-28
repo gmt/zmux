@@ -21,10 +21,21 @@ const server_fn = @import("server-fn.zig");
 const status_runtime = @import("status-runtime.zig");
 const win_mod = @import("window.zig");
 
+fn toggleReadonlyFlags(cl: *T.Client) void {
+    if (cl.flags & T.CLIENT_READONLY != 0)
+        cl.flags &= ~(T.CLIENT_READONLY | T.CLIENT_IGNORESIZE)
+    else
+        cl.flags |= T.CLIENT_READONLY | T.CLIENT_IGNORESIZE;
+}
+
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const tc = cmdq.cmdq_get_target_client(item);
     const cl = tc orelse cmdq.cmdq_get_client(item);
+
+    if (args.has('r')) {
+        if (cl) |c| toggleReadonlyFlags(c);
+    }
 
     var target: T.CmdFindState = .{};
     const tflag = args.get('t');
@@ -251,4 +262,70 @@ test "switch-client -T rejects a missing key table" {
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("prefix", client.key_table_name.?);
     try std.testing.expect(client.session == setup.session);
+}
+
+test "switch-client -r toggles readonly flags on the target client before switching to the next session" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var alpha = switchClientTestMakeSession("switch-client-alpha");
+    defer switchClientTestFreeSession(&alpha);
+    var beta = switchClientTestMakeSession("switch-client-beta");
+    defer switchClientTestFreeSession(&beta);
+
+    var queue_client = switchClientTestMakeClient("switch-client-queue-client", alpha.session);
+    defer switchClientTestFreeClient(&queue_client);
+    var target_client = switchClientTestMakeClient("switch-client-target-client", alpha.session);
+    defer switchClientTestFreeClient(&target_client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-r", "-n" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+        .cmdlist = &list,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expect(target_client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE != 0);
+    try std.testing.expect(queue_client.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
+    try std.testing.expect(target_client.session == beta.session);
+}
+
+test "switch-client -r clears readonly flags on the target client before switching to the last session" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var alpha = switchClientTestMakeSession("switch-client-last-alpha");
+    defer switchClientTestFreeSession(&alpha);
+    var beta = switchClientTestMakeSession("switch-client-last-beta");
+    defer switchClientTestFreeSession(&beta);
+
+    var queue_client = switchClientTestMakeClient("switch-client-last-queue-client", beta.session);
+    defer switchClientTestFreeClient(&queue_client);
+    var target_client = switchClientTestMakeClient("switch-client-last-target-client", alpha.session);
+    defer switchClientTestFreeClient(&target_client);
+    target_client.last_session = beta.session;
+    target_client.flags |= T.CLIENT_READONLY | T.CLIENT_IGNORESIZE;
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-r", "-l" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+        .cmdlist = &list,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expect(target_client.flags & T.CLIENT_READONLY == 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE == 0);
+    try std.testing.expect(queue_client.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
+    try std.testing.expect(target_client.session == beta.session);
 }

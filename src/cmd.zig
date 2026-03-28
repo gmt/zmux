@@ -170,6 +170,7 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_set_environment.entry,
     &cmd_show_environment.entry,
     &cmd_set_option.entry,
+    &cmd_set_option.entry_hook,
     &cmd_set_option.entry_window,
     &cmd_show_options.entry,
     &cmd_show_options.entry_window,

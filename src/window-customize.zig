@@ -19,12 +19,14 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
+const cmd_options = @import("cmd-options.zig");
 const format_mod = @import("format.zig");
 const mode_tree = @import("mode-tree.zig");
 const options_table = @import("options-table.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
@@ -32,7 +34,7 @@ const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
 const DEFAULT_FORMAT = "#{option_name}: #{option_value}#{?option_unit, #{option_unit},}#{?option_inherited, [inherited],}";
-const HELP_TEXT = "Arrows move  left/right fold  H hide inherited  Enter inspect  q cancel";
+const HELP_TEXT = "Arrows move  left/right fold  Enter edit  u unset  d reset  H hide inherited  q cancel";
 
 const ScopeKind = enum(u8) {
     server = 0,
@@ -41,12 +43,30 @@ const ScopeKind = enum(u8) {
     pane = 3,
 };
 
-const OptionMarker = struct {};
+const OptionItem = struct {
+    target: cmd_options.ResolvedTarget,
+    name: []u8,
+    idx: ?u32,
+};
+
+const PromptAction = enum(u8) {
+    edit,
+    unset,
+    reset,
+};
+
+const OptionPromptState = struct {
+    pane_id: u32,
+    target: cmd_options.ResolvedTarget,
+    name: []u8,
+    idx: ?u32,
+    action: PromptAction,
+};
 
 const CustomizeModeData = struct {
     fs: T.CmdFindState,
     tree: *mode_tree.Data,
-    markers: std.ArrayList(*OptionMarker) = .{},
+    items: std.ArrayList(*OptionItem) = .{},
     format: []u8,
     filter: ?[]u8 = null,
     hide_inherited: bool = false,
@@ -168,6 +188,16 @@ fn windowCustomizeCommand(
         rebuildAndDraw(wme);
         return;
     }
+    if (std.mem.eql(u8, command, "unset-current")) {
+        const item = currentOptionItem(data) orelse return;
+        promptForCurrentItem(client orelse return, wme.wp, item, .unset);
+        return;
+    }
+    if (std.mem.eql(u8, command, "reset-current")) {
+        const item = currentOptionItem(data) orelse return;
+        promptForCurrentItem(client orelse return, wme.wp, item, .reset);
+        return;
+    }
 
     unsupportedCommand(client, command);
     redraw(wme);
@@ -204,8 +234,8 @@ fn windowCustomizeKey(
 fn windowCustomizeClose(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
     mode_tree.free(data.tree);
-    freeMarkers(data);
-    data.markers.deinit(xm.allocator);
+    freeItems(data);
+    data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.destroy(data);
@@ -281,7 +311,7 @@ fn redraw(wme: *T.WindowModeEntry) void {
 
 fn buildTree(tree: *mode_tree.Data) void {
     const data: *CustomizeModeData = @ptrCast(@alignCast(tree.modedata.?));
-    freeMarkers(data);
+    freeItems(data);
 
     buildScope(data, tree, .server, "Server Options", opts.global_options);
     if (data.fs.s) |session_ptr| buildScope(data, tree, .session, "Session Options", session_ptr.options);
@@ -325,6 +355,7 @@ fn appendOption(
     oe: ?*const T.OptionsTableEntry,
     scope_label: []const u8,
 ) void {
+    const target = targetForScope(scope_kind, &data.fs, oo);
     const local_value = opts.options_get_only(oo, base_name);
     const value = local_value orelse opts.options_get(oo, base_name) orelse return;
     const inherited = local_value == null and oo.parent != null;
@@ -334,19 +365,19 @@ fn appendOption(
     switch (value.*) {
         .array => |arr| {
             if (arr.items.len == 0) {
-                appendRenderedOption(data, tree, parent, scope_kind, base_name, "", oe, scope_label, inherited);
+                appendRenderedOption(data, tree, parent, scope_kind, target, base_name, null, "", oe, scope_label, inherited);
                 return;
             }
             for (arr.items) |item| {
                 const indexed_name = xm.xasprintf("{s}[{d}]", .{ base_name, item.index });
                 defer xm.allocator.free(indexed_name);
-                appendRenderedOption(data, tree, parent, scope_kind, indexed_name, item.value, oe, scope_label, inherited);
+                appendRenderedOption(data, tree, parent, scope_kind, target, indexed_name, item.index, item.value, oe, scope_label, inherited);
             }
         },
         else => {
             const value_text = opts.options_value_to_string(base_name, value, oe);
             defer xm.allocator.free(value_text);
-            appendRenderedOption(data, tree, parent, scope_kind, base_name, value_text, oe, scope_label, inherited);
+            appendRenderedOption(data, tree, parent, scope_kind, target, base_name, null, value_text, oe, scope_label, inherited);
         },
     }
 }
@@ -356,7 +387,9 @@ fn appendRenderedOption(
     tree: *mode_tree.Data,
     parent: *mode_tree.Item,
     scope_kind: ScopeKind,
+    target: cmd_options.ResolvedTarget,
     display_name: []const u8,
+    idx: ?u32,
     display_value: []const u8,
     oe: ?*const T.OptionsTableEntry,
     scope_label: []const u8,
@@ -374,14 +407,18 @@ fn appendRenderedOption(
         fallbackText(display_name, display_value, unit, inherited);
     defer xm.allocator.free(rendered);
 
-    const marker = xm.allocator.create(OptionMarker) catch unreachable;
-    marker.* = .{};
-    data.markers.append(xm.allocator, marker) catch unreachable;
+    const item = xm.allocator.create(OptionItem) catch unreachable;
+    item.* = .{
+        .target = target,
+        .name = xm.xstrdup(optionBaseName(display_name, idx)),
+        .idx = idx,
+    };
+    data.items.append(xm.allocator, item) catch unreachable;
 
     _ = mode_tree.add(
         tree,
         parent,
-        @ptrCast(marker),
+        @ptrCast(item),
         optionTag(scope_kind, display_name),
         display_name,
         rendered,
@@ -536,8 +573,318 @@ fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client) void {
         return;
     }
 
+    const item = currentOptionItem(data) orelse return;
+    editCurrentItem(wme, client, item);
+}
+
+fn currentOptionItem(data: *CustomizeModeData) ?*OptionItem {
+    const current = mode_tree.getCurrent(data.tree) orelse return null;
+    return @ptrCast(@alignCast(current));
+}
+
+fn editCurrentItem(wme: *T.WindowModeEntry, client: ?*T.Client, item: *OptionItem) void {
     const cl = client orelse return;
-    status_runtime.present_client_message(cl, "Options-mode editing not supported yet");
+    const oe = opts.options_table_entry(item.name);
+
+    if (oe) |entry| {
+        switch (entry.type) {
+            .flag => {
+                const flag = opts.options_get_number(item.target.options, item.name);
+                opts.options_set_number(item.target.options, item.name, if (flag == 0) 1 else 0);
+                cmd_options.apply_target_side_effects(item.target, item.name);
+                rebuildAndDraw(wme);
+                return;
+            },
+            .choice => {
+                const next = nextChoiceValue(item.target.options, item.name, entry);
+                opts.options_set_number(item.target.options, item.name, next);
+                cmd_options.apply_target_side_effects(item.target, item.name);
+                rebuildAndDraw(wme);
+                return;
+            },
+            else => {},
+        }
+    }
+
+    promptForCurrentItem(cl, wme.wp, item, .edit);
+}
+
+fn promptForCurrentItem(client: *T.Client, pane: *T.WindowPane, item: *const OptionItem, action: PromptAction) void {
+    const prompt = switch (action) {
+        .edit => buildEditPrompt(item),
+        .unset => buildUnsetPrompt(item),
+        .reset => buildResetPrompt(item),
+    } orelse return;
+    defer xm.allocator.free(prompt);
+
+    const input = switch (action) {
+        .edit => currentEditValue(item),
+        .unset, .reset => xm.xstrdup(""),
+    };
+    defer xm.allocator.free(input);
+
+    const state = createPromptState(pane, item, action);
+    const flags: u32 = if (action == .edit)
+        status_prompt.PROMPT_NOFORMAT
+    else
+        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT;
+    status_prompt.status_prompt_set(
+        client,
+        null,
+        prompt,
+        input,
+        optionPromptCallback,
+        null,
+        freePromptState,
+        state,
+        flags,
+        .command,
+    );
+}
+
+fn buildEditPrompt(item: *const OptionItem) ?[]u8 {
+    const scope_text = scopeText(item.target);
+    defer xm.allocator.free(scope_text);
+
+    const scope_sep = if (scope_text.len != 0) ", for " else "";
+    if (item.idx) |idx|
+        return xm.xasprintf("({s}[{d}]{s}{s}) ", .{ item.name, idx, scope_sep, scope_text });
+
+    if (isArrayOption(item.name))
+        return xm.xasprintf("({s}[+]{s}{s}) ", .{ item.name, scope_sep, scope_text });
+
+    return xm.xasprintf("({s}{s}{s}) ", .{ item.name, scope_sep, scope_text });
+}
+
+fn buildUnsetPrompt(item: *const OptionItem) ?[]u8 {
+    if (item.idx) |idx|
+        return xm.xasprintf("Unset {s}[{d}]? ", .{ item.name, idx });
+    return xm.xasprintf("Unset {s}? ", .{item.name});
+}
+
+fn buildResetPrompt(item: *const OptionItem) ?[]u8 {
+    if (item.idx != null) return null;
+    return xm.xasprintf("Reset {s} to default? ", .{item.name});
+}
+
+fn currentEditValue(item: *const OptionItem) []u8 {
+    const value = opts.options_get(item.target.options, item.name) orelse return xm.xstrdup("");
+    if (item.idx) |idx| {
+        const entry = opts.options_array_get_value(value, idx) orelse return xm.xstrdup("");
+        return xm.xstrdup(entry);
+    }
+    return opts.options_value_to_string(item.name, value, opts.options_table_entry(item.name));
+}
+
+fn createPromptState(pane: *T.WindowPane, item: *const OptionItem, action: PromptAction) *OptionPromptState {
+    const state = xm.allocator.create(OptionPromptState) catch unreachable;
+    state.* = .{
+        .pane_id = pane.id,
+        .target = item.target,
+        .name = xm.xstrdup(item.name),
+        .idx = item.idx,
+        .action = action,
+    };
+    return state;
+}
+
+fn freePromptState(data: ?*anyopaque) void {
+    const state: *OptionPromptState = @ptrCast(@alignCast(data orelse return));
+    xm.allocator.free(state.name);
+    xm.allocator.destroy(state);
+}
+
+fn optionPromptCallback(client: *T.Client, data: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
+    const state: *OptionPromptState = @ptrCast(@alignCast(data orelse return 0));
+    const text = input orelse return 0;
+
+    switch (state.action) {
+        .edit => {
+            if (text.len == 0) return 0;
+            applyEdit(state, client, text);
+        },
+        .unset => {
+            if (confirmed(text))
+                applyUnset(state, client);
+        },
+        .reset => {
+            if (confirmed(text))
+                applyReset(state, client);
+        },
+    }
+    return 0;
+}
+
+fn confirmed(text: []const u8) bool {
+    return text.len == 1 and std.ascii.toLower(text[0]) == 'y';
+}
+
+fn applyEdit(state: *OptionPromptState, client: *T.Client, text: []const u8) void {
+    const oe = opts.options_table_entry(state.name);
+    var idx = state.idx;
+    if (oe) |entry| {
+        if (entry.type == .array and idx == null)
+            idx = nextArrayIndex(state.target.options, state.name);
+    }
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    if (!opts.options_set_from_string(state.target.options, oe, state.name, idx, text, false, &cause)) {
+        if (cause) |msg| {
+            uppercaseFirst(msg);
+            status_runtime.present_client_message(client, msg);
+        }
+        return;
+    }
+
+    cmd_options.apply_target_side_effects(state.target, state.name);
+    rebuildIfStillActive(state.pane_id);
+}
+
+fn applyUnset(state: *OptionPromptState, client: *T.Client) void {
+    const oe = opts.options_table_entry(state.name);
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    if (!opts.options_remove_or_default(state.target.options, oe, state.name, state.idx, state.target.global, &cause)) {
+        if (cause) |msg| {
+            uppercaseFirst(msg);
+            status_runtime.present_client_message(client, msg);
+        }
+        return;
+    }
+
+    cmd_options.apply_target_side_effects(state.target, state.name);
+    rebuildIfStillActive(state.pane_id);
+}
+
+fn applyReset(state: *OptionPromptState, client: *T.Client) void {
+    if (state.idx != null) return;
+
+    const oe = opts.options_table_entry(state.name);
+    var current: ?*T.Options = state.target.options;
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    while (current) |options_ptr| : (current = options_ptr.parent) {
+        if (opts.options_get_only(options_ptr, state.name) == null) continue;
+        const global = isGlobalOptions(options_ptr);
+        if (!opts.options_remove_or_default(options_ptr, oe, state.name, null, global, &cause)) {
+            if (cause) |msg| {
+                uppercaseFirst(msg);
+                status_runtime.present_client_message(client, msg);
+            }
+            return;
+        }
+    }
+
+    cmd_options.apply_target_side_effects(state.target, state.name);
+    rebuildIfStillActive(state.pane_id);
+}
+
+fn rebuildIfStillActive(pane_id: u32) void {
+    const pane = window.window_pane_find_by_id(pane_id) orelse return;
+    const wme = window.window_pane_mode(pane) orelse return;
+    if (wme.mode != &window_customize_mode) return;
+    rebuildAndDraw(wme);
+}
+
+fn nextChoiceValue(oo: *T.Options, name: []const u8, oe: *const T.OptionsTableEntry) i64 {
+    const choices = oe.choices orelse return 0;
+    if (choices.len == 0) return 0;
+
+    var choice = opts.options_get_number(oo, name);
+    choice += 1;
+    if (choice >= @as(i64, @intCast(choices.len)))
+        choice = 0;
+    return choice;
+}
+
+fn nextArrayIndex(oo: *T.Options, name: []const u8) ?u32 {
+    const value = opts.options_get(oo, name) orelse return 0;
+    return switch (value.*) {
+        .array => |arr| blk: {
+            var next: u32 = 0;
+            for (arr.items) |item| {
+                if (item.index == next) {
+                    next += 1;
+                    continue;
+                }
+                if (item.index > next) break;
+            }
+            break :blk next;
+        },
+        else => null,
+    };
+}
+
+fn uppercaseFirst(text: []u8) void {
+    if (text.len == 0) return;
+    text[0] = std.ascii.toUpper(text[0]);
+}
+
+fn isArrayOption(name: []const u8) bool {
+    const oe = opts.options_table_entry(name) orelse return false;
+    return oe.type == .array;
+}
+
+fn scopeText(target: cmd_options.ResolvedTarget) []u8 {
+    return switch (target.kind) {
+        .server => xm.xstrdup(""),
+        .session => xm.xasprintf("session {s}", .{if (target.session) |session_ptr| session_ptr.name else ""}),
+        .window => xm.xasprintf("window {d}", .{if (target.winlink) |wl| wl.idx else 0}),
+        .pane => blk: {
+            const pane_ptr = target.pane orelse break :blk xm.xasprintf("pane {d}", .{0});
+            const pane_window = target.window orelse pane_ptr.window;
+            break :blk xm.xasprintf("pane {d}", .{window.window_pane_index(pane_window, pane_ptr) orelse 0});
+        },
+    };
+}
+
+fn optionBaseName(display_name: []const u8, idx: ?u32) []const u8 {
+    if (idx == null) return display_name;
+    const open = std.mem.lastIndexOfScalar(u8, display_name, '[') orelse return display_name;
+    return display_name[0..open];
+}
+
+fn targetForScope(scope_kind: ScopeKind, fs: *const T.CmdFindState, oo: *T.Options) cmd_options.ResolvedTarget {
+    return switch (scope_kind) {
+        .server => .{
+            .kind = .server,
+            .options = oo,
+            .global = true,
+        },
+        .session => .{
+            .kind = .session,
+            .options = oo,
+            .global = false,
+            .session = fs.s,
+            .winlink = fs.wl,
+            .window = fs.w,
+            .pane = fs.wp,
+        },
+        .window => .{
+            .kind = .window,
+            .options = oo,
+            .global = false,
+            .session = fs.s,
+            .winlink = fs.wl,
+            .window = fs.w,
+            .pane = fs.wp,
+        },
+        .pane => .{
+            .kind = .pane,
+            .options = oo,
+            .global = false,
+            .session = fs.s,
+            .winlink = fs.wl,
+            .window = fs.w,
+            .pane = fs.wp,
+        },
+    };
+}
+
+fn isGlobalOptions(oo: *T.Options) bool {
+    return oo == opts.global_options or oo == opts.global_s_options or oo == opts.global_w_options;
 }
 
 fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
@@ -587,9 +934,12 @@ fn optionTag(scope_kind: ScopeKind, name: []const u8) u64 {
         (std.hash.Wyhash.hash(@as(u64, @intFromEnum(scope_kind)) + 1, name) & 0x0000_ffff_ffff_ffff);
 }
 
-fn freeMarkers(data: *CustomizeModeData) void {
-    for (data.markers.items) |marker| xm.allocator.destroy(marker);
-    data.markers.clearRetainingCapacity();
+fn freeItems(data: *CustomizeModeData) void {
+    for (data.items.items) |item| {
+        xm.allocator.free(item.name);
+        xm.allocator.destroy(item);
+    }
+    data.items.clearRetainingCapacity();
 }
 
 fn initTestGlobals() void {
@@ -767,7 +1117,13 @@ test "window-customize honours option format fields and filters" {
     try std.testing.expect(containsLineText(data.tree, "@pane-note|local|0"));
 }
 
-test "window-customize choose reports that editing is still unsupported" {
+fn sendPromptKey(client: *T.Client, key: T.key_code, bytes: []const u8) bool {
+    var event = T.key_event{ .key = key, .len = bytes.len };
+    if (bytes.len != 0) @memcpy(event.data[0..bytes.len], bytes);
+    return status_prompt.status_prompt_handle_key(client, &event);
+}
+
+test "window-customize choose edits the selected option through the shared prompt" {
     const sess = @import("session.zig");
 
     initTestGlobals();
@@ -807,6 +1163,162 @@ test "window-customize choose reports that editing is still unsupported" {
     defer command_args.deinit();
     windowCustomizeCommand(wme, &client, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
 
-    try std.testing.expectEqualStrings("Options-mode editing not supported yet", client.message_string.?);
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    var backspaces: usize = opts.options_get_string(setup.pane.options, "@pane-note").len;
+    while (backspaces > 0) : (backspaces -= 1)
+        try std.testing.expect(sendPromptKey(&client, T.KEYC_BSPACE, "\x7f"));
+    try std.testing.expect(sendPromptKey(&client, 'u', "u"));
+    try std.testing.expect(sendPromptKey(&client, 'p', "p"));
+    try std.testing.expect(sendPromptKey(&client, 'd', "d"));
+    try std.testing.expect(sendPromptKey(&client, 'a', "a"));
+    try std.testing.expect(sendPromptKey(&client, 't', "t"));
+    try std.testing.expect(sendPromptKey(&client, 'e', "e"));
+    try std.testing.expect(sendPromptKey(&client, T.C0_CR, "\r"));
+
+    try std.testing.expectEqualStrings("update", opts.options_get_string(setup.pane.options, "@pane-note"));
+    try std.testing.expect(status_prompt.status_prompt_active(&client) == false);
     try std.testing.expect(window.window_pane_mode(setup.pane) == wme);
+}
+
+test "window-customize choose toggles flag options without prompting" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-customize-toggle");
+    defer if (sess.session_find("window-customize-toggle") != null) sess.session_destroy(setup.session, false, "test");
+
+    const initial = opts.options_get_number(setup.pane.window.options, "automatic-rename");
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(
+        xm.allocator,
+        &.{ "-f", "#{==:#{option_name},automatic-rename}" },
+        "F:f:Nt:yZ",
+        0,
+        0,
+        &cause,
+    );
+    defer args.deinit();
+
+    var target = targetState(setup);
+    const wme = enterMode(setup.pane, &target, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    var client = makeClient(setup.session, "options-toggle-client", "/dev/pts/511");
+    defer freeClient(&client);
+
+    const data = modeData(wme);
+    _ = mode_tree.down(data.tree, false);
+
+    cause = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{"choose"}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowCustomizeCommand(wme, &client, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
+
+    try std.testing.expectEqual(if (initial == 0) @as(i64, 1) else @as(i64, 0), opts.options_get_number(setup.pane.window.options, "automatic-rename"));
+    try std.testing.expect(status_prompt.status_prompt_active(&client) == false);
+}
+
+test "window-customize unset-current removes the selected local option" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-customize-unset");
+    defer if (sess.session_find("window-customize-unset") != null) sess.session_destroy(setup.session, false, "test");
+
+    opts.options_set_string(setup.pane.options, false, "@pane-note", "local");
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(
+        xm.allocator,
+        &.{ "-f", "#{==:#{option_name},@pane-note}" },
+        "F:f:Nt:yZ",
+        0,
+        0,
+        &cause,
+    );
+    defer args.deinit();
+
+    var target = targetState(setup);
+    const wme = enterMode(setup.pane, &target, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    var client = makeClient(setup.session, "options-unset-client", "/dev/pts/521");
+    defer freeClient(&client);
+
+    const data = modeData(wme);
+    _ = mode_tree.down(data.tree, false);
+
+    cause = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{"unset-current"}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowCustomizeCommand(wme, &client, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
+
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expect(sendPromptKey(&client, 'y', "y"));
+
+    try std.testing.expect(opts.options_get_only(setup.pane.options, "@pane-note") == null);
+}
+
+test "window-customize reset-current clears local and inherited overrides back to default" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-customize-reset");
+    defer if (sess.session_find("window-customize-reset") != null) sess.session_destroy(setup.session, false, "test");
+
+    const default_status_left = xm.xstrdup(opts.options_get_string(opts.global_s_options, "status-left"));
+    defer xm.allocator.free(default_status_left);
+
+    opts.options_set_string(opts.global_s_options, false, "status-left", "global-left");
+    opts.options_set_string(setup.session.options, false, "status-left", "session-left");
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(
+        xm.allocator,
+        &.{ "-f", "#{==:#{option_name},status-left}" },
+        "F:f:Nt:yZ",
+        0,
+        0,
+        &cause,
+    );
+    defer args.deinit();
+
+    var target = targetState(setup);
+    const wme = enterMode(setup.pane, &target, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    var client = makeClient(setup.session, "options-reset-client", "/dev/pts/531");
+    defer freeClient(&client);
+
+    const data = modeData(wme);
+    _ = mode_tree.down(data.tree, false);
+    _ = mode_tree.down(data.tree, false);
+
+    cause = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{"reset-current"}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowCustomizeCommand(wme, &client, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
+
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expect(sendPromptKey(&client, 'y', "y"));
+
+    try std.testing.expect(opts.options_get_only(setup.session.options, "status-left") == null);
+    try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(opts.global_s_options, "status-left"));
+    try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(setup.session.options, "status-left"));
 }

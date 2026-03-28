@@ -280,6 +280,9 @@ fn copyModeCommand(
         if (args.value_at(1)) |arg|
             if (setJumpCharacter(modeData(wme), .to_forward, arg))
                 repeatJump(wme, .to_forward);
+    } else if (std.mem.eql(u8, command, "next-paragraph")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) nextParagraph(wme);
     } else if (std.mem.eql(u8, command, "next-space")) {
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, "");
@@ -313,6 +316,9 @@ fn copyModeCommand(
     } else if (std.mem.eql(u8, command, "page-up")) {
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) pageUpMode(wme, false);
+    } else if (std.mem.eql(u8, command, "previous-paragraph")) {
+        var remaining = count;
+        while (remaining > 0) : (remaining -= 1) previousParagraph(wme);
     } else if (std.mem.eql(u8, command, "page-down")) {
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) {
@@ -694,6 +700,25 @@ fn cursorPreviousWord(wme: *T.WindowModeEntry, separators: []const u8, already: 
     applyMotionReader(wme, &gr);
 }
 
+fn previousParagraph(wme: *T.WindowModeEntry) void {
+    var row = absoluteCursorRow(wme);
+    while (row > 0 and backingLineLength(wme, row) == 0) : (row -= 1) {}
+    while (row > 0 and backingLineLength(wme, row) > 0) : (row -= 1) {}
+    moveCursorToRow(wme, row, 0);
+}
+
+fn nextParagraph(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const backing_rows = rowCount(data.backing);
+    if (backing_rows == 0) return;
+
+    var row = absoluteCursorRow(wme);
+    const max_row = backing_rows - 1;
+    while (row < max_row and backingLineLength(wme, row) == 0) : (row += 1) {}
+    while (row < max_row and backingLineLength(wme, row) > 0) : (row += 1) {}
+    moveCursorToRow(wme, row, backingLineLength(wme, row));
+}
+
 fn cursorStartOfLine(wme: *T.WindowModeEntry) void {
     var gr: T.GridReader = undefined;
     if (!startMotionReader(wme, &gr)) return;
@@ -750,10 +775,22 @@ fn rowCount(s: *const T.Screen) u32 {
     return s.grid.sy;
 }
 
+fn backingLineLength(wme: *T.WindowModeEntry, row: u32) u32 {
+    const data = modeData(wme);
+    if (row >= data.backing.grid.sy) return 0;
+    return grid.line_length(data.backing.grid, row);
+}
+
 fn maxTop(backing: *const T.Screen, wp: *const T.WindowPane) u32 {
     const rows = backing.grid.sy;
     const view = viewRows(wp);
     return if (rows > view) rows - view else 0;
+}
+
+fn moveCursorToRow(wme: *T.WindowModeEntry, row: u32, x: u32) void {
+    setAbsoluteCursorRow(wme, row);
+    modeData(wme).cx = x;
+    clampCursorX(wme);
 }
 
 fn setAbsoluteCursorRow(wme: *T.WindowModeEntry, row: u32) void {
@@ -1604,6 +1641,108 @@ test "window-copy downward commands keep viewport scrolling separate from cancel
     try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
     try runCopyModeTestCommand(wme, "cursor-down-and-cancel");
     try std.testing.expect(window.window_pane_mode(&target) == null);
+}
+
+test "window-copy paragraph motions follow tmux blank-line paragraph scans" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(8, 8, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 5, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 8, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 5, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 70,
+        .name = xm.xstrdup("copy-source-paragraph"),
+        .sx = 8,
+        .sy = 8,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 71,
+        .name = xm.xstrdup("copy-target-paragraph"),
+        .sx = 8,
+        .sy = 5,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 72,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 8,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 7 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 73,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 5,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 4 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "alpha");
+    setGridLineText(source.base.grid, 1, "beta");
+    setGridLineText(source.base.grid, 3, "gamma");
+    setGridLineText(source.base.grid, 4, "delta");
+    setGridLineText(source.base.grid, 7, "omega");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "next-paragraph");
+    try std.testing.expectEqual(@as(u32, 2), absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cx);
+
+    wme.prefix = 2;
+    try runCopyModeTestCommand(wme, "next-paragraph");
+    try std.testing.expectEqual(@as(u32, 7), absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+
+    try runCopyModeTestCommand(wme, "previous-paragraph");
+    try std.testing.expectEqual(@as(u32, 6), absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cx);
+
+    wme.prefix = 2;
+    try runCopyModeTestCommand(wme, "previous-paragraph");
+    try std.testing.expectEqual(@as(u32, 0), absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
 }
 
 test "window-copy goto-line accepts numeric offsets and clamps within the reduced snapshot" {

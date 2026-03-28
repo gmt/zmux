@@ -245,6 +245,17 @@ fn template_replace(template: []const u8, replacement: []const u8, idx: usize) [
 }
 
 pub fn render_overlay_payload(client: *T.Client, tty_sx: u32, pane_area_sy: u32, row_offset: u32) !?[]u8 {
+    return render_overlay_payload_region(client, 0, 0, tty_sx, pane_area_sy, row_offset);
+}
+
+pub fn render_overlay_payload_region(
+    client: *T.Client,
+    view_x: u32,
+    view_y: u32,
+    tty_sx: u32,
+    pane_area_sy: u32,
+    row_offset: u32,
+) !?[]u8 {
     if (!overlay_active(client) or tty_sx == 0 or pane_area_sy == 0) return null;
 
     const session = client.session orelse return null;
@@ -259,7 +270,7 @@ pub fn render_overlay_payload(client: *T.Client, tty_sx: u32, pane_area_sy: u32,
 
     for (w.panes.items) |wp| {
         if (!win.window_pane_visible(wp)) continue;
-        const bounds = clipped_bounds(win.window_pane_draw_bounds(wp), tty_sx, pane_area_sy) orelse continue;
+        const bounds = clipped_bounds_region(win.window_pane_draw_bounds(wp), view_x, view_y, tty_sx, pane_area_sy) orelse continue;
         const pane_index = win.window_pane_index(w, wp) orelse continue;
         const pane_colour = if (w.active == wp) active_colour else colour;
 
@@ -285,13 +296,21 @@ const ClippedBounds = struct {
 };
 
 fn clipped_bounds(bounds: win.PaneDrawBounds, max_sx: u32, max_sy: u32) ?ClippedBounds {
-    if (bounds.xoff >= max_sx or bounds.yoff >= max_sy) return null;
-    const sx = @min(bounds.sx, max_sx - bounds.xoff);
-    const sy = @min(bounds.sy, max_sy - bounds.yoff);
+    return clipped_bounds_region(bounds, 0, 0, max_sx, max_sy);
+}
+
+fn clipped_bounds_region(bounds: win.PaneDrawBounds, view_x: u32, view_y: u32, max_sx: u32, max_sy: u32) ?ClippedBounds {
+    const start_x = @max(bounds.xoff, view_x);
+    const start_y = @max(bounds.yoff, view_y);
+    const end_x = @min(bounds.xoff + bounds.sx, view_x + max_sx);
+    const end_y = @min(bounds.yoff + bounds.sy, view_y + max_sy);
+    if (start_x >= end_x or start_y >= end_y) return null;
+    const sx = end_x - start_x;
+    const sy = end_y - start_y;
     if (sx == 0 or sy == 0) return null;
     return .{
-        .xoff = bounds.xoff,
-        .yoff = bounds.yoff,
+        .xoff = start_x - view_x,
+        .yoff = start_y - view_y,
         .sx = sx,
         .sy = sy,
     };

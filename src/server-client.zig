@@ -645,6 +645,13 @@ const BodyRenderResult = struct {
     cursor_y: u32 = 0,
 };
 
+pub const ClientViewport = struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    sx: u32 = 0,
+    sy: u32 = 0,
+};
+
 fn visiblePaneCount(w: *T.Window) usize {
     var count: usize = 0;
     for (w.panes.items) |pane| {
@@ -653,10 +660,10 @@ fn visiblePaneCount(w: *T.Window) usize {
     return count;
 }
 
-fn canUseCachedPaneDraw(w: *T.Window, wp: *T.WindowPane) bool {
+fn canUseCachedPaneDraw(w: *T.Window, wp: *T.WindowPane, viewport: ClientViewport) bool {
     if (visiblePaneCount(w) != 1) return false;
     const bounds = win_mod.window_pane_draw_bounds(wp);
-    return bounds.xoff == 0 and bounds.yoff == 0;
+    return bounds.xoff == 0 and bounds.yoff == 0 and viewport.x == 0 and viewport.y == 0;
 }
 
 fn redraw_needs_body(redraw_flags: u64) bool {
@@ -699,6 +706,8 @@ fn clear_rendered_pane_flags(w: *T.Window, dirty_only: bool) void {
 
 fn current_body_cursor(
     w: *T.Window,
+    view_x: u32,
+    view_y: u32,
     sx_limit: u32,
     sy_limit: u32,
     row_offset: u32,
@@ -718,12 +727,109 @@ fn current_body_cursor(
         0;
     const cursor_x = bounds.xoff + cursor_prefix + screen.cx;
     const cursor_y = bounds.yoff + screen.cy;
-    if (cursor_x >= sx_limit or cursor_y >= sy_limit) return result;
+    if (cursor_x < view_x or cursor_x >= view_x + sx_limit or
+        cursor_y < view_y or cursor_y >= view_y + sy_limit)
+        return result;
 
     result.cursor_visible = true;
-    result.cursor_x = cursor_x;
-    result.cursor_y = row_offset + cursor_y;
+    result.cursor_x = cursor_x - view_x;
+    result.cursor_y = row_offset + (cursor_y - view_y);
     return result;
+}
+
+fn visibleWindowWidth(w: *T.Window) u32 {
+    var width = w.sx;
+    for (w.panes.items) |pane| {
+        if (!win_mod.window_pane_visible(pane)) continue;
+        const bounds = win_mod.window_pane_draw_bounds(pane);
+        width = @max(width, bounds.xoff + bounds.sx);
+    }
+    return width;
+}
+
+fn visibleWindowHeight(w: *T.Window) u32 {
+    var height = w.sy;
+    for (w.panes.items) |pane| {
+        if (!win_mod.window_pane_visible(pane)) continue;
+        const bounds = win_mod.window_pane_draw_bounds(pane);
+        height = @max(height, bounds.yoff + bounds.sy);
+    }
+    return height;
+}
+
+pub fn server_client_viewport(cl: *T.Client) ?ClientViewport {
+    const s = cl.session orelse return null;
+    const wl = s.curw orelse return null;
+    const w = wl.window;
+    const wp = w.active orelse return null;
+    const overlay_rows = status.overlay_rows(cl);
+    const tty_sx = if (cl.tty.sx == 0) win_mod.window_pane_total_width(wp) else cl.tty.sx;
+    const tty_sy = if (cl.tty.sy == 0) wp.base.grid.sy + overlay_rows else cl.tty.sy;
+    const pane_area_sy = if (tty_sy > overlay_rows) tty_sy - overlay_rows else 0;
+    const full_sx = visibleWindowWidth(w);
+    const full_sy = visibleWindowHeight(w);
+
+    var viewport = ClientViewport{
+        .sx = if (tty_sx >= full_sx) full_sx else tty_sx,
+        .sy = if (pane_area_sy >= full_sy) full_sy else pane_area_sy,
+    };
+    if (viewport.sx == 0 or viewport.sy == 0) return viewport;
+
+    if (tty_sx >= full_sx and pane_area_sy >= full_sy) {
+        cl.pan_window = null;
+        cl.pan_ox = 0;
+        cl.pan_oy = 0;
+        return viewport;
+    }
+
+    if (cl.pan_window == w) {
+        if (viewport.sx >= full_sx)
+            cl.pan_ox = 0
+        else if (cl.pan_ox + viewport.sx > full_sx)
+            cl.pan_ox = full_sx - viewport.sx;
+        if (viewport.sy >= full_sy)
+            cl.pan_oy = 0
+        else if (cl.pan_oy + viewport.sy > full_sy)
+            cl.pan_oy = full_sy - viewport.sy;
+        viewport.x = cl.pan_ox;
+        viewport.y = cl.pan_oy;
+        return viewport;
+    }
+
+    const screen = screen_mod.screen_current(wp);
+    if (!screen.cursor_visible) {
+        cl.pan_window = null;
+        return viewport;
+    }
+
+    const bounds = win_mod.window_pane_draw_bounds(wp);
+    const scrollbar = win_mod.window_pane_scrollbar_layout(wp);
+    const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
+        @min(bounds.sx, scrollbar.?.width + scrollbar.?.pad)
+    else
+        0;
+    const cursor_x = bounds.xoff + cursor_prefix + screen.cx;
+    const cursor_y = bounds.yoff + screen.cy;
+
+    if (viewport.sx < full_sx) {
+        if (cursor_x < viewport.sx)
+            viewport.x = 0
+        else if (cursor_x > full_sx - viewport.sx)
+            viewport.x = full_sx - viewport.sx
+        else
+            viewport.x = cursor_x - viewport.sx / 2;
+    }
+    if (viewport.sy < full_sy) {
+        if (cursor_y < viewport.sy)
+            viewport.y = 0
+        else if (cursor_y > full_sy - viewport.sy)
+            viewport.y = full_sy - viewport.sy
+        else
+            viewport.y = cursor_y - viewport.sy / 2;
+    }
+
+    cl.pan_window = null;
+    return viewport;
 }
 
 fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
@@ -733,8 +839,7 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const overlay_rows = status.overlay_rows(cl);
     const pane_row_offset = status.pane_row_offset(cl);
     const tty_sx = if (cl.tty.sx == 0) win_mod.window_pane_total_width(wp) else cl.tty.sx;
-    const tty_sy = if (cl.tty.sy == 0) wp.base.grid.sy + overlay_rows else cl.tty.sy;
-    const pane_area_sy = if (tty_sy > overlay_rows) tty_sy - overlay_rows else 0;
+    const viewport = server_client_viewport(cl) orelse return null;
     if (tty_sx == 0) return null;
 
     const body_needs_draw = redraw_needs_body(redraw_flags);
@@ -746,12 +851,12 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const overlay_active = cmd_display_panes.overlay_active(cl);
 
     var body = BodyRenderResult{};
-    if (full_body_needs_draw and pane_area_sy != 0) {
-        if (canUseCachedPaneDraw(wl.window, wp)) {
+    if (full_body_needs_draw and viewport.sy != 0) {
+        if (canUseCachedPaneDraw(wl.window, wp, viewport)) {
             win_mod.window_pane_update_scrollbar_geometry(wp);
             const pane_width = win_mod.window_pane_total_width(wp);
-            const sx = @min(tty_sx, pane_width);
-            const sy = @min(pane_area_sy, wp.base.grid.sy);
+            const sx = @min(viewport.sx, pane_width);
+            const sy = @min(viewport.sy, wp.base.grid.sy);
             if (sx != 0 and sy != 0) {
                 body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
                 body.cursor_visible = cl.pane_cache.cursor_visible;
@@ -759,7 +864,14 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
                 body.cursor_y = pane_row_offset + cl.pane_cache.cursor_y;
             }
         } else {
-            const rendered = tty_draw.tty_draw_render_window(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null;
+            const rendered = tty_draw.tty_draw_render_window_region(
+                wl.window,
+                viewport.x,
+                viewport.y,
+                viewport.sx,
+                viewport.sy,
+                pane_row_offset,
+            ) catch return null;
             body = .{
                 .payload = rendered.payload,
                 .cursor_visible = rendered.cursor_visible,
@@ -768,43 +880,57 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
             };
             tty_draw.tty_draw_invalidate(&cl.pane_cache);
         }
-    } else if (dirty_pane_needs_draw and pane_area_sy != 0) {
-        if (canUseCachedPaneDraw(wl.window, wp) and wp.flags & T.PANE_REDRAW != 0) {
+    } else if (dirty_pane_needs_draw and viewport.sy != 0) {
+        if (canUseCachedPaneDraw(wl.window, wp, viewport) and wp.flags & T.PANE_REDRAW != 0) {
             win_mod.window_pane_update_scrollbar_geometry(wp);
             const pane_width = win_mod.window_pane_total_width(wp);
-            const sx = @min(tty_sx, pane_width);
-            const sy = @min(pane_area_sy, wp.base.grid.sy);
+            const sx = @min(viewport.sx, pane_width);
+            const sy = @min(viewport.sy, wp.base.grid.sy);
             if (sx != 0 and sy != 0) {
                 body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
             }
         } else {
-            body.payload = tty_draw.tty_draw_render_dirty_panes(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null;
+            body.payload = tty_draw.tty_draw_render_dirty_panes_region(
+                wl.window,
+                viewport.x,
+                viewport.y,
+                viewport.sx,
+                viewport.sy,
+                pane_row_offset,
+            ) catch return null;
             if (body.payload.len != 0) tty_draw.tty_draw_invalidate(&cl.pane_cache);
         }
-        const cursor = current_body_cursor(wl.window, tty_sx, pane_area_sy, pane_row_offset);
+        const cursor = current_body_cursor(wl.window, viewport.x, viewport.y, viewport.sx, viewport.sy, pane_row_offset);
         body.cursor_visible = cursor.cursor_visible;
         body.cursor_x = cursor.cursor_x;
         body.cursor_y = cursor.cursor_y;
     } else {
-        body = current_body_cursor(wl.window, tty_sx, pane_area_sy, pane_row_offset);
+        body = current_body_cursor(wl.window, viewport.x, viewport.y, viewport.sx, viewport.sy, pane_row_offset);
     }
     defer if (body.payload.len != 0) xm.allocator.free(body.payload);
 
-    const border_payload = if (border_needs_draw and pane_area_sy != 0)
-        tty_draw.tty_draw_render_borders(&cl.tty, wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null
+    const border_payload = if (border_needs_draw and viewport.sy != 0)
+        tty_draw.tty_draw_render_borders_region(&cl.tty, wl.window, viewport.x, viewport.y, viewport.sx, viewport.sy, pane_row_offset) catch return null
     else
         &[_]u8{};
     defer if (border_payload.len != 0) xm.allocator.free(border_payload);
 
-    const scrollbar_payload = if (scrollbar_needs_draw and pane_area_sy != 0)
-        tty_draw.tty_draw_render_scrollbars(wl.window, tty_sx, pane_area_sy, pane_row_offset) catch return null
+    const scrollbar_payload = if (scrollbar_needs_draw and viewport.sy != 0)
+        tty_draw.tty_draw_render_scrollbars_region(wl.window, viewport.x, viewport.y, viewport.sx, viewport.sy, pane_row_offset) catch return null
     else
         &[_]u8{};
     defer if (scrollbar_payload.len != 0) xm.allocator.free(scrollbar_payload);
 
-    const overlay_payload = if (overlay_active and pane_area_sy != 0 and
+    const overlay_payload = if (overlay_active and viewport.sy != 0 and
         (body_needs_draw or border_needs_draw or scrollbar_needs_draw or (redraw_flags & T.CLIENT_REDRAWOVERLAY) != 0))
-        (cmd_display_panes.render_overlay_payload(cl, tty_sx, pane_area_sy, pane_row_offset) catch return null)
+        (cmd_display_panes.render_overlay_payload_region(
+            cl,
+            viewport.x,
+            viewport.y,
+            tty_sx,
+            viewport.sy,
+            pane_row_offset,
+        ) catch return null)
     else
         null;
     defer if (overlay_payload) |payload| xm.allocator.free(payload);
@@ -1278,6 +1404,61 @@ test "build_client_draw_payload keeps multi-pane status-only redraw off the full
     try std.testing.expect(std.mem.indexOf(u8, full_window, "\x1b[H\x1b[2J") != null);
     try std.testing.expect(std.mem.indexOf(u8, full_window, "L1") != null);
     try std.testing.expect(std.mem.indexOf(u8, full_window, "R1") != null);
+}
+
+test "build_client_draw_payload crops a panned multi-pane viewport" {
+    const pane_io = @import("pane-io.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-panned-window", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-client-panned-window") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const left = win_mod.window_add_pane(w, null, 3, 2);
+    const right = win_mod.window_add_pane(w, null, 3, 2);
+    left.xoff = 0;
+    left.yoff = 0;
+    right.xoff = 3;
+    right.yoff = 0;
+    w.active = right;
+
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
+        .session = s,
+        .pan_window = w,
+        .pan_ox = 3,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 3, .sy = 2 };
+
+    const payload = build_client_draw_payload(&client, T.CLIENT_REDRAWWINDOW) orelse unreachable;
+    defer xm.allocator.free(payload);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\x1b[H\x1b[2J") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "R1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "R2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "L1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "L2") == null);
 }
 
 test "build_client_draw_payload keeps border-only redraw off the full-clear body path" {

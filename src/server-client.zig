@@ -32,6 +32,7 @@ const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmdq_mod = @import("cmd-queue.zig");
+const menu = @import("menu.zig");
 const win_mod = @import("window.zig");
 const tty_mod = @import("tty.zig");
 const tty_draw = @import("tty-draw.zig");
@@ -94,6 +95,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
     cmd_display_panes.clear_overlay(cl);
+    menu.clear_overlay(cl);
     popup.clear_overlay(cl);
     status_prompt.status_prompt_clear(cl);
     status_runtime.status_message_clear(cl);
@@ -950,7 +952,7 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const border_needs_draw = redraw_needs_borders(redraw_flags, wl.window);
     const scrollbar_needs_draw = redraw_needs_scrollbars(redraw_flags, body_needs_draw);
     const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
-    const overlay_active = cmd_display_panes.overlay_active(cl) or popup.overlay_active(cl);
+    const overlay_active = cmd_display_panes.overlay_active(cl) or menu.overlay_active(cl) or popup.overlay_active(cl);
 
     var body = BodyRenderResult{};
     if (full_body_needs_draw and viewport.sy != 0) {
@@ -1028,6 +1030,15 @@ fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     blk: {
         if (popup.overlay_active(cl))
             break :blk popup.render_overlay_payload_region(
+                cl,
+                viewport.x,
+                viewport.y,
+                tty_sx,
+                viewport.sy,
+                pane_row_offset,
+            ) catch return null;
+        if (menu.overlay_active(cl))
+            break :blk menu.render_overlay_payload_region(
                 cl,
                 viewport.x,
                 viewport.y,

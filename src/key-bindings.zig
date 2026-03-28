@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
+const client_registry = @import("client-registry.zig");
 
 var key_tables: std.StringHashMap(*T.KeyTable) = undefined;
 var key_table_order: std.ArrayList(*T.KeyTable) = .{};
@@ -48,7 +49,7 @@ pub fn key_bindings_get_table(name: []const u8, create: bool) ?*T.KeyTable {
     const table = xm.allocator.create(T.KeyTable) catch unreachable;
     table.* = T.KeyTable.init(xm.allocator, xm.xstrdup(name));
     key_tables.put(table.name, table) catch unreachable;
-    key_table_order.append(xm.allocator, table) catch unreachable;
+    insert_table_in_order(table);
     return table;
 }
 
@@ -144,13 +145,13 @@ pub fn key_bindings_reset(name: []const u8, key: T.key_code) void {
 
 pub fn key_bindings_remove_table(name: []const u8) void {
     const table = key_bindings_get_table(name, false) orelse return;
-    remove_table_from_registry(table);
+    remove_table_from_registry(table, true);
 }
 
 pub fn key_bindings_reset_table(name: []const u8) void {
     const table = key_bindings_get_table(name, false) orelse return;
     if (table.default_order.items.len == 0) {
-        remove_table_from_registry(table);
+        remove_table_from_registry(table, true);
         return;
     }
     clear_explicit_table(table);
@@ -299,17 +300,36 @@ fn restore_all_defaults(table: *T.KeyTable) void {
 fn maybe_remove_empty_table(table: *T.KeyTable) void {
     if (table.order.items.len != 0) return;
     if (table.default_order.items.len != 0) return;
-    remove_table_from_registry(table);
+    remove_table_from_registry(table, false);
 }
 
-fn remove_table_from_registry(table: *T.KeyTable) void {
+fn remove_table_from_registry(table: *T.KeyTable, reset_clients: bool) void {
     _ = key_tables.remove(table.name);
     for (key_table_order.items, 0..) |current, idx| {
         if (current != table) continue;
         _ = key_table_order.orderedRemove(idx);
         break;
     }
+    if (reset_clients) reset_clients_for_removed_table(table.name);
     key_bindings_unref_table(table);
+}
+
+fn insert_table_in_order(table: *T.KeyTable) void {
+    for (key_table_order.items, 0..) |current, idx| {
+        if (std.mem.order(u8, table.name, current.name) != .lt) continue;
+        key_table_order.insert(xm.allocator, idx, table) catch unreachable;
+        return;
+    }
+    key_table_order.append(xm.allocator, table) catch unreachable;
+}
+
+fn reset_clients_for_removed_table(name: []const u8) void {
+    for (client_registry.clients.items) |cl| {
+        const current_name = cl.key_table_name orelse continue;
+        if (!std.mem.eql(u8, current_name, name)) continue;
+        xm.allocator.free(current_name);
+        cl.key_table_name = null;
+    }
 }
 
 fn free_binding(binding: *T.KeyBinding) void {
@@ -971,8 +991,29 @@ test "key_bindings_init creates root and prefix tables" {
 
     try std.testing.expect(key_bindings_get_table("root", false) != null);
     try std.testing.expect(key_bindings_get_table("prefix", false) != null);
-    try std.testing.expectEqualStrings("root", key_bindings_first_table().?.name);
-    try std.testing.expectEqualStrings("prefix", key_bindings_next_table(key_bindings_first_table().?).?.name);
+    try std.testing.expectEqualStrings("prefix", key_bindings_first_table().?.name);
+    try std.testing.expectEqualStrings("root", key_bindings_next_table(key_bindings_first_table().?).?.name);
+}
+
+test "key bindings tables iterate in tmux name order" {
+    key_bindings_init();
+
+    _ = key_bindings_get_table("aaa-custom", true);
+    _ = key_bindings_get_table("zzz-custom", true);
+
+    var table = key_bindings_first_table();
+    var saw_first = false;
+    var saw_last = false;
+    var previous_name: ?[]const u8 = null;
+    while (table) |current| : (table = key_bindings_next_table(current)) {
+        if (previous_name) |previous|
+            try std.testing.expect(std.mem.order(u8, previous, current.name) == .lt);
+        if (std.mem.eql(u8, current.name, "aaa-custom")) saw_first = true;
+        if (std.mem.eql(u8, current.name, "zzz-custom")) saw_last = true;
+        previous_name = current.name;
+    }
+    try std.testing.expect(saw_first);
+    try std.testing.expect(saw_last);
 }
 
 test "key bindings add remove reset and iteration" {
@@ -1041,6 +1082,54 @@ test "key bindings remove table removes prefix entirely" {
     key_bindings_init();
     key_bindings_remove_table("prefix");
     try std.testing.expect(key_bindings_get_table("prefix", false) == null);
+}
+
+test "key bindings remove table clears matching client override" {
+    const env_mod = @import("environ.zig");
+
+    key_bindings_init();
+    key_bindings_add("transient-table", 'x', null, false, null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = undefined,
+        .key_table_name = xm.xstrdup("transient-table"),
+    };
+    client_registry.add(&client);
+    defer client_registry.remove(&client);
+
+    key_bindings_remove_table("transient-table");
+    try std.testing.expect(client.key_table_name == null);
+}
+
+test "key bindings dropping an empty table does not clear client override" {
+    const env_mod = @import("environ.zig");
+
+    key_bindings_init();
+    key_bindings_add("transient-table", 'x', null, false, null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = undefined,
+        .key_table_name = xm.xstrdup("transient-table"),
+    };
+    client_registry.add(&client);
+    defer {
+        client_registry.remove(&client);
+        if (client.key_table_name) |name| xm.allocator.free(name);
+    }
+
+    key_bindings_remove("transient-table", 'x');
+    try std.testing.expect(client.key_table_name != null);
+    try std.testing.expectEqualStrings("transient-table", client.key_table_name.?);
 }
 
 test "key bindings retain shared cmdlists across default restores" {

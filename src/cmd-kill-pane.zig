@@ -24,6 +24,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const server_fn = @import("server-fn.zig");
+const win = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -34,6 +35,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const wp = target.wp orelse return .@"error";
     if (args.has('a')) {
         const w = wp.window;
+        _ = win.window_unzoom(w);
         const panes = xm.allocator.alloc(*T.WindowPane, w.panes.items.len) catch unreachable;
         defer xm.allocator.free(panes);
         @memcpy(panes, w.panes.items);
@@ -64,7 +66,6 @@ test "kill-pane removes a non-last pane and kill-pane -a leaves target pane" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
-    const win = @import("window.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -115,4 +116,57 @@ test "kill-pane removes a non-last pane and kill-pane -a leaves target pane" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(kill_rest, &item));
     try std.testing.expectEqual(@as(usize, 1), wl.window.panes.items.len);
     try std.testing.expectEqual(survivor, wl.window.panes.items[0]);
+}
+
+test "kill-pane -a clears the reduced zoom flag before pruning peers" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "kill-pane-unzoom", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("kill-pane-unzoom") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    var third_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const third = spawn.spawn_pane(&third_ctx, &cause).?;
+    _ = third;
+    s.curw = wl;
+    const survivor = wl.window.panes.items[0];
+
+    try std.testing.expect(win.window_zoom(second));
+    try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
+
+    const target_first = xm.xasprintf("%{d}", .{survivor.id});
+    defer xm.allocator.free(target_first);
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "kill-pane", "-a", "-t", target_first }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), wl.window.panes.items.len);
+    try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_ZOOMED);
+    try std.testing.expectEqual(survivor, wl.window.panes.items[0]);
+    try std.testing.expectEqual(survivor, wl.window.active.?);
 }

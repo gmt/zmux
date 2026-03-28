@@ -161,7 +161,12 @@ pub fn server_link_window(
     select_dst: bool,
     cause: *?[]u8,
 ) i32 {
-    _ = src;
+    const src_group = sess.session_group_contains(src);
+    const dst_group = sess.session_group_contains(dst);
+    if (src != dst and src_group != null and dst_group != null and src_group.? == dst_group.?) {
+        cause.* = xm.xasprintf("sessions are grouped", .{});
+        return -1;
+    }
 
     var actual_select = select_dst;
     var actual_idx = dst_idx;
@@ -989,4 +994,49 @@ test "server_link_window replaces occupied destination with -k and server_unlink
     server_unlink_window(dst, linked);
     try std.testing.expectEqual(@as(u32, 1), sess.session_window_link_count(src_wl.window));
     try std.testing.expect(sess.session_find("dst") == null or dst.windows.count() == 0);
+}
+
+test "server_link_window rejects linking across the same session group" {
+    const opts_mod = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const src = sess.session_create(null, "src-group-guard", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("src-group-guard") != null) sess.session_destroy(src, false, "test");
+    const dst = sess.session_create(null, "dst-group-guard", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("dst-group-guard") != null) sess.session_destroy(dst, false, "test");
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var src_ctx: T.SpawnContext = .{ .s = src, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    var dst_ctx: T.SpawnContext = .{ .s = dst, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl = spawn.spawn_window(&dst_ctx, &cause).?;
+
+    const group = sess.session_group_new("group-guard");
+    sess.session_group_add(group, src);
+    sess.session_group_add(group, dst);
+
+    try std.testing.expectEqual(@as(i32, -1), server_link_window(src, src_wl, dst, -1, false, true, &cause));
+    try std.testing.expectEqualStrings("sessions are grouped", cause.?);
+    try std.testing.expectEqual(@as(u32, 1), sess.session_window_link_count(src_wl.window));
+    try std.testing.expectEqual(@as(u32, 1), sess.session_window_link_count(dst_wl.window));
+    try std.testing.expect(sess.winlink_find_by_window(&dst.windows, src_wl.window) == null);
 }

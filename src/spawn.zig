@@ -48,6 +48,8 @@ extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_
 
 /// Create a new window (and initial pane) in session sc.s.
 pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
+    var select_new_window = false;
+
     if (sc.flags & T.SPAWN_RESPAWN != 0) {
         const wl = sc.wl orelse {
             cause.* = xm.xstrdup("no window");
@@ -86,6 +88,17 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
         return null;
     };
 
+    if (sc.idx != -1) {
+        if (sess.winlink_find_by_index(&s.windows, sc.idx)) |existing_wl| {
+            if (sc.flags & T.SPAWN_KILL == 0) {
+                cause.* = xm.xasprintf("index in use: {d}", .{sc.idx});
+                return null;
+            }
+            select_new_window = s.curw == existing_wl;
+            _ = sess.session_detach_index(s, sc.idx, "spawn_window -k");
+        }
+    }
+
     const sx, const sy = client_size(sc);
     const w = win.window_create(sx, sy, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
 
@@ -115,7 +128,11 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
         }
     }
 
-    if (s.curw == null) s.curw = wl;
+    if (select_new_window) {
+        _ = sess.session_set_current(s, wl);
+    } else if (s.curw == null) {
+        s.curw = wl;
+    }
 
     return wl;
 }

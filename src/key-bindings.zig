@@ -24,6 +24,7 @@ const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
+const key_string = @import("key-string.zig");
 
 var key_tables: std.StringHashMap(*T.KeyTable) = undefined;
 var key_table_order: std.ArrayList(*T.KeyTable) = .{};
@@ -340,32 +341,18 @@ fn free_binding(binding: *T.KeyBinding) void {
 
 const DefaultBindingSpec = struct {
     table: []const u8,
-    key: T.key_code,
-    note: []const u8,
+    key: T.key_code = T.KEYC_NONE,
+    key_name: ?[]const u8 = null,
+    note: ?[]const u8 = null,
     repeat: bool = false,
-    argv: []const []const u8,
+    argv: ?[]const []const u8 = null,
+    command: ?[]const u8 = null,
 };
 
 const default_list_keys_argv = [_][]const u8{ "list-keys", "-N" };
 const default_new_window_argv = [_][]const u8{"new-window"};
 const default_display_message_argv = [_][]const u8{"display-message"};
 const default_refresh_client_argv = [_][]const u8{"refresh-client"};
-const default_copy_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
-const default_copy_mode_cursor_left_argv = [_][]const u8{ "send-keys", "-X", "cursor-left" };
-const default_copy_mode_cursor_right_argv = [_][]const u8{ "send-keys", "-X", "cursor-right" };
-const default_copy_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
-const default_copy_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
-const default_copy_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
-const default_copy_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
-const default_copy_mode_halfpage_up_argv = [_][]const u8{ "send-keys", "-X", "halfpage-up" };
-const default_copy_mode_halfpage_down_argv = [_][]const u8{ "send-keys", "-X", "halfpage-down" };
-const default_copy_mode_history_top_argv = [_][]const u8{ "send-keys", "-X", "history-top" };
-const default_copy_mode_history_bottom_argv = [_][]const u8{ "send-keys", "-X", "history-bottom" };
-const default_copy_mode_start_of_line_argv = [_][]const u8{ "send-keys", "-X", "start-of-line" };
-const default_copy_mode_end_of_line_argv = [_][]const u8{ "send-keys", "-X", "end-of-line" };
-const default_copy_mode_top_line_argv = [_][]const u8{ "send-keys", "-X", "top-line" };
-const default_copy_mode_middle_line_argv = [_][]const u8{ "send-keys", "-X", "middle-line" };
-const default_copy_mode_bottom_line_argv = [_][]const u8{ "send-keys", "-X", "bottom-line" };
 const default_client_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
 const default_client_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
 const default_client_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
@@ -421,153 +408,808 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "copy-mode",
-        .key = 'q',
-        .note = "Exit copy mode",
-        .argv = default_copy_mode_cancel_argv[0..],
+        .key_name = "C-Space",
+        .command = "send -X begin-selection",
     },
     .{
         .table = "copy-mode",
-        .key = T.C0_ESC,
-        .note = "Exit copy mode",
-        .argv = default_copy_mode_cancel_argv[0..],
+        .key_name = "C-a",
+        .command = "send -X start-of-line",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_LEFT,
-        .note = "Move left",
-        .argv = default_copy_mode_cursor_left_argv[0..],
+        .key_name = "C-c",
+        .command = "send -X cancel",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_RIGHT,
-        .note = "Move right",
-        .argv = default_copy_mode_cursor_right_argv[0..],
+        .key_name = "C-e",
+        .command = "send -X end-of-line",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_UP,
-        .note = "Move up",
-        .argv = default_copy_mode_cursor_up_argv[0..],
+        .key_name = "C-f",
+        .command = "send -X cursor-right",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_DOWN,
-        .note = "Move down",
-        .argv = default_copy_mode_cursor_down_argv[0..],
+        .key_name = "C-b",
+        .command = "send -X cursor-left",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_PPAGE,
-        .note = "Page up",
-        .argv = default_copy_mode_page_up_argv[0..],
+        .key_name = "C-g",
+        .command = "send -X clear-selection",
     },
     .{
         .table = "copy-mode",
-        .key = T.KEYC_NPAGE,
-        .note = "Page down",
-        .argv = default_copy_mode_page_down_argv[0..],
+        .key_name = "C-k",
+        .command = "send -X copy-pipe-end-of-line-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-l",
+        .command = "send -X cursor-centre-vertical",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-l",
+        .command = "send -X cursor-centre-horizontal",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-n",
+        .command = "send -X cursor-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-p",
+        .command = "send -X cursor-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-r",
+        .command = "command-prompt -T search -ip'(search up)' -I'#{pane_search_string}' \"send -X search-backward-incremental -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-s",
+        .command = "command-prompt -T search -ip'(search down)' -I'#{pane_search_string}' \"send -X search-forward-incremental -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-v",
+        .command = "send -X page-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-w",
+        .command = "send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Escape",
+        .command = "send -X cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Space",
+        .command = "send -X page-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = ",",
+        .command = "send -X jump-reverse",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = ";",
+        .command = "send -X jump-again",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "F",
+        .command = "command-prompt -1p'(jump backward)' \"send -X jump-backward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "N",
+        .command = "send -X search-reverse",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "P",
+        .command = "send -X toggle-position",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "R",
+        .command = "send -X rectangle-toggle",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "T",
+        .command = "command-prompt -1p'(jump to backward)' \"send -X jump-to-backward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "X",
+        .command = "send -X set-mark",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "f",
+        .command = "command-prompt -1p'(jump forward)' \"send -X jump-forward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "g",
+        .command = "command-prompt -p'(goto line)' \"send -X goto-line -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "n",
+        .command = "send -X search-again",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "q",
+        .command = "send -X cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "r",
+        .command = "send -X refresh-from-pane",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "t",
+        .command = "command-prompt -1p'(jump to forward)' \"send -X jump-to-forward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Home",
+        .command = "send -X start-of-line",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "End",
+        .command = "send -X end-of-line",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "MouseDown1Pane",
+        .command = "select-pane",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "MouseDrag1Pane",
+        .command = "select-pane; send -X begin-selection",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "MouseDragEnd1Pane",
+        .command = "send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "WheelUpPane",
+        .command = "select-pane; send -N5 -X scroll-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "WheelDownPane",
+        .command = "select-pane; send -N5 -X scroll-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "DoubleClick1Pane",
+        .command = "select-pane; send -X select-word; run -d0.3; send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "TripleClick1Pane",
+        .command = "select-pane; send -X select-line; run -d0.3; send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "NPage",
+        .command = "send -X page-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "PPage",
+        .command = "send -X page-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Up",
+        .command = "send -X cursor-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Down",
+        .command = "send -X cursor-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Left",
+        .command = "send -X cursor-left",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "Right",
+        .command = "send -X cursor-right",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-1",
+        .command = "command-prompt -Np'(repeat)' -I1 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-2",
+        .command = "command-prompt -Np'(repeat)' -I2 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-3",
+        .command = "command-prompt -Np'(repeat)' -I3 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-4",
+        .command = "command-prompt -Np'(repeat)' -I4 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-5",
+        .command = "command-prompt -Np'(repeat)' -I5 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-6",
+        .command = "command-prompt -Np'(repeat)' -I6 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-7",
+        .command = "command-prompt -Np'(repeat)' -I7 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-8",
+        .command = "command-prompt -Np'(repeat)' -I8 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-9",
+        .command = "command-prompt -Np'(repeat)' -I9 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-<",
+        .command = "send -X history-top",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M->",
+        .command = "send -X history-bottom",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-R",
+        .command = "send -X top-line",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-b",
+        .command = "send -X previous-word",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-M-b",
+        .command = "send -X previous-matching-bracket",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-f",
+        .command = "send -X next-word-end",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-M-f",
+        .command = "send -X next-matching-bracket",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-m",
+        .command = "send -X back-to-indentation",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-r",
+        .command = "send -X middle-line",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-v",
+        .command = "send -X page-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-w",
+        .command = "send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-x",
+        .command = "send -X jump-to-mark",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-{",
+        .command = "send -X previous-paragraph",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-}",
+        .command = "send -X next-paragraph",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-Up",
+        .command = "send -X halfpage-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "M-Down",
+        .command = "send -X halfpage-down",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-Up",
+        .command = "send -X scroll-up",
+    },
+    .{
+        .table = "copy-mode",
+        .key_name = "C-Down",
+        .command = "send -X scroll-down",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'q',
-        .note = "Exit copy mode",
-        .argv = default_copy_mode_cancel_argv[0..],
+        .key_name = "#",
+        .command = "send -FX search-backward -- '#{copy_cursor_word}'",
     },
     .{
         .table = "copy-mode-vi",
-        .key = T.C0_ESC,
-        .note = "Exit copy mode",
-        .argv = default_copy_mode_cancel_argv[0..],
+        .key_name = "*",
+        .command = "send -FX search-forward -- '#{copy_cursor_word}'",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'h',
-        .note = "Move left",
-        .argv = default_copy_mode_cursor_left_argv[0..],
+        .key_name = "C-c",
+        .command = "send -X cancel",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'l',
-        .note = "Move right",
-        .argv = default_copy_mode_cursor_right_argv[0..],
+        .key_name = "C-d",
+        .command = "send -X halfpage-down",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'k',
-        .note = "Move up",
-        .argv = default_copy_mode_cursor_up_argv[0..],
+        .key_name = "C-e",
+        .command = "send -X scroll-down",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'j',
-        .note = "Move down",
-        .argv = default_copy_mode_cursor_down_argv[0..],
+        .key_name = "C-b",
+        .command = "send -X page-up",
     },
     .{
         .table = "copy-mode-vi",
-        .key = T.KEYC_PPAGE,
-        .note = "Page up",
-        .argv = default_copy_mode_page_up_argv[0..],
+        .key_name = "C-f",
+        .command = "send -X page-down",
     },
     .{
         .table = "copy-mode-vi",
-        .key = T.KEYC_NPAGE,
-        .note = "Page down",
-        .argv = default_copy_mode_page_down_argv[0..],
+        .key_name = "C-h",
+        .command = "send -X cursor-left",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'u' | T.KEYC_CTRL,
-        .note = "Half page up",
-        .argv = default_copy_mode_halfpage_up_argv[0..],
+        .key_name = "C-j",
+        .command = "send -X copy-pipe-and-cancel",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'd' | T.KEYC_CTRL,
-        .note = "Half page down",
-        .argv = default_copy_mode_halfpage_down_argv[0..],
+        .key_name = "Enter",
+        .command = "send -X copy-pipe-and-cancel",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'g',
-        .note = "Go to top",
-        .argv = default_copy_mode_history_top_argv[0..],
+        .key_name = "C-u",
+        .command = "send -X halfpage-up",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'G',
-        .note = "Go to bottom",
-        .argv = default_copy_mode_history_bottom_argv[0..],
+        .key_name = "C-v",
+        .command = "send -X rectangle-toggle",
     },
     .{
         .table = "copy-mode-vi",
-        .key = '0',
-        .note = "Start of line",
-        .argv = default_copy_mode_start_of_line_argv[0..],
+        .key_name = "C-y",
+        .command = "send -X scroll-up",
     },
     .{
         .table = "copy-mode-vi",
-        .key = '$',
-        .note = "End of line",
-        .argv = default_copy_mode_end_of_line_argv[0..],
+        .key_name = "Escape",
+        .command = "send -X clear-selection",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'H',
-        .note = "Move to top line",
-        .argv = default_copy_mode_top_line_argv[0..],
+        .key_name = "Space",
+        .command = "send -X begin-selection",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'M',
-        .note = "Move to middle line",
-        .argv = default_copy_mode_middle_line_argv[0..],
+        .key_name = "$",
+        .command = "send -X end-of-line",
     },
     .{
         .table = "copy-mode-vi",
-        .key = 'L',
-        .note = "Move to bottom line",
-        .argv = default_copy_mode_bottom_line_argv[0..],
+        .key_name = ",",
+        .command = "send -X jump-reverse",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "/",
+        .command = "command-prompt -T search -p'(search down)' \"send -X search-forward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "0",
+        .command = "send -X start-of-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "1",
+        .command = "command-prompt -Np'(repeat)' -I1 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "2",
+        .command = "command-prompt -Np'(repeat)' -I2 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "3",
+        .command = "command-prompt -Np'(repeat)' -I3 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "4",
+        .command = "command-prompt -Np'(repeat)' -I4 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "5",
+        .command = "command-prompt -Np'(repeat)' -I5 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "6",
+        .command = "command-prompt -Np'(repeat)' -I6 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "7",
+        .command = "command-prompt -Np'(repeat)' -I7 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "8",
+        .command = "command-prompt -Np'(repeat)' -I8 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "9",
+        .command = "command-prompt -Np'(repeat)' -I9 \"send -N '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = ":",
+        .command = "command-prompt -p'(goto line)' \"send -X goto-line -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = ";",
+        .command = "send -X jump-again",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "?",
+        .command = "command-prompt -T search -p'(search up)' \"send -X search-backward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "A",
+        .command = "send -X append-selection-and-cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "B",
+        .command = "send -X previous-space",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "D",
+        .command = "send -X copy-pipe-end-of-line-and-cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "E",
+        .command = "send -X next-space-end",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "F",
+        .command = "command-prompt -1p'(jump backward)' \"send -X jump-backward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "G",
+        .command = "send -X history-bottom",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "H",
+        .command = "send -X top-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "J",
+        .command = "send -X scroll-down",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "K",
+        .command = "send -X scroll-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "L",
+        .command = "send -X bottom-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "M",
+        .command = "send -X middle-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "N",
+        .command = "send -X search-reverse",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "P",
+        .command = "send -X toggle-position",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "T",
+        .command = "command-prompt -1p'(jump to backward)' \"send -X jump-to-backward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "V",
+        .command = "send -X select-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "W",
+        .command = "send -X next-space",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "X",
+        .command = "send -X set-mark",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "^",
+        .command = "send -X back-to-indentation",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "b",
+        .command = "send -X previous-word",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "e",
+        .command = "send -X next-word-end",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "f",
+        .command = "command-prompt -1p'(jump forward)' \"send -X jump-forward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "g",
+        .command = "send -X history-top",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "h",
+        .command = "send -X cursor-left",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "j",
+        .command = "send -X cursor-down",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "k",
+        .command = "send -X cursor-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "z",
+        .command = "send -X scroll-middle",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "l",
+        .command = "send -X cursor-right",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "n",
+        .command = "send -X search-again",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "o",
+        .command = "send -X other-end",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "q",
+        .command = "send -X cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "r",
+        .command = "send -X refresh-from-pane",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "t",
+        .command = "command-prompt -1p'(jump to forward)' \"send -X jump-to-forward -- '%%'\"",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "v",
+        .command = "send -X rectangle-toggle",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "w",
+        .command = "send -X next-word",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "{",
+        .command = "send -X previous-paragraph",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "}",
+        .command = "send -X next-paragraph",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "%",
+        .command = "send -X next-matching-bracket",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "Home",
+        .command = "send -X start-of-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "End",
+        .command = "send -X end-of-line",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "MouseDown1Pane",
+        .command = "select-pane",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "MouseDrag1Pane",
+        .command = "select-pane; send -X begin-selection",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "MouseDragEnd1Pane",
+        .command = "send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "WheelUpPane",
+        .command = "select-pane; send -N5 -X scroll-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "WheelDownPane",
+        .command = "select-pane; send -N5 -X scroll-down",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "DoubleClick1Pane",
+        .command = "select-pane; send -X select-word; run -d0.3; send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "TripleClick1Pane",
+        .command = "select-pane; send -X select-line; run -d0.3; send -X copy-pipe-and-cancel",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "BSpace",
+        .command = "send -X cursor-left",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "NPage",
+        .command = "send -X page-down",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "PPage",
+        .command = "send -X page-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "Up",
+        .command = "send -X cursor-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "Down",
+        .command = "send -X cursor-down",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "Left",
+        .command = "send -X cursor-left",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "Right",
+        .command = "send -X cursor-right",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "M-x",
+        .command = "send -X jump-to-mark",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "C-Up",
+        .command = "send -X scroll-up",
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key_name = "C-Down",
+        .command = "send -X scroll-down",
     },
     .{
         .table = "client-mode",
@@ -965,10 +1607,34 @@ fn seed_default_bindings() void {
 
 fn install_default_binding(spec: DefaultBindingSpec) void {
     const table = key_bindings_get_table(spec.table, true).?;
-    const parsed = cmd_mod.cmd_parse_from_argv(spec.argv, null) catch unreachable;
-    const explicit = alloc_binding(table, maskedKey(spec.key), spec.note, if (spec.repeat) T.KEY_BINDING_REPEAT else 0, @ptrCast(parsed), false);
+    const key = if (spec.key_name) |name| parse_default_binding_key(name) else maskedKey(spec.key);
+    const parsed = parse_default_binding_cmdlist(spec);
+    const explicit = alloc_binding(table, key, spec.note, if (spec.repeat) T.KEY_BINDING_REPEAT else 0, parsed, false);
     add_explicit_binding(table, explicit);
     clone_default_from_explicit(table, explicit);
+}
+
+fn parse_default_binding_key(name: []const u8) T.key_code {
+    const key = key_string.key_string_lookup_string(name);
+    if (key == T.KEYC_UNKNOWN or key == T.KEYC_NONE)
+        @panic("bad default binding key");
+    return maskedKey(key);
+}
+
+fn parse_default_binding_cmdlist(spec: DefaultBindingSpec) *T.CmdList {
+    if (spec.argv) |argv| return @ptrCast(cmd_mod.cmd_parse_from_argv(argv, null) catch unreachable);
+    if (spec.command) |text| {
+        var input: T.CmdParseInput = .{};
+        const parsed = cmd_mod.cmd_parse_from_string(text, &input);
+        switch (parsed.status) {
+            .success => return @ptrCast(@alignCast(parsed.cmdlist.?)),
+            .@"error" => {
+                if (parsed.@"error") |err| xm.allocator.free(err);
+                @panic("bad default binding command");
+            },
+        }
+    }
+    @panic("missing default binding command");
 }
 
 fn install_select_window_default(idx: u8) void {
@@ -984,6 +1650,28 @@ fn install_select_window_default(idx: u8) void {
         .argv = argv[0..],
     };
     install_default_binding(spec);
+}
+
+fn binding_cmdlist(binding: *T.KeyBinding) *cmd_mod.CmdList {
+    return @ptrCast(@alignCast(binding.cmdlist.?));
+}
+
+fn cmdlist_len(list: *cmd_mod.CmdList) usize {
+    var count: usize = 0;
+    var cmd = list.head;
+    while (cmd) |current| : (cmd = current.next) {
+        count += 1;
+    }
+    return count;
+}
+
+fn cmdlist_nth(list: *cmd_mod.CmdList, idx: usize) *cmd_mod.Cmd {
+    var cmd = list.head orelse unreachable;
+    var i: usize = 0;
+    while (i < idx) : (i += 1) {
+        cmd = cmd.next orelse unreachable;
+    }
+    return cmd;
 }
 
 test "key_bindings_init creates root and prefix tables" {
@@ -1047,6 +1735,59 @@ test "key bindings init seeds prefix defaults and keeps root empty" {
     try std.testing.expect(prefix.order.items.len >= 14);
     try std.testing.expect(key_bindings_get_default(prefix, '?') != null);
     try std.testing.expect(key_bindings_get(prefix, '?') != null);
+}
+
+test "key bindings init seeds full copy-mode default tables" {
+    key_bindings_init();
+
+    const copy = key_bindings_get_table("copy-mode", false).?;
+    const copy_vi = key_bindings_get_table("copy-mode-vi", false).?;
+    try std.testing.expectEqual(@as(usize, 74), copy.order.items.len);
+    try std.testing.expectEqual(@as(usize, 87), copy_vi.order.items.len);
+
+    const incremental = key_bindings_get(copy, key_string.key_string_lookup_string("C-r")).?;
+    try std.testing.expect(incremental.note == null);
+    const incremental_list = binding_cmdlist(incremental);
+    try std.testing.expectEqual(@as(usize, 1), cmdlist_len(incremental_list));
+    const incremental_cmd = cmdlist_nth(incremental_list, 0);
+    try std.testing.expectEqualStrings("command-prompt", incremental_cmd.entry.name);
+    const incremental_args = cmd_mod.cmd_get_args(incremental_cmd);
+    try std.testing.expect(incremental_args.has('i'));
+    try std.testing.expectEqualStrings("search", incremental_args.get('T').?);
+    try std.testing.expectEqualStrings("(search up)", incremental_args.get('p').?);
+    try std.testing.expectEqualStrings("#{pane_search_string}", incremental_args.get('I').?);
+    try std.testing.expectEqualStrings("send -X search-backward-incremental -- '%%'", incremental_args.value_at(0).?);
+
+    const repeat = key_bindings_get(copy, key_string.key_string_lookup_string("M-1")).?;
+    const repeat_cmd = cmdlist_nth(binding_cmdlist(repeat), 0);
+    const repeat_args = cmd_mod.cmd_get_args(repeat_cmd);
+    try std.testing.expect(repeat_args.has('N'));
+    try std.testing.expectEqualStrings("(repeat)", repeat_args.get('p').?);
+    try std.testing.expectEqualStrings("1", repeat_args.get('I').?);
+    try std.testing.expectEqualStrings("send -N '%%'", repeat_args.value_at(0).?);
+
+    const double_click = key_bindings_get(copy, key_string.key_string_lookup_string("DoubleClick1Pane")).?;
+    const double_click_list = binding_cmdlist(double_click);
+    try std.testing.expectEqual(@as(usize, 4), cmdlist_len(double_click_list));
+    try std.testing.expectEqualStrings("select-pane", cmdlist_nth(double_click_list, 0).entry.name);
+    try std.testing.expectEqualStrings("send-keys", cmdlist_nth(double_click_list, 1).entry.name);
+    try std.testing.expectEqualStrings("run-shell", cmdlist_nth(double_click_list, 2).entry.name);
+    try std.testing.expectEqualStrings("send-keys", cmdlist_nth(double_click_list, 3).entry.name);
+    try std.testing.expectEqualStrings("select-word", cmd_mod.cmd_get_args(cmdlist_nth(double_click_list, 1)).value_at(0).?);
+    try std.testing.expectEqualStrings("0.3", cmd_mod.cmd_get_args(cmdlist_nth(double_click_list, 2)).get('d').?);
+    try std.testing.expectEqualStrings("copy-pipe-and-cancel", cmd_mod.cmd_get_args(cmdlist_nth(double_click_list, 3)).value_at(0).?);
+
+    const semicolon = key_bindings_get(copy_vi, key_string.key_string_lookup_string(";")).?;
+    try std.testing.expectEqualStrings("send-keys", cmdlist_nth(binding_cmdlist(semicolon), 0).entry.name);
+    try std.testing.expectEqualStrings("jump-again", cmd_mod.cmd_get_args(cmdlist_nth(binding_cmdlist(semicolon), 0)).value_at(0).?);
+
+    const word_search = key_bindings_get(copy_vi, key_string.key_string_lookup_string("#")).?;
+    const word_search_args = cmd_mod.cmd_get_args(cmdlist_nth(binding_cmdlist(word_search), 0));
+    try std.testing.expect(word_search_args.has('F'));
+    try std.testing.expect(word_search_args.has('X'));
+    try std.testing.expectEqualStrings("search-backward", word_search_args.value_at(0).?);
+    try std.testing.expectEqualStrings("--", word_search_args.value_at(1).?);
+    try std.testing.expectEqualStrings("#{copy_cursor_word}", word_search_args.value_at(2).?);
 }
 
 test "key bindings reset restores built in defaults" {

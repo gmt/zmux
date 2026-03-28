@@ -31,8 +31,9 @@ file into a planner blob.
 
 - `src/status-prompt.zig` uses the shared cell model for prompt storage and
   editing
-- `src/format-draw.zig`, `src/status.zig`, and `src/status-runtime.zig` own the
-  reduced shared status and message presentation path
+- `src/format-draw.zig`, `src/status.zig`, `src/status-runtime.zig`, and
+  `src/menu.zig` own the reduced shared status, message, and menu-overlay
+  presentation path
 - `src/server-print.zig` and `src/cmd-queue.zig` route attached, detached, and
   control-client output through shared lower seams instead of command-local
   writers

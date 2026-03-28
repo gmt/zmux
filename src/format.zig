@@ -85,6 +85,7 @@ pub const FormatContext = struct {
     option_unit: ?[]const u8 = null,
     option_is_global: ?bool = null,
     option_inherited: ?bool = null,
+    line: ?u32 = null,
 };
 
 pub const FormatExpandResult = struct {
@@ -168,6 +169,7 @@ const resolver_table = [_]Resolver{
 
     .{ .name = "host", .func = resolve_host },
     .{ .name = "host_short", .func = resolve_host_short },
+    .{ .name = "line", .func = resolve_line },
 
     .{ .name = "pid", .func = resolve_pid },
     .{ .name = "next_session_id", .func = resolve_next_session_id },
@@ -2394,6 +2396,11 @@ fn resolve_host_short(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
     defer alloc.free(host);
     const short = std.mem.indexOfScalar(u8, host, '.') orelse host.len;
     return alloc.dupe(u8, host[0..short]) catch unreachable;
+}
+
+fn resolve_line(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const line = ctx.line orelse return null;
+    return std.fmt.allocPrint(alloc, "{d}", .{line}) catch unreachable;
 }
 
 fn resolve_pid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

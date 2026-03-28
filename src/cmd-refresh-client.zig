@@ -32,13 +32,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
+    if (args.get('F')) |flags_text|
+        server_client_mod.server_client_set_flags(target_client, flags_text);
+    if (args.get('f')) |flags_text|
+        server_client_mod.server_client_set_flags(target_client, flags_text);
+
     if (args.get('r')) |report|
         updatePaneReportColours(report);
 
     if (unsupportedFlag(args, 'A', item) or
         unsupportedFlag(args, 'B', item) or
-        unsupportedFlag(args, 'f', item) or
-        unsupportedFlag(args, 'F', item) or
         false)
     {
         return .@"error";
@@ -394,6 +397,68 @@ test "refresh-client -S uses the shared status-only redraw path for the target c
     try std.testing.expect(queue_client.flags & T.CLIENT_REDRAWSTATUS == 0);
     try std.testing.expect(target_client.flags & T.CLIENT_REDRAWSTATUS != 0);
     try std.testing.expect(target_client.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
+test "refresh-client -f and -F route client flags to the target client" {
+    var queue_env = T.Environ.init(std.testing.allocator);
+    defer queue_env.deinit();
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var queue_client = T.Client{
+        .name = "queue",
+        .environ = &queue_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    queue_client.tty.client = &queue_client;
+
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target_client.tty.client = &target_client;
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-F", "read-only", "-f", "ignore-size" }, null, &cause);
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+    try std.testing.expect(queue_client.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE != 0);
+}
+
+test "refresh-client applies -F before -f when both are present" {
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target_client.tty.client = &target_client;
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(
+        &.{ "refresh-client", "-F", "ignore-size", "-f", "!ignore-size,active-pane" },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+    try std.testing.expect(target_client.flags & T.CLIENT_ACTIVEPANE != 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE == 0);
 }
 
 test "refresh-client -C resizes only control clients" {

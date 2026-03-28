@@ -87,6 +87,7 @@ pub fn enterMode(
     data.tree = mode_tree.start(wp, .{
         .modedata = @ptrCast(data),
         .preview = .off,
+        .zoom = args.has('Z'),
         .buildcb = buildTree,
     });
 

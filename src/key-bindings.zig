@@ -330,6 +330,22 @@ const default_list_keys_argv = [_][]const u8{ "list-keys", "-N" };
 const default_new_window_argv = [_][]const u8{"new-window"};
 const default_display_message_argv = [_][]const u8{"display-message"};
 const default_refresh_client_argv = [_][]const u8{"refresh-client"};
+const default_copy_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
+const default_copy_mode_cursor_left_argv = [_][]const u8{ "send-keys", "-X", "cursor-left" };
+const default_copy_mode_cursor_right_argv = [_][]const u8{ "send-keys", "-X", "cursor-right" };
+const default_copy_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
+const default_copy_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
+const default_copy_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
+const default_copy_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
+const default_copy_mode_halfpage_up_argv = [_][]const u8{ "send-keys", "-X", "halfpage-up" };
+const default_copy_mode_halfpage_down_argv = [_][]const u8{ "send-keys", "-X", "halfpage-down" };
+const default_copy_mode_history_top_argv = [_][]const u8{ "send-keys", "-X", "history-top" };
+const default_copy_mode_history_bottom_argv = [_][]const u8{ "send-keys", "-X", "history-bottom" };
+const default_copy_mode_start_of_line_argv = [_][]const u8{ "send-keys", "-X", "start-of-line" };
+const default_copy_mode_end_of_line_argv = [_][]const u8{ "send-keys", "-X", "end-of-line" };
+const default_copy_mode_top_line_argv = [_][]const u8{ "send-keys", "-X", "top-line" };
+const default_copy_mode_middle_line_argv = [_][]const u8{ "send-keys", "-X", "middle-line" };
+const default_copy_mode_bottom_line_argv = [_][]const u8{ "send-keys", "-X", "bottom-line" };
 
 const default_binding_specs = [_]DefaultBindingSpec{
     .{
@@ -355,6 +371,156 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = 'r',
         .note = "Redraw the current client",
         .argv = default_refresh_client_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = 'q',
+        .note = "Exit copy mode",
+        .argv = default_copy_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.C0_ESC,
+        .note = "Exit copy mode",
+        .argv = default_copy_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_LEFT,
+        .note = "Move left",
+        .argv = default_copy_mode_cursor_left_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_RIGHT,
+        .note = "Move right",
+        .argv = default_copy_mode_cursor_right_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_copy_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_copy_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_copy_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "copy-mode",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_copy_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'q',
+        .note = "Exit copy mode",
+        .argv = default_copy_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = T.C0_ESC,
+        .note = "Exit copy mode",
+        .argv = default_copy_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'h',
+        .note = "Move left",
+        .argv = default_copy_mode_cursor_left_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'l',
+        .note = "Move right",
+        .argv = default_copy_mode_cursor_right_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'k',
+        .note = "Move up",
+        .argv = default_copy_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'j',
+        .note = "Move down",
+        .argv = default_copy_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_copy_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_copy_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'u' | T.KEYC_CTRL,
+        .note = "Half page up",
+        .argv = default_copy_mode_halfpage_up_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'd' | T.KEYC_CTRL,
+        .note = "Half page down",
+        .argv = default_copy_mode_halfpage_down_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'g',
+        .note = "Go to top",
+        .argv = default_copy_mode_history_top_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'G',
+        .note = "Go to bottom",
+        .argv = default_copy_mode_history_bottom_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = '0',
+        .note = "Start of line",
+        .argv = default_copy_mode_start_of_line_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = '$',
+        .note = "End of line",
+        .argv = default_copy_mode_end_of_line_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'H',
+        .note = "Move to top line",
+        .argv = default_copy_mode_top_line_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'M',
+        .note = "Move to middle line",
+        .argv = default_copy_mode_middle_line_argv[0..],
+    },
+    .{
+        .table = "copy-mode-vi",
+        .key = 'L',
+        .note = "Move to bottom line",
+        .argv = default_copy_mode_bottom_line_argv[0..],
     },
 };
 

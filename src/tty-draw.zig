@@ -540,13 +540,53 @@ fn append_text_cells(renderer: *RowRenderer, gd: *T.Grid, row: u32, sx: u32) !vo
 }
 
 fn append_text_cells_range(renderer: *RowRenderer, gd: *T.Grid, row: u32, start_col: u32, sx: u32) !void {
-    for (0..sx) |idx| {
-        const col_idx = start_col + @as(u32, @intCast(idx));
+    var col = start_col;
+    const end_col = start_col + sx;
+    while (col < end_col) {
         var cell: T.GridCell = undefined;
-        grid_mod.get_cell(gd, row, @intCast(col_idx), &cell);
-        if (cell.isPadding()) continue;
+        grid_mod.get_cell(gd, row, @intCast(col), &cell);
+        const remaining = end_col - col;
+
+        if (cell.isPadding()) {
+            const padding_col = col;
+            while (col < end_col) : (col += 1) {
+                grid_mod.get_cell(gd, row, @intCast(col), &cell);
+                if (!cell.isPadding()) break;
+            }
+            try append_cleared_cells(renderer, col - padding_col, cleared_bg_before(gd, row, padding_col));
+            continue;
+        }
+
+        const cell_width = @max(@as(u32, cell.data.width), 1);
+        if (cell_width > remaining) {
+            try append_cleared_cells(renderer, remaining, cell.bg);
+            break;
+        }
+
         try renderer.appendCell(&cell);
+        col += cell_width;
     }
+}
+
+fn append_cleared_cells(renderer: *RowRenderer, count: u32, bg: i32) !void {
+    var cleared = T.grid_default_cell;
+    cleared.bg = bg;
+
+    var idx: u32 = 0;
+    while (idx < count) : (idx += 1) {
+        try renderer.appendCell(&cleared);
+    }
+}
+
+fn cleared_bg_before(gd: *T.Grid, row: u32, start_col: u32) i32 {
+    var col = start_col;
+    while (col > 0) {
+        col -= 1;
+        var cell: T.GridCell = undefined;
+        grid_mod.get_cell(gd, row, @intCast(col), &cell);
+        if (!cell.isPadding()) return cell.bg;
+    }
+    return T.grid_default_cell.bg;
 }
 
 fn append_scrollbar_segment(
@@ -977,6 +1017,60 @@ test "tty_draw_pane preserves stored utf8 glyph bytes" {
     const draw = try tty_draw_pane(&cache, wp, 4, 1);
     defer xm.allocator.free(draw);
     try std.testing.expect(std.mem.indexOf(u8, draw, "🙂x") != null);
+}
+
+test "tty_draw_render_window_region clears clipped leading wide-cell padding" {
+    const win = @import("window.zig");
+    const screen_write = @import("screen-write.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(3, 1, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 3, 1);
+    w.active = wp;
+
+    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = &wp.base };
+    screen_write.putn(&ctx, "🙂x");
+
+    const rendered = try tty_draw_render_window_region(w, 1, 0, 2, 1, 0);
+    defer xm.allocator.free(rendered.payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[1;1H\x1b[0m x") != null);
+}
+
+test "tty_draw_render_screen_region clears clipped trailing wide cells" {
+    const screen = @import("screen.zig");
+    const screen_write = @import("screen-write.zig");
+
+    const s = screen.screen_init(3, 1, 0);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    screen_write.putn(&ctx, "🙂x");
+
+    const rendered = try tty_draw_render_screen_region(s, 0, 0, 1, 1, 0, 0);
+    defer xm.allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\x1b[1;1H\x1b[0m \x1b[K") != null);
 }
 
 test "tty_draw_render_window paints multiple visible panes at shared offsets" {

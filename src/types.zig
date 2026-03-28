@@ -798,6 +798,7 @@ pub const WindowPane = struct {
     pipe_fd: i32 = -1,
     pipe_pid: std.posix.pid_t = -1,
     pipe_event: ?*c.libevent.event = null,
+    pipe_flags: u8 = 0,
     pipe_offset: WindowPaneOffset = .{},
 };
 
@@ -810,6 +811,8 @@ pub const WINDOW_ALERTFLAGS: u32 = WINDOW_BELL | WINDOW_ACTIVITY | WINDOW_SILENC
 pub const WINDOW_ZOOMED: u32 = 0x08;
 pub const WINDOW_WASZOOMED: u32 = 0x10;
 pub const WINDOW_RESIZE: u32 = 0x20;
+pub const PANE_PIPE_READ: u8 = 0x01;
+pub const PANE_PIPE_WRITE: u8 = 0x02;
 
 pub const Window = struct {
     id: u32,

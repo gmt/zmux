@@ -40,7 +40,7 @@ pub fn pane_io_start(wp: *T.WindowPane) void {
 }
 
 pub fn pane_pipe_start(wp: *T.WindowPane) void {
-    if (wp.pipe_fd < 0 or wp.pipe_event != null) return;
+    if (wp.pipe_fd < 0 or wp.pipe_event != null or !pane_pipe_reads_enabled(wp)) return;
     const base = proc_mod.libevent orelse return;
     wp.pipe_event = c.libevent.event_new(
         base,
@@ -116,7 +116,7 @@ pub fn pane_io_display(wp: *T.WindowPane, bytes: []const u8) void {
 }
 
 pub fn pane_pipe_read_ready(wp: *T.WindowPane) void {
-    if (wp.pipe_fd < 0) return;
+    if (wp.pipe_fd < 0 or !pane_pipe_reads_enabled(wp)) return;
 
     var buf: [4096]u8 = undefined;
     var needs_redraw = false;
@@ -141,7 +141,7 @@ pub fn pane_pipe_read_ready(wp: *T.WindowPane) void {
 }
 
 fn pipe_bytes(wp: *T.WindowPane, bytes: []const u8) void {
-    if (wp.pipe_fd < 0 or bytes.len == 0) return;
+    if (wp.pipe_fd < 0 or bytes.len == 0 or !pane_pipe_writes_enabled(wp)) return;
 
     var rest = bytes;
     while (rest.len > 0) {
@@ -169,6 +169,16 @@ pub fn pane_pipe_close(wp: *T.WindowPane) void {
         _ = std.posix.waitpid(wp.pipe_pid, 0);
         wp.pipe_pid = -1;
     }
+    wp.pipe_flags = 0;
+    wp.pipe_offset = .{};
+}
+
+fn pane_pipe_reads_enabled(wp: *T.WindowPane) bool {
+    return (wp.pipe_flags & T.PANE_PIPE_READ) != 0;
+}
+
+fn pane_pipe_writes_enabled(wp: *T.WindowPane) bool {
+    return (wp.pipe_flags & T.PANE_PIPE_WRITE) != 0;
 }
 
 test "pane_io_feed writes printable bytes into the grid and advances cursor" {
@@ -260,6 +270,7 @@ test "pane_io_feed mirrors raw bytes into pane pipe fd" {
     const pipe_fds = try std.posix.pipe();
     defer std.posix.close(pipe_fds[0]);
     wp.pipe_fd = pipe_fds[1];
+    wp.pipe_flags = T.PANE_PIPE_WRITE;
     pane_io_feed(wp, "abc\r\n");
 
     var buf: [16]u8 = undefined;
@@ -297,9 +308,11 @@ test "pane_io_display renders bytes without mirroring them into the pipe fd" {
     const pipe_fds = try std.posix.pipe();
     defer std.posix.close(pipe_fds[0]);
     wp.pipe_fd = pipe_fds[1];
+    wp.pipe_flags = T.PANE_PIPE_READ;
     defer {
         std.posix.close(pipe_fds[1]);
         wp.pipe_fd = -1;
+        wp.pipe_flags = 0;
     }
 
     const flags = std.c.fcntl(pipe_fds[0], std.posix.F.GETFL, @as(c_int, 0));

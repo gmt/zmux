@@ -16,6 +16,7 @@
   - mouse-root `copy-mode -M` entry that keeps the reduced copy-mode cursor
     under pane drags
   - page and half-page navigation
+  - numeric `goto-line` over the reduced captured snapshot
   - top, middle, and bottom viewport positioning
   - history-top and history-bottom over the captured snapshot
   - scrollbar drag entry via `copy-mode -S` and in-mode `scroll-to-mouse`

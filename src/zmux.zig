@@ -369,4 +369,5 @@ test {
     _ = @import("input-keys.zig");
     _ = @import("mode-tree.zig");
     _ = @import("utf8.zig");
+    _ = @import("window-client.zig");
 }

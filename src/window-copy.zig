@@ -364,6 +364,10 @@ fn copyModeCommand(
         const data = modeData(wme);
         const backing_rows = rowCount(data.backing);
         if (backing_rows != 0) setAbsoluteCursorRow(wme, backing_rows - 1);
+    } else if (std.mem.eql(u8, command, "goto-line")) {
+        if (args.value_at(1)) |arg| {
+            if (arg.len != 0) gotoLine(wme, arg);
+        }
     } else if (std.mem.eql(u8, command, "top-line")) {
         setCursorLine(wme, 0);
     } else if (std.mem.eql(u8, command, "middle-line")) {
@@ -712,6 +716,25 @@ fn cursorEndOfLine(wme: *T.WindowModeEntry) void {
 
     grid.grid_reader_cursor_end_of_line(&gr, true, false);
     applyMotionReader(wme, &gr);
+}
+
+fn gotoLine(wme: *T.WindowModeEntry, linestr: []const u8) void {
+    const data = modeData(wme);
+    const parsed = std.fmt.parseInt(i64, linestr, 10) catch return;
+    const scrollback = maxTop(data.backing, wme.wp);
+
+    // tmux stores goto-line as a scrollback offset. Translate that reduced
+    // offset into our top-row coordinate while keeping the cursor on the same
+    // viewport row.
+    var line = parsed;
+    if (line < 0 or line > @as(i64, @intCast(scrollback))) {
+        line = @intCast(scrollback);
+    }
+
+    data.top = scrollback - @as(u32, @intCast(line));
+    const max_visible = backingBottomVisibleRow(wme);
+    if (data.cy > max_visible) data.cy = max_visible;
+    clampCursorX(wme);
 }
 
 fn absoluteCursorRow(wme: *T.WindowModeEntry) u32 {
@@ -1581,6 +1604,105 @@ test "window-copy downward commands keep viewport scrolling separate from cancel
     try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
     try runCopyModeTestCommand(wme, "cursor-down-and-cancel");
     try std.testing.expect(window.window_pane_mode(&target) == null);
+}
+
+test "window-copy goto-line accepts numeric offsets and clamps within the reduced snapshot" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(6, 8, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 5, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 8, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 5, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 54,
+        .name = xm.xstrdup("copy-source-goto-line"),
+        .sx = 6,
+        .sy = 8,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 55,
+        .name = xm.xstrdup("copy-target-goto-line"),
+        .sx = 6,
+        .sy = 5,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 56,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 8,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 7 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 57,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 5,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 4 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    var row: u32 = 0;
+    while (row < 8) : (row += 1) {
+        setGridLineText(source.base.grid, row, "line");
+        source.base.grid.linedata[row].cellused = 4;
+    }
+    source.base.cx = 3;
+    source.base.cy = 4;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+    try std.testing.expectEqual(@as(u32, 4), absoluteCursorRow(wme));
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "goto-line", "1" });
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+    try std.testing.expectEqual(@as(u32, 6), absoluteCursorRow(wme));
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "goto-line", "bogus" });
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "goto-line", "99" });
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cy);
+    try std.testing.expectEqual(@as(u32, 4), absoluteCursorRow(wme));
 }
 
 test "window-copy startDrag keeps the cursor under reduced mouse drags" {

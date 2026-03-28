@@ -521,6 +521,13 @@ fn server_client_send_exit_status(cl: *T.Client, retval: i32) void {
     }
 }
 
+fn server_client_command_done(item: *cmdq_mod.CmdqItem, _: ?*anyopaque) T.CmdRetval {
+    const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
+    if (cl.flags & T.CLIENT_ATTACHED == 0)
+        cl.flags |= T.CLIENT_EXIT;
+    return .normal;
+}
+
 fn server_client_enqueue_command_list(cl: *T.Client, cmd_list: *cmd_mod.CmdList) void {
     if (cl.flags & T.CLIENT_READONLY != 0 and !cmd_mod.cmd_list_all_have(@ptrCast(cmd_list), T.CMD_READONLY)) {
         cmd_mod.cmd_list_free(cmd_list);
@@ -529,6 +536,7 @@ fn server_client_enqueue_command_list(cl: *T.Client, cmd_list: *cmd_mod.CmdList)
         return;
     }
     cmdq_mod.cmdq_append(cl, cmd_list);
+    _ = cmdq_mod.cmdq_append_item(cl, cmdq_mod.cmdq_get_callback1("server-client-command-done", server_client_command_done, null));
 }
 
 fn server_client_dispatch_default_command(cl: *T.Client) void {
@@ -1933,6 +1941,50 @@ test "server_client_dispatch_command queues default-client-command when argc is 
     server_client_dispatch_command(&client, &imsg_msg);
 
     try std.testing.expect(cmdq_mod.cmdq_has_pending(&client));
+}
+
+test "server_client_dispatch_command marks unattached clients for exit after command completion" {
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .pane_cache = .{},
+        .stdin_pending = .{},
+    };
+    defer env_mod.environ_free(client.environ);
+    defer client.stdin_pending.deinit(xm.allocator);
+    client.tty = .{ .client = &client };
+
+    var payload = std.ArrayList(u8){};
+    defer payload.deinit(xm.allocator);
+    const msg_cmd = protocol.MsgCommand{ .argc = 1 };
+    try payload.appendSlice(xm.allocator, std.mem.asBytes(&msg_cmd));
+    try payload.appendSlice(xm.allocator, "start-server");
+    try payload.append(xm.allocator, 0);
+
+    var imsg_msg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.len = @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.items.len);
+    imsg_msg.data = payload.items.ptr;
+
+    server_client_dispatch_command(&client, &imsg_msg);
+
+    try std.testing.expect(cmdq_mod.cmdq_has_pending(&client));
+    try std.testing.expectEqual(@as(u32, 2), cmdq_mod.cmdq_next(&client));
+    try std.testing.expect(client.flags & T.CLIENT_EXIT != 0);
 }
 
 test "build_client_draw_payload keeps multi-pane status-only redraw off the full-clear body path" {

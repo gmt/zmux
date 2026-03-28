@@ -276,6 +276,7 @@ pub fn server_client_unlock(cl: *T.Client) void {
 
 pub fn server_client_detach(cl: *T.Client, msg_type: protocol.MsgType) void {
     const s = cl.session orelse return;
+    const srv = @import("server.zig");
 
     if (s.attached > 0) s.attached -= 1;
     cl.last_session = s;
@@ -290,6 +291,7 @@ pub fn server_client_detach(cl: *T.Client, msg_type: protocol.MsgType) void {
     cl.exit_session = xm.xstrdup(s.name);
 
     notify.notify_client("client-detached", cl);
+    srv.server_update_socket();
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, msg_type, -1, cl.exit_session.?.ptr, cl.exit_session.?.len + 1);
     } else {
@@ -612,6 +614,7 @@ pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
 }
 
 pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
+    const srv = @import("server.zig");
     const old_session = cl.session;
     const now = std.time.milliTimestamp();
     if (cl.session) |current| {
@@ -632,6 +635,7 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     alerts.alerts_check_session(s);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);
+    srv.server_update_socket();
     if (old_session != s) notify.notify_client("client-session-changed", cl);
 }
 
@@ -1468,31 +1472,24 @@ test "server_client_detach sends detachkill payload and clears session state" {
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
+    sess.session_init_globals(xm.allocator);
+
     var pair: [2]i32 = undefined;
     try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
 
     var proc = T.ZmuxProc{ .name = "server-client-detach-test" };
     defer proc.peers.deinit(xm.allocator);
 
-    var options = T.Options.init(xm.allocator, null);
-    defer options.deinit();
-    var session_env = T.Environ.init(xm.allocator);
-    defer session_env.deinit();
-    var session = T.Session{
-        .id = 1,
-        .name = @constCast("detach-test"),
-        .cwd = "/tmp",
-        .options = &options,
-        .environ = &session_env,
-        .attached = 1,
-    };
+    const session = sess.session_create(null, "detach-test", "/tmp", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("detach-test") != null) sess.session_destroy(session, false, "test");
+    session.attached = 1;
 
     var client = T.Client{
         .environ = env,
         .tty = undefined,
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
-        .session = &session,
+        .session = session,
     };
     client.tty = .{ .client = &client };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);

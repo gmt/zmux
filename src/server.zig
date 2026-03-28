@@ -112,6 +112,39 @@ fn set_blocking(fd: i32, state: bool) void {
     _ = std.c.fcntl(fd, std.posix.F.SETFL, new_flags);
 }
 
+pub fn server_update_socket() void {
+    if (socket_path.len == 0) return;
+
+    var attached = false;
+    var sessions_it = sess.sessions.valueIterator();
+    while (sessions_it.next()) |session_ptr| {
+        if (session_ptr.*.attached != 0) {
+            attached = true;
+            break;
+        }
+    }
+
+    const stat = std.fs.cwd().statFile(socket_path) catch return;
+    var mode: std.fs.File.Mode = stat.mode & 0o777;
+    if (attached) {
+        if (mode & 0o400 != 0) mode |= 0o100;
+        if (mode & 0o040 != 0) mode |= 0o010;
+        if (mode & 0o004 != 0) mode |= 0o001;
+    } else {
+        mode &= ~@as(std.fs.File.Mode, 0o111);
+    }
+
+    std.posix.fchmodat(std.posix.AT.FDCWD, socket_path, mode, 0) catch return;
+}
+
+fn server_clear_accept() void {
+    if (server_accept_ev) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        server_accept_ev = null;
+    }
+}
+
 // ── Accept callback ───────────────────────────────────────────────────────
 
 export fn server_accept_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
@@ -140,6 +173,8 @@ export fn server_accept_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void 
 fn server_add_accept(timeout_ms: u32) void {
     _ = timeout_ms;
     if (server_fd < 0) return;
+
+    server_clear_accept();
     const ev = c.libevent;
     if (proc_mod.libevent) |base| {
         const ev_ptr = ev.event_new(base, server_fd, @intCast(ev.EV_READ | ev.EV_PERSIST), server_accept_cb, null);
@@ -148,6 +183,24 @@ fn server_add_accept(timeout_ms: u32) void {
             _ = ev.event_add(ep, null);
         }
     }
+}
+
+fn server_reopen_socket() void {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    server_clear_accept();
+
+    const fd = server_create_socket(server_client_flags, &cause);
+    if (fd != -1) {
+        if (server_fd >= 0) std.posix.close(server_fd);
+        server_fd = fd;
+        server_update_socket();
+    } else if (cause) |msg| {
+        log.log_warn("server socket reopen failed: {s}", .{msg});
+    }
+
+    server_add_accept(0);
 }
 
 // ── Server loop callback ──────────────────────────────────────────────────
@@ -382,6 +435,8 @@ export fn server_signal(signo: c_int) void {
     switch (signo) {
         std.posix.SIG.TERM, std.posix.SIG.INT => server_request_exit(),
         std.posix.SIG.CHLD => server_child_signal(),
+        std.posix.SIG.USR1 => server_reopen_socket(),
+        std.posix.SIG.USR2 => if (server_proc) |proc| proc_mod.proc_toggle_log(proc),
         else => {},
     }
 }
@@ -668,6 +723,91 @@ test "server SIGTERM drains sessions and leaves the loop to exit naturally" {
 
     client_registry.clients.clearRetainingCapacity();
     try std.testing.expect(server_loop());
+}
+
+test "server SIGUSR1 reopens the socket and restores attached execute bits" {
+    const env_mod = @import("environ.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const real = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(real);
+
+    const test_socket_path = try std.fs.path.join(xm.allocator, &.{ real, "server.sock" });
+    defer xm.allocator.free(test_socket_path);
+
+    const old_socket_path = socket_path;
+    defer socket_path = old_socket_path;
+    socket_path = test_socket_path;
+
+    const old_server_fd = server_fd;
+    defer server_fd = old_server_fd;
+    server_fd = -1;
+    defer if (server_fd >= 0) std.posix.close(server_fd);
+
+    const old_server_client_flags = server_client_flags;
+    defer server_client_flags = old_server_client_flags;
+    server_client_flags = T.CLIENT_DEFAULTSOCKET;
+
+    const old_server_accept_ev = server_accept_ev;
+    defer server_accept_ev = old_server_accept_ev;
+    server_accept_ev = null;
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-signal-usr1", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-signal-usr1") != null) sess.session_destroy(s, false, "test");
+    s.attached = 1;
+
+    var cause: ?[]u8 = null;
+    server_fd = server_create_socket(server_client_flags, &cause);
+    defer if (cause) |msg| xm.allocator.free(msg);
+    try std.testing.expect(server_fd >= 0);
+
+    const before = try std.fs.cwd().statFile(socket_path);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o660), before.mode & 0o777);
+
+    const original_fd = server_fd;
+    server_signal(std.posix.SIG.USR1);
+
+    try std.testing.expect(server_fd >= 0);
+    try std.testing.expect(server_fd != original_fd);
+    try std.testing.expect(std.c.fcntl(original_fd, std.posix.F.GETFD, @as(c_int, 0)) == -1);
+
+    const after = try std.fs.cwd().statFile(socket_path);
+    try std.testing.expectEqual(@as(std.fs.File.Mode, 0o770), after.mode & 0o777);
+}
+
+test "server SIGUSR2 toggles server proc logging" {
+    const old_server_proc = server_proc;
+    defer server_proc = old_server_proc;
+
+    try std.testing.expectEqual(@as(u32, 0), log.log_get_level());
+
+    var server_proc_value = T.ZmuxProc{
+        .name = "server",
+        .peers = .{},
+    };
+    defer server_proc_value.peers.deinit(xm.allocator);
+
+    server_proc = &server_proc_value;
+
+    server_signal(std.posix.SIG.USR2);
+    try std.testing.expectEqual(@as(u32, 1), log.log_get_level());
+
+    server_signal(std.posix.SIG.USR2);
+    try std.testing.expectEqual(@as(u32, 0), log.log_get_level());
 }
 
 test "server session-group redraw and status helpers fan out across grouped sessions" {

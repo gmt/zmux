@@ -28,6 +28,7 @@ const format_mod = @import("format.zig");
 const file_mod = @import("file.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
+const server_client_mod = @import("server-client.zig");
 const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
 const build_options = @import("build_options");
@@ -44,7 +45,7 @@ const SourceFileState = struct {
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const cl = cmdq.cmdq_get_client(item);
-    var state = xm.allocator.create(SourceFileState) catch unreachable;
+    const state = xm.allocator.create(SourceFileState) catch unreachable;
     state.* = .{
         .item = item,
         .client = cl,
@@ -55,6 +56,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         },
         .files = .{},
     };
+    const quoted_cwd = quote_cwd_for_glob(server_client_mod.server_client_get_cwd(cl, null));
+    defer xm.allocator.free(quoted_cwd);
 
     var idx: usize = 0;
     while (args.value_at(idx)) |raw_path| : (idx += 1) {
@@ -70,10 +73,67 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         } else null;
         defer if (path) |expanded| xm.allocator.free(expanded);
 
-        state.files.append(xm.allocator, xm.xstrdup(path orelse raw_path)) catch unreachable;
+        expand_path_argument(state, quoted_cwd, path orelse raw_path);
     }
 
     return drive_state(state, false);
+}
+
+fn expand_path_argument(state: *SourceFileState, quoted_cwd: []const u8, path: []const u8) void {
+    if (std.mem.eql(u8, path, "-")) {
+        add_path(state, path);
+        return;
+    }
+
+    const pattern = if (std.mem.startsWith(u8, path, "/"))
+        xm.xstrdup(path)
+    else
+        xm.xasprintf("{s}/{s}", .{ quoted_cwd, path });
+    defer xm.allocator.free(pattern);
+
+    const pattern_z = xm.xm_dupeZ(pattern);
+    defer xm.allocator.free(pattern_z);
+
+    var matches: c.posix_sys.glob_t = std.mem.zeroes(c.posix_sys.glob_t);
+    defer c.posix_sys.globfree(&matches);
+
+    const result = c.posix_sys.glob(pattern_z.ptr, 0, null, &matches);
+    if (result != 0) {
+        if (result == c.posix_sys.GLOB_NOMATCH and state.flags.quiet) return;
+
+        const errno_value: c_int = if (result == c.posix_sys.GLOB_NOMATCH)
+            @intFromEnum(std.posix.E.NOENT)
+        else if (result == c.posix_sys.GLOB_NOSPACE)
+            @intFromEnum(std.posix.E.NOMEM)
+        else
+            @intFromEnum(std.posix.E.INVAL);
+        cfg_mod.cfg_note_path_error(path, errno_value, false);
+        state.ok = false;
+        return;
+    }
+
+    var idx: usize = 0;
+    while (idx < matches.gl_pathc) : (idx += 1) {
+        const matched = std.mem.span(matches.gl_pathv[idx]);
+        add_path(state, matched);
+    }
+}
+
+fn add_path(state: *SourceFileState, path: []const u8) void {
+    state.files.append(xm.allocator, xm.xstrdup(path)) catch unreachable;
+}
+
+fn quote_cwd_for_glob(path: []const u8) []u8 {
+    var quoted = std.ArrayList(u8){};
+    errdefer quoted.deinit(xm.allocator);
+
+    for (path) |ch| {
+        if (ch < 128 and !std.ascii.isAlphanumeric(ch) and ch != '/')
+            quoted.append(xm.allocator, '\\') catch unreachable;
+        quoted.append(xm.allocator, ch) catch unreachable;
+    }
+
+    return quoted.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn drive_state(state: *SourceFileState, from_callback: bool) T.CmdRetval {
@@ -244,4 +304,75 @@ test "source-file waits for detached client reads and loads remote content" {
 
     const pb = paste_mod.paste_get_name("sourced") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("loaded", paste_mod.paste_buffer_data(pb, null));
+}
+
+test "source-file expands relative glob patterns from the client cwd" {
+    paste_mod.paste_reset_for_tests();
+    defer paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "one.conf", .data = "set-buffer -b one loaded-one\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "two.conf", .data = "set-buffer -b two loaded-two\n" });
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .cwd = cwd,
+    };
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "source-file", "*.conf" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const one = paste_mod.paste_get_name("one") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("loaded-one", paste_mod.paste_buffer_data(one, null));
+
+    const two = paste_mod.paste_get_name("two") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("loaded-two", paste_mod.paste_buffer_data(two, null));
+}
+
+test "source-file quiet glob nomatch does not fail" {
+    paste_mod.paste_reset_for_tests();
+    defer paste_mod.paste_reset_for_tests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .cwd = cwd,
+    };
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "source-file", "-q", "*.missing" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
 }

@@ -59,7 +59,7 @@ pub fn resolve_target(
     window_default: bool,
 ) ?ResolvedTarget {
     const kind = requested_scope(args, window_default);
-    return resolve_target_kind(item, args, kind, false);
+    return resolve_target_kind(item, args, kind);
 }
 
 pub fn resolve_target_for_name(
@@ -75,14 +75,14 @@ pub fn resolve_target_for_name(
         return null;
     };
 
-    if (oe.scope.server) return resolve_target_kind(item, args, .server, false);
-    if (oe.scope.session) return resolve_target_kind(item, args, .session, false);
+    if (oe.scope.server) return resolve_target_kind(item, args, .server);
+    if (oe.scope.session) return resolve_target_kind(item, args, .session);
     if (oe.scope.window and oe.scope.pane) {
-        if (args.has('p')) return resolve_target_kind(item, args, .pane, true);
-        return resolve_target_kind(item, args, .window, false);
+        if (args.has('p')) return resolve_target_kind(item, args, .pane);
+        return resolve_target_kind(item, args, .window);
     }
-    if (oe.scope.window) return resolve_target_kind(item, args, .window, false);
-    if (oe.scope.pane) return resolve_target_kind(item, args, .pane, false);
+    if (oe.scope.window) return resolve_target_kind(item, args, .window);
+    if (oe.scope.pane) return resolve_target_kind(item, args, .pane);
 
     cmdq.cmdq_error(item, "invalid option: {s}", .{name});
     return null;
@@ -92,7 +92,6 @@ fn resolve_target_kind(
     item: *cmdq.CmdqItem,
     args: *const @import("arguments.zig").Arguments,
     kind: ScopeKind,
-    ignore_global_pane: bool,
 ) ?ResolvedTarget {
     switch (kind) {
         .server => return .{ .kind = .server, .options = opts.global_options, .global = true },
@@ -137,11 +136,6 @@ fn resolve_target_kind(
             };
         },
         .pane => {
-            if (args.has('g') and !ignore_global_pane) {
-                cmdq.cmdq_error(item, "global pane options not supported yet", .{});
-                return null;
-            }
-
             var target: T.CmdFindState = .{};
             if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, T.CMD_FIND_QUIET) != 0 or target.wp == null) {
                 if (args.get('t')) |tflag|

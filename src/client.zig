@@ -251,6 +251,11 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             file_mod.clientHandleWriteOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);
         },
         .write_close => file_mod.clientHandleWriteClose(imsg_msg),
+        .flags => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (data_len < @sizeOf(u64) or imsg_msg.data == null) return;
+            @memcpy(std.mem.asBytes(&client_flags), @as([*]const u8, @ptrCast(imsg_msg.data.?))[0..@sizeOf(u64)]);
+        },
         .shell => {
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
             if (data_len == 0 or imsg_msg.data == null) return;

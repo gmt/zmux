@@ -77,8 +77,10 @@ fn exec_neww(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .idx = target.idx,
         .cwd = args.get('c'),
         .name = args.get('n'),
-        .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
+        .flags = 0,
     };
+    if (args.has('d')) sc.flags |= T.SPAWN_DETACHED;
+    if (args.has('k')) sc.flags |= T.SPAWN_KILL;
     const argv = argv_tail(args, 0);
     defer if (argv) |slice| free_argv(slice);
     if (argv) |slice| {
@@ -366,4 +368,61 @@ test "new-window -S -n errors when multiple windows share the name" {
     try std.testing.expectEqual(@as(usize, 3), session.windows.count());
     try std.testing.expectEqual(current_wl, session.curw.?);
     try std.testing.expectEqualStrings("Multiple windows named dup", client.message_string.?);
+}
+
+test "new-window rejects occupied target index without -k" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-index-in-use", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-index-in-use") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var occupied_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const occupied_wl = spawn_mod.spawn_window(&occupied_sc, &cause).?;
+    session.curw = occupied_wl;
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-d", "-t", "new-window-index-in-use:0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), session.windows.count());
+    try std.testing.expectEqual(occupied_wl, session.curw.?);
+}
+
+test "new-window -d -k replaces the current target slot and selects the replacement" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "new-window-kill-existing", "/", env_mod.environ_create(), @import("options.zig").options_create(@import("options.zig").global_s_options), null);
+    defer if (sess.session_find("new-window-kill-existing") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var current_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const current_wl = spawn_mod.spawn_window(&current_sc, &cause).?;
+    const replaced_window_id = current_wl.window.id;
+    var other_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn_mod.spawn_window(&other_sc, &cause).?;
+    session.curw = current_wl;
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-d", "-k", "-t", "new-window-kill-existing:0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const replacement = sess.winlink_find_by_index(&session.windows, 0).?;
+    try std.testing.expectEqual(@as(usize, 2), session.windows.count());
+    try std.testing.expect(replacement.window.id != replaced_window_id);
+    try std.testing.expectEqual(replacement, session.curw.?);
 }

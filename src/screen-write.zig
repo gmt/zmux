@@ -194,7 +194,10 @@ pub fn newline(ctx: *T.ScreenWriteCtx) void {
     }
     const top = @min(s.rupper, gd.sy - 1);
     const bottom = @min(s.rlower, gd.sy - 1);
-    grid.scroll_up(gd, top, bottom);
+    if (top == 0 and bottom == gd.sy - 1)
+        grid.scroll_full_screen_into_history(gd)
+    else
+        grid.scroll_up(gd, top, bottom);
     s.cy = bottom;
 }
 

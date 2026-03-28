@@ -29,6 +29,9 @@ const alerts = @import("alerts.zig");
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len == 0) return;
+    wp.flags |= T.PANE_CHANGED;
+    if (wp.modes.items.len != 0)
+        wp.flags |= T.PANE_UNSEENCHANGES;
     wp.input_pending.appendSlice(@import("xmalloc.zig").allocator, bytes) catch unreachable;
 
     var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
@@ -65,6 +68,12 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
         }
         if (next == '>') {
             ctx.s.mode &= ~T.MODE_KKEYPAD;
+            i += 2;
+            continue;
+        }
+        if (next == 'H') {
+            if (ctx.s.cx < ctx.s.grid.sx)
+                screen_mod.screen_set_tab(ctx.s, ctx.s.cx);
             i += 2;
             continue;
         }
@@ -157,10 +166,16 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8) void {
     const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return;
     const kind = payload[0..semi];
     const value = payload[semi + 1 ..];
-    if (!(std.mem.eql(u8, kind, "0") or std.mem.eql(u8, kind, "1") or std.mem.eql(u8, kind, "2"))) return;
+    const current = screen_mod.screen_current(wp);
 
-    if (wp.screen.title) |old| xm.allocator.free(old);
-    wp.screen.title = if (value.len != 0) xm.xstrdup(value) else null;
+    if (std.mem.eql(u8, kind, "0") or std.mem.eql(u8, kind, "1") or std.mem.eql(u8, kind, "2")) {
+        if (current.title) |old| xm.allocator.free(old);
+        current.title = if (value.len != 0) xm.xstrdup(value) else null;
+        return;
+    }
+    if (std.mem.eql(u8, kind, "7")) {
+        screen_mod.screen_set_path(current, value);
+    }
 }
 
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
@@ -224,6 +239,11 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         '@' => screen_write.insert_characters(ctx, first_param(params, 1)),
         'P' => screen_write.delete_characters(ctx, first_param(params, 1)),
         'X' => screen_write.erase_characters(ctx, first_param(params, 1)),
+        'g' => switch (first_param(params, 0)) {
+            0 => if (ctx.s.cx < ctx.s.grid.sx) screen_mod.screen_clear_tab(ctx.s, ctx.s.cx),
+            3 => screen_mod.screen_clear_all_tabs(ctx.s),
+            else => {},
+        },
         'r' => {
             const top = first_param(params, 1) -| 1;
             const bottom = second_param(params, ctx.s.grid.sy) -| 1;
@@ -531,7 +551,51 @@ test "input parses OSC pane title updates" {
 
     const wp = win.window_add_pane(w, null, 4, 2);
     input_parse_screen(wp, "\x1b]2;logs\x07");
-    try std.testing.expectEqualStrings("logs", wp.screen.title.?);
+    try std.testing.expectEqualStrings("logs", screen_mod.screen_current(wp).title.?);
+}
+
+test "input tracks pane path tabs and unseen changes" {
+    const grid = @import("grid.zig");
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(12, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 12, 3);
+    const mode = T.WindowMode{ .name = "input-runtime-test" };
+    const wme = win.window_pane_push_mode(wp, &mode, null, null);
+
+    input_parse_screen(wp, "\x1b]7;/tmp/demo\x07\x1b[4G\x1bH\rA\tB");
+    try std.testing.expectEqualStrings("/tmp/demo", screen_mod.screen_current(wp).path.?);
+    try std.testing.expect(screen_mod.screen_has_tab(screen_mod.screen_current(wp), 3));
+    try std.testing.expect((wp.flags & T.PANE_UNSEENCHANGES) != 0);
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 3));
+
+    input_parse_screen(wp, "\x1b[4G\x1b[g");
+    try std.testing.expect(!screen_mod.screen_has_tab(screen_mod.screen_current(wp), 3));
+
+    input_parse_screen(wp, "\x1b[3g");
+    try std.testing.expect(!screen_mod.screen_has_tab(screen_mod.screen_current(wp), 8));
+
+    try std.testing.expect(win.window_pane_pop_mode(wp, wme));
+    try std.testing.expect((wp.flags & T.PANE_UNSEENCHANGES) == 0);
 }
 
 test "input tracks keypad cursor mouse and extended-key modes" {

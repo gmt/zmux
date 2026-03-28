@@ -25,6 +25,7 @@ const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const cl = cmdq.cmdq_get_client(item);
+    const state = cmdq.cmdq_get_state(item);
     const entry_ptr = cmd.entry;
     const dedicated_cycle = entry_ptr == &entry_next or entry_ptr == &entry_previous or entry_ptr == &entry_last;
     const next = entry_ptr == &entry_next or args.has('n');
@@ -44,18 +45,22 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cmdq.cmdq_error(item, "no next window", .{});
             return .@"error";
         }
+        cmd_find.cmd_find_from_session(&state.current, s, 0);
     } else if (previous) {
         if (!sess.session_previous(s, args.has('a'))) {
             cmdq.cmdq_error(item, "no previous window", .{});
             return .@"error";
         }
+        cmd_find.cmd_find_from_session(&state.current, s, 0);
     } else if (last or (args.has('T') and wl != null and wl == s.curw)) {
         if (!sess.session_last(s)) {
             cmdq.cmdq_error(item, "no last window", .{});
             return .@"error";
         }
-    } else if (!sess.session_select(s, (wl orelse return .@"error").idx)) {
-        return .@"error";
+        if (state.current.s == s)
+            cmd_find.cmd_find_from_session(&state.current, s, 0);
+    } else if (sess.session_select(s, (wl orelse return .@"error").idx)) {
+        cmd_find.cmd_find_from_session(&state.current, s, 0);
     }
 
     if (cl) |c| {
@@ -65,6 +70,7 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
     server_fn.server_redraw_session(s);
+    notify.notify_hook(item, "after-select-window", &state.current);
     resize_mod.recalculate_sizes();
     return .normal;
 }
@@ -365,6 +371,57 @@ test "next-window and previous-window honor alert-only selection" {
     defer cmd_mod.cmd_free(previous_cmd);
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(previous_cmd, &item));
     try std.testing.expectEqual(setup.first, setup.session.curw.?);
+}
+
+test "select-window queues after-select-window hooks for direct, cycle, and toggle paths" {
+    const opts = @import("options.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    init_test_state();
+    defer deinit_test_state();
+
+    opts.options_set_array(opts.global_s_options, "after-select-window", &.{
+        "set-environment -g -F AFTER_SELECT_WINDOW '#{session_name}:#{window_index}'",
+    });
+
+    const setup = make_select_window_test_session("select-window-hook");
+    defer if (sess.session_find("select-window-hook") != null) sess.session_destroy(setup.session, false, "test");
+
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    var direct_cause: ?[]u8 = null;
+    const direct_list = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "select-window", "-t", "select-window-hook:2" }, null, &direct_cause);
+    defer if (direct_cause) |msg| xm.allocator.free(msg);
+    cmdq.cmdq_append(null, direct_list);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try std.testing.expectEqualStrings("select-window-hook:2", env_mod.environ_find(env_mod.global_environ, "AFTER_SELECT_WINDOW").?.value.?);
+
+    env_mod.environ_unset(env_mod.global_environ, "AFTER_SELECT_WINDOW");
+
+    var cycle_cause: ?[]u8 = null;
+    const cycle_list = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "next-window", "-t", "select-window-hook" }, null, &cycle_cause);
+    defer if (cycle_cause) |msg| xm.allocator.free(msg);
+    cmdq.cmdq_append(null, cycle_list);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try std.testing.expectEqualStrings("select-window-hook:0", env_mod.environ_find(env_mod.global_environ, "AFTER_SELECT_WINDOW").?.value.?);
+
+    env_mod.environ_unset(env_mod.global_environ, "AFTER_SELECT_WINDOW");
+
+    var current: T.CmdFindState = .{ .idx = -1 };
+    cmd_find.cmd_find_from_session(&current, setup.session, 0);
+    const state = cmdq.cmdq_new_state(&current, null, 0);
+    defer cmdq.cmdq_free_state(state);
+
+    var toggle_cause: ?[]u8 = null;
+    const toggle_cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-T", "-t", "select-window-hook:0" }, null, &toggle_cause);
+    defer cmd_mod.cmd_free(toggle_cmd);
+    defer if (toggle_cause) |msg| xm.allocator.free(msg);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list, .state = state };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(toggle_cmd, &item));
+    try std.testing.expectEqualStrings("select-window-hook:2", env_mod.environ_find(env_mod.global_environ, "AFTER_SELECT_WINDOW").?.value.?);
 }
 
 test "new-window synchronizes grouped peers and uses shared group status-only invalidation for detached creates" {

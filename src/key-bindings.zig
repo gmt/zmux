@@ -370,9 +370,14 @@ const default_client_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-
 const default_client_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
 const default_buffer_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
 const default_buffer_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
+const default_buffer_mode_delete_argv = [_][]const u8{ "send-keys", "-X", "delete" };
+const default_buffer_mode_delete_tagged_argv = [_][]const u8{ "send-keys", "-X", "delete-tagged" };
 const default_buffer_mode_edit_selected_argv = [_][]const u8{ "send-keys", "-X", "edit-selected" };
 const default_buffer_mode_filter_argv = [_][]const u8{ "send-keys", "-X", "filter" };
 const default_buffer_mode_paste_argv = [_][]const u8{ "send-keys", "-X", "paste" };
+const default_buffer_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
+const default_buffer_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
+const default_buffer_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
 const default_buffer_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
 const default_buffer_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
 const default_buffer_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
@@ -2084,9 +2089,39 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "buffer-mode",
+        .key = 'd',
+        .note = "Delete selected buffer",
+        .argv = default_buffer_mode_delete_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = 'D',
+        .note = "Delete tagged buffers",
+        .argv = default_buffer_mode_delete_tagged_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
         .key = 'f',
         .note = "Filter buffers",
         .argv = default_buffer_mode_filter_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = 't',
+        .note = "Tag buffer",
+        .argv = default_buffer_mode_tag_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = 'T',
+        .note = "Clear all tagged buffers",
+        .argv = default_buffer_mode_tag_none_argv[0..],
+    },
+    .{
+        .table = "buffer-mode",
+        .key = 't' | T.KEYC_CTRL,
+        .note = "Tag all buffers",
+        .argv = default_buffer_mode_tag_all_argv[0..],
     },
     .{
         .table = "buffer-mode",
@@ -2144,9 +2179,39 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "buffer-mode-vi",
+        .key = 'd',
+        .note = "Delete selected buffer",
+        .argv = default_buffer_mode_delete_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'D',
+        .note = "Delete tagged buffers",
+        .argv = default_buffer_mode_delete_tagged_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
         .key = 'f',
         .note = "Filter buffers",
         .argv = default_buffer_mode_filter_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 't',
+        .note = "Tag buffer",
+        .argv = default_buffer_mode_tag_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 'T',
+        .note = "Clear all tagged buffers",
+        .argv = default_buffer_mode_tag_none_argv[0..],
+    },
+    .{
+        .table = "buffer-mode-vi",
+        .key = 't' | T.KEYC_CTRL,
+        .note = "Tag all buffers",
+        .argv = default_buffer_mode_tag_all_argv[0..],
     },
     .{
         .table = "buffer-mode-vi",
@@ -2916,16 +2981,26 @@ test "default buffer-mode bindings are installed" {
     const emacs = key_bindings_get_table("buffer-mode", false).?;
     try std.testing.expect(key_bindings_get(emacs, 'q') != null);
     try std.testing.expect(key_bindings_get(emacs, 'p') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'd') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'D') != null);
     try std.testing.expect(key_bindings_get(emacs, 'e') != null);
     try std.testing.expect(key_bindings_get(emacs, 'f') != null);
+    try std.testing.expect(key_bindings_get(emacs, 't') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'T') != null);
+    try std.testing.expect(key_bindings_get(emacs, 't' | T.KEYC_CTRL) != null);
     try std.testing.expect(key_bindings_get(emacs, T.KEYC_DOWN) != null);
 
     const vi = key_bindings_get_table("buffer-mode-vi", false).?;
     try std.testing.expect(key_bindings_get(vi, 'q') != null);
     try std.testing.expect(key_bindings_get(vi, 'j') != null);
     try std.testing.expect(key_bindings_get(vi, 'p') != null);
+    try std.testing.expect(key_bindings_get(vi, 'd') != null);
+    try std.testing.expect(key_bindings_get(vi, 'D') != null);
     try std.testing.expect(key_bindings_get(vi, 'e') != null);
     try std.testing.expect(key_bindings_get(vi, 'f') != null);
+    try std.testing.expect(key_bindings_get(vi, 't') != null);
+    try std.testing.expect(key_bindings_get(vi, 'T') != null);
+    try std.testing.expect(key_bindings_get(vi, 't' | T.KEYC_CTRL) != null);
 }
 
 test "key bindings dispatch preserves the supplied current target state" {

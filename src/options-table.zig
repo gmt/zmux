@@ -89,6 +89,14 @@ const status_format_default = [_][]const u8{
     status_format_default_0,
 };
 
+const copy_mode_position_format_default =
+    "#[align=right]" ++
+    "#{t/p:top_line_time}#{?#{e|>:#{top_line_time},0}, ,}" ++
+    "[#{scroll_position}/#{history_size}]" ++
+    "#{?search_timed_out, (timed out)," ++
+    "#{?search_count, (#{search_count}" ++
+    "#{?search_count_partial,+,} results),}}";
+
 pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     // ── Server options ────────────────────────────────────────────────────
     .{ .name = "backspace", .type = .string, .scope = S, .default_str = "\x7f" },
@@ -265,6 +273,9 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "copy-mode-match-style", .type = .style, .scope = W, .default_str = "bg=cyan,fg=black" },
     .{ .name = "copy-mode-current-match-style", .type = .style, .scope = W, .default_str = "bg=magenta,fg=black" },
     .{ .name = "copy-mode-mark-style", .type = .style, .scope = W, .default_str = "bg=red,fg=black" },
+    .{ .name = "copy-mode-position-format", .type = .string, .scope = WP, .default_str = copy_mode_position_format_default },
+    .{ .name = "copy-mode-position-style", .type = .style, .scope = W, .default_str = "#{E:mode-style}" },
+    .{ .name = "copy-mode-selection-style", .type = .style, .scope = W, .default_str = "#{E:mode-style}" },
     .{ .name = "fill-character", .type = .string, .scope = W, .default_str = "" },
     .{ .name = "main-pane-height", .type = .string, .scope = W, .default_str = "24" },
     .{ .name = "main-pane-width", .type = .string, .scope = W, .default_str = "80" },
@@ -312,3 +323,31 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "window-style", .type = .style, .scope = WP, .default_str = "default" },
     .{ .name = "wrap-search", .type = .flag, .scope = W, .default_num = 1 },
 };
+
+test "copy-mode position options keep tmux defaults and scopes" {
+    const std = @import("std");
+
+    const format = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "copy-mode-position-format")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.string, format.type);
+    try std.testing.expect(format.scope.window);
+    try std.testing.expect(format.scope.pane);
+    try std.testing.expectEqualStrings(copy_mode_position_format_default, format.default_str.?);
+
+    const position_style = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "copy-mode-position-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, position_style.type);
+    try std.testing.expect(position_style.scope.window);
+    try std.testing.expect(!position_style.scope.pane);
+    try std.testing.expectEqualStrings("#{E:mode-style}", position_style.default_str.?);
+
+    const selection_style = for (options_table) |*entry| {
+        if (std.mem.eql(u8, entry.name, "copy-mode-selection-style")) break entry;
+    } else unreachable;
+    try std.testing.expectEqual(OT.style, selection_style.type);
+    try std.testing.expect(selection_style.scope.window);
+    try std.testing.expect(!selection_style.scope.pane);
+    try std.testing.expectEqualStrings("#{E:mode-style}", selection_style.default_str.?);
+}

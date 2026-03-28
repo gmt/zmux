@@ -33,6 +33,7 @@ const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server_client = @import("server-client.zig");
 const sort_mod = @import("sort.zig");
+const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
@@ -62,6 +63,10 @@ const EditData = struct {
     wp_id: u32,
     name: []u8,
     pb: *paste_mod.PasteBuffer,
+};
+
+const FilterPromptState = struct {
+    pane_id: u32,
 };
 
 var edit_dispatch_hook: ?*const fn (*T.Client, []const u8) void = null;
@@ -151,6 +156,10 @@ fn windowBufferCommand(
     }
     if (std.mem.eql(u8, command, "edit-selected")) {
         startEditSelected(wme, client);
+        return;
+    }
+    if (std.mem.eql(u8, command, "filter")) {
+        startFilterPrompt(wme, client);
         return;
     }
     if (std.mem.eql(u8, command, "cursor-up")) {
@@ -365,6 +374,26 @@ fn startEditSelected(wme: *T.WindowModeEntry, client: ?*T.Client) void {
     dispatchEditCommand(cl, command);
 }
 
+fn startFilterPrompt(wme: *T.WindowModeEntry, client: ?*T.Client) void {
+    const cl = client orelse return;
+    if ((cl.flags & T.CLIENT_ATTACHED) == 0) return;
+
+    const state = xm.allocator.create(FilterPromptState) catch unreachable;
+    state.* = .{ .pane_id = wme.wp.id };
+    status_prompt.status_prompt_set(
+        cl,
+        null,
+        "(filter) ",
+        modeData(wme).filter,
+        filterPromptCallback,
+        null,
+        freeFilterPromptState,
+        state,
+        status_prompt.PROMPT_NOFORMAT,
+        .search,
+    );
+}
+
 fn runCommand(client: ?*T.Client, session: *T.Session, wl: *T.Winlink, template: []const u8, buffer_name: []const u8) void {
     const cl = client orelse return;
     const expanded = templateReplace(template, buffer_name, 1);
@@ -401,6 +430,33 @@ fn dispatchEditCommand(client: *T.Client, command: []const u8) void {
         return;
     }
     server_client.server_client_lock(client, command);
+}
+
+fn filterPromptCallback(_: *T.Client, data: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
+    const state: *FilterPromptState = @ptrCast(@alignCast(data orelse return 0));
+    const pane = window.window_pane_find_by_id(state.pane_id) orelse return 0;
+    const wme = window.window_pane_mode(pane) orelse return 0;
+    if (wme.mode != &window_buffer_mode) return 0;
+
+    const mode_data = modeData(wme);
+    if (mode_data.filter) |filter| xm.allocator.free(filter);
+
+    if (input) |text| {
+        if (text.len != 0)
+            mode_data.filter = xm.xstrdup(text)
+        else
+            mode_data.filter = null;
+    } else {
+        mode_data.filter = null;
+    }
+
+    rebuildAndDraw(wme);
+    return 0;
+}
+
+fn freeFilterPromptState(data: ?*anyopaque) void {
+    const state: *FilterPromptState = @ptrCast(@alignCast(data orelse return));
+    xm.allocator.destroy(state);
 }
 
 fn finishEditClose(buf: ?[]u8, arg: ?*anyopaque) void {
@@ -557,6 +613,12 @@ fn contains(haystack: []const u8, needle: []const u8, ignore_case: bool) bool {
         if (matched) return true;
     }
     return false;
+}
+
+fn sendPromptKey(client: *T.Client, key: T.key_code, bytes: []const u8) bool {
+    var event = T.key_event{ .key = key, .len = bytes.len };
+    if (bytes.len != 0) @memcpy(event.data[0..bytes.len], bytes);
+    return status_prompt.status_prompt_handle_key(client, &event);
 }
 
 fn initTestGlobals() void {
@@ -802,4 +864,58 @@ test "window-buffer edit-selected updates the selected buffer and rebuilds the m
 
     const first_item = modeData(wme).items.items[0];
     try std.testing.expect(std.mem.indexOf(u8, first_item.text, "edited") != null);
+}
+
+test "window-buffer filter command updates the live mode filter through the shared prompt" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-buffer-filter");
+    defer if (sess.session_find("window-buffer-filter") != null) sess.session_destroy(setup.session, false, "test");
+
+    paste_mod.paste_add(null, xm.xstrdup("older"));
+    paste_mod.paste_add(null, xm.xstrdup("needle buffer"));
+
+    var chooser = makeClient(setup.session, "filterer", "/dev/pts/412");
+    defer freeClient(&chooser);
+
+    var cause: ?[]u8 = null;
+    var mode_args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:NO:rt:yZ", 0, 1, &cause);
+    defer mode_args.deinit();
+
+    var fs = T.CmdFindState{
+        .s = setup.session,
+        .wl = setup.session.curw,
+        .w = setup.session.curw.?.window,
+        .wp = setup.pane,
+        .idx = setup.session.curw.?.idx,
+    };
+
+    const wme = enterMode(setup.pane, &fs, &mode_args);
+    defer {
+        status_prompt.status_prompt_clear(&chooser);
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    cause = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{"filter"}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowBufferCommand(wme, &chooser, setup.session, setup.session.curw.?, @ptrCast(&command_args), null);
+
+    try std.testing.expectEqualStrings("(filter) ", status_prompt.status_prompt_message(&chooser).?);
+    const filter_expr = "#{==:buffer_name,buffer1}";
+    for (filter_expr) |ch| {
+        const bytes = [_]u8{ch};
+        try std.testing.expect(sendPromptKey(&chooser, ch, &bytes));
+    }
+    try std.testing.expect(sendPromptKey(&chooser, T.C0_CR, "\r"));
+
+    const data = modeData(wme);
+    try std.testing.expectEqualStrings(filter_expr, data.filter.?);
+    try std.testing.expectEqual(@as(usize, 1), data.items.items.len);
+    try std.testing.expectEqualStrings("buffer1", mode_tree.getCurrentName(data.tree).?);
+    try std.testing.expect(status_prompt.status_prompt_input(&chooser) == null);
 }

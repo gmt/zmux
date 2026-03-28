@@ -204,8 +204,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     // Create session
-    const new_env = env_mod.environ_create();
-    if (cl) |c| env_mod.environ_copy(c.environ, new_env);
+    const new_env = build_session_environment(args, cl);
 
     const sess_opts = opts.options_create(opts.global_s_options);
 
@@ -300,6 +299,22 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     log.log_debug("new session ${d} {s}", .{ s.id, s.name });
     return .normal;
+}
+
+fn build_session_environment(
+    args: *const @import("arguments.zig").Arguments,
+    cl: ?*T.Client,
+) *T.Environ {
+    const env = env_mod.environ_create();
+    if (cl) |client| {
+        if (!args.has('E'))
+            env_mod.environ_update(opts.global_s_options, client.environ, env);
+    }
+    if (args.entry('e')) |env_entry| {
+        for (env_entry.values.items) |value|
+            env_mod.environ_put(env, value, 0);
+    }
+    return env;
 }
 
 fn argv_tail(args: *const @import("arguments.zig").Arguments, start: usize) ?[][]u8 {
@@ -571,6 +586,95 @@ test "new-session -c stores the session cwd and resolves the first pane from the
     const created_wp = created_wl.window.active.?;
     try std.testing.expectEqualStrings("child", created.cwd);
     try std.testing.expectEqualStrings(expected_pane_cwd, created_wp.cwd.?);
+}
+
+test "new-session seeds the session environment from update-environment and repeated -e overrides" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    opts.options_set_array(opts.global_s_options, "update-environment", &.{ "DISPLAY", "SSH_AUTH_SOCK", "MISSING" });
+
+    var client = new_session_test_client("new-session-env-client", null);
+    defer new_session_test_free_client(&client);
+    env_mod.environ_set(client.environ, "DISPLAY", 0, ":1");
+    env_mod.environ_set(client.environ, "SSH_AUTH_SOCK", 0, "/tmp/agent");
+    env_mod.environ_set(client.environ, "EXTRA", 0, "ignore-me");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-s",
+        "new-session-env",
+        "-e",
+        "DISPLAY=:2",
+        "-e",
+        "FOO=first",
+        "-e",
+        "FOO=second",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const created = sess.session_find("new-session-env").?;
+    defer if (sess.session_find("new-session-env") != null) sess.session_destroy(created, false, "test");
+
+    try std.testing.expectEqualStrings(":2", env_mod.environ_find(created.environ, "DISPLAY").?.value.?);
+    try std.testing.expectEqualStrings("/tmp/agent", env_mod.environ_find(created.environ, "SSH_AUTH_SOCK").?.value.?);
+    try std.testing.expect(env_mod.environ_find(created.environ, "MISSING").?.value == null);
+    try std.testing.expectEqualStrings("second", env_mod.environ_find(created.environ, "FOO").?.value.?);
+    try std.testing.expect(env_mod.environ_find(created.environ, "EXTRA") == null);
+}
+
+test "new-session -E skips update-environment and applies repeated -e overrides to the initial pane" {
+    const respawn_cmd = @import("cmd-respawn-pane.zig");
+
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    opts.options_set_array(opts.global_s_options, "update-environment", &.{"DISPLAY"});
+
+    var client = new_session_test_client("new-session-pane-env-client", null);
+    defer new_session_test_free_client(&client);
+    env_mod.environ_set(client.environ, "DISPLAY", 0, ":1");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-E",
+        "-s",
+        "new-session-pane-env",
+        "-e",
+        "FOO=first",
+        "-e",
+        "FOO=second",
+        "-e",
+        "BAR=ok",
+        "/bin/sh",
+        "-c",
+        "printf '%s %s' \"$FOO\" \"$BAR\"",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const created = sess.session_find("new-session-pane-env").?;
+    defer if (sess.session_find("new-session-pane-env") != null) sess.session_destroy(created, false, "test");
+
+    try std.testing.expect(env_mod.environ_find(created.environ, "DISPLAY") == null);
+    try std.testing.expectEqualStrings("second", env_mod.environ_find(created.environ, "FOO").?.value.?);
+    try std.testing.expectEqualStrings("ok", env_mod.environ_find(created.environ, "BAR").?.value.?);
+
+    std.Thread.sleep(500 * std.time.ns_per_ms);
+    const output = respawn_cmd.read_pane_output(created.curw.?.window.active.?);
+    defer xm.allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "second ok") != null);
 }
 
 test "new-session -t creates a fresh session group when the target name does not exist" {

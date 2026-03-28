@@ -31,6 +31,7 @@ const log = @import("log.zig");
 const opts = @import("options.zig");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
 
 pub var global_environ: *T.Environ = undefined;
 
@@ -146,11 +147,14 @@ pub fn environ_update(oo: *T.Options, srcenv: *T.Environ, dstenv: *T.Environ) vo
 pub fn environ_push(env: *T.Environ) void {
     var it = env.entries.valueIterator();
     while (it.next()) |entry| {
-        if (entry.value == null) continue;
         if (entry.name.len == 0) continue;
         if (entry.flags & T.ENVIRON_HIDDEN != 0) continue;
         const name_z = xm.allocator.dupeZ(u8, entry.name) catch unreachable;
         defer xm.allocator.free(name_z);
+        if (entry.value == null) {
+            _ = unsetenv(name_z);
+            continue;
+        }
         const val_z = xm.allocator.dupeZ(u8, entry.value.?) catch unreachable;
         defer xm.allocator.free(val_z);
         _ = setenv(name_z, val_z, 1);

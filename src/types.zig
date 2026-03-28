@@ -791,6 +791,7 @@ pub const WINDOW_ACTIVITY: u32 = 0x02;
 pub const WINDOW_SILENCE: u32 = 0x04;
 pub const WINDOW_ALERTFLAGS: u32 = WINDOW_BELL | WINDOW_ACTIVITY | WINDOW_SILENCE;
 pub const WINDOW_ZOOMED: u32 = 0x08;
+pub const WINDOW_WASZOOMED: u32 = 0x10;
 pub const WINDOW_RESIZE: u32 = 0x20;
 
 pub const Window = struct {

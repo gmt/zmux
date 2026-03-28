@@ -27,6 +27,8 @@ const srv = @import("server.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
 const opts = @import("options.zig");
+const format_mod = @import("format.zig");
+const format_draw = @import("format-draw.zig");
 const cmd_display_panes = @import("cmd-display-panes.zig");
 const key_bindings = @import("key-bindings.zig");
 const key_string = @import("key-string.zig");
@@ -35,7 +37,9 @@ const marked_pane_mod = @import("marked-pane.zig");
 const input_keys = @import("input-keys.zig");
 const menu = @import("menu.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
+const pane_io = @import("pane-io.zig");
 const popup = @import("popup.zig");
+const screen_write = @import("screen-write.zig");
 const server_client_mod = @import("server-client.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -209,21 +213,71 @@ pub fn server_unlink_window(s: *T.Session, wl: *T.Winlink) void {
 }
 
 pub fn server_destroy_pane(wp: *T.WindowPane, notify: bool) void {
-    _ = notify;
     const w = wp.window;
+    close_pane_io(wp);
+
+    const remain_on_exit = opts.options_get_number(wp.options, "remain-on-exit");
+    if (remain_on_exit != 0 and (wp.flags & T.PANE_STATUSREADY) == 0)
+        return;
+
+    var keep_dead_pane = false;
+    switch (remain_on_exit) {
+        0 => {},
+        2 => {
+            const status: u32 = @bitCast(wp.status);
+            keep_dead_pane = !(std.posix.W.IFEXITED(status) and std.posix.W.EXITSTATUS(status) == 0);
+        },
+        1 => keep_dead_pane = true,
+        else => {},
+    }
+    if (keep_dead_pane) {
+        if ((wp.flags & T.PANE_STATUSDRAWN) != 0)
+            return;
+        wp.flags |= T.PANE_STATUSDRAWN;
+        wp.dead_time = std.time.timestamp();
+        if (notify)
+            notify_mod.notify_pane("pane-died", wp);
+        draw_remain_on_exit(wp);
+        wp.base.mode &= ~@as(i32, T.MODE_CURSOR);
+        wp.flags |= T.PANE_REDRAW;
+        return;
+    }
+
+    if (notify)
+        notify_mod.notify_pane("pane-exited", wp);
+
     if (w.panes.items.len <= 1) {
         server_kill_window(w, true);
         return;
     }
 
-    const was_active = w.active == wp;
+    _ = win.window_unzoom(w);
     win.window_remove_pane(w, wp);
-    if (was_active) {
-        w.active = if (w.panes.items.len > 0) w.panes.items[0] else null;
-    }
-
     srv.server_redraw_window(w);
     server_status_window(w);
+}
+
+fn close_pane_io(wp: *T.WindowPane) void {
+    pane_io.pane_io_stop(wp);
+    if (wp.fd >= 0) {
+        std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+}
+
+fn draw_remain_on_exit(wp: *T.WindowPane) void {
+    const fmt = opts.options_get_string(wp.options, "remain-on-exit-format");
+    if (fmt.len == 0) return;
+    if (wp.base.grid.sx == 0 or wp.base.grid.sy == 0) return;
+
+    const expanded = format_mod.format_single(null, fmt, null, null, null, wp);
+    defer xm.allocator.free(expanded);
+
+    var ctx = T.ScreenWriteCtx{ .s = &wp.base };
+    screen_write.set_scroll_region(&ctx, 0, wp.base.grid.sy - 1);
+    screen_write.cursor_to(&ctx, wp.base.grid.sy - 1, 0);
+    screen_write.newline(&ctx);
+    format_draw.format_draw(&ctx, &T.grid_default_cell, wp.base.grid.sx, expanded);
 }
 
 pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
@@ -428,6 +482,98 @@ test "server_destroy_pane removes non-last pane and reassigns active pane" {
     const second = win.window_add_pane(w, null, 80, 24);
     w.active = second;
     w.references = 1;
+
+    server_destroy_pane(second, false);
+
+    try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
+    try std.testing.expectEqual(first, w.active.?);
+    try std.testing.expectEqual(first, w.panes.items[0]);
+}
+
+test "server_destroy_pane keeps a dead pane and draws remain-on-exit text" {
+    const grid = @import("grid.zig");
+    const opts_mod = @import("options.zig");
+
+    win.window_init_globals(xm.allocator);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const w = win.window_create(24, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win.window_remove_ref(w, "test");
+    const wp = win.window_add_pane(w, null, 24, 3);
+    w.active = wp;
+    w.references = 1;
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    opts_mod.options_set_number(wp.options, "remain-on-exit", 1);
+    wp.flags |= T.PANE_STATUSREADY;
+    wp.status = 7 << 8;
+
+    server_destroy_pane(wp, false);
+
+    try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
+    try std.testing.expectEqual(@as(i32, -1), wp.fd);
+    try std.testing.expect(wp.flags & T.PANE_STATUSDRAWN != 0);
+    try std.testing.expect(wp.flags & T.PANE_REDRAW != 0);
+    try std.testing.expect(wp.dead_time != 0);
+    try std.testing.expect(wp.base.mode & T.MODE_CURSOR == 0);
+
+    const line = grid.string_cells(wp.base.grid, wp.base.grid.sy - 1, wp.base.grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(line);
+    try std.testing.expectEqualStrings("Pane is dead (7)", line);
+}
+
+test "server_destroy_pane waits for remain-on-exit status before drawing or removing" {
+    const opts_mod = @import("options.zig");
+
+    win.window_init_globals(xm.allocator);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const w = win.window_create(24, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win.window_remove_ref(w, "test");
+    const wp = win.window_add_pane(w, null, 24, 3);
+    w.active = wp;
+    w.references = 1;
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    opts_mod.options_set_number(wp.options, "remain-on-exit", 1);
+
+    server_destroy_pane(wp, false);
+
+    try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
+    try std.testing.expectEqual(@as(i32, -1), wp.fd);
+    try std.testing.expect(wp.flags & T.PANE_STATUSDRAWN == 0);
+    try std.testing.expect(wp.flags & T.PANE_REDRAW == 0);
+    try std.testing.expectEqual(@as(i64, 0), wp.dead_time);
+    try std.testing.expect(wp.base.mode & T.MODE_CURSOR != 0);
+}
+
+test "server_destroy_pane removes a zero-exit pane when remain-on-exit is failed" {
+    const opts_mod = @import("options.zig");
+
+    win.window_init_globals(xm.allocator);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win.window_remove_ref(w, "test");
+
+    const first = win.window_add_pane(w, null, 80, 24);
+    const second = win.window_add_pane(w, null, 80, 24);
+    w.active = second;
+    w.references = 1;
+
+    opts_mod.options_set_number(second.options, "remain-on-exit", 2);
+    second.flags |= T.PANE_STATUSREADY;
+    second.status = 0;
 
     server_destroy_pane(second, false);
 

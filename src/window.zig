@@ -196,12 +196,14 @@ pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
 
 pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
     remove_last_pane_reference(w, wp);
+    const removed_geometry = pane_geometry(wp);
     for (w.panes.items, 0..) |p, i| {
         if (p == wp) {
             _ = w.panes.orderedRemove(i);
             if (w.active == wp) {
                 w.active = if (w.panes.items.len > 0) w.panes.items[0] else null;
             }
+            collapse_detached_pane_gap(w, removed_geometry);
             return true;
         }
     }
@@ -871,6 +873,64 @@ fn pane_geometry(wp: *T.WindowPane) PaneGeometry {
     };
 }
 
+fn collapse_detached_pane_gap(w: *T.Window, removed: PaneGeometry) void {
+    if (w.panes.items.len == 0) return;
+
+    if (w.panes.items.len == 1) {
+        apply_pane_geometry(w.panes.items[0], .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = w.sx,
+            .sy = w.sy,
+        });
+        return;
+    }
+
+    if (find_gap_absorber(w, removed)) |absorber| {
+        var geometry = pane_geometry(absorber);
+
+        if (geometry.xoff + geometry.sx + 1 == removed.xoff and geometry.yoff == removed.yoff and geometry.sy == removed.sy) {
+            geometry.sx += removed.sx + 1;
+        } else if (removed.xoff + removed.sx + 1 == geometry.xoff and geometry.yoff == removed.yoff and geometry.sy == removed.sy) {
+            geometry.xoff = removed.xoff;
+            geometry.sx += removed.sx + 1;
+        } else if (geometry.yoff + geometry.sy + 1 == removed.yoff and geometry.xoff == removed.xoff and geometry.sx == removed.sx) {
+            geometry.sy += removed.sy + 1;
+        } else if (removed.yoff + removed.sy + 1 == geometry.yoff and geometry.xoff == removed.xoff and geometry.sx == removed.sx) {
+            geometry.yoff = removed.yoff;
+            geometry.sy += removed.sy + 1;
+        } else {
+            return;
+        }
+
+        apply_pane_geometry(absorber, geometry);
+    }
+}
+
+fn find_gap_absorber(w: *T.Window, removed: PaneGeometry) ?*T.WindowPane {
+    for (w.panes.items) |pane| {
+        const geometry = pane_geometry(pane);
+        if (geometry.xoff + geometry.sx + 1 == removed.xoff and geometry.yoff == removed.yoff and geometry.sy == removed.sy)
+            return pane;
+    }
+    for (w.panes.items) |pane| {
+        const geometry = pane_geometry(pane);
+        if (removed.xoff + removed.sx + 1 == geometry.xoff and geometry.yoff == removed.yoff and geometry.sy == removed.sy)
+            return pane;
+    }
+    for (w.panes.items) |pane| {
+        const geometry = pane_geometry(pane);
+        if (geometry.yoff + geometry.sy + 1 == removed.yoff and geometry.xoff == removed.xoff and geometry.sx == removed.sx)
+            return pane;
+    }
+    for (w.panes.items) |pane| {
+        const geometry = pane_geometry(pane);
+        if (removed.yoff + removed.sy + 1 == geometry.yoff and geometry.xoff == removed.xoff and geometry.sx == removed.sx)
+            return pane;
+    }
+    return null;
+}
+
 fn apply_pane_geometry(wp: *T.WindowPane, geometry: PaneGeometry) void {
     wp.xoff = geometry.xoff;
     wp.yoff = geometry.yoff;
@@ -1150,4 +1210,39 @@ test "window_plan_split rejects full-size reduced splits once a window already h
     _ = window_add_pane(w, null, 80, 24);
 
     try std.testing.expectError(error.FullSizeNeedsLayout, window_plan_split(first, .leftright, -1, T.SPAWN_FULLSIZE));
+}
+
+test "window_detach_pane collapses the removed gap back into the remaining layout" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+    const plan = try window_plan_split(first, .leftright, 25, 0);
+    window_apply_split_plan(first, second, plan);
+
+    try std.testing.expectEqual(@as(u32, 54), first.sx);
+    try std.testing.expectEqual(@as(u32, 25), second.sx);
+    try std.testing.expect(window_detach_pane(w, second));
+    try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
+    try std.testing.expectEqual(@as(u32, 0), first.xoff);
+    try std.testing.expectEqual(@as(u32, 0), first.yoff);
+    try std.testing.expectEqual(@as(u32, 80), first.sx);
+    try std.testing.expectEqual(@as(u32, 24), first.sy);
 }

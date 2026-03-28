@@ -23,6 +23,7 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const resize_mod = @import("resize.zig");
 const server_fn = @import("server-fn.zig");
 const sess = @import("session.zig");
@@ -32,13 +33,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
 
     var source: T.CmdFindState = .{};
-    if (cmd_find.cmd_find_target(&source, item, args.get('s'), .window, 0) != 0)
+    if (cmd_find.cmd_find_target(&source, item, args.get('s'), .window, T.CMD_FIND_DEFAULT_MARKED) != 0)
         return .@"error";
     const src = source.s orelse return .@"error";
     const wl_src = source.wl orelse return .@"error";
 
     var target: T.CmdFindState = .{};
-    if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, T.CMD_FIND_WINDOW_INDEX) != 0)
+    if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, 0) != 0)
         return .@"error";
     const dst = target.s orelse return .@"error";
     const wl_dst = target.wl orelse return .@"error";
@@ -54,8 +55,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const w_src = wl_src.window;
     const w_dst = wl_dst.window;
+    const marked_wl = marked_pane_mod.marked_pane.wl;
     sess.session_rebind_winlink(wl_dst, w_src);
     sess.session_rebind_winlink(wl_src, w_dst);
+    if (marked_wl == wl_src)
+        marked_pane_mod.rebind_winlink(wl_src, wl_dst)
+    else if (marked_wl == wl_dst)
+        marked_pane_mod.rebind_winlink(wl_dst, wl_src);
 
     if (args.has('d')) {
         _ = sess.session_set_current(dst, wl_dst);
@@ -274,4 +280,75 @@ test "swap-window synchronizes grouped peers after a cross-session swap" {
     const dst_peer_wl = sess.winlink_find_by_index(&dst_peer.windows, 0).?;
     try std.testing.expectEqual(src_wl.window, src_peer_wl.window);
     try std.testing.expectEqual(dst_wl.window, dst_peer_wl.window);
+}
+
+test "swap-window uses the marked pane window as the default source" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+    marked_pane_mod.clear();
+    defer marked_pane_mod.clear();
+
+    const s = sess.session_create(null, "swap-window-marked", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("swap-window-marked") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_window(&second_ctx, &cause).?;
+    s.curw = second;
+    marked_pane_mod.set(s, first, first.window.active.?);
+
+    const first_window = first.window;
+    const second_window = second.window;
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "swap-window", "-t", "swap-window-marked:1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(second_window, first.window);
+    try std.testing.expectEqual(first_window, second.window);
+    try std.testing.expectEqual(second, marked_pane_mod.marked_pane.wl.?);
+    try std.testing.expectEqual(first_window.active.?, marked_pane_mod.marked_pane.wp.?);
+}
+
+test "swap-window resolves relative target windows" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+
+    const s = sess.session_create(null, "swap-window-relative", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("swap-window-relative") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_window(&second_ctx, &cause).?;
+    s.curw = second;
+
+    const first_window = first.window;
+    const second_window = second.window;
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "swap-window", "-t", ":-1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(second_window, first.window);
+    try std.testing.expectEqual(first_window, second.window);
 }

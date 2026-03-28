@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
 
@@ -43,7 +44,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         source = target;
         source.wp = adjacent_pane(dst_w, dst_wp, args.has('D')) orelse dst_wp;
     } else {
-        if (cmd_find.cmd_find_target(&source, item, args.get('s'), .pane, 0) != 0)
+        if (cmd_find.cmd_find_target(&source, item, args.get('s'), .pane, T.CMD_FIND_DEFAULT_MARKED) != 0)
             return .@"error";
     }
     const src_wl = source.wl orelse return .@"error";
@@ -65,6 +66,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         swap_within_window(src_w, src_wp, dst_wp);
     } else {
         swap_across_windows(src_w, src_wp, dst_w, dst_wp);
+        rebindMarkedPane(&source, src_wp, &target, dst_wp);
     }
 
     if (!args.has('d')) {
@@ -163,6 +165,14 @@ fn swap_across_windows(src_w: *T.Window, src_wp: *T.WindowPane, dst_w: *T.Window
 
     win.window_forget_pane_history(src_w, src_wp);
     win.window_forget_pane_history(dst_w, dst_wp);
+}
+
+fn rebindMarkedPane(source: *const T.CmdFindState, src_wp: *T.WindowPane, target: *const T.CmdFindState, dst_wp: *T.WindowPane) void {
+    if (marked_pane_mod.marked_pane.wp == src_wp) {
+        marked_pane_mod.set(target.s.?, target.wl.?, src_wp);
+    } else if (marked_pane_mod.marked_pane.wp == dst_wp) {
+        marked_pane_mod.set(source.s.?, source.wl.?, dst_wp);
+    }
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -367,4 +377,45 @@ test "swap-pane -Z preserves the reduced zoom flag" {
     try std.testing.expectEqual(second, wl.window.active.?);
     try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
     try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_WASZOOMED);
+}
+
+test "swap-pane uses the marked pane as the default source" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const xm = @import("xmalloc.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+    marked_pane_mod.clear();
+    defer marked_pane_mod.clear();
+
+    const s = sess.session_create(null, "swap-pane-marked", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("swap-pane-marked") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    const src_wp = src_wl.window.active.?;
+    var dst_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl = spawn.spawn_window(&dst_ctx, &cause).?;
+    const dst_wp = dst_wl.window.active.?;
+
+    marked_pane_mod.set(s, src_wl, src_wp);
+
+    const dst_target = std.fmt.allocPrint(xm.allocator, "%{d}", .{dst_wp.id}) catch unreachable;
+    defer xm.allocator.free(dst_target);
+
+    var parse_cause: ?[]u8 = null;
+    const swap_cmd = try cmd_mod.cmd_parse_one(&.{ "swap-pane", "-t", dst_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(swap_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(swap_cmd, &item));
+
+    try std.testing.expectEqual(dst_wl.window, src_wp.window);
+    try std.testing.expectEqual(src_wl.window, dst_wp.window);
+    try std.testing.expectEqual(dst_wl, marked_pane_mod.marked_pane.wl.?);
+    try std.testing.expectEqual(src_wp, marked_pane_mod.marked_pane.wp.?);
 }

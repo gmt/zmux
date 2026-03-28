@@ -775,6 +775,8 @@ pub const WindowPane = struct {
 
     // Colour palette
     palette: ColourPalette = .{},
+    control_bg: i32 = -1,
+    control_fg: i32 = -1,
     scrollbar_style: Style = .{},
     sb_slider_y: u32 = 0,
     sb_slider_h: u32 = 0,

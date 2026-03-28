@@ -66,11 +66,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (args.count() != 0) {
-        cmdq.cmdq_error(item, "refresh-client adjustment is not supported yet", .{});
-        return .@"error";
-    }
-
     if (args.get('C')) |size_str| {
         if ((target_client.flags & T.CLIENT_CONTROL) == 0) {
             cmdq.cmdq_error(item, "not a control client", .{});
@@ -430,6 +425,42 @@ test "refresh-client redraws the target client instead of the queue client" {
     try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
     try std.testing.expect(queue_client.flags & T.CLIENT_REDRAW == 0);
     try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
+}
+
+test "refresh-client ignores a stray adjustment unless pan mode is active" {
+    var queue_env = T.Environ.init(std.testing.allocator);
+    defer queue_env.deinit();
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var queue_client = T.Client{
+        .name = "queue",
+        .environ = &queue_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    queue_client.tty.client = &queue_client;
+
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    target_client.tty.client = &target_client;
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "bogus" }, null, &cause);
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+    try std.testing.expect(queue_client.flags & T.CLIENT_REDRAW == 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
+    try std.testing.expectEqual(@as(i32, 0), queue_client.retval);
 }
 
 test "refresh-client -S uses the shared status-only redraw path for the target client" {

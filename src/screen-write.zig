@@ -262,6 +262,80 @@ pub fn erase_screen(ctx: *T.ScreenWriteCtx) void {
     ctx.s.cy = 0;
 }
 
+pub fn preview(ctx: *T.ScreenWriteCtx, src: *const T.Screen, nx: u32, ny: u32) void {
+    const dst = ctx.s;
+    if (nx == 0 or ny == 0 or dst.grid.sx == 0 or dst.grid.sy == 0) return;
+
+    const base_x = dst.cx;
+    const base_y = dst.cy;
+
+    var px: u32 = 0;
+    var py: u32 = 0;
+    if ((src.mode & T.MODE_CURSOR) != 0 and src.cursor_visible) {
+        px = src.cx;
+        if (px < nx / 3)
+            px = 0
+        else
+            px -= nx / 3;
+        if (px + nx > src.grid.sx) {
+            if (nx > src.grid.sx)
+                px = 0
+            else
+                px = src.grid.sx - nx;
+        }
+
+        py = src.cy;
+        if (py < ny / 3)
+            py = 0
+        else
+            py -= ny / 3;
+        if (py + ny > src.grid.sy) {
+            if (ny > src.grid.sy)
+                py = 0
+            else
+                py = src.grid.sy - ny;
+        }
+    }
+
+    var row: u32 = 0;
+    while (row < ny and base_y + row < dst.grid.sy) : (row += 1) {
+        cursor_to(ctx, base_y + row, base_x);
+
+        var col: u32 = 0;
+        while (col < nx and base_x + col < dst.grid.sx) : (col += 1) {
+            if (py + row >= src.grid.sy or px + col >= src.grid.sx) {
+                putCell(ctx, &T.grid_default_cell);
+                continue;
+            }
+
+            var gc: T.GridCell = undefined;
+            grid.get_cell(src.grid, py + row, px + col, &gc);
+            if (gc.isPadding()) {
+                putc(ctx, ' ');
+                continue;
+            }
+            putCell(ctx, &gc);
+        }
+    }
+
+    if ((src.mode & T.MODE_CURSOR) != 0 and src.cursor_visible and
+        src.cx >= px and src.cx < px + nx and
+        src.cy >= py and src.cy < py + ny and
+        base_x + (src.cx - px) < dst.grid.sx and
+        base_y + (src.cy - py) < dst.grid.sy)
+    {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(src.grid, src.cy, src.cx, &gc);
+        if (!gc.isPadding()) {
+            gc.attr |= T.GRID_ATTR_REVERSE;
+            cursor_to(ctx, base_y + (src.cy - py), base_x + (src.cx - px));
+            putCell(ctx, &gc);
+        }
+    }
+
+    cursor_to(ctx, base_y, base_x);
+}
+
 pub fn erase_to_screen_end(ctx: *T.ScreenWriteCtx) void {
     const gd = ctx.s.grid;
     if (gd.sy == 0) return;
@@ -583,4 +657,39 @@ test "screen-write escaped byte path keeps utf8 glyphs but visualizes raw contro
     defer xm.allocator.free(rendered);
 
     try std.testing.expectEqualStrings("\\033🙂\\303(", rendered);
+}
+
+test "screen-write preview copies a cursor-centered viewport" {
+    const screen = @import("screen.zig");
+
+    const src = screen.screen_init(8, 4, 100);
+    defer {
+        screen.screen_free(src);
+        @import("xmalloc.zig").allocator.destroy(src);
+    }
+    const dst = screen.screen_init(4, 2, 100);
+    defer {
+        screen.screen_free(dst);
+        @import("xmalloc.zig").allocator.destroy(dst);
+    }
+
+    {
+        var src_ctx = T.ScreenWriteCtx{ .s = src };
+        putn(&src_ctx, "abcdefgh\nijklmnop\nqrstuvwx\nyz012345");
+        src.cx = 5;
+        src.cy = 2;
+        src.mode |= T.MODE_CURSOR;
+        src.cursor_visible = true;
+    }
+
+    var dst_ctx = T.ScreenWriteCtx{ .s = dst };
+    preview(&dst_ctx, src, 4, 2);
+
+    const first = grid.string_cells(dst.grid, 0, dst.grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(first);
+    const second = grid.string_cells(dst.grid, 1, dst.grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(second);
+
+    try std.testing.expectEqualStrings("uvwx", first);
+    try std.testing.expectEqualStrings("2345", second);
 }

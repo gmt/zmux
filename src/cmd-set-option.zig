@@ -28,6 +28,7 @@ const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 const cmd_opts = @import("cmd-options.zig");
 const win = @import("window.zig");
+const names = @import("names.zig");
 const alerts = @import("alerts.zig");
 const notify = @import("notify.zig");
 const utf8 = @import("utf8.zig");
@@ -184,6 +185,8 @@ fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) 
     if (std.mem.eql(u8, name, "codepoint-widths") and target.kind == .server and target.global)
         utf8.utf8_update_width_cache();
     if (target.kind == .window) {
+        if (std.mem.eql(u8, name, "automatic-rename"))
+            names.mark_automatic_rename_change(target.window, target.global);
         if (target.window) |w| {
             for (w.panes.items) |wp|
                 win.window_pane_options_changed(wp, name);
@@ -819,4 +822,48 @@ test "set-window-option exact matches win over longer prefixed names" {
         "#{?pane_in_mode,[zmux],#{pane_current_command}}#{?pane_dead,dead,}",
         opts.options_get_string(opts.global_w_options, "automatic-rename-format"),
     );
+}
+
+test "set-window-option marks active panes changed when automatic rename is enabled globally" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_number(opts.global_w_options, "automatic-rename", 0);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "set-window-option-automatic-rename", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(session, false, "test");
+
+    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, 0, &attach_cause).?;
+    session.curw = wl;
+    const pane = win.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+    pane.flags &= ~@as(u32, T.PANE_CHANGED);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-window-option", "-g", "automatic-rename", "on" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(i64, 1), opts.options_get_number(opts.global_w_options, "automatic-rename"));
+    try std.testing.expect(pane.flags & T.PANE_CHANGED != 0);
 }

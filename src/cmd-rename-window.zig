@@ -28,7 +28,6 @@ const format_mod = @import("format.zig");
 const opts = @import("options.zig");
 const win = @import("window.zig");
 const server_fn = @import("server-fn.zig");
-const notify = @import("notify.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -56,7 +55,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     opts.options_set_number(wl.window.options, "automatic-rename", 0);
     server_fn.server_redraw_window_borders(wl.window);
     server_fn.server_status_window(wl.window);
-    notify.notify_window("window-renamed", wl.window);
     return .normal;
 }
 

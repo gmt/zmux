@@ -41,7 +41,7 @@ const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "paste-buffer -p -b '%%'";
 const DEFAULT_FORMAT = "#{t/p:buffer_created}: #{buffer_sample}";
-const HELP_TEXT = "Enter/p paste  e edit  arrows move  q cancel";
+const HELP_TEXT = "Enter/p paste  d/D delete  t/T/^T tags  e edit  arrows move  q cancel";
 
 const BufferItem = struct {
     buffer: *paste_mod.PasteBuffer,
@@ -156,6 +156,29 @@ fn windowBufferCommand(
     }
     if (std.mem.eql(u8, command, "edit-selected")) {
         startEditSelected(wme, client);
+        return;
+    }
+    if (std.mem.eql(u8, command, "tag")) {
+        mode_tree.toggleCurrentTag(data.tree, false);
+        redraw(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "tag-all")) {
+        mode_tree.tagAll(data.tree);
+        redraw(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "tag-none")) {
+        mode_tree.clearAllTagged(data.tree);
+        redraw(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "delete")) {
+        deleteCurrent(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "delete-tagged")) {
+        deleteTagged(wme);
         return;
     }
     if (std.mem.eql(u8, command, "filter")) {
@@ -336,7 +359,8 @@ fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
     const line = tree.line_list.items[index];
     const item: *BufferItem = @ptrCast(@alignCast(line.item.itemdata.?));
     const current = if (index == tree.current) ">" else " ";
-    return xm.xasprintf("{s} {s}", .{ current, item.text });
+    const tagged = if (line.item.tagged) "*" else " ";
+    return xm.xasprintf("{s}{s} {s}", .{ current, tagged, item.text });
 }
 
 fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client, session: *T.Session, wl: *T.Winlink) void {
@@ -392,6 +416,42 @@ fn startFilterPrompt(wme: *T.WindowModeEntry, client: ?*T.Client) void {
         status_prompt.PROMPT_NOFORMAT,
         .search,
     );
+}
+
+fn deleteCurrent(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    deleteItem(data, item_ptr);
+    rebuildAfterDelete(wme);
+}
+
+fn deleteTagged(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    mode_tree.eachTagged(data.tree, deleteTaggedCallback, null, T.KEYC_NONE, false);
+    rebuildAfterDelete(wme);
+}
+
+fn deleteTaggedCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, _: ?*T.Client, _: T.key_code) void {
+    const data: *BufferModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item_ptr = itemdata orelse return;
+    deleteItem(data, item_ptr);
+}
+
+fn deleteItem(data: *BufferModeData, item_ptr: *anyopaque) void {
+    const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
+    if (mode_tree.getCurrent(data.tree) == item_ptr) {
+        if (!mode_tree.down(data.tree, false))
+            mode_tree.up(data.tree, false);
+    }
+    paste_mod.paste_free(item.buffer);
+}
+
+fn rebuildAfterDelete(wme: *T.WindowModeEntry) void {
+    if (paste_mod.paste_is_empty()) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+        return;
+    }
+    rebuildAndDraw(wme);
 }
 
 fn runCommand(client: ?*T.Client, session: *T.Session, wl: *T.Winlink, template: []const u8, buffer_name: []const u8) void {
@@ -789,6 +849,105 @@ test "window-buffer choose runs the tmux template command for the selected buffe
 
     try std.testing.expectEqualStrings("buffer1", env_mod.environ_find(env_mod.global_environ, "CHOSEN_BUFFER").?.value.?);
     try std.testing.expect(window.window_pane_mode(setup.pane) == null);
+}
+
+test "window-buffer delete removes the selected buffer and keeps selection stable" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-buffer-delete");
+    defer if (sess.session_find("window-buffer-delete") != null) sess.session_destroy(setup.session, false, "test");
+
+    paste_mod.paste_add(null, xm.xstrdup("older"));
+    paste_mod.paste_add(null, xm.xstrdup("newer"));
+    paste_mod.paste_add(null, xm.xstrdup("newest"));
+
+    var cause: ?[]u8 = null;
+    var mode_args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:NO:rt:yZ", 0, 1, &cause);
+    defer mode_args.deinit();
+
+    var fs = T.CmdFindState{
+        .s = setup.session,
+        .wl = setup.session.curw,
+        .w = setup.session.curw.?.window,
+        .wp = setup.pane,
+        .idx = setup.session.curw.?.idx,
+    };
+
+    const wme = enterMode(setup.pane, &fs, &mode_args);
+
+    _ = mode_tree.down(modeData(wme).tree, false);
+    try std.testing.expectEqualStrings("buffer1", mode_tree.getCurrentName(modeData(wme).tree).?);
+
+    cause = null;
+    var delete_args = try args_mod.args_parse(xm.allocator, &.{"delete"}, "", 0, -1, &cause);
+    defer delete_args.deinit();
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&delete_args), null);
+    try std.testing.expect(paste_mod.paste_get_name("buffer1") == null);
+    try std.testing.expectEqualStrings("buffer2", mode_tree.getCurrentName(modeData(wme).tree).?);
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&delete_args), null);
+    try std.testing.expect(paste_mod.paste_get_name("buffer2") == null);
+    try std.testing.expectEqualStrings("buffer0", mode_tree.getCurrentName(modeData(wme).tree).?);
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&delete_args), null);
+    try std.testing.expect(paste_mod.paste_is_empty());
+    try std.testing.expect(window.window_pane_mode(setup.pane) == null);
+}
+
+test "window-buffer delete-tagged removes tagged buffers and keeps the untagged selection" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-buffer-delete-tagged");
+    defer if (sess.session_find("window-buffer-delete-tagged") != null) sess.session_destroy(setup.session, false, "test");
+
+    paste_mod.paste_add(null, xm.xstrdup("older"));
+    paste_mod.paste_add(null, xm.xstrdup("middle"));
+    paste_mod.paste_add(null, xm.xstrdup("newest"));
+
+    var cause: ?[]u8 = null;
+    var mode_args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:NO:rt:yZ", 0, 1, &cause);
+    defer mode_args.deinit();
+
+    var fs = T.CmdFindState{
+        .s = setup.session,
+        .wl = setup.session.curw,
+        .w = setup.session.curw.?.window,
+        .wp = setup.pane,
+        .idx = setup.session.curw.?.idx,
+    };
+
+    const wme = enterMode(setup.pane, &fs, &mode_args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    cause = null;
+    var tag_args = try args_mod.args_parse(xm.allocator, &.{"tag"}, "", 0, -1, &cause);
+    defer tag_args.deinit();
+    cause = null;
+    var delete_tagged_args = try args_mod.args_parse(xm.allocator, &.{"delete-tagged"}, "", 0, -1, &cause);
+    defer delete_tagged_args.deinit();
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&tag_args), null);
+    _ = mode_tree.down(modeData(wme).tree, false);
+    _ = mode_tree.down(modeData(wme).tree, false);
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&tag_args), null);
+
+    windowBufferCommand(wme, null, setup.session, setup.session.curw.?, @ptrCast(&delete_tagged_args), null);
+
+    try std.testing.expect(paste_mod.paste_get_name("buffer0") == null);
+    try std.testing.expect(paste_mod.paste_get_name("buffer2") == null);
+    try std.testing.expect(paste_mod.paste_get_name("buffer1") != null);
+    try std.testing.expectEqual(@as(usize, 1), modeData(wme).items.items.len);
+    try std.testing.expectEqualStrings("buffer1", mode_tree.getCurrentName(modeData(wme).tree).?);
 }
 
 test "window-buffer edit-selected updates the selected buffer and rebuilds the mode tree on save" {

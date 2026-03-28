@@ -50,6 +50,122 @@ fn usage(to_stderr: bool) void {
     ) catch {};
 }
 
+const ParsedMainArgs = struct {
+    const Action = enum {
+        none,
+        usage,
+        version,
+    };
+
+    path: ?[]u8 = null,
+    label: ?[]u8 = null,
+    shell_command: ?[]u8 = null,
+    flags: u64 = 0,
+    feat: i32 = 0,
+    cfg_file_override: bool = false,
+    command_start: usize = 0,
+    action: Action = .none,
+
+    fn deinit(self: *ParsedMainArgs) void {
+        if (self.path) |path| xm.allocator.free(path);
+        if (self.label) |label| xm.allocator.free(label);
+        if (self.shell_command) |shell_command| xm.allocator.free(shell_command);
+    }
+};
+
+fn parseMainArgs(raw_args: []const []const u8) error{Usage}!ParsedMainArgs {
+    var parsed = ParsedMainArgs{};
+    errdefer parsed.deinit();
+
+    if (raw_args.len > 0 and raw_args[0].len > 0 and raw_args[0][0] == '-')
+        parsed.flags |= T.CLIENT_LOGIN;
+
+    var i: usize = 1;
+    while (i < raw_args.len) : (i += 1) {
+        const arg = raw_args[i];
+        if (arg.len == 0 or arg[0] != '-') break;
+        if (std.mem.eql(u8, arg, "--")) {
+            i += 1;
+            break;
+        }
+        if (arg.len < 2) return error.Usage;
+
+        // Scan all flag characters in this arg.
+        // Flags that take a value may have it inline (e.g. -Lname) or in
+        // the next argv element (e.g. -L name), matching getopt behavior.
+        var j: usize = 1;
+        while (j < arg.len) {
+            const opt_char = arg[j];
+            j += 1;
+
+            switch (opt_char) {
+                '2' => tty_features.addFeatures(&parsed.feat, "256", ":,"),
+                'C' => {
+                    if (parsed.flags & T.CLIENT_CONTROL != 0)
+                        parsed.flags |= T.CLIENT_CONTROLCONTROL
+                    else
+                        parsed.flags |= T.CLIENT_CONTROL;
+                },
+                'D' => parsed.flags |= T.CLIENT_NOFORK,
+                'h' => {
+                    parsed.action = .usage;
+                    return parsed;
+                },
+                'l' => parsed.flags |= T.CLIENT_LOGIN,
+                'N' => parsed.flags |= T.CLIENT_NOSTARTSERVER,
+                'u' => parsed.flags |= T.CLIENT_UTF8,
+                'v' => log.log_add_level(),
+                'V' => {
+                    parsed.action = .version;
+                    return parsed;
+                },
+                'c', 'f', 'L', 'S', 'T' => {
+                    const value = if (j < arg.len) blk: {
+                        const v = arg[j..];
+                        j = arg.len;
+                        break :blk v;
+                    } else blk: {
+                        i += 1;
+                        if (i >= raw_args.len) return error.Usage;
+                        break :blk raw_args[i];
+                    };
+                    switch (opt_char) {
+                        'c' => {
+                            if (parsed.shell_command) |shell_command| xm.allocator.free(shell_command);
+                            parsed.shell_command = xm.xstrdup(value);
+                        },
+                        'f' => {
+                            if (!parsed.cfg_file_override) {
+                                cfg_mod.cfg_reset_files();
+                                parsed.cfg_file_override = true;
+                            }
+                            cfg_mod.cfg_quiet = false;
+                            cfg_mod.cfg_add_file(value);
+                        },
+                        'L' => {
+                            if (parsed.label) |label| xm.allocator.free(label);
+                            parsed.label = xm.xstrdup(value);
+                        },
+                        'S' => {
+                            if (parsed.path) |path| xm.allocator.free(path);
+                            parsed.path = xm.xstrdup(value);
+                        },
+                        'T' => tty_features.addFeatures(&parsed.feat, value, ":,"),
+                        else => unreachable,
+                    }
+                },
+                else => return error.Usage,
+            }
+        }
+    }
+
+    parsed.command_start = i;
+    const cmd_argc = raw_args.len - i;
+    if (parsed.shell_command != null and cmd_argc != 0) return error.Usage;
+    if (parsed.flags & T.CLIENT_NOFORK != 0 and cmd_argc != 0) return error.Usage;
+    return parsed;
+}
+
 // ── main ─────────────────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -86,111 +202,37 @@ pub fn main() !void {
     const raw_args = try std.process.argsAlloc(xm.allocator);
     defer std.process.argsFree(xm.allocator, raw_args);
 
-    var path: ?[]u8 = null;
-    var label: ?[]u8 = null;
-    var flags: u64 = 0;
-    var feat: i32 = 0;
-    // Config file list (from -f flags)
-    var cfg_file_override = false;
+    const parsed = parseMainArgs(raw_args) catch {
+        usage(true);
+        std.process.exit(1);
+    };
+
+    var path = parsed.path;
+    const label = parsed.label;
+    var flags = parsed.flags;
+    const feat = parsed.feat;
+    const shell_command = parsed.shell_command;
+    const cfg_file_override = parsed.cfg_file_override;
     var cmd_argc: i32 = 0;
     var cmd_argv: [*]const [*:0]const u8 = undefined;
     var cmd_argv_storage: [256][*:0]const u8 = undefined;
 
-    // Check if invoked as a login shell
-    if (raw_args.len > 0 and raw_args[0].len > 0 and raw_args[0][0] == '-')
-        flags |= T.CLIENT_LOGIN;
-
-    var i: usize = 1;
-    while (i < raw_args.len) : (i += 1) {
-        const arg = raw_args[i];
-        if (arg.len == 0 or arg[0] != '-') break;
-        if (std.mem.eql(u8, arg, "--")) {
-            i += 1;
-            break;
-        }
-        if (arg.len < 2) {
-            usage(true);
-            std.process.exit(1);
-        }
-
-        // Scan all flag characters in this arg.
-        // Flags that take a value may have it inline (e.g. -Lname) or in
-        // the next argv element (e.g. -L name), matching getopt behavior.
-        var j: usize = 1;
-        while (j < arg.len) {
-            const opt_char = arg[j];
-            j += 1;
-
-            switch (opt_char) {
-                '2' => tty_features.addFeatures(&feat, "256", ":,"),
-                'C' => {
-                    if (flags & T.CLIENT_CONTROL != 0)
-                        flags |= T.CLIENT_CONTROLCONTROL
-                    else
-                        flags |= T.CLIENT_CONTROL;
-                },
-                'D' => flags |= T.CLIENT_NOFORK,
-                'h' => {
-                    usage(false);
-                    return;
-                },
-                'l' => flags |= T.CLIENT_LOGIN,
-                'N' => flags |= T.CLIENT_NOSTARTSERVER,
-                'u' => flags |= T.CLIENT_UTF8,
-                'v' => log.log_add_level(),
-                'V' => {
-                    _ = std.fs.File.stdout().writeAll("zmux 3.6a-dev\n") catch {};
-                    return;
-                },
-                // Flags that take a value argument
-                'c', 'f', 'L', 'S', 'T' => {
-                    // Value is either the rest of this arg or the next arg
-                    const value = if (j < arg.len) blk: {
-                        const v = arg[j..];
-                        j = arg.len; // consume rest of arg
-                        break :blk v;
-                    } else blk: {
-                        i += 1;
-                        if (i >= raw_args.len) {
-                            usage(true);
-                            std.process.exit(1);
-                        }
-                        break :blk raw_args[i];
-                    };
-                    switch (opt_char) {
-                        'c' => {}, // shell-command – TODO
-                        'f' => {
-                            if (!cfg_file_override) {
-                                cfg_mod.cfg_reset_files();
-                                cfg_file_override = true;
-                            }
-                            cfg_mod.cfg_quiet = false;
-                            cfg_mod.cfg_add_file(value);
-                        },
-                        'L' => {
-                            if (label) |l| xm.allocator.free(l);
-                            label = xm.xstrdup(value);
-                        },
-                        'S' => {
-                            if (path) |p| xm.allocator.free(p);
-                            path = xm.xstrdup(value);
-                        },
-                        'T' => tty_features.addFeatures(&feat, value, ":,"),
-                        else => unreachable,
-                    }
-                },
-                else => {
-                    usage(true);
-                    std.process.exit(1);
-                },
-            }
-        }
+    switch (parsed.action) {
+        .usage => {
+            usage(false);
+            return;
+        },
+        .version => {
+            _ = std.fs.File.stdout().writeAll("zmux 3.6a-dev\n") catch {};
+            return;
+        },
+        .none => {},
     }
 
     // Remaining args are the command
-    cmd_argc = @intCast(raw_args.len - i);
-    for (0..@intCast(cmd_argc)) |j| {
-        cmd_argv_storage[j] = raw_args[i + j].ptr;
+    cmd_argc = @intCast(raw_args.len - parsed.command_start);
+    for (0..@as(usize, @intCast(cmd_argc))) |j| {
+        cmd_argv_storage[j] = raw_args[parsed.command_start + j].ptr;
     }
     if (cmd_argc > 0) cmd_argv = &cmd_argv_storage;
 
@@ -236,7 +278,7 @@ pub fn main() !void {
 
     // Hand off to client
     const empty_argv: [1][*:0]const u8 = .{""};
-    const rc = client_mod.client_main(base, cmd_argc, if (cmd_argc > 0) cmd_argv else &empty_argv, flags, feat);
+    const rc = client_mod.client_main(base, shell_command, cmd_argc, if (cmd_argc > 0) cmd_argv else &empty_argv, flags, feat);
     std.process.exit(@intCast(@as(i32, @max(rc, 0))));
 }
 
@@ -277,6 +319,34 @@ pub fn checkshell(shell: ?[]const u8) bool {
 
 pub fn getversion() []const u8 {
     return T.ZMUX_VERSION;
+}
+
+test "parseMainArgs stores top-level shell command" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-c", "printf top-level" };
+    var parsed = try parseMainArgs(args[0..]);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("printf top-level", parsed.shell_command.?);
+    try std.testing.expectEqual(@as(usize, args.len), parsed.command_start);
+}
+
+test "parseMainArgs rejects top-level shell command mixed with command argv" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-c", "printf top-level", "new-session" };
+    try std.testing.expectError(error.Usage, parseMainArgs(args[0..]));
+}
+
+test "parseMainArgs rejects nofork with command argv" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-D", "new-session" };
+    try std.testing.expectError(error.Usage, parseMainArgs(args[0..]));
 }
 
 test {

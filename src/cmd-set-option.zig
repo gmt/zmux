@@ -20,18 +20,15 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
-const cmd_mod = @import("cmd.zig");
 const cmd_format = @import("cmd-format.zig");
 const cmd_find = @import("cmd-find.zig");
-const cmdq = @import("cmd-queue.zig");
-const opts = @import("options.zig");
-const format_mod = @import("format.zig");
+const cmd_mod = @import("cmd.zig");
 const cmd_opts = @import("cmd-options.zig");
-const win = @import("window.zig");
-const names = @import("names.zig");
-const alerts = @import("alerts.zig");
+const cmdq = @import("cmd-queue.zig");
+const format_mod = @import("format.zig");
+const opts = @import("options.zig");
 const notify = @import("notify.zig");
-const utf8 = @import("utf8.zig");
+const win = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -114,7 +111,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option"});
             return .@"error";
         }
-        apply_target_side_effects(target, option_name);
+        cmd_opts.apply_target_side_effects(target, option_name);
         return .normal;
     }
 
@@ -149,7 +146,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option value"});
         return .@"error";
     }
-    apply_target_side_effects(target, option_name);
+    cmd_opts.apply_target_side_effects(target, option_name);
     return .normal;
 }
 
@@ -183,25 +180,6 @@ fn clear_window_option_overrides(
         win.window_pane_options_changed(wp, name);
     }
     return true;
-}
-
-fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) void {
-    if (std.mem.eql(u8, name, "monitor-silence"))
-        alerts.alerts_reset_all();
-    if (std.mem.eql(u8, name, "codepoint-widths") and target.kind == .server and target.global)
-        utf8.utf8_update_width_cache();
-    if (target.kind == .window) {
-        if (std.mem.eql(u8, name, "automatic-rename"))
-            names.mark_automatic_rename_change(target.window, target.global);
-        if (target.window) |w| {
-            for (w.panes.items) |wp|
-                win.window_pane_options_changed(wp, name);
-        }
-        return;
-    }
-    if (target.pane) |wp| {
-        win.window_pane_options_changed(wp, name);
-    }
 }
 
 fn validate_command_option_value(

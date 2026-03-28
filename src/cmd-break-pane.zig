@@ -56,6 +56,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         if (dst_idx == -1) return .@"error";
     }
 
+    _ = win.window_unzoom(src_w);
+
     var result_wl: ?*T.Winlink = null;
     const result_wp = src_wp;
 
@@ -216,6 +218,52 @@ test "break-pane moves a pane into a new window when source has multiple panes" 
     try std.testing.expectEqual(broken.window.options, second.options.parent.?);
 }
 
+test "break-pane clears zoom on the source window before splitting out a pane" {
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "break-unzoom-split", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-unzoom-split") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const second = spawn.spawn_pane(&second_ctx, &cause).?;
+    try std.testing.expect(win.window_zoom(second));
+
+    const pane_target = xm.xasprintf("%{d}", .{second.id});
+    defer xm.allocator.free(pane_target);
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "break-pane", "-s", pane_target, "-t", "break-unzoom-split:3" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_ZOOMED);
+    const broken = sess.winlink_find_by_index(&s.windows, 3).?;
+    try std.testing.expectEqual(@as(u32, 0), broken.window.flags & T.WINDOW_ZOOMED);
+}
+
 test "break-pane moves a single-pane window to another session and can rename it" {
     const env_mod = @import("environ.zig");
     const spawn = @import("spawn.zig");
@@ -263,6 +311,52 @@ test "break-pane moves a single-pane window to another session and can rename it
     try std.testing.expectEqual(source_window, moved.window);
     try std.testing.expectEqualStrings("moved", moved.window.name);
     try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(moved.window.options, "automatic-rename"));
+}
+
+test "break-pane clears a stale zoom flag before relinking a single-pane window" {
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const src = sess.session_create(null, "break-unzoom-src", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-unzoom-src") != null) sess.session_destroy(src, false, "test");
+    const dst = sess.session_create(null, "break-unzoom-dst", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("break-unzoom-dst") != null) sess.session_destroy(dst, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = src, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    src.curw = wl;
+    wl.window.flags |= T.WINDOW_ZOOMED;
+
+    const pane_target = xm.xasprintf("%{d}", .{wl.window.active.?.id});
+    defer xm.allocator.free(pane_target);
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "break-pane", "-s", pane_target, "-t", "break-unzoom-dst:2" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const moved = sess.winlink_find_by_index(&dst.windows, 2).?;
+    try std.testing.expectEqual(@as(u32, 0), moved.window.flags & T.WINDOW_ZOOMED);
 }
 
 test "break-pane location rendering uses session window and pane indexes" {

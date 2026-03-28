@@ -47,6 +47,7 @@ const status = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const screen_mod = @import("screen.zig");
+const control_subscriptions = @import("control-subscriptions.zig");
 
 var next_client_id: u32 = 0;
 
@@ -121,6 +122,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     if (cl.path) |path| xm.allocator.free(path);
     if (cl.key_table_name) |name| xm.allocator.free(name);
     cl.client_windows.deinit(xm.allocator);
+    control_subscriptions.control_subscriptions_deinit(cl);
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
     tty_draw.tty_draw_free(&cl.pane_cache);

@@ -112,6 +112,10 @@ fn open_pipe(
     set_blocking(pair[0], false);
     wp.pipe_fd = pair[0];
     wp.pipe_pid = pid;
+    wp.pipe_flags = 0;
+    if (pipe_in) wp.pipe_flags |= T.PANE_PIPE_READ;
+    if (pipe_out) wp.pipe_flags |= T.PANE_PIPE_WRITE;
+    wp.pipe_offset = wp.offset;
     if (pipe_in)
         pane_io.pane_pipe_start(wp);
 }
@@ -228,4 +232,108 @@ test "pipe-pane -I feeds child stdout back into the pane and expands formats" {
     for (expected, 0..) |ch, idx| {
         try std.testing.expectEqual(ch, grid.ascii_at(setup.wp.base.grid, 0, @intCast(idx)));
     }
+}
+
+test "pipe-pane -O forwards pane output into the child stdin" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    const output_path = try std.fmt.allocPrint(xm.allocator, "{s}/pane-output.txt", .{cwd});
+    defer xm.allocator.free(output_path);
+
+    const shell_command = try std.fmt.allocPrint(
+        xm.allocator,
+        "dd of='{s}' bs=1 count=17 2>/dev/null",
+        .{output_path},
+    );
+    defer xm.allocator.free(shell_command);
+
+    const setup = try test_session_with_empty_pane("pipe-pane-output");
+    defer test_teardown_session("pipe-pane-output", setup.s);
+    const live_pipe = try std.posix.pipe();
+    defer {
+        std.posix.close(live_pipe[0]);
+        if (setup.wp.fd >= 0) {
+            std.posix.close(setup.wp.fd);
+            setup.wp.fd = -1;
+        }
+    }
+    setup.wp.fd = live_pipe[1];
+
+    var cause: ?[]u8 = null;
+    const argv = [_][]const u8{ "pipe-pane", "-O", "-t", "pipe-pane-output:0.0", shell_command };
+    const cmd = try cmd_mod.cmd_parse_one(argv[0..], null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    pane_io.pane_io_feed(setup.wp, "forwarded bytes\r\n");
+
+    var spins: usize = 0;
+    while (spins < 50) : (spins += 1) {
+        std.fs.accessAbsolute(output_path, .{}) catch {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+        break;
+    }
+
+    pane_io.pane_pipe_close(setup.wp);
+
+    const output = try std.fs.openFileAbsolute(output_path, .{});
+    defer output.close();
+    const contents = try output.readToEndAlloc(xm.allocator, 1024);
+    defer xm.allocator.free(contents);
+    try std.testing.expectEqualStrings("forwarded bytes\r\n", contents);
+}
+
+test "pipe-pane -I does not feed pane output into the child stdin" {
+    const grid = @import("grid.zig");
+
+    const setup = try test_session_with_empty_pane("pipe-pane-input-only");
+    defer test_teardown_session("pipe-pane-input-only", setup.s);
+    const live_pipe = try std.posix.pipe();
+    defer {
+        std.posix.close(live_pipe[0]);
+        if (setup.wp.fd >= 0) {
+            std.posix.close(setup.wp.fd);
+            setup.wp.fd = -1;
+        }
+    }
+    setup.wp.fd = live_pipe[1];
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(
+        &.{ "pipe-pane", "-I", "-t", "pipe-pane-input-only:0.0", "cat" },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    defer pane_io.pane_pipe_close(setup.wp);
+
+    pane_io.pane_io_feed(setup.wp, "loop?");
+    var spins: usize = 0;
+    while (spins < 25) : (spins += 1) {
+        pane_io.pane_pipe_read_ready(setup.wp);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+
+    try std.testing.expectEqualStrings("loop?", &.{
+        grid.ascii_at(setup.wp.base.grid, 0, 0),
+        grid.ascii_at(setup.wp.base.grid, 0, 1),
+        grid.ascii_at(setup.wp.base.grid, 0, 2),
+        grid.ascii_at(setup.wp.base.grid, 0, 3),
+        grid.ascii_at(setup.wp.base.grid, 0, 4),
+    });
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(setup.wp.base.grid, 0, 5));
+    try std.testing.expectEqual(@as(u32, 5), setup.wp.base.cx);
 }

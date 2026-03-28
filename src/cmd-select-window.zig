@@ -24,16 +24,40 @@ const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
 fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    var target: T.CmdFindState = .{};
     const cl = cmdq.cmdq_get_client(item);
+    const entry_ptr = cmd.entry;
+    const dedicated_cycle = entry_ptr == &entry_next or entry_ptr == &entry_previous or entry_ptr == &entry_last;
+    const next = entry_ptr == &entry_next or args.has('n');
+    const previous = entry_ptr == &entry_previous or args.has('p');
+    const last = entry_ptr == &entry_last or args.has('l');
 
-    if (cmd_find.cmd_find_target(&target, item, args.get('t'), .window, 0) != 0)
+    var target: T.CmdFindState = .{};
+    const find_type: T.CmdFindType = if (dedicated_cycle) .session else .window;
+
+    if (cmd_find.cmd_find_target(&target, item, args.get('t'), find_type, 0) != 0)
         return .@"error";
     const s = target.s orelse return .@"error";
-    const wl = target.wl orelse return .@"error";
+    const wl = target.wl;
 
-    _ = sess.session_set_current(s, wl);
-    // Update client if one is attached
+    if (next) {
+        if (!sess.session_next(s, args.has('a'))) {
+            cmdq.cmdq_error(item, "no next window", .{});
+            return .@"error";
+        }
+    } else if (previous) {
+        if (!sess.session_previous(s, args.has('a'))) {
+            cmdq.cmdq_error(item, "no previous window", .{});
+            return .@"error";
+        }
+    } else if (last or (args.has('T') and wl != null and wl == s.curw)) {
+        if (!sess.session_last(s)) {
+            cmdq.cmdq_error(item, "no last window", .{});
+            return .@"error";
+        }
+    } else if (!sess.session_select(s, (wl orelse return .@"error").idx)) {
+        return .@"error";
+    }
+
     if (cl) |c| {
         if (c.session == s) {
             server_client_mod.server_client_apply_session_size(c, s);
@@ -41,6 +65,7 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
     server_fn.server_redraw_session(s);
+    resize_mod.recalculate_sizes();
     return .normal;
 }
 
@@ -210,6 +235,39 @@ pub const entry: cmd_mod.CmdEntry = .{
     .exec = exec_selectw,
 };
 
+pub const entry_next: cmd_mod.CmdEntry = .{
+    .name = "next-window",
+    .alias = "next",
+    .usage = "[-a] [-t target-session]",
+    .template = "at:",
+    .lower = 0,
+    .upper = 0,
+    .flags = 0,
+    .exec = exec_selectw,
+};
+
+pub const entry_previous: cmd_mod.CmdEntry = .{
+    .name = "previous-window",
+    .alias = "prev",
+    .usage = "[-a] [-t target-session]",
+    .template = "at:",
+    .lower = 0,
+    .upper = 0,
+    .flags = 0,
+    .exec = exec_selectw,
+};
+
+pub const entry_last: cmd_mod.CmdEntry = .{
+    .name = "last-window",
+    .alias = "last",
+    .usage = "[-t target-session]",
+    .template = "t:",
+    .lower = 0,
+    .upper = 0,
+    .flags = 0,
+    .exec = exec_selectw,
+};
+
 pub const entry_neww: cmd_mod.CmdEntry = .{
     .name = "new-window",
     .alias = "neww",
@@ -220,6 +278,94 @@ pub const entry_neww: cmd_mod.CmdEntry = .{
     .flags = 0,
     .exec = exec_neww,
 };
+
+fn make_select_window_test_session(name: []const u8) struct {
+    session: *T.Session,
+    first: *T.Winlink,
+    second: *T.Winlink,
+    third: *T.Winlink,
+} {
+    const opts = @import("options.zig");
+
+    const session = sess.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    var cause: ?[]u8 = null;
+
+    var first_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const first = spawn_mod.spawn_window(&first_sc, &cause).?;
+    var second_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second = spawn_mod.spawn_window(&second_sc, &cause).?;
+    var third_sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const third = spawn_mod.spawn_window(&third_sc, &cause).?;
+
+    session.curw = first;
+    return .{
+        .session = session,
+        .first = first,
+        .second = second,
+        .third = third,
+    };
+}
+
+test "select-window honors next previous last and toggle flags" {
+    init_test_state();
+    defer deinit_test_state();
+
+    const setup = make_select_window_test_session("select-window-cycle");
+    defer if (sess.session_find("select-window-cycle") != null) sess.session_destroy(setup.session, false, "test");
+
+    var cause: ?[]u8 = null;
+
+    const next_cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-n", "-t", "select-window-cycle:0" }, null, &cause);
+    defer cmd_mod.cmd_free(next_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(next_cmd, &item));
+    try std.testing.expectEqual(setup.second, setup.session.curw.?);
+    try std.testing.expectEqual(@as(usize, 1), setup.session.lastw.items.len);
+    try std.testing.expectEqual(setup.first, setup.session.lastw.items[0]);
+
+    const previous_cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-p", "-t", "select-window-cycle:1" }, null, &cause);
+    defer cmd_mod.cmd_free(previous_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(previous_cmd, &item));
+    try std.testing.expectEqual(setup.first, setup.session.curw.?);
+
+    const last_cmd = try cmd_mod.cmd_parse_one(&.{ "last-window", "-t", "select-window-cycle" }, null, &cause);
+    defer cmd_mod.cmd_free(last_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(last_cmd, &item));
+    try std.testing.expectEqual(setup.second, setup.session.curw.?);
+
+    const toggle_cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-T", "-t", "select-window-cycle:1" }, null, &cause);
+    defer cmd_mod.cmd_free(toggle_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(toggle_cmd, &item));
+    try std.testing.expectEqual(setup.first, setup.session.curw.?);
+}
+
+test "next-window and previous-window honor alert-only selection" {
+    init_test_state();
+    defer deinit_test_state();
+
+    const setup = make_select_window_test_session("select-window-alerts");
+    defer if (sess.session_find("select-window-alerts") != null) sess.session_destroy(setup.session, false, "test");
+
+    setup.first.flags |= T.WINLINK_ACTIVITY;
+    setup.third.flags |= T.WINLINK_BELL;
+    setup.session.curw = setup.first;
+
+    var cause: ?[]u8 = null;
+    const next_cmd = try cmd_mod.cmd_parse_one(&.{ "next-window", "-a", "-t", "select-window-alerts" }, null, &cause);
+    defer cmd_mod.cmd_free(next_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(next_cmd, &item));
+    try std.testing.expectEqual(setup.third, setup.session.curw.?);
+
+    const previous_cmd = try cmd_mod.cmd_parse_one(&.{ "previous-window", "-a", "-t", "select-window-alerts" }, null, &cause);
+    defer cmd_mod.cmd_free(previous_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(previous_cmd, &item));
+    try std.testing.expectEqual(setup.first, setup.session.curw.?);
+}
 
 test "new-window synchronizes grouped peers and uses shared group status-only invalidation for detached creates" {
     const opts = @import("options.zig");

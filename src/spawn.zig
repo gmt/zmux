@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
+const cmdq = @import("cmd-queue.zig");
 const win = @import("window.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
@@ -31,6 +32,7 @@ const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
 const pane_io = @import("pane-io.zig");
 const resize_mod = @import("resize.zig");
+const server_client_mod = @import("server-client.zig");
 const c = @import("c.zig");
 
 extern fn openpty(
@@ -214,7 +216,19 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         break :blk if (default_shell.len > 0) default_shell else "/bin/sh";
     };
 
-    const cwd: []const u8 = sc.cwd orelse blk: {
+    const item = sc.item;
+    const target = if (item) |cmd_item| cmdq.cmdq_get_target(@ptrCast(@alignCast(cmd_item))) else T.CmdFindState{};
+    const cl = if (item) |cmd_item| cmdq.cmdq_get_client(@ptrCast(@alignCast(cmd_item))) else null;
+
+    const cwd_owned = if (sc.cwd) |raw_cwd|
+        resolve_spawn_cwd(raw_cwd, item, cl, target.s)
+    else if (sc.flags & T.SPAWN_RESPAWN == 0)
+        xm.xstrdup(server_client_mod.server_client_get_cwd(cl, target.s))
+    else
+        null;
+    defer if (cwd_owned) |owned| xm.allocator.free(owned);
+
+    const cwd: []const u8 = cwd_owned orelse blk: {
         if (sc.flags & T.SPAWN_RESPAWN != 0) {
             if (wp.cwd) |existing| break :blk existing;
         }
@@ -364,6 +378,29 @@ fn shell_basename(shell: []const u8) []const u8 {
 fn shell_login_name(shell: []const u8) []u8 {
     const base = shell_basename(shell);
     return xm.xasprintf("-{s}", .{base});
+}
+
+fn resolve_spawn_cwd(
+    raw_cwd: []const u8,
+    item: ?*T.CmdqItem,
+    cl: ?*T.Client,
+    target_session: ?*T.Session,
+) []u8 {
+    const expanded = if (item) |cmd_item|
+        format_mod.format_single(cmd_item, raw_cwd, cl, target_session, null, null)
+    else
+        xm.xstrdup(raw_cwd);
+
+    if (expanded.len != 0 and expanded[0] == '/') return expanded;
+
+    const base = server_client_mod.server_client_get_cwd(cl, target_session);
+    const resolved = xm.xasprintf("{s}{s}{s}", .{
+        base,
+        if (expanded.len != 0) "/" else "",
+        expanded,
+    });
+    xm.allocator.free(expanded);
+    return resolved;
 }
 
 fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8) !void {

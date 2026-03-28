@@ -98,6 +98,68 @@ pub fn pageDown(wp: *T.WindowPane, half_page: bool, scroll_exit: bool) void {
     redraw(wme);
 }
 
+pub fn scrollToMouse(wp: *T.WindowPane, slider_mouse_pos: i32, mouse_y: u32, scroll_exit: bool) void {
+    const wme = window.window_pane_mode(wp) orelse return;
+    if (wme.mode != &window_copy_mode) return;
+    if (slider_mouse_pos < 0) return;
+
+    _ = window.window_set_active_pane(wp.window, wp, false);
+
+    const data = modeData(wme);
+    const backing_rows = rowCount(data.backing);
+    const view_rows = viewRows(wp);
+    if (backing_rows <= view_rows or view_rows == 0) {
+        data.top = 0;
+        data.cy = @min(data.cy, backingBottomVisibleRow(wme));
+        redraw(wme);
+        return;
+    }
+
+    const sb_height = wp.sy;
+    if (sb_height == 0) return;
+
+    var slider_height: u32 = @intFromFloat(
+        @as(f64, @floatFromInt(sb_height)) *
+            (@as(f64, @floatFromInt(view_rows)) / @as(f64, @floatFromInt(backing_rows))),
+    );
+    if (slider_height < 1) slider_height = 1;
+
+    const max_slider_y = sb_height -| slider_height;
+    const relative_mouse_y = @as(i32, @intCast(mouse_y)) - @as(i32, @intCast(wp.yoff));
+    const unclamped_slider_y = relative_mouse_y - slider_mouse_pos;
+    const slider_y: u32 = if (unclamped_slider_y <= 0)
+        0
+    else
+        @min(@as(u32, @intCast(unclamped_slider_y)), max_slider_y);
+
+    const max_top = maxTop(data.backing, wp);
+    data.top = if (max_slider_y == 0)
+        0
+    else
+        @intCast((@as(u64, slider_y) * max_top + (max_slider_y / 2)) / max_slider_y);
+
+    const max_visible = backingBottomVisibleRow(wme);
+    if (data.cy > max_visible) data.cy = max_visible;
+    clampCursorX(wme);
+
+    if (scroll_exit and absoluteCursorRow(wme) + 1 >= backing_rows and data.top == max_top) {
+        _ = window_mode_runtime.resetMode(wp);
+        return;
+    }
+    redraw(wme);
+}
+
+pub fn startDrag(client: ?*T.Client, mouse: *const T.MouseEvent) void {
+    const cl = client orelse return;
+    const wp = resolveMousePane(mouse) orelse return;
+    const wme = window.window_pane_mode(wp) orelse return;
+    if (wme.mode != &window_copy_mode) return;
+
+    updateCursorFromMouse(wme, mouse, true);
+    cl.tty.mouse_drag_update = dragUpdate;
+    redraw(wme);
+}
+
 pub fn mouseFormatSource(wp: *T.WindowPane, y: u32) ?MouseFormatSource {
     const wme = window.window_pane_mode(wp) orelse return null;
     if (wme.mode != &window_copy_mode) return null;
@@ -157,7 +219,6 @@ fn copyModeCommand(
 ) void {
     _ = _session;
     _ = _wl;
-    _ = _mouse;
 
     const args: *const args_mod.Arguments = @ptrCast(@alignCast(raw_args));
     if (args.count() == 0) return;
@@ -171,6 +232,14 @@ fn copyModeCommand(
     }
     if (std.mem.eql(u8, command, "refresh-from-pane")) {
         refreshFromSource(wme, true);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "scroll-to-mouse")) {
+        if (client) |cl| {
+            if (_mouse) |mouse|
+                scrollToMouse(wme.wp, cl.tty.mouse_slider_mpos, mouse.y, args.has('e'));
+        }
         wme.prefix = 1;
         return;
     }
@@ -360,6 +429,48 @@ fn redraw(wme: *T.WindowModeEntry) void {
     if (view.grid.sx != 0) view.cx = @min(data.cx, view.grid.sx - 1) else view.cx = 0;
     if (rows != 0) view.cy = @min(data.cy, rows - 1) else view.cy = 0;
     window_mode_runtime.noteModeRedraw(wme.wp);
+}
+
+fn mouseAt(wp: *T.WindowPane, mouse: *const T.MouseEvent, last: bool) ?struct { x: u32, y: u32 } {
+    const x = (if (last) mouse.lx else mouse.x) + mouse.ox;
+    var y = (if (last) mouse.ly else mouse.y) + mouse.oy;
+
+    if (mouse.statusat == 0 and y >= mouse.statuslines)
+        y -= mouse.statuslines;
+
+    if (x < wp.xoff or x >= wp.xoff + wp.sx) return null;
+    if (y < wp.yoff or y >= wp.yoff + wp.sy) return null;
+
+    return .{
+        .x = x - wp.xoff,
+        .y = y - wp.yoff,
+    };
+}
+
+fn updateCursorFromMouse(wme: *T.WindowModeEntry, mouse: *const T.MouseEvent, last: bool) void {
+    const point = mouseAt(wme.wp, mouse, last) orelse return;
+    const data = modeData(wme);
+    const absolute_row = data.top + point.y;
+    setAbsoluteCursorRow(wme, absolute_row);
+    data.cx = point.x;
+    clampCursorX(wme);
+}
+
+fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
+    _ = client;
+    const wp = resolveMousePane(mouse) orelse return;
+    const wme = window.window_pane_mode(wp) orelse return;
+    if (wme.mode != &window_copy_mode) return;
+
+    updateCursorFromMouse(wme, mouse, false);
+    redraw(wme);
+}
+
+fn resolveMousePane(mouse: *const T.MouseEvent) ?*T.WindowPane {
+    if (mouse_runtime.cmd_mouse_pane(mouse, null, null)) |wp| return wp;
+    if (mouse.wp == -1) return null;
+    const pane_id = std.math.cast(u32, mouse.wp) orelse return null;
+    return window.window_pane_find_by_id(pane_id);
 }
 
 fn repeatCount(wme: *T.WindowModeEntry) u32 {
@@ -765,6 +876,213 @@ test "window-copy navigation commands move through a taller source snapshot" {
     copyModeCommand(wme, null, undefined, undefined, @ptrCast(&page_args), null);
     try std.testing.expectEqual(@as(u32, 1), modeData(wme).top);
     try std.testing.expectEqual(@as(u32, 0), modeData(wme).cy);
+}
+
+test "window-copy startDrag keeps the cursor under reduced mouse drags" {
+    const opts_mod = @import("options.zig");
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window.window_init_globals(xm.allocator);
+
+    const source_grid = grid.grid_create(6, 2, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 2, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 30,
+        .name = xm.xstrdup("copy-drag"),
+        .sx = 6,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 31,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 32,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    try window.all_window_panes.put(target.id, &target);
+    defer _ = window.all_window_panes.remove(target.id);
+
+    grid.set_ascii(source.base.grid, 1, 0, 'a');
+    grid.set_ascii(source.base.grid, 1, 1, 'b');
+    grid.set_ascii(source.base.grid, 1, 2, 'c');
+    grid.set_ascii(source.base.grid, 1, 3, 'd');
+    grid.set_ascii(source.base.grid, 1, 4, 'e');
+    grid.set_ascii(source.base.grid, 0, 0, 'v');
+    grid.set_ascii(source.base.grid, 0, 1, 'w');
+    grid.set_ascii(source.base.grid, 0, 2, 'x');
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = enterMode(&target, &source, &args);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "copy-mode-drag-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty = .{ .client = &client };
+
+    var start_mouse = T.MouseEvent{
+        .valid = true,
+        .s = -1,
+        .w = -1,
+        .wp = @intCast(target.id),
+        .x = 5,
+        .y = 1,
+        .lx = 4,
+        .ly = 1,
+    };
+    startDrag(&client, &start_mouse);
+    try std.testing.expect(client.tty.mouse_drag_update != null);
+    try std.testing.expectEqual(@as(u32, 4), target.screen.cx);
+    try std.testing.expectEqual(@as(u32, 1), target.screen.cy);
+
+    var drag_mouse = T.MouseEvent{
+        .valid = true,
+        .s = -1,
+        .w = -1,
+        .wp = @intCast(target.id),
+        .x = 2,
+        .y = 0,
+    };
+    client.tty.mouse_drag_update.?(&client, &drag_mouse);
+    try std.testing.expectEqual(@as(u32, 2), target.screen.cx);
+    try std.testing.expectEqual(@as(u32, 0), target.screen.cy);
+}
+
+test "window-copy scrollToMouse maps the reduced viewport onto scrollbar drags" {
+    const opts_mod = @import("options.zig");
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(6, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 40,
+        .name = xm.xstrdup("copy-scroll"),
+        .sx = 6,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 41,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 42,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &source;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).top);
+
+    scrollToMouse(&target, 0, 1, false);
+    try std.testing.expectEqual(@as(u32, 2), modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 0), target.screen.cy);
+
+    scrollToMouse(&target, 0, 0, false);
+    try std.testing.expectEqual(@as(u32, 0), modeData(wme).top);
 }
 
 test "unsupported window-copy commands surface a status message" {

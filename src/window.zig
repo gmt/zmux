@@ -1149,8 +1149,12 @@ test "window_rotate_panes rotates order and active pane" {
 
     const first = window_add_pane(w, null, 80, 24);
     const second = window_add_pane(w, null, 40, 12);
-    const third = window_add_pane(w, null, 20, 10);
     _ = window_set_active_pane(w, second, true);
+    const third = window_add_pane(w, null, 20, 10);
+
+    try std.testing.expectEqual(first, w.panes.items[0]);
+    try std.testing.expectEqual(second, w.panes.items[1]);
+    try std.testing.expectEqual(third, w.panes.items[2]);
 
     _ = window_rotate_panes(w, false);
     try std.testing.expectEqual(second, w.panes.items[0]);

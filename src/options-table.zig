@@ -148,6 +148,8 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "command-alias", .type = .array, .scope = S, .separator = "," },
     .{ .name = "codepoint-widths", .type = .array, .scope = S, .separator = "," },
     .{ .name = "copy-command", .type = .string, .scope = S, .default_str = "" },
+    .{ .name = "cursor-colour", .type = .colour, .scope = WP, .default_num = -1 },
+    .{ .name = "cursor-style", .type = .choice, .scope = WP, .default_num = 0, .choices = &.{ "default", "blinking-block", "block", "blinking-underline", "underline", "blinking-bar", "bar" } },
     .{ .name = "default-client-command", .type = .command, .scope = S, .default_str = "new-session" },
     .{ .name = "default-terminal", .type = .string, .scope = S, .default_str = "tmux-256color" },
     .{ .name = "editor", .type = .string, .scope = S, .default_str = "/usr/bin/vi" },
@@ -157,8 +159,11 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "extended-keys", .type = .choice, .scope = S, .default_num = 0, .choices = &.{ "off", "on", "always" } },
     .{ .name = "extended-keys-format", .type = .choice, .scope = S, .default_num = 1, .choices = &.{ "csi-u", "xterm" } },
     .{ .name = "focus-events", .type = .flag, .scope = S, .default_num = 0 },
+    .{ .name = "get-clipboard", .type = .choice, .scope = S, .default_num = 1, .choices = &.{ "off", "buffer", "request", "both" } },
     .{ .name = "history-file", .type = .string, .scope = S, .default_str = "" },
+    .{ .name = "input-buffer-size", .type = .number, .scope = S, .default_num = 1048576, .minimum = 1048576 },
     .{ .name = "message-limit", .type = .number, .scope = S, .default_num = 1000, .minimum = 0 },
+    .{ .name = "prefix-timeout", .type = .number, .scope = S, .default_num = 0, .minimum = 0 },
     .{ .name = "prompt-history-limit", .type = .number, .scope = S, .default_num = 100, .minimum = 0 },
     .{ .name = "set-clipboard", .type = .choice, .scope = S, .default_num = 1, .choices = &.{ "off", "on", "external" } },
     .{ .name = "terminal-features", .type = .array, .scope = S, .separator = "," },
@@ -186,6 +191,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "display-time", .type = .number, .scope = Ss, .default_num = 750, .minimum = 0 },
     .{ .name = "focus-follows-mouse", .type = .flag, .scope = Ss, .default_num = 0 },
     .{ .name = "history-limit", .type = .number, .scope = Ss, .default_num = 2000, .minimum = 0 },
+    .{ .name = "initial-repeat-time", .type = .number, .scope = Ss, .default_num = 0, .minimum = 0 },
     .{ .name = "key-table", .type = .string, .scope = Ss, .default_str = "root" },
     .{ .name = "lock-after-time", .type = .number, .scope = Ss, .default_num = 0, .minimum = 0 },
     .{ .name = "lock-command", .type = .string, .scope = Ss, .default_str = "lock -np" },
@@ -309,6 +315,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "aggressive-resize", .type = .flag, .scope = W, .default_num = 0 },
     .{ .name = "allow-passthrough", .type = .choice, .scope = WP, .default_num = 0, .choices = &.{ "off", "on", "all" } },
     .{ .name = "allow-rename", .type = .flag, .scope = WP, .default_num = 1 },
+    .{ .name = "allow-set-title", .type = .flag, .scope = WP, .default_num = 1 },
     .{ .name = "alternate-screen", .type = .flag, .scope = WP, .default_num = 1 },
     .{ .name = "automatic-rename", .type = .flag, .scope = W, .default_num = 1 },
     .{ .name = "automatic-rename-format", .type = .string, .scope = W, .default_str = "#{?pane_in_mode,[zmux],#{pane_current_command}}#{?pane_dead,dead,}" },
@@ -370,6 +377,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "window-status-style", .type = .style, .scope = W, .default_str = "default" },
     .{ .name = "window-style", .type = .style, .scope = WP, .default_str = "default" },
     .{ .name = "wrap-search", .type = .flag, .scope = W, .default_num = 1 },
+    .{ .name = "xterm-keys", .type = .flag, .scope = W, .default_num = 1 },
 };
 
 test "copy-mode position options keep tmux defaults and scopes" {
@@ -444,4 +452,69 @@ test "status format defaults and status style options keep tmux metadata" {
     try std.testing.expect(session_style.scope.window);
     try std.testing.expect(!session_style.scope.pane);
     try std.testing.expectEqualStrings("default", session_style.default_str.?);
+}
+
+test "tty compatibility options keep tmux metadata" {
+    const std = @import("std");
+
+    const Find = struct {
+        fn entry(name: []const u8) *const T.OptionsTableEntry {
+            return for (options_table) |*table_entry| {
+                if (std.mem.eql(u8, table_entry.name, name)) break table_entry;
+            } else unreachable;
+        }
+    };
+
+    const cursor_colour = Find.entry("cursor-colour");
+    try std.testing.expectEqual(OT.colour, cursor_colour.type);
+    try std.testing.expect(cursor_colour.scope.window);
+    try std.testing.expect(cursor_colour.scope.pane);
+    try std.testing.expectEqual(@as(i64, -1), cursor_colour.default_num);
+
+    const cursor_style = Find.entry("cursor-style");
+    try std.testing.expectEqual(OT.choice, cursor_style.type);
+    try std.testing.expect(cursor_style.scope.window);
+    try std.testing.expect(cursor_style.scope.pane);
+    try std.testing.expectEqual(@as(i64, 0), cursor_style.default_num);
+    try std.testing.expectEqual(@as(usize, 7), cursor_style.choices.?.len);
+    try std.testing.expectEqualStrings("default", cursor_style.choices.?[0]);
+    try std.testing.expectEqualStrings("bar", cursor_style.choices.?[6]);
+
+    const get_clipboard = Find.entry("get-clipboard");
+    try std.testing.expectEqual(OT.choice, get_clipboard.type);
+    try std.testing.expect(get_clipboard.scope.server);
+    try std.testing.expectEqual(@as(i64, 1), get_clipboard.default_num);
+    try std.testing.expectEqual(@as(usize, 4), get_clipboard.choices.?.len);
+    try std.testing.expectEqualStrings("off", get_clipboard.choices.?[0]);
+    try std.testing.expectEqualStrings("both", get_clipboard.choices.?[3]);
+
+    const input_buffer_size = Find.entry("input-buffer-size");
+    try std.testing.expectEqual(OT.number, input_buffer_size.type);
+    try std.testing.expect(input_buffer_size.scope.server);
+    try std.testing.expectEqual(@as(i64, 1048576), input_buffer_size.default_num);
+    try std.testing.expectEqual(@as(?i64, 1048576), input_buffer_size.minimum);
+
+    const prefix_timeout = Find.entry("prefix-timeout");
+    try std.testing.expectEqual(OT.number, prefix_timeout.type);
+    try std.testing.expect(prefix_timeout.scope.server);
+    try std.testing.expectEqual(@as(i64, 0), prefix_timeout.default_num);
+    try std.testing.expectEqual(@as(?i64, 0), prefix_timeout.minimum);
+
+    const initial_repeat_time = Find.entry("initial-repeat-time");
+    try std.testing.expectEqual(OT.number, initial_repeat_time.type);
+    try std.testing.expect(initial_repeat_time.scope.session);
+    try std.testing.expectEqual(@as(i64, 0), initial_repeat_time.default_num);
+    try std.testing.expectEqual(@as(?i64, 0), initial_repeat_time.minimum);
+
+    const allow_set_title = Find.entry("allow-set-title");
+    try std.testing.expectEqual(OT.flag, allow_set_title.type);
+    try std.testing.expect(allow_set_title.scope.window);
+    try std.testing.expect(allow_set_title.scope.pane);
+    try std.testing.expectEqual(@as(i64, 1), allow_set_title.default_num);
+
+    const xterm_keys = Find.entry("xterm-keys");
+    try std.testing.expectEqual(OT.flag, xterm_keys.type);
+    try std.testing.expect(xterm_keys.scope.window);
+    try std.testing.expect(!xterm_keys.scope.pane);
+    try std.testing.expectEqual(@as(i64, 1), xterm_keys.default_num);
 }

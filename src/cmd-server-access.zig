@@ -187,13 +187,43 @@ test "server-access list mode succeeds without user" {
     defer free_options_for_tests();
     server_acl.server_acl_reset_for_tests();
 
+    var stdout_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&stdout_pipe));
+    defer {
+        std.posix.close(stdout_pipe[0]);
+        if (stdout_pipe[1] != -1) std.posix.close(stdout_pipe[1]);
+    }
+
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "server-access", "-l" }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.posix.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO);
+    defer std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO) catch {};
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(stdout_pipe[1]);
+    stdout_pipe[1] = -1;
+
+    const owner_uid: std.posix.uid_t = @intCast(std.os.linux.getuid());
+    const expected = if (owner_uid == 0)
+        ""
+    else blk: {
+        const owner_pw = c.posix_sys.getpwuid(owner_uid) orelse unreachable;
+        const owner_name = std.mem.span(@as([*:0]const u8, @ptrCast(owner_pw.*.pw_name)));
+        break :blk xm.xasprintf("{s} (W)\n", .{owner_name});
+    };
+    defer if (owner_uid != 0) xm.allocator.free(@constCast(expected));
+
+    var buf: [256]u8 = undefined;
+    const read_len = try std.posix.read(stdout_pipe[0], &buf);
+    try std.testing.expectEqualStrings(expected, buf[0..read_len]);
 }
 
 test "server-access core ACL transitions stay honest" {

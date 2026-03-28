@@ -556,8 +556,11 @@ pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
 
 pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     const old_session = cl.session;
+    const now = std.time.milliTimestamp();
     if (cl.session) |current| {
         if (current == s) {
+            s.last_attached_time = now;
+            sess.session_update_activity(s, now);
             server_client_apply_session_size(cl, s);
             return;
         }
@@ -567,7 +570,8 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     cl.session = s;
     s.attached += 1;
     if (s.curw) |wl| wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
-    sess.session_update_activity(s, null);
+    s.last_attached_time = now;
+    sess.session_update_activity(s, now);
     alerts.alerts_check_session(s);
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
     server_client_apply_session_size(cl, s);

@@ -23,10 +23,12 @@ const cmd_mod = @import("cmd.zig");
 const cmd_find = @import("cmd-find.zig");
 const cmdq = @import("cmd-queue.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
+const window_clock = @import("window-clock.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
+    const is_clock = cmd_mod.cmd_get_entry(cmd) == &entry_clock;
 
     if (args.has('q')) {
         var target: T.CmdFindState = .{};
@@ -37,19 +39,20 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
+    var target_wp: *T.WindowPane = undefined;
     if (args.has('M')) {
         const client = cmdq.cmdq_get_client(item);
         const event = cmdq.cmdq_get_event(item);
 
         var mouse_session: ?*T.Session = null;
         var mouse_wl: ?*T.Winlink = null;
-        _ = mouse_runtime.cmd_mouse_pane(&event.m, &mouse_session, &mouse_wl) orelse return .normal;
+        target_wp = mouse_runtime.cmd_mouse_pane(&event.m, &mouse_session, &mouse_wl) orelse return .normal;
         if (client == null or client.?.session != mouse_session.?) return .normal;
     } else {
         var target: T.CmdFindState = .{};
         if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
             return .@"error";
-        _ = target.wp orelse return .@"error";
+        target_wp = target.wp orelse return .@"error";
     }
 
     if (args.has('s')) {
@@ -59,11 +62,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         _ = source.wp orelse return .@"error";
     }
 
-    const mode_name = if (cmd_mod.cmd_get_entry(cmd) == &entry_clock)
-        "window-clock"
-    else
-        "window-copy";
-    cmdq.cmdq_error(item, "{s} mode not supported yet", .{mode_name});
+    if (is_clock) {
+        window_clock.enter_mode(target_wp);
+        return .normal;
+    }
+
+    cmdq.cmdq_error(item, "{s} mode not supported yet", .{"window-copy"});
     return .@"error";
 }
 
@@ -212,8 +216,10 @@ test "copy-mode reports the reduced missing window-copy runtime" {
     try std.testing.expectEqualStrings("Window-copy mode not supported yet", client.message_string.?);
 }
 
-test "clock-mode reports the reduced missing window-clock runtime" {
+test "clock-mode enters the shared window clock mode" {
+    const screen_mod = @import("screen.zig");
     const sess = @import("session.zig");
+    const win = @import("window.zig");
     const xm = @import("xmalloc.zig");
 
     init_test_globals();
@@ -245,8 +251,10 @@ test "clock-mode reports the reduced missing window-clock runtime" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Window-clock mode not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.message_string == null);
+    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+    try std.testing.expectEqual(&window_clock.window_clock_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
 test "copy-mode -M is a quiet no-op when the mouse pane is in another session" {

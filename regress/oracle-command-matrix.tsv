@@ -9,7 +9,7 @@ choose-client	pane	unsupported
 choose-tree	pane	unsupported
 clear-history	pane	implemented
 clear-prompt-history	none	unsupported
-clock-mode	pane	unsupported
+clock-mode	pane	implemented
 command-prompt	client	unsupported
 confirm-before	client	unsupported
 copy-mode	pane	unsupported

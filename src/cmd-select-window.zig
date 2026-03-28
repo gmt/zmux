@@ -64,6 +64,8 @@ fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (cl) |c| {
+        if (c.session != null and s.curw != null)
+            s.curw.?.window.latest = @ptrCast(c);
         if (c.session == s) {
             server_client_mod.server_client_apply_session_size(c, s);
             server_client_mod.server_client_force_redraw(c);
@@ -422,6 +424,47 @@ test "select-window queues after-select-window hooks for direct, cycle, and togg
     var item = cmdq.CmdqItem{ .cmdlist = &list, .state = state };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(toggle_cmd, &item));
     try std.testing.expectEqualStrings("select-window-hook:2", env_mod.environ_find(env_mod.global_environ, "AFTER_SELECT_WINDOW").?.value.?);
+}
+
+test "select-window records latest client on the newly selected window across sessions" {
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const driver = make_select_window_test_session("select-window-latest-driver");
+    defer if (sess.session_find("select-window-latest-driver") != null) sess.session_destroy(driver.session, false, "test");
+
+    const target = make_select_window_test_session("select-window-latest-target");
+    defer if (sess.session_find("select-window-latest-target") != null) sess.session_destroy(target.session, false, "test");
+
+    var client = T.Client{
+        .name = "select-window-latest-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = driver.session,
+    };
+    defer {
+        if (client.message_string) |message| xm.allocator.free(message);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty.client = &client;
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-t", "select-window-latest-target:1" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(target.second, target.session.curw.?);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&client)), target.second.window.latest);
+    try std.testing.expectEqual(driver.first, driver.session.curw.?);
 }
 
 test "new-window synchronizes grouped peers and uses shared group status-only invalidation for detached creates" {

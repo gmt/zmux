@@ -29,6 +29,30 @@ fn toggleReadonlyFlags(cl: *T.Client) void {
         cl.flags |= T.CLIENT_READONLY | T.CLIENT_IGNORESIZE;
 }
 
+const TargetLookup = struct {
+    find_type: T.CmdFindType,
+    flags: u32,
+};
+
+fn switchClientTargetLookup(tflag: ?[]const u8) TargetLookup {
+    const target = tflag orelse return .{
+        .find_type = .session,
+        .flags = T.CMD_FIND_PREFER_UNATTACHED,
+    };
+
+    if (std.mem.eql(u8, target, "=") or std.mem.indexOfAny(u8, target, ":.%") != null) {
+        return .{
+            .find_type = .pane,
+            .flags = 0,
+        };
+    }
+
+    return .{
+        .find_type = .session,
+        .flags = T.CMD_FIND_PREFER_UNATTACHED,
+    };
+}
+
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const tc = cmdq.cmdq_get_target_client(item);
@@ -58,17 +82,8 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     var target: T.CmdFindState = .{};
     const tflag = args.get('t');
-
-    if (tflag) |t| {
-        const is_window_target = std.mem.indexOfScalar(u8, t, ':') != null or
-            std.mem.indexOfScalar(u8, t, '.') != null;
-        if (is_window_target) {
-            if (cmd_find.cmd_find_target(&target, item, tflag, .window, 0) != 0)
-                return .@"error";
-        } else if (cmd_find.cmd_find_target(&target, item, tflag, .session, 0) != 0) {
-            return .@"error";
-        }
-    } else if (cmd_find.cmd_find_target(&target, item, null, .session, 0) != 0) {
+    const target_lookup = switchClientTargetLookup(tflag);
+    if (cmd_find.cmd_find_target(&target, item, tflag, target_lookup.find_type, target_lookup.flags) != 0) {
         return .@"error";
     }
 
@@ -418,4 +433,71 @@ test "switch-client rejects invalid sort order" {
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", exec(cmd, &item));
     try std.testing.expect(client.session == setup.session);
+}
+
+test "switch-client -t @windowid prefers an unattached session" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var attached = switchClientTestMakeSession("switch-client-shared-window-attached");
+    defer switchClientTestFreeSession(&attached);
+    attached.session.activity_time = 500;
+
+    const unattached = sess.session_create(null, "switch-client-shared-window-unattached", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("switch-client-shared-window-unattached") != null) sess.session_destroy(unattached, false, "test");
+    unattached.activity_time = 100;
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const unattached_wl = sess.session_attach(unattached, attached.window, -1, &cause).?;
+    unattached.curw = unattached_wl;
+
+    var client = switchClientTestMakeClient("switch-client-shared-window-client", attached.session);
+    defer switchClientTestFreeClient(&client);
+
+    const window_id = try std.fmt.allocPrint(xm.allocator, "@{d}", .{attached.window.id});
+    defer xm.allocator.free(window_id);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-t", window_id }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expectEqual(unattached, client.session.?);
+    try std.testing.expectEqual(unattached_wl, client.session.?.curw.?);
+}
+
+test "switch-client -t = uses the hovered pane target" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-mouse-pane-target");
+    defer switchClientTestFreeSession(&setup);
+    const first = setup.window.active.?;
+    const second = win_mod.window_add_pane(setup.window, null, 80, 24);
+    if (setup.window.active != first)
+        try std.testing.expect(win_mod.window_set_active_pane(setup.window, first, true));
+    try std.testing.expect(setup.window.active == first);
+
+    var client = switchClientTestMakeClient("switch-client-mouse-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-t", "=" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    item.event.m = .{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .status),
+        .s = @intCast(setup.session.id),
+        .w = @intCast(setup.window.id),
+        .wp = @intCast(second.id),
+    };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expectEqual(second, setup.window.active.?);
 }

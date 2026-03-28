@@ -72,6 +72,7 @@ pub fn options_free(oo: *T.Options) void {
 fn free_value(v: *T.OptionsValue) void {
     switch (v.*) {
         .string => |s| xm.allocator.free(s),
+        .command => |s| xm.allocator.free(s),
         .array => |*arr| {
             for (arr.items) |item| xm.allocator.free(item.value);
             arr.deinit(xm.allocator);
@@ -176,6 +177,14 @@ pub fn options_get_string(oo: *T.Options, name: []const u8) []const u8 {
     const v = options_get(oo, name) orelse return "";
     return switch (v.*) {
         .string => |s| s,
+        else => "",
+    };
+}
+
+pub fn options_get_command_string(oo: *T.Options, name: []const u8) []const u8 {
+    const v = options_get(oo, name) orelse return "";
+    return switch (v.*) {
+        .command => |s| s,
         else => "",
     };
 }
@@ -328,6 +337,10 @@ pub fn options_set_bool(oo: *T.Options, name: []const u8, value: bool) void {
 /// Set a string option (takes ownership of a copy of value).
 pub fn options_set_string(oo: *T.Options, comptime _: bool, name: []const u8, value: []const u8) void {
     put_value(oo, name, .{ .string = xm.xstrdup(value) });
+}
+
+pub fn options_set_command(oo: *T.Options, name: []const u8, value: []const u8) void {
+    put_value(oo, name, .{ .command = xm.xstrdup(value) });
 }
 
 /// Set a colour option.
@@ -492,8 +505,11 @@ pub fn options_set_from_string(
             }
         },
         .command => {
-            cause.* = xm.xstrdup("command options not supported yet");
-            return false;
+            if (value == null) {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            }
+            options_set_command(oo, name, value.?);
         },
     }
     return true;
@@ -525,7 +541,7 @@ pub fn options_value_to_string(_: []const u8, value: *const T.OptionsValue, oe: 
         .style => |_| xm.xstrdup("default"),
         .flag => |b| xm.xstrdup(if (b) "on" else "off"),
         .array => |arr| array_join_values(xm.allocator, arr.items, " "),
-        .command => xm.xstrdup(""),
+        .command => |cmd| xm.xstrdup(cmd),
     };
 }
 
@@ -559,7 +575,10 @@ pub fn options_default(oo: *T.Options, oe: *const T.OptionsTableEntry) void {
                 array_assign(arr, oe, value);
             }
         },
-        .command => {},
+        .command => {
+            const def = oe.default_str orelse "";
+            options_set_command(oo, oe.name, def);
+        },
     }
     _ = table; // suppress unused import warning until table is referenced
 }

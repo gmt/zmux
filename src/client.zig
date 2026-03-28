@@ -644,8 +644,8 @@ pub fn client_main(
         }
         client_send_command(argv_slice.items);
     } else {
-        // Default command: new-session or attach
-        client_send_command([_][]const u8{"new-session"});
+        const no_args = [_][]const u8{};
+        client_send_command(no_args[0..]);
     }
 
     if (client_flags & T.CLIENT_CONTROL != 0) {
@@ -751,6 +751,48 @@ test "client shell request uses shell message" {
 
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.shell))), c.imsg.imsg_get_type(&imsg_msg));
     try std.testing.expectEqual(@as(usize, 0), c.imsg.imsg_get_len(&imsg_msg));
+}
+
+test "client empty command request sends zero argc command payload" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-empty-command-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+        client_proc = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const no_args = [_][]const u8{};
+    client_send_command(no_args[0..]);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.command))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(usize, @sizeOf(protocol.MsgCommand)), c.imsg.imsg_get_len(&imsg_msg));
+
+    var msg_cmd: protocol.MsgCommand = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, std.mem.asBytes(&msg_cmd).ptr, @sizeOf(protocol.MsgCommand)));
+    try std.testing.expectEqual(@as(i32, 0), msg_cmd.argc);
 }
 
 test "client lock command runs shell command then sends unlock" {

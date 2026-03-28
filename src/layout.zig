@@ -107,6 +107,14 @@ pub fn dump_window(w: *T.Window) ?[]u8 {
     return xm.xasprintf("{x:0>4},{s}", .{ layout_checksum(body.items), body.items });
 }
 
+pub fn dump_root(root: *const T.LayoutCell) ?[]u8 {
+    var body: std.ArrayList(u8) = .{};
+    defer body.deinit(xm.allocator);
+    if (!dump_append_public(root, &body))
+        return null;
+    return xm.xasprintf("{x:0>4},{s}", .{ layout_checksum(body.items), body.items });
+}
+
 pub fn parse_window(w: *T.Window, layout: []const u8, cause: *?[]u8) bool {
     cause.* = null;
     if (w.panes.items.len == 0) {
@@ -245,6 +253,35 @@ fn dump_append(lc: *Cell, body: *std.ArrayList(u8)) bool {
             body.append(xm.allocator, open_bracket) catch unreachable;
             for (lc.cells.items, 0..) |child, idx| {
                 if (!dump_append(child, body))
+                    return false;
+                if (idx + 1 < lc.cells.items.len)
+                    body.append(xm.allocator, ',') catch unreachable;
+            }
+            body.append(xm.allocator, close_bracket) catch unreachable;
+            return true;
+        },
+    }
+}
+
+fn dump_append_public(lc: *const T.LayoutCell, body: *std.ArrayList(u8)) bool {
+    var tmp: [64]u8 = undefined;
+    const prefix = switch (lc.type) {
+        .windowpane => blk: {
+            const pane = lc.wp orelse return false;
+            break :blk std.fmt.bufPrint(&tmp, "{d}x{d},{d},{d},{d}", .{ lc.sx, lc.sy, lc.xoff, lc.yoff, pane.id }) catch return false;
+        },
+        .leftright, .topbottom => std.fmt.bufPrint(&tmp, "{d}x{d},{d},{d}", .{ lc.sx, lc.sy, lc.xoff, lc.yoff }) catch return false,
+    };
+    body.appendSlice(xm.allocator, prefix) catch unreachable;
+
+    switch (lc.type) {
+        .windowpane => return true,
+        .leftright, .topbottom => {
+            const open_bracket: u8 = if (lc.type == .leftright) '{' else '[';
+            const close_bracket: u8 = if (lc.type == .leftright) '}' else ']';
+            body.append(xm.allocator, open_bracket) catch unreachable;
+            for (lc.cells.items, 0..) |child, idx| {
+                if (!dump_append_public(child, body))
                     return false;
                 if (idx + 1 < lc.cells.items.len)
                     body.append(xm.allocator, ',') catch unreachable;

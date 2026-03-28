@@ -11,6 +11,7 @@ const args_mod = @import("arguments.zig");
 const colour_mod = @import("colour.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
+const control_subscriptions = @import("control-subscriptions.zig");
 const resize_mod = @import("resize.zig");
 const server = @import("server.zig");
 const server_client_mod = @import("server-client.zig");
@@ -40,11 +41,25 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.get('r')) |report|
         updatePaneReportColours(report);
 
-    if (unsupportedFlag(args, 'A', item) or
-        unsupportedFlag(args, 'B', item) or
-        false)
-    {
+    if (args.has('A')) {
+        if ((target_client.flags & T.CLIENT_CONTROL) == 0) {
+            cmdq.cmdq_error(item, "not a control client", .{});
+            return .@"error";
+        }
+        _ = unsupportedFlag(args, 'A', item);
         return .@"error";
+    }
+
+    if (args.has('B')) {
+        if ((target_client.flags & T.CLIENT_CONTROL) == 0) {
+            cmdq.cmdq_error(item, "not a control client", .{});
+            return .@"error";
+        }
+        if (args.entry('B')) |flag_entry| {
+            for (flag_entry.values.items) |value|
+                updateControlSubscription(target_client, value);
+        }
+        return .normal;
     }
 
     if (args.count() != 0) {
@@ -91,6 +106,41 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     return .normal;
+}
+
+fn updateControlSubscription(target_client: *T.Client, value: []const u8) void {
+    const first_colon = std.mem.indexOfScalar(u8, value, ':') orelse {
+        control_subscriptions.control_remove_sub(target_client, value);
+        return;
+    };
+
+    const name = value[0..first_colon];
+    const remainder = value[first_colon + 1 ..];
+    const second_colon = std.mem.indexOfScalar(u8, remainder, ':') orelse return;
+    const what = remainder[0..second_colon];
+    const format = remainder[second_colon + 1 ..];
+
+    var sub_type: T.ControlSubType = .session;
+    var sub_id: u32 = 0;
+
+    if (std.mem.eql(u8, what, "%*")) {
+        sub_type = .all_panes;
+    } else if (parseSubscriptionTargetId(what, '%')) |id| {
+        sub_type = .pane;
+        sub_id = id;
+    } else if (std.mem.eql(u8, what, "@*")) {
+        sub_type = .all_windows;
+    } else if (parseSubscriptionTargetId(what, '@')) |id| {
+        sub_type = .window;
+        sub_id = id;
+    }
+
+    control_subscriptions.control_add_sub(target_client, name, sub_type, sub_id, format);
+}
+
+fn parseSubscriptionTargetId(value: []const u8, prefix: u8) ?u32 {
+    if (value.len < 2 or value[0] != prefix) return null;
+    return std.fmt.parseInt(u32, value[1..], 10) catch null;
 }
 
 fn execPanCommand(args: *const args_mod.Arguments, target_client: *T.Client, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -642,6 +692,190 @@ test "refresh-client rejects unsupported panes and non-control size requests" {
     defer cmd_mod.cmd_free(resize);
     var resize_item = cmdq.CmdqItem{ .target_client = &target_client };
     try std.testing.expectEqual(T.CmdRetval.@"error", exec(resize, &resize_item));
+
+    const subscription = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-B", "watch::#{session_name}" }, null, &cause);
+    defer cmd_mod.cmd_free(subscription);
+    var subscription_item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.@"error", exec(subscription, &subscription_item));
+}
+
+test "refresh-client -B stores and removes control subscriptions" {
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_CONTROL,
+    };
+    defer control_subscriptions.control_subscriptions_deinit(&target_client);
+    target_client.tty.client = &target_client;
+
+    var cause: ?[]u8 = null;
+    const add = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-B", "watch::#{session_name}" }, null, &cause);
+    defer cmd_mod.cmd_free(add);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(add, &item));
+    try std.testing.expectEqual(@as(usize, 1), target_client.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("watch", target_client.control_subscriptions.items[0].name);
+    try std.testing.expectEqual(T.ControlSubType.session, target_client.control_subscriptions.items[0].sub_type);
+    try std.testing.expectEqualStrings("#{session_name}", target_client.control_subscriptions.items[0].format);
+
+    const remove = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-B", "watch" }, null, &cause);
+    defer cmd_mod.cmd_free(remove);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(remove, &item));
+    try std.testing.expectEqual(@as(usize, 0), target_client.control_subscriptions.items.len);
+}
+
+test "refresh-client -B parses pane and window subscription targets" {
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_CONTROL,
+    };
+    defer control_subscriptions.control_subscriptions_deinit(&target_client);
+    target_client.tty.client = &target_client;
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(
+        &.{
+            "refresh-client",
+            "-B",
+            "pane:%7:#{pane_id}",
+            "-B",
+            "panes:%*:#{pane_id}",
+            "-B",
+            "window:@3:#{window_id}",
+            "-B",
+            "windows:@*:#{window_id}",
+        },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+    try std.testing.expectEqual(@as(usize, 4), target_client.control_subscriptions.items.len);
+    try std.testing.expectEqual(T.ControlSubType.pane, target_client.control_subscriptions.items[0].sub_type);
+    try std.testing.expectEqual(@as(u32, 7), target_client.control_subscriptions.items[0].id);
+    try std.testing.expectEqual(T.ControlSubType.all_panes, target_client.control_subscriptions.items[1].sub_type);
+    try std.testing.expectEqual(T.ControlSubType.window, target_client.control_subscriptions.items[2].sub_type);
+    try std.testing.expectEqual(@as(u32, 3), target_client.control_subscriptions.items[2].id);
+    try std.testing.expectEqual(T.ControlSubType.all_windows, target_client.control_subscriptions.items[3].sub_type);
+}
+
+test "refresh-client -B emits %subscription-changed for control clients" {
+    const c = @import("c.zig");
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const session_mod = @import("session.zig");
+    const xm = @import("xmalloc.zig");
+
+    const helpers = struct {
+        fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+    };
+
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = session_mod.session_create(null, "refresh-subscriptions", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (session_mod.session_find("refresh-subscriptions") != null) session_mod.session_destroy(session, false, "test");
+
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const pane = window_mod.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+
+    var attach_cause: ?[]u8 = null;
+    const wl = session_mod.session_attach(session, window, -1, &attach_cause).?;
+    session.curw = wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "refresh-client-subscription-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(target_client.environ);
+    defer control_subscriptions.control_subscriptions_deinit(&target_client);
+    target_client.tty = .{ .client = &target_client };
+    target_client.peer = proc_mod.proc_add_peer(&proc, pair[0], helpers.noopDispatch, null);
+    defer {
+        const peer = target_client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-B", "watch:%*:#{pane_id}" }, null, &cause);
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+
+    control_subscriptions.control_check_subscriptions(&target_client);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const expected = xm.xasprintf("%subscription-changed watch ${d} @{d} {d} %{d} : %{d}\n", .{ session.id, window.id, wl.idx, pane.id, pane.id });
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }
 
 test "refresh-client -r stores OSC report colours on the target pane" {

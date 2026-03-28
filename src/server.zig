@@ -122,6 +122,10 @@ export fn server_accept_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void 
     var sa_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.un);
     const new_fd = std.c.accept(fd, @ptrCast(&sa), &sa_len);
     if (new_fd < 0) return;
+    if (server_exit) {
+        std.posix.close(new_fd);
+        return;
+    }
 
     set_blocking(new_fd, false);
 
@@ -337,14 +341,46 @@ pub fn server_start(
     std.process.exit(0);
 }
 
+fn server_send_exit() void {
+    cmd_wait_for.cmd_wait_for_flush();
+
+    var clients = std.ArrayList(*T.Client){};
+    defer clients.deinit(xm.allocator);
+    for (client_registry.clients.items) |cl|
+        clients.append(xm.allocator, cl) catch unreachable;
+
+    for (clients.items) |cl| {
+        cl.session = null;
+        if (cl.flags & T.CLIENT_SUSPENDED != 0) {
+            server_client_mod.server_client_lost(cl);
+            continue;
+        }
+        cl.flags |= T.CLIENT_EXIT;
+        cl.exit_reason = .server_exited;
+    }
+
+    var sessions = std.ArrayList(*T.Session){};
+    defer sessions.deinit(xm.allocator);
+    var it = sess.sessions.valueIterator();
+    while (it.next()) |session_ptr|
+        sessions.append(xm.allocator, session_ptr.*) catch unreachable;
+
+    for (sessions.items) |session_ptr| {
+        if (sess.session_alive(session_ptr))
+            sess.session_destroy(session_ptr, true, "server_send_exit");
+    }
+}
+
+pub fn server_request_exit() void {
+    server_exit = true;
+    server_send_exit();
+}
+
 // ── Signal handler ────────────────────────────────────────────────────────
 
 export fn server_signal(signo: c_int) void {
     switch (signo) {
-        std.posix.SIG.TERM, std.posix.SIG.INT => {
-            server_exit = true;
-            proc_mod.proc_exit(server_proc.?);
-        },
+        std.posix.SIG.TERM, std.posix.SIG.INT => server_request_exit(),
         std.posix.SIG.CHLD => server_child_signal(),
         else => {},
     }
@@ -580,6 +616,57 @@ test "server loop keeps server alive while shared jobs still run" {
     try std.testing.expect(!server_loop());
 
     job_mod.job_finished(job, 0);
+    try std.testing.expect(server_loop());
+}
+
+test "server SIGTERM drains sessions and leaves the loop to exit naturally" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_number(opts.global_options, "exit-empty", 1);
+    opts.options_set_number(opts.global_options, "exit-unattached", 1);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const old_server_exit = server_exit;
+    defer server_exit = old_server_exit;
+    server_exit = false;
+
+    const shutdown_session = sess.session_create(null, "server-signal-shutdown", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = shutdown_session,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+    client_registry.add(&client);
+
+    server_signal(std.posix.SIG.TERM);
+
+    try std.testing.expect(server_exit);
+    try std.testing.expect(client.flags & T.CLIENT_EXIT != 0);
+    try std.testing.expectEqual(T.ClientExitReason.server_exited, client.exit_reason);
+    try std.testing.expect(client.session == null);
+    try std.testing.expect(sess.session_find("server-signal-shutdown") == null);
+    try std.testing.expect(!server_loop());
+
+    client_registry.clients.clearRetainingCapacity();
     try std.testing.expect(server_loop());
 }
 

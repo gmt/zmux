@@ -43,14 +43,69 @@ const CmdqType = enum {
 
 pub const CmdqCb = *const fn (*CmdqItem, ?*anyopaque) T.CmdRetval;
 
+pub const HookInfo = struct {
+    hook: ?[]const u8 = null,
+    hook_client: ?[]const u8 = null,
+    hook_session: ?[]const u8 = null,
+    hook_session_name: ?[]const u8 = null,
+    hook_window: ?[]const u8 = null,
+    hook_window_name: ?[]const u8 = null,
+    hook_pane: ?[]const u8 = null,
+};
+
+const HookInfoOwned = struct {
+    hook: ?[]u8 = null,
+    hook_client: ?[]u8 = null,
+    hook_session: ?[]u8 = null,
+    hook_session_name: ?[]u8 = null,
+    hook_window: ?[]u8 = null,
+    hook_window_name: ?[]u8 = null,
+    hook_pane: ?[]u8 = null,
+
+    fn deinit(self: *HookInfoOwned) void {
+        freeOptional(&self.hook);
+        freeOptional(&self.hook_client);
+        freeOptional(&self.hook_session);
+        freeOptional(&self.hook_session_name);
+        freeOptional(&self.hook_window);
+        freeOptional(&self.hook_window_name);
+        freeOptional(&self.hook_pane);
+    }
+
+    fn borrow(self: *const HookInfoOwned) HookInfo {
+        return .{
+            .hook = self.hook,
+            .hook_client = self.hook_client,
+            .hook_session = self.hook_session,
+            .hook_session_name = self.hook_session_name,
+            .hook_window = self.hook_window,
+            .hook_window_name = self.hook_window_name,
+            .hook_pane = self.hook_pane,
+        };
+    }
+
+    fn lookup(self: *const HookInfoOwned, key: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, key, "hook")) return self.hook;
+        if (std.mem.eql(u8, key, "hook_client")) return self.hook_client;
+        if (std.mem.eql(u8, key, "hook_session")) return self.hook_session;
+        if (std.mem.eql(u8, key, "hook_session_name")) return self.hook_session_name;
+        if (std.mem.eql(u8, key, "hook_window")) return self.hook_window;
+        if (std.mem.eql(u8, key, "hook_window_name")) return self.hook_window_name;
+        if (std.mem.eql(u8, key, "hook_pane")) return self.hook_pane;
+        return null;
+    }
+};
+
 pub const CmdqState = struct {
     references: u32 = 1,
     flags: u32 = 0,
     event: T.key_event = .{ .key = T.KEYC_NONE },
     current: T.CmdFindState = blankFindState(),
+    hook_info: HookInfoOwned = .{},
 };
 
 var default_state: CmdqState = .{};
+var current_running_item: ?*CmdqItem = null;
 
 // ── Concrete types for the opaque T.CmdqItem / T.CmdqList ────────────────
 
@@ -92,6 +147,16 @@ var queues_init = false;
 
 fn blankFindState() T.CmdFindState {
     return .{ .idx = -1 };
+}
+
+fn freeOptional(value: *?[]u8) void {
+    if (value.*) |owned| xm.allocator.free(owned);
+    value.* = null;
+}
+
+fn setOptionalString(slot: *?[]u8, value: ?[]const u8) void {
+    freeOptional(slot);
+    if (value) |slice| slot.* = xm.xstrdup(slice);
 }
 
 fn copyFindState(src: *const T.CmdFindState) T.CmdFindState {
@@ -202,13 +267,40 @@ pub fn cmdq_link_state(state: *CmdqState) *CmdqState {
 
 pub fn cmdq_copy_state(state: *CmdqState, current: ?*const T.CmdFindState) *CmdqState {
     const source = current orelse &state.current;
-    return cmdq_new_state(source, &state.event, state.flags);
+    const copied = cmdq_new_state(source, &state.event, state.flags);
+    cmdq_set_hook_info(copied, state.hook_info.borrow());
+    return copied;
 }
 
 pub fn cmdq_free_state(state: *CmdqState) void {
     if (state.references == 0) return;
     state.references -= 1;
-    if (state.references == 0) xm.allocator.destroy(state);
+    if (state.references == 0) {
+        state.hook_info.deinit();
+        xm.allocator.destroy(state);
+    }
+}
+
+pub fn cmdq_set_hook_info(state: *CmdqState, info: HookInfo) void {
+    setOptionalString(&state.hook_info.hook, info.hook);
+    setOptionalString(&state.hook_info.hook_client, info.hook_client);
+    setOptionalString(&state.hook_info.hook_session, info.hook_session);
+    setOptionalString(&state.hook_info.hook_session_name, info.hook_session_name);
+    setOptionalString(&state.hook_info.hook_window, info.hook_window);
+    setOptionalString(&state.hook_info.hook_window_name, info.hook_window_name);
+    setOptionalString(&state.hook_info.hook_pane, info.hook_pane);
+}
+
+pub fn cmdq_lookup_hook(item_ptr: ?*anyopaque, key: []const u8) ?[]const u8 {
+    const item = if (item_ptr) |raw|
+        @as(*CmdqItem, @ptrCast(@alignCast(raw)))
+    else
+        current_running_item orelse return null;
+    return item.state.hook_info.lookup(key);
+}
+
+pub fn cmdq_current_running() ?*CmdqItem {
+    return current_running_item;
 }
 
 pub fn cmdq_get_command(cmdlist_ptr: *T.CmdList, state: ?*CmdqState) *CmdqItem {
@@ -329,9 +421,15 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
         if (item.flags & CMDQ_WAITING != 0) return items;
 
         if (item.flags & CMDQ_FIRED == 0) {
-            const retval = switch (item.item_type) {
-                .command => fire_command(item),
-                .callback => fire_callback(item),
+            const retval = blk: {
+                const previous_running = current_running_item;
+                current_running_item = item;
+                defer current_running_item = previous_running;
+
+                break :blk switch (item.item_type) {
+                    .command => fire_command(item),
+                    .callback => fire_callback(item),
+                };
             };
             item.flags |= CMDQ_FIRED;
 
@@ -383,7 +481,12 @@ pub fn cmdq_run_immediate_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, state
     while (cmd_node) |cmd| {
         cmd_node = cmd.next;
         item.cmd = cmd;
-        const result = cmd_mod.cmd_execute(cmd, &item);
+        const result = blk: {
+            const previous_running = current_running_item;
+            current_running_item = &item;
+            defer current_running_item = previous_running;
+            break :blk cmd_mod.cmd_execute(cmd, &item);
+        };
         switch (result) {
             .normal => {},
             .@"error" => return .@"error",

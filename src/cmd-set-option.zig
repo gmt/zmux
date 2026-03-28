@@ -22,12 +22,14 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_format = @import("cmd-format.zig");
+const cmd_find = @import("cmd-find.zig");
 const cmdq = @import("cmd-queue.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 const cmd_opts = @import("cmd-options.zig");
 const win = @import("window.zig");
 const alerts = @import("alerts.zig");
+const notify = @import("notify.zig");
 const utf8 = @import("utf8.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -45,13 +47,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
         return .@"error";
     }
-    if (hook_command and args.has('R')) {
-        cmdq.cmdq_error(item, "hook execution not supported yet", .{});
-        return .@"error";
-    }
     if (hook_command and (oe == null or !oe.?.is_hook)) {
         cmdq.cmdq_error(item, "invalid option: {s}", .{option_name});
         return .@"error";
+    }
+    if (hook_command and args.has('R')) {
+        var hook_target: T.CmdFindState = .{ .idx = -1 };
+        _ = cmd_find.cmd_find_target(&hook_target, item, args.get('t'), .pane, T.CMD_FIND_QUIET | T.CMD_FIND_CANFAIL);
+        notify.notify_hook(item, option_name, &hook_target);
+        return .normal;
     }
 
     const target = cmd_opts.resolve_target_for_name(item, args, entry_ptr == &entry_window, option_name) orelse return .@"error";
@@ -354,15 +358,36 @@ test "set-hook rejects non-hook options" {
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
 }
 
-test "set-hook -R reports the missing runtime honestly" {
+test "set-hook -R runs the stored hook immediately" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_array(opts.global_s_options, "after-show-options", &.{
+        "set-environment -g HOOK_RESULT fired",
+    });
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
     var cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-hook", "-R", "after-show-options" }, null, &cause);
-    defer cmd_mod.cmd_free(cmd);
+    const list = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "set-hook", "-R", "after-show-options" }, null, &cause);
     defer if (cause) |msg| xm.allocator.free(msg);
 
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    cmdq.cmdq_append(null, list);
+    try std.testing.expectEqual(@as(u32, 2), cmdq.cmdq_next(null));
+    try std.testing.expectEqualStrings("fired", env_mod.environ_find(env_mod.global_environ, "HOOK_RESULT").?.value.?);
 }
 
 test "set-option -w -U clears pane local overrides before unsetting window options" {

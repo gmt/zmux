@@ -341,7 +341,13 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         }
     }
 
-    if (using_mode_table) return true;
+    if (using_mode_table) {
+        if (pane_mode) |wme| {
+            if (wme.mode.key) |mode_key|
+                mode_key(wme, cl, s, wl, normalize_key(event.key), null);
+        }
+        return true;
+    }
 
     if (!std.mem.eql(u8, current_table, "root")) {
         server_client_mod.server_client_set_key_table(cl, null);

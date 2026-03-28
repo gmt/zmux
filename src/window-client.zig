@@ -26,6 +26,7 @@ const client_registry = @import("client-registry.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
+const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -39,27 +40,38 @@ const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "detach-client -t '%%'";
 const DEFAULT_FORMAT = "#{client_tty}: session #{client_session_name}";
+const DEFAULT_KEY_FORMAT =
+    "#{?#{e|<:#{line},10}," ++
+    "#{line}" ++
+    ",#{e|<:#{line},36}," ++
+    "M-#{a:#{e|+:97,#{e|-:#{line},10}}}" ++
+    "}";
 const HELP_TEXT = "Enter choose  d/x/z detach kill suspend  t/T/^T tags  q cancel";
 
 const ClientItem = struct {
     client: *T.Client,
     target_name: []u8,
     text: []u8,
+    key: T.key_code = T.KEYC_NONE,
+    keystr: ?[]u8 = null,
     tagged: bool = false,
 };
 
 const ClientModeData = struct {
     format: []u8,
+    key_format: []u8,
     filter: ?[]u8 = null,
     command: []u8,
     sort_crit: T.SortCriteria = .{},
     items: std.ArrayList(ClientItem) = .{},
     current: usize = 0,
     offset: usize = 0,
+    max_key_label_width: usize = 0,
 };
 
 pub const window_client_mode = T.WindowMode{
     .name = "client-mode",
+    .key = clientModeKey,
     .key_table = clientModeKeyTable,
     .command = clientModeCommand,
     .close = clientModeClose,
@@ -80,6 +92,7 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
     const data = xm.allocator.create(ClientModeData) catch unreachable;
     data.* = .{
         .format = xm.xstrdup(args.get('F') orelse DEFAULT_FORMAT),
+        .key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT),
         .filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null,
         .command = xm.xstrdup(args.value_at(0) orelse DEFAULT_COMMAND),
         .sort_crit = .{
@@ -91,6 +104,26 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
     const wme = window_mode_runtime.pushMode(wp, &window_client_mode, @ptrCast(data), null);
     rebuildAndDraw(wme);
     return wme;
+}
+
+fn clientModeKey(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: *T.Session,
+    wl: *T.Winlink,
+    key: T.key_code,
+    mouse: ?*const T.MouseEvent,
+) void {
+    _ = mouse;
+
+    const data = modeData(wme);
+    for (data.items.items, 0..) |item, idx| {
+        if (item.key == T.KEYC_NONE or item.key != key) continue;
+        data.current = idx;
+        runCommand(client, session, wl, data.command, item.target_name);
+        _ = window_mode_runtime.resetMode(wme.wp);
+        return;
+    }
 }
 
 fn clientModeKeyTable(wme: *T.WindowModeEntry) []const u8 {
@@ -201,6 +234,7 @@ fn clientModeClose(wme: *T.WindowModeEntry) void {
     freeItems(data);
     data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
+    xm.allocator.free(data.key_format);
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
     xm.allocator.destroy(data);
@@ -222,6 +256,9 @@ fn refreshFromArgs(wme: *T.WindowModeEntry, args: *const args_mod.Arguments) voi
     const data = modeData(wme);
     xm.allocator.free(data.format);
     data.format = xm.xstrdup(args.get('F') orelse DEFAULT_FORMAT);
+
+    xm.allocator.free(data.key_format);
+    data.key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT);
 
     if (data.filter) |filter| xm.allocator.free(filter);
     data.filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null;
@@ -261,6 +298,7 @@ fn rebuildData(data: *ClientModeData) void {
 
     freeItems(data);
     data.items.clearRetainingCapacity();
+    data.max_key_label_width = 0;
 
     const clients = sort_mod.sorted_clients(data.sort_crit);
     defer xm.allocator.free(clients);
@@ -277,12 +315,22 @@ fn rebuildData(data: *ClientModeData) void {
 
         const text = format_mod.format_require_complete(xm.allocator, data.format, &ctx) orelse fallbackText(cl);
         const target_name = clientTargetName(cl);
+        const line_number: u32 = @intCast(data.items.items.len);
+        const item_key = keyForLine(data, cl, line_number);
+        const item_keystr = if (item_key != T.KEYC_NONE)
+            xm.xstrdup(key_string.key_string_lookup_key(item_key, 0))
+        else
+            null;
         data.items.append(xm.allocator, .{
             .client = cl,
             .target_name = target_name,
             .text = text,
+            .key = item_key,
+            .keystr = item_keystr,
             .tagged = isTagged(tagged_clients.items, cl),
         }) catch unreachable;
+        if (item_keystr) |keystr|
+            data.max_key_label_width = @max(data.max_key_label_width, keystr.len);
         if (!restored_current and previous_client == cl) {
             data.current = data.items.items.len - 1;
             restored_current = true;
@@ -345,7 +393,33 @@ fn renderLine(data: *const ClientModeData, index: usize) []u8 {
     const item = data.items.items[index];
     const current = if (index == data.current) ">" else " ";
     const tagged = if (item.tagged) "*" else " ";
-    return xm.xasprintf("{s}{s} {s}", .{ current, tagged, item.text });
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    out.appendSlice(xm.allocator, current) catch unreachable;
+    out.appendSlice(xm.allocator, tagged) catch unreachable;
+    out.append(xm.allocator, ' ') catch unreachable;
+
+    if (data.max_key_label_width != 0) {
+        const key_width = data.max_key_label_width + 2;
+        if (item.keystr) |keystr| {
+            out.append(xm.allocator, '[') catch unreachable;
+            out.appendSlice(xm.allocator, keystr) catch unreachable;
+            out.append(xm.allocator, ']') catch unreachable;
+
+            const pad = key_width - (keystr.len + 2);
+            var i: usize = 0;
+            while (i < pad) : (i += 1) out.append(xm.allocator, ' ') catch unreachable;
+        } else {
+            var i: usize = 0;
+            while (i < key_width) : (i += 1) out.append(xm.allocator, ' ') catch unreachable;
+        }
+        out.append(xm.allocator, ' ') catch unreachable;
+    }
+
+    out.appendSlice(xm.allocator, item.text) catch unreachable;
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn viewRows(wp: *const T.WindowPane) u32 {
@@ -519,6 +593,7 @@ fn freeItems(data: *ClientModeData) void {
     for (data.items.items) |item| {
         xm.allocator.free(item.target_name);
         xm.allocator.free(item.text);
+        if (item.keystr) |keystr| xm.allocator.free(keystr);
     }
 }
 
@@ -567,6 +642,18 @@ fn clientFormatContext(cl: *T.Client) format_mod.FormatContext {
         .window = w,
         .pane = pane,
     };
+}
+
+fn keyForLine(data: *const ClientModeData, cl: *T.Client, line: u32) T.key_code {
+    var ctx = clientFormatContext(cl);
+    ctx.line = line;
+
+    const expanded = format_mod.format_require_complete(xm.allocator, data.key_format, &ctx) orelse return T.KEYC_NONE;
+    defer xm.allocator.free(expanded);
+
+    const key = key_string.key_string_lookup_string(expanded);
+    if (key == T.KEYC_UNKNOWN or key == T.KEYC_NONE) return T.KEYC_NONE;
+    return key;
 }
 
 fn isTagged(tagged_clients: []*T.Client, client: *T.Client) bool {
@@ -680,7 +767,7 @@ test "window-client mode renders attached clients and preserves selection by cli
     client_registry.add(&first);
 
     var cause: ?[]u8 = null;
-    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    var args = try args_mod.args_parse(xm.allocator, &.{ "-K", "#{line}" }, "F:f:K:NO:rt:yZ", 0, 1, &cause);
     defer args.deinit();
 
     const wme = enterMode(setup.pane, &args);
@@ -691,6 +778,9 @@ test "window-client mode renders attached clients and preserves selection by cli
     const data = modeData(wme);
     try std.testing.expectEqual(@as(usize, 2), data.items.items.len);
     try std.testing.expectEqualStrings("/dev/pts/201: session window-client-render", data.items.items[0].text);
+    const first_line = renderLine(data, 0);
+    defer xm.allocator.free(first_line);
+    try std.testing.expect(std.mem.indexOf(u8, first_line, "[0]") != null);
 
     data.current = 1;
     rebuildData(data);
@@ -726,5 +816,40 @@ test "window-client choose runs the tmux template command for the selected clien
 
     try std.testing.expect(target.session == null);
     try std.testing.expect((target.flags & T.CLIENT_ATTACHED) == 0);
+    try std.testing.expect(window.window_pane_mode(setup.pane) == null);
+}
+
+test "window-client custom key format chooses the matching client" {
+    const cmdq_mod = @import("cmd-queue.zig");
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-key-format");
+    defer if (sess.session_find("window-client-key-format") != null) sess.session_destroy(setup.session, false, "test");
+
+    var chooser = makeClient(setup.session, "chooser", "/dev/pts/320");
+    defer freeClient(&chooser);
+    var first = makeClient(setup.session, "first", "/dev/pts/321");
+    defer freeClient(&first);
+    var second = makeClient(setup.session, "second", "/dev/pts/322");
+    defer freeClient(&second);
+    client_registry.add(&second);
+    client_registry.add(&first);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{ "-K", "#{line}" }, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    try std.testing.expectEqual(@as(T.key_code, '0'), modeData(wme).items.items[0].key);
+    try std.testing.expectEqual(@as(T.key_code, '1'), modeData(wme).items.items[1].key);
+    const chosen = modeData(wme).items.items[1].client;
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, '1', null);
+    while (cmdq_mod.cmdq_next(&chooser) != 0) {}
+    try std.testing.expect(chosen.session == null);
+    try std.testing.expect(first.session != null or second.session != null);
     try std.testing.expect(window.window_pane_mode(setup.pane) == null);
 }

@@ -372,6 +372,8 @@ fn inject_key(
                     null;
                 const inserted = key_bindings.key_bindings_dispatch(binding, queue_after, tc, null, @constCast(target));
                 if (inserted) |cursor| after.* = @ptrCast(@alignCast(cursor));
+            } else if (wme.mode.key) |mode_key| {
+                if (tc) |target_client| mode_key(wme, target_client, s, wl, key & ~T.KEYC_MASK_FLAGS, null);
             }
             return .normal;
         }
@@ -499,6 +501,10 @@ fn test_mode_table_name(_: *T.WindowModeEntry) []const u8 {
     return "send-keys-mode";
 }
 
+fn test_mode_table_fallback_name(_: *T.WindowModeEntry) []const u8 {
+    return "send-keys-mode-fallback";
+}
+
 fn test_mode_key(
     wme: *T.WindowModeEntry,
     tc: ?*T.Client,
@@ -539,6 +545,12 @@ fn test_mode_command(
 const test_mode_table: T.WindowMode = .{
     .name = "mode-table",
     .key_table = test_mode_table_name,
+};
+
+const test_mode_table_with_key: T.WindowMode = .{
+    .name = "mode-table-key",
+    .key = test_mode_key,
+    .key_table = test_mode_table_fallback_name,
 };
 
 const test_mode_key_only: T.WindowMode = .{
@@ -1243,6 +1255,55 @@ test "send-keys routes active mode keys through the target client instead of wri
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "mode-client", "-t", "send-mode-key:0.0", "x" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.saw_client);
+    try std.testing.expectEqual(@as(T.key_code, 'x'), state.last_key);
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&poll_fds, 100));
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
+test "send-keys falls back to an active mode key handler when the mode table has no binding" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const setup = try test_session_with_empty_pane("send-mode-key-fallback");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-mode-key-fallback", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+    var state = ModeKeyState{};
+    _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_table_with_key, @ptrCast(&state), null);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .name = xm.xstrdup("mode-fallback-client"),
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.s,
+    };
+    defer xm.allocator.free(cl.name.?);
+    cl.tty.client = &cl;
+    client_registry.add(&cl);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-c", "mode-fallback-client", "-t", "send-mode-key-fallback:0.0", "x" }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };

@@ -252,7 +252,6 @@ pub fn session_create(
 
     sessions.put(s.name, s) catch unreachable;
     log.log_debug("new session $%{d} {s}", .{ s.id, s.name });
-    notify.notify_session("session-created", s);
     return s;
 }
 

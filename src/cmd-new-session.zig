@@ -36,7 +36,9 @@ const env_mod = @import("environ.zig");
 const protocol = @import("zmux-protocol.zig");
 const server_client_mod = @import("server-client.zig");
 const server_mod = @import("server.zig");
+const cfg_mod = @import("cfg.zig");
 const format_mod = @import("format.zig");
+const notify = @import("notify.zig");
 
 fn attach_existing_session(
     item: *cmdq.CmdqItem,
@@ -74,6 +76,7 @@ fn attach_existing_session(
             return .@"error";
         }
         server_client_mod.server_client_attach(c, s);
+        if (cfg_mod.cfg_finished) cfg_mod.cfg_show_causes(c);
     }
     return .normal;
 }
@@ -266,6 +269,8 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         wl = s.curw;
     }
 
+    notify.notify_session("session-created", s);
+
     // Apply explicit -x/-y dimensions
     if (wl) |created_wl| {
         if (args.has('x') or args.has('y')) {
@@ -308,6 +313,15 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         defer xm.allocator.free(expanded);
         cmdq.cmdq_print(item, "{s}", .{expanded});
     }
+
+    if (!args.has('d'))
+        cmd_find.cmd_find_from_session(&cmdq.cmdq_get_state(item).current, s, 0);
+
+    var hook_state: T.CmdFindState = .{ .idx = -1 };
+    cmd_find.cmd_find_from_session(&hook_state, s, 0);
+    notify.notify_hook(item, "after-new-session", &hook_state);
+
+    if (cfg_mod.cfg_finished) cfg_mod.cfg_show_causes(cl);
 
     log.log_debug("new session ${d} {s}", .{ s.id, s.name });
     return .normal;
@@ -906,6 +920,122 @@ test "new-session -t joins the target session group and synchronizes windows" {
         const peer_wl = sess.winlink_find_by_index(&peer.windows, leader_entry.key_ptr.*).?;
         try std.testing.expectEqual(leader_entry.value_ptr.*.window, peer_wl.window);
     }
+}
+
+test "new-session queues session-created after the initial window exists" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    opts.options_set_array(opts.global_s_options, "session-created", &.{
+        "set-environment -g -F SESSION_CREATED_HOOK '#{session_name}:#{window_name}:#{window_index}'",
+    });
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-s",
+        "session-created-hook",
+        "-n",
+        "seed-window",
+    }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    const created = sess.session_find("session-created-hook").?;
+    defer if (sess.session_find("session-created-hook") != null)
+        sess.session_destroy(created, false, "test");
+
+    try std.testing.expectEqualStrings(
+        "session-created-hook:seed-window:0",
+        env_mod.environ_find(env_mod.global_environ, "SESSION_CREATED_HOOK").?.value.?,
+    );
+}
+
+test "new-session queues after-new-session hook with the new session context" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    opts.options_set_array(opts.global_s_options, "after-new-session", &.{
+        "set-environment -g -F AFTER_NEW_SESSION '#{session_name}:#{window_name}:#{window_index}'",
+    });
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-s",
+        "after-new-session-hook",
+        "-n",
+        "seed-window",
+    }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    const created = sess.session_find("after-new-session-hook").?;
+    defer if (sess.session_find("after-new-session-hook") != null)
+        sess.session_destroy(created, false, "test");
+
+    try std.testing.expectEqualStrings(
+        "after-new-session-hook:seed-window:0",
+        env_mod.environ_find(env_mod.global_environ, "AFTER_NEW_SESSION").?.value.?,
+    );
+}
+
+test "new-session updates the current state to the created session" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("new-session-current-state");
+    defer new_session_test_free_session(&current_setup);
+
+    var client = new_session_test_client("new-session-current-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    client_registry.add(&client);
+
+    var current: T.CmdFindState = .{ .idx = -1 };
+    cmd_find.cmd_find_from_session(&current, current_setup.session, 0);
+
+    const state = cmdq.cmdq_new_state(&current, null, 0);
+    defer cmdq.cmdq_free_state(state);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-s",
+        "new-session-current-target",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &client,
+        .cmdlist = &list,
+        .state = state,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const created = sess.session_find("new-session-current-target").?;
+    defer if (sess.session_find("new-session-current-target") != null)
+        sess.session_destroy(created, false, "test");
+
+    try std.testing.expectEqual(created, item.state.current.s.?);
+    try std.testing.expectEqual(created.curw.?, item.state.current.wl.?);
+    try std.testing.expectEqual(created.curw.?.window.active.?, item.state.current.wp.?);
 }
 
 test "new-session rejects -t combined with a window name" {

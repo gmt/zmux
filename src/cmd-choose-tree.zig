@@ -25,6 +25,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const paste_mod = @import("paste.zig");
 const sort_mod = @import("sort.zig");
+const window_client = @import("window-client.zig");
 const xm = @import("xmalloc.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -34,7 +35,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, 0) != 0)
         return .@"error";
     const wp = target.wp orelse return .@"error";
-    _ = wp;
 
     const order = sort_mod.sort_order_from_string(args.get('O'));
     if (order == .end and args.has('O')) {
@@ -44,8 +44,21 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (cmd.entry == &entry_buffer and paste_mod.paste_is_empty())
         return .normal;
-    if (cmd.entry == &entry_client and client_registry.clients.items.len == 0)
+    if (cmd.entry == &entry_client and !window_client.hasSelectableClients())
         return .normal;
+
+    if (cmd.entry == &entry_client) {
+        if (args.has('K')) {
+            cmdq.cmdq_error(item, "choose-client custom key format not supported yet", .{});
+            return .@"error";
+        }
+        if (args.has('N') or args.has('Z') or args.has('y')) {
+            cmdq.cmdq_error(item, "choose-client preview flags not supported yet", .{});
+            return .@"error";
+        }
+        _ = window_client.enterMode(wp, args);
+        return .normal;
+    }
 
     cmdq.cmdq_error(item, "{s} mode not supported yet", .{cmd.entry.name});
     return .@"error";
@@ -191,6 +204,94 @@ test "choose-client is a no-op when there are no clients" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "choose-client enters the reduced client mode when clients exist" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const setup = try test_setup("choose-client-live");
+    defer if (sess.session_find("choose-client-live") != null) sess.session_destroy(setup.session, false, "test");
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var target_client = T.Client{
+        .name = "target-client",
+        .ttyname = xm.xstrdup("/dev/pts/451"),
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    defer xm.allocator.free(target_client.ttyname.?);
+    target_client.tty = .{ .client = &target_client };
+    client_registry.add(&target_client);
+
+    const target = try test_target(xm.allocator, "choose-client-live");
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-client", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_client.window_client_mode, win.window_pane_mode(setup.pane).?.mode);
+}
+
+test "choose-client rejects unsupported custom key format flags" {
+    const sess = @import("session.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const setup = try test_setup("choose-client-key-format");
+    defer if (sess.session_find("choose-client-key-format") != null) sess.session_destroy(setup.session, false, "test");
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var current_client = T.Client{
+        .name = "choose-client-current",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    current_client.tty = .{ .client = &current_client };
+    defer if (current_client.message_string) |msg| xm.allocator.free(msg);
+
+    var target_client = T.Client{
+        .name = "target-client",
+        .ttyname = xm.xstrdup("/dev/pts/452"),
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    defer xm.allocator.free(target_client.ttyname.?);
+    target_client.tty = .{ .client = &target_client };
+    client_registry.add(&target_client);
+
+    const target = try test_target(xm.allocator, "choose-client-key-format");
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-client", "-K", "#{line}", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &current_client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Choose-client custom key format not supported yet", current_client.message_string.?);
 }
 
 test "choose-tree reports the reduced missing mode runtime" {

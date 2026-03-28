@@ -144,7 +144,7 @@ fn capture_grid(
 
     var absolute_row = top;
     while (absolute_row <= bottom) : (absolute_row += 1) {
-        const row = grid_storage_row(gd, absolute_row) orelse {
+        const row = grid_mod.absolute_row_to_storage(gd, absolute_row) orelse {
             if (!join_lines) out.append(xm.allocator, '\n') catch unreachable;
             continue;
         };
@@ -177,13 +177,6 @@ fn parse_bound(gd: *T.Grid, raw: ?[]const u8, is_start: bool) u32 {
     if (parsed < 0 and @as(u64, @intCast(-parsed)) > gd.hsize) return 0;
     const absolute = @as(i64, @intCast(gd.hsize)) + parsed;
     return @min(if (absolute < 0) 0 else @as(u32, @intCast(absolute)), last_row);
-}
-
-fn grid_storage_row(gd: *T.Grid, absolute_row: u32) ?u32 {
-    if (absolute_row < gd.hsize) return null;
-    const row = absolute_row - gd.hsize;
-    if (row >= gd.sy) return null;
-    return row;
 }
 
 fn grid_line_wrapped(gd: *T.Grid, row: u32) bool {
@@ -552,22 +545,20 @@ test "capture-pane helper preserves incomplete lines only with -T" {
     try std.testing.expectEqualStrings("ab\n", preserved_capture);
 }
 
-test "capture-pane helper maps absolute pane rows onto visible rows" {
-    const screen = screen_mod.screen_init(4, 3, 0);
+test "capture-pane helper captures real history rows before visible rows" {
+    const screen = screen_mod.screen_init(5, 2, 10);
     defer {
         screen_mod.screen_free(screen);
         xm.allocator.destroy(screen);
     }
 
-    screen.grid.hsize = 4;
-    set_grid_line_text(screen.grid, 0, "one");
-    set_grid_line_text(screen.grid, 1, "two");
-    set_grid_line_text(screen.grid, 2, "tri");
+    var ctx = T.ScreenWriteCtx{ .s = screen };
+    screen_write.putn(&ctx, "one\ntwo\nthree");
 
-    const captured = capture_grid(screen, "0", "2", false, false, false, false, false);
+    const captured = capture_grid(screen, "-", "1", false, false, false, false, false);
     defer xm.allocator.free(captured);
 
-    try std.testing.expectEqualStrings("one\ntwo\ntri\n", captured);
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n", captured);
 }
 
 test "capture-pane mode screen helper prefers the active mode screen for -M" {

@@ -75,10 +75,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         _ = window_customize.enterMode(wp, &target, args);
         return .normal;
     }
-    if (args.has('K')) {
-        cmdq.cmdq_error(item, "choose-tree custom key format not supported yet", .{});
-        return .@"error";
-    }
 
     _ = window_tree.enterMode(wp, .{
         .fs = &target,
@@ -89,6 +85,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         else
             .pane,
         .format = args.get('F'),
+        .key_format = args.get('K'),
         .filter = args.get('f'),
         .command = args.value_at(0),
         .sort_crit = .{
@@ -547,8 +544,9 @@ test "choose-tree rejects invalid sort order before the reduced mode error" {
     try std.testing.expectEqualStrings("Invalid sort order", client.message_string.?);
 }
 
-test "choose-tree rejects unsupported custom key format" {
+test "choose-tree accepts custom key format" {
     const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
 
     init_test_globals();
     defer deinit_test_globals();
@@ -579,6 +577,6 @@ test "choose-tree rejects unsupported custom key format" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Choose-tree custom key format not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(&window_tree.window_tree_mode, win_mod.window_pane_mode(setup.pane).?.mode);
 }

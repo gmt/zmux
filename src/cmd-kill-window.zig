@@ -58,6 +58,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         for (other_windows.items) |other| {
             server_fn.server_kill_window(other, false);
         }
+        server_fn.server_renumber_all();
         return .normal;
     }
 
@@ -160,4 +161,55 @@ test "kill-window destroys session when last window is removed" {
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(sess.session_find("kill-last-window-test") == null);
+}
+
+test "kill-window -a renumbers surviving windows when configured" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "kill-window-renumber", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("kill-window-renumber") != null) sess.session_destroy(s, false, "test");
+
+    opts.options_set_number(s.options, "base-index", 1);
+    opts.options_set_number(s.options, "renumber-windows", 1);
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&first_ctx, &cause).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&second_ctx, &cause).?;
+    var third_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const third = spawn.spawn_window(&third_ctx, &cause).?;
+    s.curw = third;
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "kill-window", "-a", "-t", "kill-window-renumber:3" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), s.windows.count());
+    try std.testing.expectEqual(third.window, sess.winlink_find_by_index(&s.windows, 1).?.window);
+    try std.testing.expectEqual(@as(i32, 1), s.curw.?.idx);
+    try std.testing.expect(sess.winlink_find_by_index(&s.windows, 2) == null);
+    try std.testing.expect(sess.winlink_find_by_index(&s.windows, 3) == null);
 }

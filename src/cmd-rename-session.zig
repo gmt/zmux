@@ -91,8 +91,10 @@ pub const entry: cmd_mod.CmdEntry = .{
 test "rename-session renames target session and rejects duplicates" {
     const env_mod = @import("environ.zig");
     const opts = @import("options.zig");
+    const win = @import("window.zig");
 
     sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -112,12 +114,32 @@ test "rename-session renames target session and rejects duplicates" {
     const s2 = sess.session_create(null, "beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     defer sess.session_destroy(s2, false, "test");
 
+    var attach_cause: ?[]u8 = null;
+    const w1 = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    _ = win.window_add_pane(w1, null, 80, 24);
+    const wl1 = sess.session_attach(s1, w1, 0, &attach_cause).?;
+    s1.curw = wl1;
+
+    const w2 = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    _ = win.window_add_pane(w2, null, 80, 24);
+    const wl2 = sess.session_attach(s2, w2, 0, &attach_cause).?;
+    s2.curw = wl2;
+
     var cause: ?[]u8 = null;
     const rename_ok = try cmd_mod.cmd_parse_one(&.{ "rename-session", "-t", "alpha", "gamma" }, null, &cause);
     defer cmd_mod.cmd_free(rename_ok);
 
     var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    var state = cmdq.CmdqState{
+        .current = .{
+            .s = s1,
+            .wl = wl1,
+            .idx = wl1.idx,
+            .w = wl1.window,
+            .wp = wl1.window.active,
+        },
+    };
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list, .state = &state };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(rename_ok, &item));
     try std.testing.expectEqualStrings("gamma", s1.name);
     try std.testing.expect(sess.session_find("alpha") == null);

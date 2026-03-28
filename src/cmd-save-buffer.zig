@@ -861,6 +861,8 @@ test "save-buffer writes detached file paths through write-ready then write-clos
 
 test "save-buffer reports bad file descriptor for dash on attached clients" {
     paste_mod.paste_reset_for_tests();
+    init_options_for_tests();
+    defer free_options_for_tests();
 
     var cause: ?[]u8 = null;
     try std.testing.expectEqual(@as(i32, 0), paste_mod.paste_set(xm.xstrdup("attached-save"), "named", &cause));

@@ -395,7 +395,9 @@ const default_options_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "pag
 const default_options_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
 const default_options_mode_expand_argv = [_][]const u8{ "send-keys", "-X", "expand" };
 const default_options_mode_collapse_argv = [_][]const u8{ "send-keys", "-X", "collapse" };
+const default_options_mode_reset_current_argv = [_][]const u8{ "send-keys", "-X", "reset-current" };
 const default_options_mode_toggle_hide_inherited_argv = [_][]const u8{ "send-keys", "-X", "toggle-hide-inherited" };
+const default_options_mode_unset_current_argv = [_][]const u8{ "send-keys", "-X", "unset-current" };
 const default_session_menu =
     " 'Next' 'n' {switch-client -n}" ++
     " 'Previous' 'p' {switch-client -p}" ++
@@ -2392,6 +2394,18 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "options-mode",
+        .key = 'd',
+        .note = "Reset selected option to default",
+        .argv = default_options_mode_reset_current_argv[0..],
+    },
+    .{
+        .table = "options-mode",
+        .key = 'u',
+        .note = "Unset selected option",
+        .argv = default_options_mode_unset_current_argv[0..],
+    },
+    .{
+        .table = "options-mode",
         .key = 'H',
         .note = "Toggle inherited options",
         .argv = default_options_mode_toggle_hide_inherited_argv[0..],
@@ -2473,6 +2487,18 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = T.KEYC_RIGHT,
         .note = "Expand current section",
         .argv = default_options_mode_expand_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'd',
+        .note = "Reset selected option to default",
+        .argv = default_options_mode_reset_current_argv[0..],
+    },
+    .{
+        .table = "options-mode-vi",
+        .key = 'u',
+        .note = "Unset selected option",
+        .argv = default_options_mode_unset_current_argv[0..],
     },
     .{
         .table = "options-mode-vi",
@@ -2846,11 +2872,15 @@ test "default options-mode bindings are installed" {
     const emacs = key_bindings_get_table("options-mode", false).?;
     try std.testing.expect(key_bindings_get(emacs, 'q') != null);
     try std.testing.expect(key_bindings_get(emacs, T.KEYC_RIGHT) != null);
+    try std.testing.expect(key_bindings_get(emacs, 'd') != null);
+    try std.testing.expect(key_bindings_get(emacs, 'u') != null);
     try std.testing.expect(key_bindings_get(emacs, 'H') != null);
 
     const vi = key_bindings_get_table("options-mode-vi", false).?;
     try std.testing.expect(key_bindings_get(vi, 'h') != null);
     try std.testing.expect(key_bindings_get(vi, 'l') != null);
+    try std.testing.expect(key_bindings_get(vi, 'd') != null);
+    try std.testing.expect(key_bindings_get(vi, 'u') != null);
     try std.testing.expect(key_bindings_get(vi, 'H') != null);
 }
 

@@ -227,6 +227,53 @@ pub const entry_hook: cmd_mod.CmdEntry = .{
     .exec = exec,
 };
 
+const CapturedStderr = struct {
+    retval: T.CmdRetval,
+    stderr: []u8,
+};
+
+fn capture_stderr(argv: []const []const u8) !CapturedStderr {
+    var stderr_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&stderr_pipe));
+    defer {
+        std.posix.close(stderr_pipe[0]);
+        if (stderr_pipe[1] != -1) std.posix.close(stderr_pipe[1]);
+    }
+
+    const stderr_dup = try std.posix.dup(std.posix.STDERR_FILENO);
+    defer std.posix.close(stderr_dup);
+
+    try std.posix.dup2(stderr_pipe[1], std.posix.STDERR_FILENO);
+    defer std.posix.dup2(stderr_dup, std.posix.STDERR_FILENO) catch {};
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(argv, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    const retval = cmd_mod.cmd_execute(cmd, &item);
+
+    try std.posix.dup2(stderr_dup, std.posix.STDERR_FILENO);
+    std.posix.close(stderr_pipe[1]);
+    stderr_pipe[1] = -1;
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+    var buf: [256]u8 = undefined;
+    while (true) {
+        const n = try std.posix.read(stderr_pipe[0], &buf);
+        if (n == 0) break;
+        try out.appendSlice(xm.allocator, buf[0..n]);
+    }
+
+    return .{
+        .retval = retval,
+        .stderr = try out.toOwnedSlice(xm.allocator),
+    };
+}
+
 test "set-option -p stores pane local custom options and updates consumers" {
     const sess = @import("session.zig");
     const colour_mod = @import("colour.zig");
@@ -727,4 +774,49 @@ test "set-option -qo leaves an existing local value untouched" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("present", opts.options_get_string(s.options, "status-left"));
     try std.testing.expectEqual(@as(usize, 0), server.message_log.items.len);
+}
+
+test "set-option rejects ambiguous option prefixes before scope resolution" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const result = try capture_stderr(&.{ "set-option", "-g", "status-l", "ambiguous" });
+    defer xm.allocator.free(result.stderr);
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", result.retval);
+    try std.testing.expectEqualStrings("ambiguous option: status-l\n", result.stderr);
+    try std.testing.expectEqualStrings("[#{session_name}] ", opts.options_get_string(opts.global_s_options, "status-left"));
+}
+
+test "set-window-option exact matches win over longer prefixed names" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-window-option", "-g", "automatic-rename", "off" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(opts.global_w_options, "automatic-rename"));
+    try std.testing.expectEqualStrings(
+        "#{?pane_in_mode,[zmux],#{pane_current_command}}#{?pane_dead,dead,}",
+        opts.options_get_string(opts.global_w_options, "automatic-rename-format"),
+    );
 }

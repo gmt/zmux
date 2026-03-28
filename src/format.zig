@@ -137,6 +137,7 @@ const resolver_table = [_]Resolver{
 
     .{ .name = "pid", .func = resolve_pid },
     .{ .name = "next_session_id", .func = resolve_next_session_id },
+    .{ .name = "origin_flag", .func = resolve_origin_flag },
     .{ .name = "server_sessions", .func = resolve_server_sessions },
     .{ .name = "socket_path", .func = resolve_socket_path },
     .{ .name = "start_time", .func = resolve_start_time },
@@ -149,9 +150,21 @@ const resolver_table = [_]Resolver{
     .{ .name = "buffer_name", .func = resolve_buffer_name },
     .{ .name = "buffer_sample", .func = resolve_buffer_sample },
     .{ .name = "buffer_size", .func = resolve_buffer_size },
+    .{ .name = "cursor_blinking", .func = resolve_cursor_blinking },
+    .{ .name = "cursor_character", .func = resolve_cursor_character },
+    .{ .name = "cursor_colour", .func = resolve_cursor_colour },
     .{ .name = "cursor_flag", .func = resolve_cursor_flag },
+    .{ .name = "cursor_shape", .func = resolve_cursor_shape },
+    .{ .name = "cursor_very_visible", .func = resolve_cursor_very_visible },
     .{ .name = "cursor_x", .func = resolve_cursor_x },
     .{ .name = "cursor_y", .func = resolve_cursor_y },
+    .{ .name = "history_all_bytes", .func = resolve_history_all_bytes },
+    .{ .name = "history_bytes", .func = resolve_history_bytes },
+    .{ .name = "history_limit", .func = resolve_history_limit },
+    .{ .name = "history_size", .func = resolve_history_size },
+    .{ .name = "insert_flag", .func = resolve_insert_flag },
+    .{ .name = "keypad_cursor_flag", .func = resolve_keypad_cursor_flag },
+    .{ .name = "keypad_flag", .func = resolve_keypad_flag },
     .{ .name = "mouse_all_flag", .func = resolve_mouse_all_flag },
     .{ .name = "mouse_any_flag", .func = resolve_mouse_any_flag },
     .{ .name = "mouse_button_flag", .func = resolve_mouse_button_flag },
@@ -252,6 +265,7 @@ const resolver_table = [_]Resolver{
     .{ .name = "window_visible_layout", .func = resolve_window_visible_layout },
     .{ .name = "window_zoomed_flag", .func = resolve_window_zoomed_flag },
     .{ .name = "window_width", .func = resolve_window_width },
+    .{ .name = "synchronized_output_flag", .func = resolve_synchronized_output_flag },
     .{ .name = "version", .func = resolve_version },
 };
 
@@ -1903,6 +1917,49 @@ fn mouse_mode_flag(alloc: std.mem.Allocator, ctx: *const FormatContext, flag: i3
     return alloc.dupe(u8, if ((current.mode & flag) != 0) "1" else "0") catch unreachable;
 }
 
+const GridStorageUsage = struct {
+    lines: usize = 0,
+    line_bytes: usize = 0,
+    cells: usize = 0,
+    cell_bytes: usize = 0,
+    extended_cells: usize = 0,
+    extended_bytes: usize = 0,
+
+    fn totalBytes(self: GridStorageUsage) usize {
+        return self.line_bytes + self.cell_bytes + self.extended_bytes;
+    }
+};
+
+// tmux keeps the pane's active or alternate screen state inside wp->base and
+// only points wp->screen at temporary mode displays. zmux currently splits the
+// alternate or mode display screen out, so pane-state formatter keys use the
+// current screen unless a pane mode is borrowing wp.screen.
+fn pane_state_screen(wp: *T.WindowPane) *T.Screen {
+    if (window_mod.window_pane_mode(wp) != null) return &wp.base;
+    return screen_mod.screen_current(wp);
+}
+
+fn pane_display_screen(wp: *T.WindowPane) *T.Screen {
+    return screen_mod.screen_current(wp);
+}
+
+// The current grid runtime only materializes the stored backing it actually
+// owns, so the history byte counters describe live backing storage rather than
+// reconstructing scrolled-off lines that the reduced grid does not retain.
+fn grid_storage_usage(gd: *const T.Grid) GridStorageUsage {
+    var usage = GridStorageUsage{
+        .lines = gd.linedata.len,
+        .line_bytes = gd.linedata.len * @sizeOf(T.GridLine),
+    };
+    for (gd.linedata) |line| {
+        usage.cells += line.celldata.len;
+        usage.extended_cells += line.extddata.len;
+    }
+    usage.cell_bytes = usage.cells * @sizeOf(T.GridCellEntry);
+    usage.extended_bytes = usage.extended_cells * @sizeOf(T.GridExtdEntry);
+    return usage;
+}
+
 fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
 }
@@ -2171,24 +2228,107 @@ fn resolve_buffer_size(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u
     return xm.xasprintf("{d}", .{paste_mod.paste_buffer_data(pb, null).len});
 }
 
+fn resolve_cursor_blinking(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_display_screen(wp);
+    return alloc.dupe(u8, if ((screen.mode & T.MODE_CURSOR_BLINKING) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_cursor_character(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_state_screen(wp);
+    var gc: T.GridCell = undefined;
+    grid.get_cell(screen.grid, screen.cy, screen.cx, &gc);
+    if (gc.isPadding()) return null;
+    return alloc.dupe(u8, gc.data.data[0..gc.data.size]) catch unreachable;
+}
+
+fn resolve_cursor_colour(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_display_screen(wp);
+    const colour_value = if (screen.ccolour != -1) screen.ccolour else screen.default_ccolour;
+    return alloc.dupe(u8, colour.colour_tostring(colour_value)) catch unreachable;
+}
+
 fn resolve_cursor_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
-    const screen = screen_mod.screen_current(wp);
-    return alloc.dupe(u8, if (screen.cursor_visible) "1" else "0") catch unreachable;
+    const screen = pane_state_screen(wp);
+    return alloc.dupe(u8, if ((screen.mode & T.MODE_CURSOR) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_cursor_shape(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_display_screen(wp);
+    const value: []const u8 = switch (screen.cstyle) {
+        .block => "block",
+        .underline => "underline",
+        .bar => "bar",
+        .default => "default",
+    };
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_cursor_very_visible(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_display_screen(wp);
+    return alloc.dupe(u8, if ((screen.mode & T.MODE_CURSOR_VERY_VISIBLE) != 0) "1" else "0") catch unreachable;
 }
 
 fn resolve_cursor_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const wp = ctx_pane(ctx) orelse return null;
-    const screen = screen_mod.screen_current(wp);
+    const screen = pane_state_screen(wp);
     return xm.xasprintf("{d}", .{screen.cx});
 }
 
 fn resolve_cursor_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const wp = ctx_pane(ctx) orelse return null;
-    const screen = screen_mod.screen_current(wp);
+    const screen = pane_state_screen(wp);
     return xm.xasprintf("{d}", .{screen.cy});
+}
+
+fn resolve_history_all_bytes(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const wp = ctx_pane(ctx) orelse return null;
+    const usage = grid_storage_usage(pane_state_screen(wp).grid);
+    return xm.xasprintf(
+        "{d},{d},{d},{d},{d},{d}",
+        .{ usage.lines, usage.line_bytes, usage.cells, usage.cell_bytes, usage.extended_cells, usage.extended_bytes },
+    );
+}
+
+fn resolve_history_bytes(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const wp = ctx_pane(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{grid_storage_usage(pane_state_screen(wp).grid).totalBytes()});
+}
+
+fn resolve_history_limit(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const wp = ctx_pane(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{pane_state_screen(wp).grid.hlimit});
+}
+
+fn resolve_history_size(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const wp = ctx_pane(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{pane_state_screen(wp).grid.hsize});
+}
+
+fn resolve_insert_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_INSERT) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_keypad_cursor_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_KCURSOR) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_keypad_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_KKEYPAD) != 0) "1" else "0") catch unreachable;
 }
 
 fn resolve_mouse_all_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2510,6 +2650,11 @@ fn resolve_next_session_id(alloc: std.mem.Allocator, ctx: *const FormatContext) 
     _ = alloc;
     _ = ctx;
     return xm.xasprintf("${d}", .{sess.session_next_id_peek()});
+}
+
+fn resolve_origin_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_ORIGIN) != 0) "1" else "0") catch unreachable;
 }
 
 fn resolve_server_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2988,6 +3133,11 @@ fn resolve_version(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, T.ZMUX_VERSION) catch unreachable;
 }
 
+fn resolve_synchronized_output_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_SYNC) != 0) "1" else "0") catch unreachable;
+}
+
 test "format_expand resolves mouse pane keys from queued item state" {
     const env_mod = @import("environ.zig");
 
@@ -3328,6 +3478,150 @@ test "format_expand resolves pane runtime keys" {
         "1:1:1:0:6:1:0:9:/tracked/current:/tracked/base:brightred:brightcyan:1:Ext 2:1::1:3,8:1",
         expanded,
     );
+}
+
+test "format_expand resolves cursor history and screen mode keys" {
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-screen-keys", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 8, 3);
+    w.active = wp;
+
+    wp.base.cx = 1;
+    wp.base.cy = 0;
+    wp.base.mode |= T.MODE_CURSOR | T.MODE_INSERT | T.MODE_KCURSOR | T.MODE_KKEYPAD | T.MODE_ORIGIN | T.MODE_SYNC;
+    wp.base.grid.hsize = 5;
+    wp.base.grid.hlimit = 120;
+    var cursor_cell = T.grid_default_cell;
+    utf8.utf8_set(&cursor_cell.data, 'Z');
+    grid.set_cell(wp.base.grid, 0, 1, &cursor_cell);
+    grid.ensure_line_capacity(wp.base.grid, 1);
+    var extd = T.grid_default_cell;
+    extd.data.size = 2;
+    extd.data.width = 2;
+    extd.data.have = 2;
+    extd.data.data[0] = 0xc3;
+    extd.data.data[1] = 0xa9;
+    grid.set_cell(wp.base.grid, 1, 0, &extd);
+
+    wp.base.cstyle = .underline;
+    wp.base.default_cstyle = .bar;
+    wp.base.ccolour = 90;
+    wp.base.default_ccolour = 91;
+    wp.base.mode |= T.MODE_CURSOR_BLINKING | T.MODE_CURSOR_VERY_VISIBLE;
+
+    const usage = grid_storage_usage(wp.base.grid);
+    const expected = try std.fmt.allocPrint(
+        xm.allocator,
+        "1:Z:brightblack:underline:1:1:1:5:{d}:{d},{d},{d},{d},{d},{d}:1:1:1:1:1",
+        .{ usage.totalBytes(), usage.lines, usage.line_bytes, usage.cells, usage.cell_bytes, usage.extended_cells, usage.extended_bytes },
+    );
+    defer xm.allocator.free(expected);
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{cursor_flag}:#{cursor_character}:#{cursor_colour}:#{cursor_shape}:#{cursor_very_visible}:#{cursor_blinking}:#{cursor_x}:#{history_size}:#{history_bytes}:#{history_all_bytes}:#{insert_flag}:#{keypad_cursor_flag}:#{keypad_flag}:#{origin_flag}:#{synchronized_output_flag}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+    try std.testing.expectEqualStrings(expected, expanded);
+}
+
+test "format_expand prefers the active alternate screen for pane screen keys" {
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-alt-screen-keys", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 8, 3);
+    w.active = wp;
+
+    wp.base.cx = 0;
+    wp.base.cy = 0;
+    wp.base.mode |= T.MODE_CURSOR;
+    var base_cell = T.grid_default_cell;
+    utf8.utf8_set(&base_cell.data, 'B');
+    grid.set_cell(wp.base.grid, 0, 0, &base_cell);
+
+    screen_mod.screen_enter_alternate(wp, true);
+    wp.screen.cx = 2;
+    wp.screen.cy = 1;
+    wp.screen.mode |= T.MODE_CURSOR | T.MODE_INSERT | T.MODE_ORIGIN;
+    wp.screen.mode &= ~@as(i32, T.MODE_KCURSOR | T.MODE_KKEYPAD | T.MODE_SYNC);
+    wp.screen.cstyle = .bar;
+    wp.screen.default_ccolour = 96;
+    wp.screen.ccolour = -1;
+    wp.screen.grid.hsize = 9;
+    wp.screen.grid.hlimit = 240;
+    var alt_cell = T.grid_default_cell;
+    utf8.utf8_set(&alt_cell.data, 'A');
+    grid.set_cell(wp.screen.grid, 1, 2, &alt_cell);
+
+    const usage = grid_storage_usage(wp.screen.grid);
+    const expected = try std.fmt.allocPrint(
+        xm.allocator,
+        "A:2:1:9:240:{d}:bar:brightcyan:1:0:0:1:0:{d},{d},{d},{d},{d},{d}",
+        .{ usage.totalBytes(), usage.lines, usage.line_bytes, usage.cells, usage.cell_bytes, usage.extended_cells, usage.extended_bytes },
+    );
+    defer xm.allocator.free(expected);
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{cursor_character}:#{cursor_x}:#{cursor_y}:#{history_size}:#{history_limit}:#{history_bytes}:#{cursor_shape}:#{cursor_colour}:#{insert_flag}:#{keypad_cursor_flag}:#{keypad_flag}:#{origin_flag}:#{synchronized_output_flag}:#{history_all_bytes}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+    try std.testing.expectEqualStrings(expected, expanded);
 }
 
 test "format_expand resolves pane dead status signal and time keys" {

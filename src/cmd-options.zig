@@ -19,11 +19,15 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const alerts = @import("alerts.zig");
 const args_mod = @import("arguments.zig");
-const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const names = @import("names.zig");
 const opts = @import("options.zig");
+const utf8 = @import("utf8.zig");
+const window = @import("window.zig");
+const xm = @import("xmalloc.zig");
 
 pub const ScopeKind = enum {
     server,
@@ -172,6 +176,24 @@ pub fn is_custom_option(name: []const u8) bool {
     return name.len > 0 and name[0] == '@';
 }
 
+pub fn apply_target_side_effects(target: ResolvedTarget, name: []const u8) void {
+    if (std.mem.eql(u8, name, "monitor-silence"))
+        alerts.alerts_reset_all();
+    if (std.mem.eql(u8, name, "codepoint-widths") and target.kind == .server and target.global)
+        utf8.utf8_update_width_cache();
+    if (target.kind == .window) {
+        if (std.mem.eql(u8, name, "automatic-rename"))
+            names.mark_automatic_rename_change(target.window, target.global);
+        if (target.window) |w| {
+            for (w.panes.items) |wp|
+                window.window_pane_options_changed(wp, name);
+        }
+        return;
+    }
+    if (target.pane) |wp|
+        window.window_pane_options_changed(wp, name);
+}
+
 pub fn collect_lines(
     target: ResolvedTarget,
     name: ?[]const u8,
@@ -206,16 +228,16 @@ fn collect_single(target: ResolvedTarget, name: []const u8, idx: ?u32, values_on
 }
 
 fn append_custom_lines(lines: *std.ArrayList([]u8), target: ResolvedTarget, values_only: bool) void {
-    var names: std.ArrayList([]const u8) = .{};
-    defer names.deinit(xm.allocator);
+    var custom_names: std.ArrayList([]const u8) = .{};
+    defer custom_names.deinit(xm.allocator);
 
     var it = target.options.entries.keyIterator();
     while (it.next()) |name| {
         if (!is_custom_option(name.*)) continue;
-        names.append(xm.allocator, name.*) catch unreachable;
+        custom_names.append(xm.allocator, name.*) catch unreachable;
     }
-    std.sort.block([]const u8, names.items, {}, less_than_string);
-    for (names.items) |name| {
+    std.sort.block([]const u8, custom_names.items, {}, less_than_string);
+    for (custom_names.items) |name| {
         const value = target.options.entries.getPtr(name).?;
         append_lines(lines, name, value, null, values_only, false);
     }

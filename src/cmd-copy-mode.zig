@@ -69,9 +69,17 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
+    const client = cmdq.cmdq_get_client(item);
+    const event = cmdq.cmdq_get_event(item);
+
     _ = window_copy.enterMode(target_wp, source_wp orelse target_wp, args);
+    if (args.has('M')) window_copy.startDrag(client, &event.m);
     if (args.has('u')) window_copy.pageUp(target_wp, false);
     if (args.has('d')) window_copy.pageDown(target_wp, false, args.has('e'));
+    if (args.has('S')) {
+        if (client) |cl| window_copy.scrollToMouse(target_wp, cl.tty.mouse_slider_mpos, event.m.y, args.has('e'));
+        return .normal;
+    }
     return .normal;
 }
 
@@ -311,4 +319,67 @@ test "copy-mode -M is a quiet no-op when the mouse pane is in another session" {
     };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(client.message_string == null);
+}
+
+test "copy-mode -M starts reduced cursor drag tracking on the mouse pane" {
+    const grid = @import("grid.zig");
+    const screen_mod = @import("screen.zig");
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const xm = @import("xmalloc.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("copy-mode-drag");
+    defer if (sess.session_find("copy-mode-drag") != null) sess.session_destroy(setup.session, false, "test");
+
+    grid.set_ascii(setup.pane.base.grid, 1, 0, 'a');
+    grid.set_ascii(setup.pane.base.grid, 1, 1, 'b');
+    grid.set_ascii(setup.pane.base.grid, 1, 2, 'c');
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "copy-mode-drag-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+    defer if (client.message_string) |msg| xm.allocator.free(msg);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "copy-mode", "-M" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &client,
+        .cmdlist = &list,
+        .event = .{
+            .m = .{
+                .valid = true,
+                .key = T.keycMouse(T.KEYC_MOUSEDRAG1, .pane),
+                .s = @intCast(setup.session.id),
+                .w = @intCast(setup.winlink.window.id),
+                .wp = @intCast(setup.pane.id),
+                .x = 3,
+                .y = 1,
+                .lx = 2,
+                .ly = 1,
+            },
+        },
+    };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.message_string == null);
+    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+    try std.testing.expectEqual(&window_copy.window_copy_mode, win.window_pane_mode(setup.pane).?.mode);
+    try std.testing.expect(client.tty.mouse_drag_update != null);
+    try std.testing.expectEqual(@as(u32, 2), setup.pane.screen.cx);
+    try std.testing.expectEqual(@as(u32, 1), setup.pane.screen.cy);
 }

@@ -391,6 +391,8 @@ const default_tree_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-u
 const default_tree_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
 const default_tree_mode_expand_argv = [_][]const u8{ "send-keys", "-X", "expand" };
 const default_tree_mode_collapse_argv = [_][]const u8{ "send-keys", "-X", "collapse" };
+const default_tree_mode_scroll_left_argv = [_][]const u8{ "send-keys", "-X", "scroll-left" };
+const default_tree_mode_scroll_right_argv = [_][]const u8{ "send-keys", "-X", "scroll-right" };
 const default_tree_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
 const default_tree_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
 const default_tree_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
@@ -2318,6 +2320,18 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "tree-mode",
+        .key = '<',
+        .note = "Scroll previews left",
+        .argv = default_tree_mode_scroll_left_argv[0..],
+    },
+    .{
+        .table = "tree-mode",
+        .key = '>',
+        .note = "Scroll previews right",
+        .argv = default_tree_mode_scroll_right_argv[0..],
+    },
+    .{
+        .table = "tree-mode",
         .key = 't',
         .note = "Tag selected item",
         .argv = default_tree_mode_tag_argv[0..],
@@ -2417,6 +2431,18 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = T.KEYC_RIGHT,
         .note = "Expand current item",
         .argv = default_tree_mode_expand_argv[0..],
+    },
+    .{
+        .table = "tree-mode-vi",
+        .key = '<',
+        .note = "Scroll previews left",
+        .argv = default_tree_mode_scroll_left_argv[0..],
+    },
+    .{
+        .table = "tree-mode-vi",
+        .key = '>',
+        .note = "Scroll previews right",
+        .argv = default_tree_mode_scroll_right_argv[0..],
     },
     .{
         .table = "tree-mode-vi",

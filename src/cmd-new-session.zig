@@ -169,6 +169,12 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (!args.has('d') and !no_attach) {
         if (cl) |c| {
+            if (c.session == null and c.fd != -1 and (c.flags & T.CLIENT_CONTROL) == 0) {
+                if (server_client_mod.server_client_check_nested(c)) {
+                    cmdq.cmdq_error(item, "sessions should be nested with care, unset $TMUX to force", .{});
+                    return .@"error";
+                }
+            }
             if (c.session == null and server_client_mod.server_client_open(c, &cause) != 0) {
                 defer if (cause) |msg| xm.allocator.free(msg);
                 cmdq.cmdq_error(item, "open terminal failed: {s}", .{cause orelse "unknown"});
@@ -455,7 +461,14 @@ fn new_session_test_free_client(client: *T.Client) void {
     if (client.message_string) |message| xm.allocator.free(message);
     if (client.name) |name| xm.allocator.free(@constCast(name));
     if (client.cwd) |cwd| xm.allocator.free(@constCast(cwd));
+    if (client.ttyname) |ttyname| xm.allocator.free(ttyname);
     if (client.exit_session) |name| xm.allocator.free(name);
+}
+
+fn new_session_test_set_pane_tty(wp: *T.WindowPane, tty: []const u8) void {
+    std.debug.assert(tty.len < T.TTY_NAME_MAX);
+    @memset(wp.tty_name[0..], 0);
+    @memcpy(wp.tty_name[0..tty.len], tty);
 }
 
 test "new-session -A attaches to an existing named session" {
@@ -776,6 +789,67 @@ test "new-session -E skips update-environment and applies repeated -e overrides 
     const output = respawn_cmd.read_pane_output(created.curw.?.window.active.?);
     defer xm.allocator.free(output);
     try std.testing.expect(std.mem.indexOf(u8, output, "second ok") != null);
+}
+
+test "new-session rejects nested unattached clients before opening a terminal" {
+    new_session_test_init();
+    defer new_session_test_finish();
+    server_mod.server_reset_message_log();
+    defer server_mod.server_reset_message_log();
+
+    var current_setup = new_session_test_make_session("new-session-nested-current");
+    defer new_session_test_free_session(&current_setup);
+    const tty = "/dev/pts/new-session-nested";
+    new_session_test_set_pane_tty(current_setup.window.active.?, tty);
+    current_setup.window.active.?.fd = try std.posix.dup(std.posix.STDERR_FILENO);
+
+    var client = new_session_test_client("new-session-nested-client", null);
+    defer new_session_test_free_client(&client);
+    client.fd = std.posix.STDIN_FILENO;
+    client.ttyname = xm.xstrdup(tty);
+    env_mod.environ_set(client.environ, "ZMUX", 0, "/tmp/zmux.sock,1,0");
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-session", "-s", "new-session-nested-blocked" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(sess.session_find("new-session-nested-blocked") == null);
+    try std.testing.expectEqual(@as(usize, 1), server_mod.message_log.items.len);
+    try std.testing.expectEqualStrings(
+        "new-session-nested-client message: sessions should be nested with care, unset $TMUX to force",
+        server_mod.message_log.items[0].msg,
+    );
+}
+
+test "new-session -d skips the nested-session guard" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("new-session-detached-nested-current");
+    defer new_session_test_free_session(&current_setup);
+    const tty = "/dev/pts/new-session-detached-nested";
+    new_session_test_set_pane_tty(current_setup.window.active.?, tty);
+    current_setup.window.active.?.fd = try std.posix.dup(std.posix.STDERR_FILENO);
+
+    var client = new_session_test_client("new-session-detached-nested-client", null);
+    defer new_session_test_free_client(&client);
+    client.fd = std.posix.STDIN_FILENO;
+    client.ttyname = xm.xstrdup(tty);
+    env_mod.environ_set(client.environ, "ZMUX", 0, "/tmp/zmux.sock,1,0");
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-session", "-d", "-s", "new-session-detached-nested-ok" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(sess.session_find("new-session-detached-nested-ok") != null);
 }
 
 test "new-session -t creates a fresh session group when the target name does not exist" {

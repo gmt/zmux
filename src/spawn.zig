@@ -32,6 +32,7 @@ const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
 const pane_io = @import("pane-io.zig");
 const resize_mod = @import("resize.zig");
+const server_mod = @import("server.zig");
 const server_client_mod = @import("server-client.zig");
 const c = @import("c.zig");
 
@@ -343,6 +344,13 @@ fn build_child_environment(
     if (env_mod.environ_find(child, "PATH") == null)
         env_mod.environ_set(child, "PATH", 0, "/usr/bin:/bin");
 
+    if (server_mod.socket_path.len != 0) {
+        const session_id: i32 = if (sc.s) |session| @intCast(session.id) else -1;
+        const zmux_value = xm.xasprintf("{s},{d},{d}", .{ server_mod.socket_path, std.c.getpid(), session_id });
+        defer xm.allocator.free(zmux_value);
+        env_mod.environ_set(child, "ZMUX", 0, zmux_value);
+    }
+
     var pane_buf: [32]u8 = undefined;
     const pane_id = std.fmt.bufPrint(&pane_buf, "%{d}", .{wp.id}) catch unreachable;
     env_mod.environ_set(child, "TMUX_PANE", 0, pane_id);
@@ -467,4 +475,45 @@ fn client_size(sc: *T.SpawnContext) struct { u32, u32 } {
         return .{ sx, sy };
     }
     return .{ 80, 24 };
+}
+
+test "build_child_environment carries the zmux session marker into pane children" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const previous_socket_path = server_mod.socket_path;
+    defer server_mod.socket_path = previous_socket_path;
+    server_mod.socket_path = "/tmp/zmux-test.sock";
+
+    const s = sess.session_create(null, "spawn-child-env", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("spawn-child-env") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+    const wp = win.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+
+    const sc = T.SpawnContext{ .s = s };
+    const child = build_child_environment(&sc, wp, null, "/bin/sh");
+    defer env_mod.environ_free(child);
+
+    const expected = xm.xasprintf("{s},{d},{d}", .{ server_mod.socket_path, std.c.getpid(), s.id });
+    defer xm.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, env_mod.environ_find(child, "ZMUX").?.value.?);
+    try std.testing.expectEqualStrings("/bin/sh", env_mod.environ_find(child, "SHELL").?.value.?);
+    try std.testing.expectEqualStrings("%0", env_mod.environ_find(child, "TMUX_PANE").?.value.?);
 }

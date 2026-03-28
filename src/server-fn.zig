@@ -582,6 +582,112 @@ test "server_destroy_pane removes a zero-exit pane when remain-on-exit is failed
     try std.testing.expectEqual(first, w.panes.items[0]);
 }
 
+test "server_destroy_pane queues pane-died hooks for remain-on-exit panes" {
+    const cmdq = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "pane-died-hook", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("pane-died-hook") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(24, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wp = win.window_add_pane(w, null, 24, 3);
+    w.active = wp;
+
+    var cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &cause).?;
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    opts_mod.options_set_array(w.options, "pane-died", &.{
+        "set-environment -g -F HOOK_RESULT '#{hook}:#{hook_pane}'",
+    });
+
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    opts_mod.options_set_number(wp.options, "remain-on-exit", 1);
+    wp.flags |= T.PANE_STATUSREADY;
+    wp.status = 7 << 8;
+
+    const expected = try std.fmt.allocPrint(xm.allocator, "pane-died:%{d}", .{wp.id});
+    defer xm.allocator.free(expected);
+
+    server_destroy_pane(wp, true);
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    try std.testing.expectEqualStrings(expected, env_mod.environ_find(env_mod.global_environ, "HOOK_RESULT").?.value.?);
+}
+
+test "server_destroy_pane queues pane-exited hooks before removing the pane" {
+    const cmdq = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "pane-exited-hook", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("pane-exited-hook") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const first = win.window_add_pane(w, null, 80, 24);
+    const second = win.window_add_pane(w, null, 80, 24);
+    w.active = second;
+
+    var cause: ?[]u8 = null;
+    _ = sess.session_attach(s, w, -1, &cause).?;
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    opts_mod.options_set_array(w.options, "pane-exited", &.{
+        "set-environment -g -F HOOK_RESULT '#{hook}:#{hook_pane}'",
+    });
+
+    const expected = try std.fmt.allocPrint(xm.allocator, "pane-exited:%{d}", .{second.id});
+    defer xm.allocator.free(expected);
+
+    server_destroy_pane(second, true);
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
+    try std.testing.expectEqual(first, w.active.?);
+    try std.testing.expectEqualStrings(expected, env_mod.environ_find(env_mod.global_environ, "HOOK_RESULT").?.value.?);
+}
+
 test "server_client_handle_key uses prefix table and queues bound commands" {
     const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");

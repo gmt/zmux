@@ -557,6 +557,11 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
             c.libevent.event_free(ev);
             w.alerts_timer = null;
         }
+        if (w.name_event) |ev| {
+            _ = c.libevent.event_del(ev);
+            c.libevent.event_free(ev);
+            w.name_event = null;
+        }
         while (w.panes.items.len > 0) {
             const wp = w.panes.items[w.panes.items.len - 1];
             window_remove_pane(w, wp);
@@ -695,6 +700,7 @@ pub fn window_rotate_panes(w: *T.Window, reverse: bool) ?*T.WindowPane {
 pub fn window_set_name(w: *T.Window, name: []const u8) void {
     xm.allocator.free(w.name);
     w.name = utf8.utf8_stravis(name, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_TAB | utf8.VIS_NL);
+    notify.notify_window("window-renamed", w);
 }
 
 pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32) void {

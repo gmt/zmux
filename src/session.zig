@@ -421,6 +421,7 @@ pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
         s.lastw.insert(xm.allocator, 0, old) catch unreachable;
     }
     s.curw = wl;
+    notify.notify_session("session-window-changed", s);
     return true;
 }
 
@@ -570,6 +571,11 @@ pub fn session_previous_session(
 }
 
 test "session_set_current maintains last-window history" {
+    const cmdq = @import("cmd-queue.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    session_init_globals(xm.allocator);
+
     var s = T.Session{
         .id = 1,
         .name = xm.xstrdup("session-history"),

@@ -25,6 +25,8 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const colour_mod = @import("colour.zig");
+const client_registry = @import("client-registry.zig");
+const notify = @import("notify.zig");
 const pane_io = @import("pane-io.zig");
 const style_mod = @import("style.zig");
 const grid_mod = @import("grid.zig");
@@ -39,10 +41,12 @@ pub var windows: std.AutoHashMap(u32, *T.Window) = undefined;
 pub var all_window_panes: std.AutoHashMap(u32, *T.WindowPane) = undefined;
 var next_window_id: u32 = 0;
 var next_window_pane_id: u32 = 0;
+var next_active_point: u32 = 0;
 
 pub fn window_init_globals(alloc: std.mem.Allocator) void {
     windows = std.AutoHashMap(u32, *T.Window).init(alloc);
     all_window_panes = std.AutoHashMap(u32, *T.WindowPane).init(alloc);
+    next_active_point = 0;
     marked_pane_mod.clear();
 }
 
@@ -201,7 +205,21 @@ pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
         if (p == wp) {
             _ = w.panes.orderedRemove(i);
             if (w.active == wp) {
-                w.active = if (w.panes.items.len > 0) w.panes.items[0] else null;
+                w.active = window_get_last_pane(w);
+                if (w.active == null) {
+                    if (i > 0)
+                        w.active = w.panes.items[i - 1]
+                    else if (i < w.panes.items.len)
+                        w.active = w.panes.items[i];
+                }
+                if (w.active) |active| {
+                    remove_last_pane_reference(w, active);
+                    active.flags |= T.PANE_CHANGED;
+                    if (w.winlinks.items.len != 0)
+                        notify.notify_window("window-pane-changed", w);
+                    window_mark_viewing_clients_for_active_pane_change(w);
+                    window_update_focus(w);
+                }
             }
             collapse_detached_pane_gap(w, removed_geometry);
             return true;
@@ -559,13 +577,50 @@ pub fn window_destroy_all_panes(w: *T.Window) void {
 }
 
 pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) bool {
-    _ = _notify;
     if (w.active == wp) return false;
     if (!window_has_pane(w, wp)) return false;
-    if (w.active) |old| push_last_pane(w, old);
+    const lastwp = w.active;
     remove_last_pane_reference(w, wp);
+    if (lastwp) |old| push_last_pane(w, old);
     w.active = wp;
+    wp.active_point = next_active_point;
+    next_active_point +%= 1;
+    wp.flags |= T.PANE_CHANGED;
+
+    if (client_registry.clients.items.len != 0 and
+        opts.options_get_number(opts.global_options, "focus-events") != 0)
+    {
+        if (lastwp) |old| window_pane_update_focus(old);
+        window_pane_update_focus(w.active);
+    }
+
+    window_mark_viewing_clients_for_active_pane_change(w);
+    if (_notify and w.winlinks.items.len != 0)
+        notify.notify_window("window-pane-changed", w);
     return true;
+}
+
+pub fn window_update_focus(w: ?*T.Window) void {
+    const window = w orelse return;
+    window_pane_update_focus(window.active);
+}
+
+pub fn window_pane_update_focus(wp: ?*T.WindowPane) void {
+    const pane = wp orelse return;
+    if (pane.flags & T.PANE_EXITED != 0) return;
+
+    const focused = window_pane_should_be_focused(pane);
+    if (!focused and (pane.flags & T.PANE_FOCUSED) != 0) {
+        if ((pane.base.mode & T.MODE_FOCUSON) != 0 and pane.fd >= 0)
+            write_pane_bytes_best_effort(pane.fd, "\x1b[O");
+        notify.notify_pane("pane-focus-out", pane);
+        pane.flags &= ~@as(u32, T.PANE_FOCUSED);
+    } else if (focused and (pane.flags & T.PANE_FOCUSED) == 0) {
+        if ((pane.base.mode & T.MODE_FOCUSON) != 0 and pane.fd >= 0)
+            write_pane_bytes_best_effort(pane.fd, "\x1b[I");
+        notify.notify_pane("pane-focus-in", pane);
+        pane.flags |= T.PANE_FOCUSED;
+    }
 }
 
 pub fn window_rotate_panes(w: *T.Window, reverse: bool) ?*T.WindowPane {
@@ -986,6 +1041,30 @@ fn choose_better_pane(best: ?*T.WindowPane, candidate: *T.WindowPane) *T.WindowP
     return best.?;
 }
 
+fn window_pane_should_be_focused(wp: *T.WindowPane) bool {
+    if (wp.window.active != wp) return false;
+
+    for (client_registry.clients.items) |cl| {
+        const s = cl.session orelse continue;
+        const wl = s.curw orelse continue;
+        if (s.attached == 0) continue;
+        if ((cl.flags & T.CLIENT_FOCUSED) == 0) continue;
+        if (wl.window == wp.window) return true;
+    }
+    return false;
+}
+
+fn window_mark_viewing_clients_for_active_pane_change(w: *T.Window) void {
+    for (client_registry.clients.items) |cl| {
+        const s = cl.session orelse continue;
+        const wl = s.curw orelse continue;
+        if ((cl.flags & T.CLIENT_ATTACHED) == 0) continue;
+        if ((cl.flags & T.CLIENT_TERMINAL) == 0) continue;
+        if (wl.window != w) continue;
+        cl.flags |= T.CLIENT_REDRAWWINDOW | T.CLIENT_REDRAWSTATUS;
+    }
+}
+
 fn write_pane_bytes_best_effort(fd: i32, bytes: []const u8) void {
     var rest = bytes;
     while (rest.len > 0) {
@@ -993,6 +1072,21 @@ fn write_pane_bytes_best_effort(fd: i32, bytes: []const u8) void {
         if (written == 0) return;
         rest = rest[written..];
     }
+}
+
+fn set_nonblocking_for_test(fd: i32) void {
+    const flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+}
+
+fn read_pipe_best_effort(fd: i32, buf: []u8) ![]const u8 {
+    const n = std.posix.read(fd, buf) catch |err| switch (err) {
+        error.WouldBlock => return &.{},
+        else => return err,
+    };
+    return buf[0..n];
 }
 
 test "window panes inherit from their window options and refresh cached pane state" {
@@ -1098,6 +1192,148 @@ test "window_set_active_pane tracks last pane history and detach prunes it" {
 
     try std.testing.expect(window_detach_pane(w, second));
     try std.testing.expect(window_get_last_pane(w) == null);
+}
+
+test "window_detach_pane promotes the last active pane and marks it changed" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+    const third = window_add_pane(w, null, 80, 24);
+
+    try std.testing.expect(window_set_active_pane(w, second, true));
+    try std.testing.expect(window_set_active_pane(w, third, true));
+    try std.testing.expect(window_detach_pane(w, third));
+    try std.testing.expectEqual(second, w.active.?);
+    try std.testing.expectEqual(first, window_get_last_pane(w).?);
+    try std.testing.expect((second.flags & T.PANE_CHANGED) != 0);
+}
+
+test "window_set_active_pane updates active metadata, focus hooks, and redraw flags" {
+    const cmdq = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_number(opts.global_options, "focus-events", 1);
+    opts.options_set_array(opts.global_w_options, "window-pane-changed", &.{
+        "set-environment -g -F WINDOW_HOOK '#{hook_window_name}'",
+    });
+    opts.options_set_array(opts.global_w_options, "pane-focus-in", &.{
+        "set-environment -g -F FOCUS_IN '#{hook_pane}'",
+    });
+    opts.options_set_array(opts.global_w_options, "pane-focus-out", &.{
+        "set-environment -g -F FOCUS_OUT '#{hook_pane}'",
+    });
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    sess.session_init_globals(xm.allocator);
+    window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "window-active-focus", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("window-active-focus") != null) sess.session_destroy(s, false, "test");
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(w.name);
+    w.name = xm.xstrdup("focus-window");
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+    first.base.mode |= T.MODE_FOCUSON;
+    second.base.mode |= T.MODE_FOCUSON;
+
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, -1, &cause).?;
+    s.curw = wl;
+    s.attached = 1;
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_TERMINAL | T.CLIENT_FOCUSED,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 40, .sy = 10 };
+    client_registry.add(&client);
+
+    const first_pipe = try std.posix.pipe();
+    defer std.posix.close(first_pipe[0]);
+    const second_pipe = try std.posix.pipe();
+    defer std.posix.close(second_pipe[0]);
+    set_nonblocking_for_test(first_pipe[0]);
+    set_nonblocking_for_test(second_pipe[0]);
+    first.fd = first_pipe[1];
+    second.fd = second_pipe[1];
+
+    window_update_focus(w);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try std.testing.expect((first.flags & T.PANE_FOCUSED) != 0);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[I", try read_pipe_best_effort(first_pipe[0], &buf));
+    const first_hook = env_mod.environ_find(env_mod.global_environ, "FOCUS_IN").?.value.?;
+    const first_hook_expected = xm.xasprintf("%{d}", .{first.id});
+    defer xm.allocator.free(first_hook_expected);
+    try std.testing.expectEqualStrings(first_hook_expected, first_hook);
+
+    try std.testing.expect(window_set_active_pane(w, second, true));
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    try std.testing.expectEqual(second, w.active.?);
+    try std.testing.expectEqual(@as(u32, 0), second.active_point);
+    try std.testing.expect((second.flags & T.PANE_CHANGED) != 0);
+    try std.testing.expect((first.flags & T.PANE_FOCUSED) == 0);
+    try std.testing.expect((second.flags & T.PANE_FOCUSED) != 0);
+    try std.testing.expect((client.flags & T.CLIENT_REDRAWWINDOW) != 0);
+    try std.testing.expect((client.flags & T.CLIENT_REDRAWSTATUS) != 0);
+    try std.testing.expectEqualStrings("\x1b[O", try read_pipe_best_effort(first_pipe[0], &buf));
+    try std.testing.expectEqualStrings("\x1b[I", try read_pipe_best_effort(second_pipe[0], &buf));
+
+    const focus_out_hook = env_mod.environ_find(env_mod.global_environ, "FOCUS_OUT").?.value.?;
+    const focus_out_expected = xm.xasprintf("%{d}", .{first.id});
+    defer xm.allocator.free(focus_out_expected);
+    try std.testing.expectEqualStrings(focus_out_expected, focus_out_hook);
+
+    const focus_in_hook = env_mod.environ_find(env_mod.global_environ, "FOCUS_IN").?.value.?;
+    const focus_in_expected = xm.xasprintf("%{d}", .{second.id});
+    defer xm.allocator.free(focus_in_expected);
+    try std.testing.expectEqualStrings(focus_in_expected, focus_in_hook);
+    try std.testing.expectEqualStrings("focus-window", env_mod.environ_find(env_mod.global_environ, "WINDOW_HOOK").?.value.?);
 }
 
 test "window_pane_resize clamps to window bounds and updates sole pane window size" {

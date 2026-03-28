@@ -346,6 +346,21 @@ const default_copy_mode_end_of_line_argv = [_][]const u8{ "send-keys", "-X", "en
 const default_copy_mode_top_line_argv = [_][]const u8{ "send-keys", "-X", "top-line" };
 const default_copy_mode_middle_line_argv = [_][]const u8{ "send-keys", "-X", "middle-line" };
 const default_copy_mode_bottom_line_argv = [_][]const u8{ "send-keys", "-X", "bottom-line" };
+const default_client_mode_cancel_argv = [_][]const u8{ "send-keys", "-X", "cancel" };
+const default_client_mode_choose_argv = [_][]const u8{ "send-keys", "-X", "choose" };
+const default_client_mode_cursor_up_argv = [_][]const u8{ "send-keys", "-X", "cursor-up" };
+const default_client_mode_cursor_down_argv = [_][]const u8{ "send-keys", "-X", "cursor-down" };
+const default_client_mode_page_up_argv = [_][]const u8{ "send-keys", "-X", "page-up" };
+const default_client_mode_page_down_argv = [_][]const u8{ "send-keys", "-X", "page-down" };
+const default_client_mode_detach_argv = [_][]const u8{ "send-keys", "-X", "detach" };
+const default_client_mode_detach_tagged_argv = [_][]const u8{ "send-keys", "-X", "detach-tagged" };
+const default_client_mode_kill_argv = [_][]const u8{ "send-keys", "-X", "kill" };
+const default_client_mode_kill_tagged_argv = [_][]const u8{ "send-keys", "-X", "kill-tagged" };
+const default_client_mode_suspend_argv = [_][]const u8{ "send-keys", "-X", "suspend" };
+const default_client_mode_suspend_tagged_argv = [_][]const u8{ "send-keys", "-X", "suspend-tagged" };
+const default_client_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
+const default_client_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
+const default_client_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
 
 const default_binding_specs = [_]DefaultBindingSpec{
     .{
@@ -521,6 +536,210 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = 'L',
         .note = "Move to bottom line",
         .argv = default_copy_mode_bottom_line_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'q',
+        .note = "Exit client mode",
+        .argv = default_client_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = T.C0_ESC,
+        .note = "Exit client mode",
+        .argv = default_client_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = '\r',
+        .note = "Choose selected client",
+        .argv = default_client_mode_choose_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_client_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_client_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_client_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_client_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'd',
+        .note = "Detach selected client",
+        .argv = default_client_mode_detach_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'D',
+        .note = "Detach tagged clients",
+        .argv = default_client_mode_detach_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'x',
+        .note = "Kill selected client",
+        .argv = default_client_mode_kill_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'X',
+        .note = "Kill tagged clients",
+        .argv = default_client_mode_kill_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'z',
+        .note = "Suspend selected client",
+        .argv = default_client_mode_suspend_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'Z',
+        .note = "Suspend tagged clients",
+        .argv = default_client_mode_suspend_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 't',
+        .note = "Tag selected client",
+        .argv = default_client_mode_tag_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 'T',
+        .note = "Clear all tags",
+        .argv = default_client_mode_tag_none_argv[0..],
+    },
+    .{
+        .table = "client-mode",
+        .key = 't' | T.KEYC_CTRL,
+        .note = "Tag all clients",
+        .argv = default_client_mode_tag_all_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'q',
+        .note = "Exit client mode",
+        .argv = default_client_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = T.C0_ESC,
+        .note = "Exit client mode",
+        .argv = default_client_mode_cancel_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = '\r',
+        .note = "Choose selected client",
+        .argv = default_client_mode_choose_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'k',
+        .note = "Move up",
+        .argv = default_client_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'j',
+        .note = "Move down",
+        .argv = default_client_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = T.KEYC_UP,
+        .note = "Move up",
+        .argv = default_client_mode_cursor_up_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = T.KEYC_DOWN,
+        .note = "Move down",
+        .argv = default_client_mode_cursor_down_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = T.KEYC_PPAGE,
+        .note = "Page up",
+        .argv = default_client_mode_page_up_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = T.KEYC_NPAGE,
+        .note = "Page down",
+        .argv = default_client_mode_page_down_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'd',
+        .note = "Detach selected client",
+        .argv = default_client_mode_detach_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'D',
+        .note = "Detach tagged clients",
+        .argv = default_client_mode_detach_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'x',
+        .note = "Kill selected client",
+        .argv = default_client_mode_kill_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'X',
+        .note = "Kill tagged clients",
+        .argv = default_client_mode_kill_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'z',
+        .note = "Suspend selected client",
+        .argv = default_client_mode_suspend_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'Z',
+        .note = "Suspend tagged clients",
+        .argv = default_client_mode_suspend_tagged_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 't',
+        .note = "Tag selected client",
+        .argv = default_client_mode_tag_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 'T',
+        .note = "Clear all tags",
+        .argv = default_client_mode_tag_none_argv[0..],
+    },
+    .{
+        .table = "client-mode-vi",
+        .key = 't' | T.KEYC_CTRL,
+        .note = "Tag all clients",
+        .argv = default_client_mode_tag_all_argv[0..],
     },
 };
 

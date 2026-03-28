@@ -49,6 +49,13 @@ file into a planner blob.
 - `src/tty-term.zig`, `src/tty-features.zig`, and `src/tty.zig` own the
   reduced terminfo and outer-tty capability path
 
+### Layout And Geometry
+
+- `src/layout.zig` owns the reduced geometry-tree reconstruction and
+  layout-dependent pane-resize seam used by `resize-pane`
+- future intent is to replace that transient reconstruction with persistent
+  layout ownership as more split, destroy, and layout-aware consumers land
+
 ### Async Job Runtime
 
 - `src/job.zig` owns the reduced shared job registry, summary fields, shell
@@ -90,6 +97,8 @@ file into a planner blob.
 - the tty runtime still exposes only a selected-capability `tty-term` seam
 - mouse/runtime coverage is still reduced compared with tmux's fuller attached
   client path
+- layout mutation now covers reduced `resize-pane` border motion, but the
+  broader persistent layout runtime is still intentionally incomplete
 
 ## Rules For New Work
 

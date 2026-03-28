@@ -269,12 +269,19 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         }
     }
 
-    const current_table = if (cl.key_table_name) |name| name else blk: {
+    const client_table_name = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");
         break :blk if (configured.len != 0) configured else "root";
     };
+    const pane_mode = win.window_pane_mode(wp);
+    const mode_table_name = if (std.mem.eql(u8, client_table_name, "root") and pane_mode != null and pane_mode.?.mode.key_table != null)
+        pane_mode.?.mode.key_table.?(pane_mode.?)
+    else
+        null;
+    const current_table = mode_table_name orelse client_table_name;
+    const using_mode_table = mode_table_name != null;
 
-    if (std.mem.eql(u8, current_table, "root") and is_prefix_key(s, event.key)) {
+    if (!using_mode_table and std.mem.eql(u8, current_table, "root") and is_prefix_key(s, event.key)) {
         server_client_mod.server_client_set_key_table(cl, "prefix");
         return true;
     }
@@ -282,11 +289,13 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
         if (lookup_binding(table, event.key)) |binding| {
             _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, binding_find_state);
-            if (!std.mem.eql(u8, current_table, "root"))
+            if (!using_mode_table and !std.mem.eql(u8, current_table, "root"))
                 server_client_mod.server_client_set_key_table(cl, null);
             return true;
         }
     }
+
+    if (using_mode_table) return true;
 
     if (!std.mem.eql(u8, current_table, "root")) {
         server_client_mod.server_client_set_key_table(cl, null);
@@ -422,6 +431,66 @@ test "server_client_handle_key uses prefix table and queues bound commands" {
     try std.testing.expect(cl.key_table_name == null);
     _ = cmdq.cmdq_next(&cl);
     try std.testing.expectEqual(@as(usize, 2), s.windows.count());
+}
+
+test "server_client_handle_key routes default keys through the active pane mode table" {
+    const args_mod = @import("arguments.zig");
+    const cmdq = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+    const window_copy = @import("window-copy.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-copy-mode", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-copy-mode") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = window_copy.enterMode(wp, wp, &args);
+    try std.testing.expectEqual(&window_copy.window_copy_mode, win.window_pane_mode(wp).?.mode);
+
+    var event = T.key_event{
+        .key = 'q',
+        .data = std.mem.zeroes([16]u8),
+        .len = 1,
+    };
+    event.data[0] = 'q';
+    try std.testing.expect(server_client_handle_key(&cl, &event));
+    _ = cmdq.cmdq_next(&cl);
+    try std.testing.expect(win.window_pane_mode(wp) == null);
 }
 
 test "server_client_handle_key forwards unbound keys to pane" {

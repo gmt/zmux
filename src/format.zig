@@ -3164,8 +3164,8 @@ fn resolve_pane_last(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
 }
 
 fn resolve_pane_search_string(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    _ = ctx_pane(ctx) orelse return null;
-    return alloc.dupe(u8, "") catch unreachable;
+    const wp = ctx_pane(ctx) orelse return null;
+    return alloc.dupe(u8, wp.searchstr orelse "") catch unreachable;
 }
 
 fn resolve_pane_synchronized(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -3668,6 +3668,7 @@ test "format_expand resolves pane runtime keys" {
     opts.options_set_number(w.options, "pane-border-status", T.PANE_STATUS_TOP);
     opts.options_set_number(left.options, "synchronize-panes", 1);
     left.flags |= T.PANE_INPUTOFF | T.PANE_UNSEENCHANGES;
+    left.searchstr = xm.xstrdup("needle");
 
     screen_mod.screen_set_path(&left.base, "/tracked/base");
     screen_mod.screen_enter_alternate(left, true);
@@ -3705,7 +3706,7 @@ test "format_expand resolves pane runtime keys" {
     defer xm.allocator.free(expanded);
 
     try std.testing.expectEqualStrings(
-        "1:1:1:0:6:1:0:9:/tracked/current:/tracked/base:brightred:brightcyan:1:Ext 2:1::1:3,8:1",
+        "1:1:1:0:6:1:0:9:/tracked/current:/tracked/base:brightred:brightcyan:1:Ext 2:1:needle:1:3,8:1",
         expanded,
     );
 }

@@ -536,6 +536,7 @@ fn window_pane_destroy(wp: *T.WindowPane) void {
     }
     if (wp.shell) |shell| xm.allocator.free(shell);
     if (wp.cwd) |cwd| xm.allocator.free(cwd);
+    if (wp.searchstr) |searchstr| xm.allocator.free(searchstr);
     wp.input_pending.deinit(xm.allocator);
     while (wp.modes.items.len > 0) {
         const wme = wp.modes.orderedRemove(0);

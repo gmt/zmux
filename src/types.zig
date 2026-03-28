@@ -781,6 +781,8 @@ pub const WindowPane = struct {
     base: Screen,
     input_pending: std.ArrayList(u8) = .{},
     modes: std.ArrayList(*WindowModeEntry) = .{},
+    searchstr: ?[]u8 = null,
+    searchregex: bool = false,
 
     // Colour palette
     palette: ColourPalette = .{},

@@ -105,6 +105,10 @@ pub fn tty_clipboard_query(tty: *T.Tty) void {
     armClipboardTimer(tty);
 }
 
+pub fn tty_finish_clipboard_query(tty: *T.Tty) void {
+    cancelClipboardQuery(tty);
+}
+
 pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !void {
     var actual = mode;
     if ((tty.flags & @as(i32, @intCast(T.TTY_NOCURSOR))) != 0)

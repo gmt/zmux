@@ -16,13 +16,16 @@
   alternate-screen browser over the shared `window-mode-runtime.zig` interface.
 - The current reduced `tree-mode` supports session/window/pane tree browsing,
   current-target focus, default choose actions, `-F` formatting, `-f` filters,
-  `-O` sorting, `-r` reverse sorting, `-G` group squashing control, and
-  reduced tagging/navigation bindings.
+  `-O` sorting, `-r` reverse sorting, `-G` group squashing control, reduced
+  tagging/navigation bindings, and `-Z` zoom ownership for the mode lifetime
+  with prior zoom state restored on exit.
 - The current reduced `tree-mode` does not provide tmux's preview panes,
-  prompt-driven command or kill flows, preview zoom, mouse preview selection,
-  or custom `-K` key-format bindings.
-- Current `choose-buffer` and `customize-mode` behavior still stops at the
-  explicit reduced-mode error because there is still no `window-buffer` or
-  `window-customize` consumer wired onto the pane-mode runtime.
+  prompt-driven command or kill flows, mouse preview selection, or custom `-K`
+  key-format bindings.
+- Current `customize-mode` behavior enters the reduced read-only
+  `options-mode` pane consumer described in [`docs/modes/options-mode.md`](docs/modes/options-mode.md).
+- Current `choose-buffer` behavior still stops at the explicit reduced-mode
+  error because there is still no `window-buffer` consumer wired onto the
+  pane-mode runtime.
 - Future intent is to move the rest of the chooser family onto the same shared
   pane-mode substrate instead of adding command-local shims.

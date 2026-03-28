@@ -41,12 +41,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const intent = buildModeIntent(args);
     defer xm.allocator.free(intent.filter);
-    _ = intent.zoom;
 
     _ = window_tree.enterMode(wp, .{
         .fs = &target,
         .kind = .pane,
         .filter = intent.filter,
+        .zoom = intent.zoom,
     });
     return .normal;
 }
@@ -254,4 +254,93 @@ test "find-window enters the reduced window-tree runtime" {
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqual(&window_tree.window_tree_mode, win.window_pane_mode(setup.pane).?.mode);
+}
+
+test "find-window -Z zooms tree mode and unzooms on exit when it created the zoom" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const window_mode_runtime = @import("window-mode-runtime.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("find-window-zoom");
+    defer if (sess.session_find("find-window-zoom") != null)
+        sess.session_destroy(setup.session, false, "test");
+
+    const extra = win.window_add_pane(setup.pane.window, null, 80, 24);
+    setup.pane.window.active = extra;
+
+    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{extra.id});
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "find-window-zoom-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "find-window", "-Z", "-t", target, "sh" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(extra.window.flags & T.WINDOW_ZOOMED != 0);
+
+    try std.testing.expect(window_mode_runtime.resetMode(extra));
+    try std.testing.expectEqual(@as(u32, 0), extra.window.flags & T.WINDOW_ZOOMED);
+}
+
+test "find-window -Z preserves an already zoomed window after tree mode closes" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const window_mode_runtime = @import("window-mode-runtime.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const setup = try test_setup("find-window-keep-zoom");
+    defer if (sess.session_find("find-window-keep-zoom") != null)
+        sess.session_destroy(setup.session, false, "test");
+
+    const extra = win.window_add_pane(setup.pane.window, null, 80, 24);
+    setup.pane.window.active = extra;
+    try std.testing.expect(win.window_zoom(extra));
+    try std.testing.expect(extra.window.flags & T.WINDOW_ZOOMED != 0);
+
+    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{extra.id});
+    defer xm.allocator.free(target);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "find-window-keep-zoom-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = setup.session,
+    };
+    client.tty = .{ .client = &client };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "find-window", "-Z", "-t", target, "sh" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expect(window_mode_runtime.resetMode(extra));
+    try std.testing.expect(extra.window.flags & T.WINDOW_ZOOMED != 0);
 }

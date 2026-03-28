@@ -361,6 +361,8 @@ test "set-hook rejects non-hook options" {
 test "set-hook -R runs the stored hook immediately" {
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);

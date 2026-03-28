@@ -313,6 +313,8 @@ pub fn notify_paste_buffer(pbname: []const u8, deleted: bool) void {
 test "notify_window queues hook commands with window metadata" {
     const env_mod = @import("environ.zig");
     const win = @import("window.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -352,6 +354,8 @@ test "notify_window queues hook commands with window metadata" {
 test "notify hooks from client queue run after the client tail" {
     const env_mod = @import("environ.zig");
     const win = @import("window.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     const callbacks = struct {
         var target_window: ?*T.Window = null;

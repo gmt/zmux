@@ -380,6 +380,63 @@ const default_tree_mode_tag_argv = [_][]const u8{ "send-keys", "-X", "tag" };
 const default_tree_mode_tag_all_argv = [_][]const u8{ "send-keys", "-X", "tag-all" };
 const default_tree_mode_tag_none_argv = [_][]const u8{ "send-keys", "-X", "tag-none" };
 const default_tree_mode_home_target_argv = [_][]const u8{ "send-keys", "-X", "home-target" };
+const default_session_menu =
+    " 'Next' 'n' {switch-client -n}" ++
+    " 'Previous' 'p' {switch-client -p}" ++
+    " ''" ++
+    " 'Renumber' 'N' {move-window -r}" ++
+    " 'Rename' 'n' {command-prompt -I \"#S\" {rename-session -- '%%'}}" ++
+    " ''" ++
+    " 'New Session' 's' {new-session}" ++
+    " 'New Window' 'w' {new-window}";
+const default_window_menu =
+    " '#{?#{>:#{session_windows},1},,-}Swap Left' 'l' {swap-window -t:-1}" ++
+    " '#{?#{>:#{session_windows},1},,-}Swap Right' 'r' {swap-window -t:+1}" ++
+    " '#{?pane_marked_set,,-}Swap Marked' 's' {swap-window}" ++
+    " ''" ++
+    " 'Kill' 'X' {kill-window}" ++
+    " 'Respawn' 'R' {respawn-window -k}" ++
+    " '#{?pane_marked,Unmark,Mark}' 'm' {select-pane -m}" ++
+    " 'Rename' 'n' {command-prompt -FI \"#W\" {rename-window -t '#{window_id}' -- '%%'}}" ++
+    " ''" ++
+    " 'New After' 'w' {new-window -a}" ++
+    " 'New At End' 'W' {new-window}";
+const default_pane_menu =
+    " '#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Top,}' '<' \"send -X history-top\"" ++
+    " '#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Bottom,}' '>' \"send -X history-bottom\"" ++
+    " ''" ++
+    " '#{?#{&&:#{buffer_size},#{!:#{pane_in_mode}}},Paste #[underscore]#{=/9/...:buffer_sample},}' 'p' \"paste-buffer\"" ++
+    " ''" ++
+    " '#{?mouse_word,Search For #[underscore]#{=/9/...:mouse_word},}' 'C-r' \"if -F '#{?#{m/r:(copy|view)-mode,#{pane_mode}},0,1}' 'copy-mode -t ='; send -X -t = search-backward -- '#{q:mouse_word}'\"" ++
+    " '#{?mouse_word,Type #[underscore]#{=/9/...:mouse_word},}' 'C-y' \"copy-mode -q; send-keys -l -- '#{q:mouse_word}'\"" ++
+    " '#{?mouse_word,Copy #[underscore]#{=/9/...:mouse_word},}' 'c' \"copy-mode -q; set-buffer -- '#{q:mouse_word}'\"" ++
+    " '#{?mouse_line,Copy Line,}' 'l' \"copy-mode -q; set-buffer -- '#{q:mouse_line}'\"" ++
+    " ''" ++
+    " '#{?mouse_hyperlink,Type #[underscore]#{=/9/...:mouse_hyperlink},}' 'C-h' \"copy-mode -q; send-keys -l -- '#{q:mouse_hyperlink}'\"" ++
+    " '#{?mouse_hyperlink,Copy #[underscore]#{=/9/...:mouse_hyperlink},}' 'h' \"copy-mode -q; set-buffer -- '#{q:mouse_hyperlink}'\"" ++
+    " ''" ++
+    " 'Horizontal Split' 'h' \"split-window -h\"" ++
+    " 'Vertical Split' 'v' \"split-window -v\"" ++
+    " ''" ++
+    " '#{?#{>:#{window_panes},1},,-}Swap Up' 'u' \"swap-pane -U\"" ++
+    " '#{?#{>:#{window_panes},1},,-}Swap Down' 'd' \"swap-pane -D\"" ++
+    " '#{?pane_marked_set,,-}Swap Marked' 's' \"swap-pane\"" ++
+    " ''" ++
+    " 'Kill' 'X' \"kill-pane\"" ++
+    " 'Respawn' 'R' \"respawn-pane -k\"" ++
+    " '#{?pane_marked,Unmark,Mark}' 'm' \"select-pane -m\"" ++
+    " '#{?#{>:#{window_panes},1},,-}#{?window_zoomed_flag,Unzoom,Zoom}' 'z' \"resize-pane -Z\"";
+const default_pane_menu_display =
+    "display-menu -t = -xM -yM -T '#[align=centre]#{pane_index} (#{pane_id})'" ++ default_pane_menu;
+const default_mouse_down3_pane_argv = [_][]const u8{
+    "if",
+    "-F",
+    "-t",
+    "=",
+    "#{||:#{mouse_any_flag},#{&&:#{pane_in_mode},#{?#{m/r:(copy|view)-mode,#{pane_mode}},0,1}}}",
+    "select-pane -t=; send -M",
+    default_pane_menu_display,
+};
 
 const default_binding_specs = [_]DefaultBindingSpec{
     .{
@@ -405,6 +462,123 @@ const default_binding_specs = [_]DefaultBindingSpec{
         .key = 'r',
         .note = "Redraw the current client",
         .argv = default_refresh_client_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = '<',
+        .note = "Display window menu",
+        .command = "display-menu -xW -yW -T '#[align=centre]#{window_index}:#{window_name}'" ++ default_window_menu,
+    },
+    .{
+        .table = "prefix",
+        .key = '>',
+        .note = "Display pane menu",
+        .command = "display-menu -xP -yP -T '#[align=centre]#{pane_index} (#{pane_id})'" ++ default_pane_menu,
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown1Pane",
+        .command = "select-pane -t =; send -M",
+    },
+    .{
+        .table = "root",
+        .key_name = "C-MouseDown1Pane",
+        .command = "swap-pane -s @",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDrag1Pane",
+        .command = "if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' \"send -M\" \"copy-mode -M\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "WheelUpPane",
+        .command = "if -F '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' \"send -M\" \"copy-mode -e -t =\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown2Pane",
+        .command = "select-pane -t =; if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' \"send -M\" \"paste-buffer -p\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "DoubleClick1Pane",
+        .command = "select-pane -t =; if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' \"send -M\" \"copy-mode -H -t =; send -X select-word; run -d0.3; send -X copy-pipe-and-cancel\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "TripleClick1Pane",
+        .command = "select-pane -t =; if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' \"send -M\" \"copy-mode -H -t =; send -X select-line; run -d0.3; send -X copy-pipe-and-cancel\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDrag1Border",
+        .command = "resize-pane -M",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown1Status",
+        .command = "switch-client -t =",
+    },
+    .{
+        .table = "root",
+        .key_name = "C-MouseDown1Status",
+        .command = "swap-window -t @",
+    },
+    .{
+        .table = "root",
+        .key_name = "WheelDownStatus",
+        .command = "select-window -t +",
+    },
+    .{
+        .table = "root",
+        .key_name = "WheelUpStatus",
+        .command = "select-window -t -",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown3StatusLeft",
+        .command = "display-menu -t = -xM -yW -T '#[align=centre]#{session_name}'" ++ default_session_menu,
+    },
+    .{
+        .table = "root",
+        .key_name = "M-MouseDown3StatusLeft",
+        .command = "display-menu -t = -xM -yW -T '#[align=centre]#{session_name}'" ++ default_session_menu,
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown3Status",
+        .command = "display-menu -t = -xW -yW -T '#[align=centre]#{window_index}:#{window_name}'" ++ default_window_menu,
+    },
+    .{
+        .table = "root",
+        .key_name = "M-MouseDown3Status",
+        .command = "display-menu -t = -xW -yW -T '#[align=centre]#{window_index}:#{window_name}'" ++ default_window_menu,
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown3Pane",
+        .argv = default_mouse_down3_pane_argv[0..],
+    },
+    .{
+        .table = "root",
+        .key_name = "M-MouseDown3Pane",
+        .command = default_pane_menu_display,
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown1ScrollbarUp",
+        .command = "if -Ft= '#{pane_in_mode}' \"send -Xt= page-up\" \"copy-mode -u -t =\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDown1ScrollbarDown",
+        .command = "if -Ft= '#{pane_in_mode}' \"send -Xt= page-down\" \"copy-mode -d -t =\"",
+    },
+    .{
+        .table = "root",
+        .key_name = "MouseDrag1ScrollbarSlider",
+        .command = "if -Ft= '#{pane_in_mode}' \"send -Xt= scroll-to-mouse\" \"copy-mode -S -t =\"",
     },
     .{
         .table = "copy-mode",
@@ -1630,7 +1804,7 @@ fn parse_default_binding_cmdlist(spec: DefaultBindingSpec) *T.CmdList {
             .success => return @ptrCast(@alignCast(parsed.cmdlist.?)),
             .@"error" => {
                 if (parsed.@"error") |err| xm.allocator.free(err);
-                @panic("bad default binding command");
+                std.debug.panic("bad default binding command: {s}", .{text});
             },
         }
     }
@@ -1707,10 +1881,10 @@ test "key bindings tables iterate in tmux name order" {
 test "key bindings add remove reset and iteration" {
     key_bindings_init();
 
-    key_bindings_add("root", 'a', "alpha", true, null);
-    key_bindings_add("root", 'b', null, false, null);
+    key_bindings_add("transient-test", 'a', "alpha", true, null);
+    key_bindings_add("transient-test", 'b', null, false, null);
 
-    const root = key_bindings_get_table("root", false).?;
+    const root = key_bindings_get_table("transient-test", false).?;
     const a = key_bindings_get(root, 'a').?;
     const b = key_bindings_get(root, 'b').?;
     try std.testing.expectEqualStrings("alpha", a.note.?);
@@ -1719,22 +1893,53 @@ test "key bindings add remove reset and iteration" {
     try std.testing.expect(key_bindings_first(root) == a);
     try std.testing.expect(key_bindings_next(root, a) == b);
 
-    key_bindings_remove("root", 'a');
+    key_bindings_remove("transient-test", 'a');
     try std.testing.expect(key_bindings_get(root, 'a') == null);
 
-    key_bindings_reset("root", 'b');
-    try std.testing.expect(key_bindings_get_table("root", false) == null);
+    key_bindings_reset("transient-test", 'b');
+    try std.testing.expect(key_bindings_get_table("transient-test", false) == null);
 }
 
-test "key bindings init seeds prefix defaults and keeps root empty" {
+test "key bindings init seeds prefix menu defaults and root menu mouse defaults" {
     key_bindings_init();
 
     const prefix = key_bindings_get_table("prefix", false).?;
     const root = key_bindings_get_table("root", false).?;
-    try std.testing.expect(root.order.items.len == 0);
-    try std.testing.expect(prefix.order.items.len >= 14);
+    try std.testing.expectEqual(@as(usize, 16), prefix.order.items.len);
+    try std.testing.expectEqual(@as(usize, 21), root.order.items.len);
     try std.testing.expect(key_bindings_get_default(prefix, '?') != null);
     try std.testing.expect(key_bindings_get(prefix, '?') != null);
+
+    const window_menu = key_bindings_get(prefix, '<').?;
+    try std.testing.expectEqualStrings("Display window menu", window_menu.note.?);
+    try std.testing.expectEqualStrings("display-menu", cmdlist_nth(binding_cmdlist(window_menu), 0).entry.name);
+    const window_menu_args = cmd_mod.cmd_get_args(cmdlist_nth(binding_cmdlist(window_menu), 0));
+    try std.testing.expectEqualStrings("W", window_menu_args.get('x').?);
+    try std.testing.expectEqualStrings("W", window_menu_args.get('y').?);
+    try std.testing.expectEqualStrings("#[align=centre]#{window_index}:#{window_name}", window_menu_args.get('T').?);
+    try std.testing.expectEqualStrings("#{?#{>:#{session_windows},1},,-}Swap Left", window_menu_args.value_at(0).?);
+
+    const pane_menu = key_bindings_get(prefix, '>').?;
+    try std.testing.expectEqualStrings("Display pane menu", pane_menu.note.?);
+    try std.testing.expectEqualStrings("display-menu", cmdlist_nth(binding_cmdlist(pane_menu), 0).entry.name);
+
+    const status_click = key_bindings_get(root, key_string.key_string_lookup_string("MouseDown1Status")).?;
+    const status_click_cmd = cmdlist_nth(binding_cmdlist(status_click), 0);
+    try std.testing.expectEqualStrings("switch-client", status_click_cmd.entry.name);
+    try std.testing.expectEqualStrings("=", cmd_mod.cmd_get_args(status_click_cmd).get('t').?);
+
+    const pane_context = key_bindings_get(root, key_string.key_string_lookup_string("MouseDown3Pane")).?;
+    const pane_context_cmd = cmdlist_nth(binding_cmdlist(pane_context), 0);
+    const pane_context_args = cmd_mod.cmd_get_args(pane_context_cmd);
+    try std.testing.expectEqualStrings("if-shell", pane_context_cmd.entry.name);
+    try std.testing.expect(pane_context_args.has('F'));
+    try std.testing.expectEqualStrings("=", pane_context_args.get('t').?);
+    try std.testing.expectEqualStrings("#{||:#{mouse_any_flag},#{&&:#{pane_in_mode},#{?#{m/r:(copy|view)-mode,#{pane_mode}},0,1}}}", pane_context_args.value_at(0).?);
+
+    const scrollbar_drag = key_bindings_get(root, key_string.key_string_lookup_string("MouseDrag1ScrollbarSlider")).?;
+    const scrollbar_drag_cmd = cmdlist_nth(binding_cmdlist(scrollbar_drag), 0);
+    try std.testing.expectEqualStrings("if-shell", scrollbar_drag_cmd.entry.name);
+    try std.testing.expectEqualStrings("#{pane_in_mode}", cmd_mod.cmd_get_args(scrollbar_drag_cmd).value_at(0).?);
 }
 
 test "key bindings init seeds full copy-mode default tables" {

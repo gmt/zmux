@@ -220,6 +220,17 @@ pub fn server_client_lock(cl: *T.Client, cmd: []const u8) void {
     _ = proc_mod.proc_send(peer, .lock, -1, cmd_z.ptr, cmd.len + 1);
 }
 
+pub fn server_client_suspend(cl: *T.Client) void {
+    const peer = cl.peer orelse return;
+    _ = cl.session orelse return;
+    if (cl.flags & (T.CLIENT_SUSPENDED | T.CLIENT_EXIT) != 0) return;
+
+    tty_mod.tty_stop_tty(&cl.tty);
+    tty_draw.tty_draw_invalidate(&cl.pane_cache);
+    cl.flags |= T.CLIENT_SUSPENDED;
+    _ = proc_mod.proc_send(peer, .@"suspend", -1, null, 0);
+}
+
 pub fn server_client_unlock(cl: *T.Client) void {
     if (cl.flags & T.CLIENT_SUSPENDED == 0) return;
     cl.flags &= ~@as(u64, T.CLIENT_SUSPENDED);
@@ -1360,6 +1371,69 @@ test "server_client_detach sends detachkill payload and clears session state" {
     defer xm.allocator.free(payload);
     try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
     try std.testing.expectEqualStrings("detach-test", payload[0 .. payload.len - 1]);
+}
+
+test "server_client_suspend sends suspend message and leaves session attached" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-suspend-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session = T.Session{
+        .id = 1,
+        .name = @constCast("suspend-test"),
+        .cwd = "/tmp",
+        .options = &options,
+        .environ = &session_env,
+        .attached = 1,
+    };
+
+    var client = T.Client{
+        .fd = 1,
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = &session,
+    };
+    tty_mod.tty_init(&client.tty, &client);
+    tty_mod.tty_start_tty(&client.tty);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    server_client_suspend(&client);
+    try std.testing.expect(client.flags & T.CLIENT_SUSPENDED != 0);
+    try std.testing.expect(client.session == &session);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.@"suspend"))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(usize, 0), c.imsg.imsg_get_len(&imsg_msg));
 }
 
 test "server_client_exec sends command and shell payload" {

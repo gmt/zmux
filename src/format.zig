@@ -1124,6 +1124,9 @@ fn resolve_direct_key(alloc: std.mem.Allocator, key: []const u8, ctx: *const For
         const value = resolver.func(alloc, ctx) orelse return unresolved_key(alloc, key, short_alias);
         return .{ .text = value, .complete = true };
     }
+    if (lookup_option_value(alloc, key, ctx)) |value| {
+        return .{ .text = value, .complete = true };
+    }
     return unresolved_key(alloc, key, short_alias);
 }
 
@@ -2671,6 +2674,19 @@ test "format_expand covers key option-table defaults" {
     const window_status = format_require_complete(xm.allocator, "#{E:window-status-format}", &ctx).?;
     defer xm.allocator.free(window_status);
     try std.testing.expectEqualStrings("0:editor*", window_status);
+
+    const status_justify = format_require_complete(xm.allocator, "#{status-justify}", &ctx).?;
+    defer xm.allocator.free(status_justify);
+    try std.testing.expectEqualStrings("left", status_justify);
+
+    const status_left_length = format_require_complete(xm.allocator, "#{status-left-length}", &ctx).?;
+    defer xm.allocator.free(status_left_length);
+    try std.testing.expectEqualStrings("10", status_left_length);
+
+    const status_format = format_require_complete(xm.allocator, opts.options_get_array(s.options, "status-format")[0], &ctx).?;
+    defer xm.allocator.free(status_format);
+    try std.testing.expect(std.mem.indexOf(u8, status_format, "#{") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_format, "[defaults]") != null);
 
     const titles = format_require_complete(xm.allocator, "#{T:set-titles-string}", &ctx).?;
     defer xm.allocator.free(titles);

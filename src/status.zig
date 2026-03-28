@@ -449,11 +449,13 @@ test "status render draws reduced status line and utf8 prompt overlay" {
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_string(session_opts, false, "status-right", "#{pane_title}");
+    opts.options_set_number(session_opts, "status-right-length", 16);
     const session_env = env_mod.environ_create();
     const s = sess.session_create(null, "alpha", "/", session_env, session_opts, null);
     defer sess.session_destroy(s, false, "test");
 
-    const w = win_mod.window_create(20, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const w = win_mod.window_create(26, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     xm.allocator.free(w.name);
     w.name = xm.xstrdup("editor");
     var cause: ?[]u8 = null;
@@ -470,7 +472,7 @@ test "status render draws reduced status line and utf8 prompt overlay" {
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
-    client.tty = .{ .client = &client, .sx = 20, .sy = 5 };
+    client.tty = .{ .client = &client, .sx = 26, .sy = 5 };
 
     const base = render(&client);
     defer if (base.payload.len != 0) xm.allocator.free(base.payload);

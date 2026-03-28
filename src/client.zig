@@ -497,7 +497,7 @@ fn client_handle_lock_command(cmd: []const u8) void {
     if (client_peer) |peer| _ = proc_mod.proc_send(peer, .unlock, -1, null, 0);
 }
 
-fn client_set_tstp_handler(sig_handler: usize) void {
+fn client_set_tstp_handler(sig_handler: ?*const fn (i32) callconv(.c) void) void {
     const action = std.posix.Sigaction{
         .handler = .{ .handler = sig_handler },
         .mask = std.posix.sigemptyset(),

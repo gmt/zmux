@@ -724,9 +724,12 @@ pub const PANE_FOCUSED: u32 = 0x0004;
 pub const PANE_INPUTOFF: u32 = 0x0040;
 pub const PANE_CHANGED: u32 = 0x0080;
 pub const PANE_EXITED: u32 = 0x0100;
+pub const PANE_STATUSREADY: u32 = 0x0200;
+pub const PANE_STATUSDRAWN: u32 = 0x0400;
 pub const PANE_EMPTY: u32 = 0x0800;
 pub const PANE_STYLECHANGED: u32 = 0x1000;
 pub const PANE_THEMECHANGED: u32 = 0x2000;
+pub const PANE_UNSEENCHANGES: u32 = 0x4000;
 
 pub const WindowMode = struct {
     name: []const u8 = "",
@@ -769,6 +772,7 @@ pub const WindowPane = struct {
     pid: std.posix.pid_t = -1,
     tty_name: [TTY_NAME_MAX]u8 = std.mem.zeroes([TTY_NAME_MAX]u8),
     status: i32 = 0,
+    dead_time: i64 = 0,
     fd: i32 = -1,
     event: ?*c.libevent.event = null,
 

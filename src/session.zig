@@ -41,6 +41,7 @@ var next_session_id: u32 = 0;
 pub fn session_init_globals(alloc: std.mem.Allocator) void {
     sessions = std.StringHashMap(*T.Session).init(alloc);
     session_groups = std.StringHashMap(*T.SessionGroup).init(alloc);
+    next_session_id = 0;
 }
 
 // ── Lookup ────────────────────────────────────────────────────────────────
@@ -96,6 +97,21 @@ pub fn session_group_new(name: []const u8) *T.SessionGroup {
     };
     session_groups.put(sg.name, sg) catch unreachable;
     return sg;
+}
+
+pub fn session_group_count(sg: *T.SessionGroup) u32 {
+    return @intCast(sg.sessions.items.len);
+}
+
+pub fn session_group_attached_count(sg: *T.SessionGroup) u32 {
+    var count: u32 = 0;
+    for (sg.sessions.items) |member|
+        count += member.attached;
+    return count;
+}
+
+pub fn session_next_id_peek() u32 {
+    return next_session_id;
 }
 
 pub fn session_group_add(sg: *T.SessionGroup, s: *T.Session) void {

@@ -868,6 +868,7 @@ pub const Session = struct {
     cwd: []const u8,
     created: i64 = 0,
     activity_time: i64 = 0,
+    last_attached_time: i64 = 0,
 
     curw: ?*Winlink = null,
     lastw: std.ArrayList(*Winlink) = .{},

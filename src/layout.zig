@@ -19,7 +19,10 @@
 //   ISC licence - same terms as above.
 
 const std = @import("std");
+const args_mod = @import("arguments.zig");
+const opts = @import("options.zig");
 const T = @import("types.zig");
+const win = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
 const Rect = struct {
@@ -42,6 +45,16 @@ const Cell = struct {
 
 const BuildError = error{
     InvalidLayout,
+};
+
+const layout_set_names = [_][]const u8{
+    "even-horizontal",
+    "even-vertical",
+    "main-horizontal",
+    "main-horizontal-mirrored",
+    "main-vertical",
+    "main-vertical-mirrored",
+    "tiled",
 };
 
 pub fn resize_pane(wp: *T.WindowPane, type_: T.LayoutType, change: i32, opposite: bool) bool {
@@ -77,6 +90,784 @@ pub fn resize_pane_to(wp: *T.WindowPane, type_: T.LayoutType, new_size: u32) boo
         @as(i64, @intCast(new_size)) - @as(i64, @intCast(size));
     const change: i32 = std.math.cast(i32, change64) orelse return false;
     return resize_leaf(root, leaf, type_, change, true);
+}
+
+pub fn dump_window(w: *T.Window) ?[]u8 {
+    if (w.panes.items.len == 0)
+        return null;
+
+    var builder = Builder.init(w.panes.items);
+    defer builder.arena.deinit();
+    const root = builder.build() catch return null;
+
+    var body: std.ArrayList(u8) = .{};
+    defer body.deinit(xm.allocator);
+    if (!dump_append(root, &body))
+        return null;
+    return xm.xasprintf("{x:0>4},{s}", .{ layout_checksum(body.items), body.items });
+}
+
+pub fn parse_window(w: *T.Window, layout: []const u8, cause: *?[]u8) bool {
+    cause.* = null;
+    if (w.panes.items.len == 0) {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    }
+    if (layout.len < 5 or layout[4] != ',') {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    }
+
+    const csum = std.fmt.parseInt(u16, layout[0..4], 16) catch {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    };
+    const encoded = layout[5..];
+    if (layout_checksum(encoded) != csum) {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(xm.allocator);
+    defer arena.deinit();
+    var parser = LayoutParser.init(arena.allocator(), encoded);
+    var root: ?*Cell = parser.construct(null) orelse {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    };
+    if (!parser.atEnd()) {
+        cause.* = xm.xstrdup("invalid layout");
+        return false;
+    }
+
+    while (true) {
+        const npanes = w.panes.items.len;
+        const ncells = count_cells(root.?);
+        if (npanes > ncells) {
+            cause.* = xm.xasprintf("have {d} panes but need {d}", .{ npanes, ncells });
+            return false;
+        }
+        if (npanes == ncells)
+            break;
+
+        const bottom_right = find_bottomright(root.?);
+        destroy_cell(bottom_right, &root);
+        if (root == null) {
+            cause.* = xm.xstrdup("invalid layout");
+            return false;
+        }
+    }
+
+    normalize_root_size(root.?);
+    if (!check_layout(root.?)) {
+        cause.* = xm.xstrdup("size mismatch after applying layout");
+        return false;
+    }
+
+    assign_panes(w.panes.items, root.?);
+    apply_tree_to_window(w, root.?);
+    return true;
+}
+
+pub fn spread_out(wp: *T.WindowPane) bool {
+    var builder = Builder.init(wp.window.panes.items);
+    defer builder.arena.deinit();
+    const root = builder.build() catch return false;
+    const leaf = find_leaf(root, wp) orelse return false;
+
+    var parent = leaf.parent;
+    while (parent) |candidate| : (parent = candidate.parent) {
+        if (spread_cell(candidate)) {
+            fix_offsets(root);
+            apply_panes(root);
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn set_lookup(name: []const u8) i32 {
+    var matched: i32 = -1;
+
+    for (layout_set_names, 0..) |candidate, idx| {
+        if (std.mem.eql(u8, candidate, name))
+            return @intCast(idx);
+    }
+    for (layout_set_names, 0..) |candidate, idx| {
+        if (!std.mem.startsWith(u8, candidate, name))
+            continue;
+        if (matched != -1)
+            return -1;
+        matched = @intCast(idx);
+    }
+
+    return matched;
+}
+
+pub fn set_select(w: *T.Window, layout: usize) usize {
+    const bounded = @min(layout, layout_set_names.len - 1);
+    apply_preset_layout(w, bounded);
+    w.lastlayout = @intCast(bounded);
+    return bounded;
+}
+
+pub fn set_next(w: *T.Window) usize {
+    const layout = if (w.lastlayout == -1)
+        @as(usize, 0)
+    else
+        (@as(usize, @intCast(w.lastlayout)) + 1) % layout_set_names.len;
+    return set_select(w, layout);
+}
+
+pub fn set_previous(w: *T.Window) usize {
+    const layout = if (w.lastlayout == -1)
+        layout_set_names.len - 1
+    else if (w.lastlayout == 0)
+        layout_set_names.len - 1
+    else
+        @as(usize, @intCast(w.lastlayout - 1));
+    return set_select(w, layout);
+}
+
+fn dump_append(lc: *Cell, body: *std.ArrayList(u8)) bool {
+    var tmp: [64]u8 = undefined;
+    const prefix = if (lc.wp) |pane|
+        std.fmt.bufPrint(&tmp, "{d}x{d},{d},{d},{d}", .{ lc.sx, lc.sy, lc.xoff, lc.yoff, pane.id }) catch return false
+    else
+        std.fmt.bufPrint(&tmp, "{d}x{d},{d},{d}", .{ lc.sx, lc.sy, lc.xoff, lc.yoff }) catch return false;
+    body.appendSlice(xm.allocator, prefix) catch unreachable;
+
+    switch (lc.type) {
+        .windowpane => return true,
+        .leftright, .topbottom => {
+            const open_bracket: u8 = if (lc.type == .leftright) '{' else '[';
+            const close_bracket: u8 = if (lc.type == .leftright) '}' else ']';
+            body.append(xm.allocator, open_bracket) catch unreachable;
+            for (lc.cells.items, 0..) |child, idx| {
+                if (!dump_append(child, body))
+                    return false;
+                if (idx + 1 < lc.cells.items.len)
+                    body.append(xm.allocator, ',') catch unreachable;
+            }
+            body.append(xm.allocator, close_bracket) catch unreachable;
+            return true;
+        },
+    }
+}
+
+fn layout_checksum(layout: []const u8) u16 {
+    var csum: u16 = 0;
+    for (layout) |ch| {
+        csum = (csum >> 1) + ((csum & 1) << 15);
+        csum +%= ch;
+    }
+    return csum;
+}
+
+const LayoutParser = struct {
+    alloc: std.mem.Allocator,
+    input: []const u8,
+    index: usize = 0,
+
+    fn init(alloc: std.mem.Allocator, input: []const u8) LayoutParser {
+        return .{
+            .alloc = alloc,
+            .input = input,
+        };
+    }
+
+    fn atEnd(self: *const LayoutParser) bool {
+        return self.index >= self.input.len;
+    }
+
+    fn peek(self: *const LayoutParser) ?u8 {
+        if (self.index >= self.input.len)
+            return null;
+        return self.input[self.index];
+    }
+
+    fn readNumber(self: *LayoutParser) ?u32 {
+        const start = self.index;
+        while (self.index < self.input.len and std.ascii.isDigit(self.input[self.index]))
+            self.index += 1;
+        if (self.index == start)
+            return null;
+        return std.fmt.parseInt(u32, self.input[start..self.index], 10) catch null;
+    }
+
+    fn expect(self: *LayoutParser, ch: u8) bool {
+        if (self.peek() != ch)
+            return false;
+        self.index += 1;
+        return true;
+    }
+
+    fn construct(self: *LayoutParser, parent: ?*Cell) ?*Cell {
+        const sx = self.readNumber() orelse return null;
+        if (!self.expect('x'))
+            return null;
+        const sy = self.readNumber() orelse return null;
+        if (!self.expect(','))
+            return null;
+        const xoff = self.readNumber() orelse return null;
+        if (!self.expect(','))
+            return null;
+        const yoff = self.readNumber() orelse return null;
+
+        if (self.peek() == ',') {
+            const saved = self.index;
+            self.index += 1;
+            _ = self.readNumber() orelse {
+                self.index = saved;
+                return null;
+            };
+            if (self.peek() == 'x')
+                self.index = saved;
+        }
+
+        const lc = create_cell(self.alloc, .windowpane, .{
+            .xoff = xoff,
+            .yoff = yoff,
+            .sx = sx,
+            .sy = sy,
+        }) catch unreachable;
+        lc.parent = parent;
+
+        const next = self.peek() orelse return lc;
+        switch (next) {
+            ',', '}', ']' => return lc,
+            '{', '[' => {
+                lc.type = if (next == '{') .leftright else .topbottom;
+                self.index += 1;
+            },
+            else => return null,
+        }
+
+        while (true) {
+            const child = self.construct(lc) orelse return null;
+            append_raw_child(lc, child, self.alloc) catch unreachable;
+            if (self.peek() != ',')
+                break;
+            self.index += 1;
+        }
+
+        const close_bracket: u8 = if (lc.type == .leftright) '}' else ']';
+        if (!self.expect(close_bracket))
+            return null;
+        return lc;
+    }
+};
+
+fn count_cells(lc: *Cell) usize {
+    if (lc.type == .windowpane)
+        return 1;
+
+    var count: usize = 0;
+    for (lc.cells.items) |child|
+        count += count_cells(child);
+    return count;
+}
+
+fn find_bottomright(lc: *Cell) *Cell {
+    if (lc.type == .windowpane)
+        return lc;
+    return find_bottomright(lc.cells.items[lc.cells.items.len - 1]);
+}
+
+fn destroy_cell(lc: *Cell, root: *?*Cell) void {
+    const parent = lc.parent orelse {
+        root.* = null;
+        return;
+    };
+    const idx = child_index(parent, lc) orelse return;
+
+    if (parent.cells.items.len > 1) {
+        const other = if (idx == 0)
+            parent.cells.items[1]
+        else
+            parent.cells.items[idx - 1];
+        if (parent.type == .leftright)
+            resize_adjust(other, .leftright, @intCast(lc.sx + 1))
+        else
+            resize_adjust(other, .topbottom, @intCast(lc.sy + 1));
+    }
+
+    _ = parent.cells.orderedRemove(idx);
+    if (parent.cells.items.len != 1)
+        return;
+
+    const survivor = parent.cells.items[0];
+    survivor.parent = parent.parent;
+    if (survivor.parent) |grandparent| {
+        const parent_idx = child_index(grandparent, parent) orelse return;
+        grandparent.cells.items[parent_idx] = survivor;
+        return;
+    }
+
+    survivor.xoff = 0;
+    survivor.yoff = 0;
+    root.* = survivor;
+}
+
+fn child_index(parent: *Cell, child: *Cell) ?usize {
+    for (parent.cells.items, 0..) |candidate, idx| {
+        if (candidate == child)
+            return idx;
+    }
+    return null;
+}
+
+fn normalize_root_size(root: *Cell) void {
+    if (root.type == .windowpane)
+        return;
+
+    var sx: u32 = 0;
+    var sy: u32 = 0;
+    switch (root.type) {
+        .leftright => {
+            for (root.cells.items) |child| {
+                sy = child.sy + 1;
+                sx += child.sx + 1;
+            }
+        },
+        .topbottom => {
+            for (root.cells.items) |child| {
+                sx = child.sx + 1;
+                sy += child.sy + 1;
+            }
+        },
+        .windowpane => unreachable,
+    }
+
+    if (sx != 0 and sy != 0) {
+        root.sx = sx - 1;
+        root.sy = sy - 1;
+    }
+}
+
+fn check_layout(lc: *Cell) bool {
+    switch (lc.type) {
+        .windowpane => return true,
+        .leftright => {
+            var total: u32 = 0;
+            for (lc.cells.items) |child| {
+                if (child.sy != lc.sy)
+                    return false;
+                if (!check_layout(child))
+                    return false;
+                total += child.sx + 1;
+            }
+            return total != 0 and total - 1 == lc.sx;
+        },
+        .topbottom => {
+            var total: u32 = 0;
+            for (lc.cells.items) |child| {
+                if (child.sx != lc.sx)
+                    return false;
+                if (!check_layout(child))
+                    return false;
+                total += child.sy + 1;
+            }
+            return total != 0 and total - 1 == lc.sy;
+        },
+    }
+}
+
+fn assign_panes(panes: []const *T.WindowPane, root: *Cell) void {
+    var next_pane: usize = 0;
+    assign_panes_recursive(panes, &next_pane, root);
+}
+
+fn assign_panes_recursive(panes: []const *T.WindowPane, next_pane: *usize, lc: *Cell) void {
+    switch (lc.type) {
+        .windowpane => {
+            lc.wp = panes[next_pane.*];
+            next_pane.* += 1;
+        },
+        .leftright, .topbottom => {
+            for (lc.cells.items) |child|
+                assign_panes_recursive(panes, next_pane, child);
+        },
+    }
+}
+
+fn apply_tree_to_window(w: *T.Window, root: *Cell) void {
+    win.window_resize(w, root.sx, root.sy, -1, -1);
+    root.xoff = 0;
+    root.yoff = 0;
+    fix_offsets(root);
+    apply_panes(root);
+}
+
+fn spread_cell(parent: *Cell) bool {
+    const number = parent.cells.items.len;
+    if (number <= 1)
+        return false;
+
+    const size = switch (parent.type) {
+        .leftright => parent.sx,
+        .topbottom => parent.sy,
+        .windowpane => return false,
+    };
+    if (size < number - 1)
+        return false;
+
+    const each = (size - (number - 1)) / @as(u32, @intCast(number));
+    if (each == 0)
+        return false;
+
+    var remainder = size - (@as(u32, @intCast(number)) * each) - (@as(u32, @intCast(number)) - 1);
+    var changed = false;
+    for (parent.cells.items) |child| {
+        switch (parent.type) {
+            .leftright => {
+                var change = @as(i32, @intCast(each)) - @as(i32, @intCast(child.sx));
+                if (remainder > 0) {
+                    change += 1;
+                    remainder -= 1;
+                }
+                resize_adjust(child, .leftright, change);
+                changed = changed or change != 0;
+            },
+            .topbottom => {
+                var change = @as(i32, @intCast(each)) - @as(i32, @intCast(child.sy));
+                if (remainder > 0) {
+                    change += 1;
+                    remainder -= 1;
+                }
+                resize_adjust(child, .topbottom, change);
+                changed = changed or change != 0;
+            },
+            .windowpane => unreachable,
+        }
+    }
+    return changed;
+}
+
+fn apply_preset_layout(w: *T.Window, layout: usize) void {
+    var arena = std.heap.ArenaAllocator.init(xm.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const root = switch (layout) {
+        0 => build_even_layout(w, alloc, .leftright),
+        1 => build_even_layout(w, alloc, .topbottom),
+        2 => build_main_horizontal_layout(w, alloc, false),
+        3 => build_main_horizontal_layout(w, alloc, true),
+        4 => build_main_vertical_layout(w, alloc, false),
+        5 => build_main_vertical_layout(w, alloc, true),
+        6 => build_tiled_layout(w, alloc),
+        else => unreachable,
+    };
+    if (root == null)
+        return;
+    apply_tree_to_window(w, root.?);
+}
+
+fn build_even_layout(w: *T.Window, alloc: std.mem.Allocator, type_: T.LayoutType) ?*Cell {
+    const n = w.panes.items.len;
+    if (n <= 1)
+        return null;
+
+    const root = create_cell(alloc, type_, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = if (type_ == .leftright)
+            @max(@as(u32, @intCast(n)) * (T.PANE_MINIMUM + 1) - 1, w.sx)
+        else
+            w.sx,
+        .sy = if (type_ == .topbottom)
+            @max(@as(u32, @intCast(n)) * (T.PANE_MINIMUM + 1) - 1, w.sy)
+        else
+            w.sy,
+    }) catch unreachable;
+    for (w.panes.items) |pane| {
+        const child = create_cell(alloc, .windowpane, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = if (type_ == .leftright) w.sx else root.sx,
+            .sy = if (type_ == .topbottom) w.sy else root.sy,
+        }) catch unreachable;
+        child.wp = pane;
+        append_raw_child(root, child, alloc) catch unreachable;
+    }
+    _ = spread_cell(root);
+    return root;
+}
+
+fn build_main_horizontal_layout(w: *T.Window, alloc: std.mem.Allocator, mirrored: bool) ?*Cell {
+    const total = w.panes.items.len;
+    if (total <= 1)
+        return null;
+    const other_count = total - 1;
+
+    const available = w.sy - 1;
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    const main_text = opts.options_get_string(w.options, "main-pane-height");
+    var mainh = @as(u32, @intCast(args_mod.args_string_percentage(main_text, 0, std.math.maxInt(i32), available, &cause)));
+    if (cause != null) {
+        xm.allocator.free(cause.?);
+        cause = null;
+        mainh = 24;
+    }
+
+    var otherh: u32 = undefined;
+    if (mainh + T.PANE_MINIMUM >= available) {
+        mainh = if (available <= T.PANE_MINIMUM * 2) T.PANE_MINIMUM else available - T.PANE_MINIMUM;
+        otherh = T.PANE_MINIMUM;
+    } else {
+        const other_text = opts.options_get_string(w.options, "other-pane-height");
+        otherh = @as(u32, @intCast(args_mod.args_string_percentage(other_text, 0, std.math.maxInt(i32), available, &cause)));
+        if (cause != null or otherh == 0) {
+            if (cause) |msg| {
+                xm.allocator.free(msg);
+                cause = null;
+            }
+            otherh = available - mainh;
+        } else if (otherh > available or available - otherh < mainh) {
+            otherh = available - mainh;
+        } else {
+            mainh = available - otherh;
+        }
+    }
+
+    const sx = @max(@as(u32, @intCast(other_count)) * (T.PANE_MINIMUM + 1) - 1, w.sx);
+    const root = create_cell(alloc, .topbottom, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = sx,
+        .sy = mainh + otherh + 1,
+    }) catch unreachable;
+    const main = create_cell(alloc, .windowpane, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = sx,
+        .sy = mainh,
+    }) catch unreachable;
+    main.wp = w.panes.items[0];
+
+    const other = if (other_count == 1) blk: {
+        const leaf = create_cell(alloc, .windowpane, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = sx,
+            .sy = otherh,
+        }) catch unreachable;
+        leaf.wp = w.panes.items[1];
+        break :blk leaf;
+    } else blk: {
+        const node = create_cell(alloc, .leftright, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = sx,
+            .sy = otherh,
+        }) catch unreachable;
+        for (w.panes.items[1..]) |pane| {
+            const child = create_cell(alloc, .windowpane, .{
+                .xoff = 0,
+                .yoff = 0,
+                .sx = T.PANE_MINIMUM,
+                .sy = otherh,
+            }) catch unreachable;
+            child.wp = pane;
+            append_raw_child(node, child, alloc) catch unreachable;
+        }
+        _ = spread_cell(node);
+        break :blk node;
+    };
+
+    if (!mirrored) {
+        append_raw_child(root, main, alloc) catch unreachable;
+        append_raw_child(root, other, alloc) catch unreachable;
+    } else {
+        append_raw_child(root, other, alloc) catch unreachable;
+        append_raw_child(root, main, alloc) catch unreachable;
+    }
+    return root;
+}
+
+fn build_main_vertical_layout(w: *T.Window, alloc: std.mem.Allocator, mirrored: bool) ?*Cell {
+    const total = w.panes.items.len;
+    if (total <= 1)
+        return null;
+    const other_count = total - 1;
+
+    const available = w.sx - 1;
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    const main_text = opts.options_get_string(w.options, "main-pane-width");
+    var mainw = @as(u32, @intCast(args_mod.args_string_percentage(main_text, 0, std.math.maxInt(i32), available, &cause)));
+    if (cause != null) {
+        xm.allocator.free(cause.?);
+        cause = null;
+        mainw = 80;
+    }
+
+    var otherw: u32 = undefined;
+    if (mainw + T.PANE_MINIMUM >= available) {
+        mainw = if (available <= T.PANE_MINIMUM * 2) T.PANE_MINIMUM else available - T.PANE_MINIMUM;
+        otherw = T.PANE_MINIMUM;
+    } else {
+        const other_text = opts.options_get_string(w.options, "other-pane-width");
+        otherw = @as(u32, @intCast(args_mod.args_string_percentage(other_text, 0, std.math.maxInt(i32), available, &cause)));
+        if (cause != null or otherw == 0) {
+            if (cause) |msg| {
+                xm.allocator.free(msg);
+                cause = null;
+            }
+            otherw = available - mainw;
+        } else if (otherw > available or available - otherw < mainw) {
+            otherw = available - mainw;
+        } else {
+            mainw = available - otherw;
+        }
+    }
+
+    const sy = @max(@as(u32, @intCast(other_count)) * (T.PANE_MINIMUM + 1) - 1, w.sy);
+    const root = create_cell(alloc, .leftright, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = mainw + otherw + 1,
+        .sy = sy,
+    }) catch unreachable;
+    const main = create_cell(alloc, .windowpane, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = mainw,
+        .sy = sy,
+    }) catch unreachable;
+    main.wp = w.panes.items[0];
+
+    const other = if (other_count == 1) blk: {
+        const leaf = create_cell(alloc, .windowpane, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = otherw,
+            .sy = sy,
+        }) catch unreachable;
+        leaf.wp = w.panes.items[1];
+        break :blk leaf;
+    } else blk: {
+        const node = create_cell(alloc, .topbottom, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = otherw,
+            .sy = sy,
+        }) catch unreachable;
+        for (w.panes.items[1..]) |pane| {
+            const child = create_cell(alloc, .windowpane, .{
+                .xoff = 0,
+                .yoff = 0,
+                .sx = otherw,
+                .sy = T.PANE_MINIMUM,
+            }) catch unreachable;
+            child.wp = pane;
+            append_raw_child(node, child, alloc) catch unreachable;
+        }
+        _ = spread_cell(node);
+        break :blk node;
+    };
+
+    if (!mirrored) {
+        append_raw_child(root, main, alloc) catch unreachable;
+        append_raw_child(root, other, alloc) catch unreachable;
+    } else {
+        append_raw_child(root, other, alloc) catch unreachable;
+        append_raw_child(root, main, alloc) catch unreachable;
+    }
+    return root;
+}
+
+fn build_tiled_layout(w: *T.Window, alloc: std.mem.Allocator) ?*Cell {
+    const total = w.panes.items.len;
+    if (total <= 1)
+        return null;
+
+    const max_columns: u32 = @intCast(@max(opts.options_get_number(w.options, "tiled-layout-max-columns"), 0));
+    var rows: u32 = 1;
+    var columns: u32 = 1;
+    while (rows * columns < total) {
+        rows += 1;
+        if (rows * columns < total and (max_columns == 0 or columns < max_columns))
+            columns += 1;
+    }
+
+    var width = (w.sx - (columns - 1)) / columns;
+    if (width < T.PANE_MINIMUM)
+        width = T.PANE_MINIMUM;
+    var height = (w.sy - (rows - 1)) / rows;
+    if (height < T.PANE_MINIMUM)
+        height = T.PANE_MINIMUM;
+
+    const root_sx = @max(((width + 1) * columns) - 1, w.sx);
+    const root_sy = @max(((height + 1) * rows) - 1, w.sy);
+    const root = create_cell(alloc, .topbottom, .{
+        .xoff = 0,
+        .yoff = 0,
+        .sx = root_sx,
+        .sy = root_sy,
+    }) catch unreachable;
+
+    var pane_index: usize = 0;
+    for (0..rows) |_| {
+        if (pane_index >= total)
+            break;
+
+        const remaining = total - pane_index;
+        const row_count: usize = @min(@as(usize, columns), remaining);
+        if (row_count == 1 or columns == 1) {
+            const leaf = create_cell(alloc, .windowpane, .{
+                .xoff = 0,
+                .yoff = 0,
+                .sx = root_sx,
+                .sy = height,
+            }) catch unreachable;
+            leaf.wp = w.panes.items[pane_index];
+            pane_index += 1;
+            append_raw_child(root, leaf, alloc) catch unreachable;
+            continue;
+        }
+
+        const row = create_cell(alloc, .leftright, .{
+            .xoff = 0,
+            .yoff = 0,
+            .sx = root_sx,
+            .sy = height,
+        }) catch unreachable;
+        for (0..row_count) |_| {
+            const child = create_cell(alloc, .windowpane, .{
+                .xoff = 0,
+                .yoff = 0,
+                .sx = width,
+                .sy = height,
+            }) catch unreachable;
+            child.wp = w.panes.items[pane_index];
+            pane_index += 1;
+            append_raw_child(row, child, alloc) catch unreachable;
+        }
+
+        const used = @as(u32, @intCast(row.cells.items.len)) * (width + 1) - 1;
+        if (row.sx > used) {
+            const last = row.cells.items[row.cells.items.len - 1];
+            resize_adjust(last, .leftright, @intCast(row.sx - used));
+        }
+        append_raw_child(root, row, alloc) catch unreachable;
+    }
+
+    const used_rows = @as(u32, @intCast(root.cells.items.len)) * height + @as(u32, @intCast(root.cells.items.len)) - 1;
+    if (root.sy > used_rows) {
+        const last_row = root.cells.items[root.cells.items.len - 1];
+        resize_adjust(last_row, .topbottom, @intCast(root.sy - used_rows));
+    }
+    return root;
+}
+
+fn append_raw_child(parent: *Cell, child: *Cell, alloc: std.mem.Allocator) BuildError!void {
+    child.parent = parent;
+    parent.cells.append(alloc, child) catch unreachable;
 }
 
 const Builder = struct {

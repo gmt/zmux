@@ -278,6 +278,7 @@ pub const options_table: []const T.OptionsTableEntry = &[_]T.OptionsTableEntry{
     .{ .name = "monitor-silence", .type = .number, .scope = W, .default_num = 0, .minimum = 0 },
     .{ .name = "other-pane-height", .type = .string, .scope = W, .default_str = "0" },
     .{ .name = "other-pane-width", .type = .string, .scope = W, .default_str = "0" },
+    .{ .name = "tiled-layout-max-columns", .type = .number, .scope = W, .default_num = 0, .minimum = 0 },
     .{ .name = "pane-active-border-style", .type = .style, .scope = WP, .default_str = "#{?pane_in_mode,fg=yellow,#{?synchronize-panes,fg=red,fg=green}}" },
     .{ .name = "pane-base-index", .type = .number, .scope = W, .default_num = 0, .minimum = 0 },
     .{ .name = "pane-border-format", .type = .string, .scope = WP, .default_str = "#{?pane_active,#[reverse],}#{pane_index}#[default] \"#{pane_title}\"" },

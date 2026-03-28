@@ -138,6 +138,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
+    if (!validate_command_option_value(oe, value, &cause)) {
+        if (args.has('q')) return .normal;
+        cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option value"});
+        return .@"error";
+    }
+
     if (!opts.options_set_from_string(target.options, oe, option_name, idx, value, args.has('a'), &cause)) {
         if (args.has('q')) return .normal;
         cmdq.cmdq_error(item, "{s}", .{cause orelse "invalid option value"});
@@ -195,6 +201,33 @@ fn apply_target_side_effects(target: cmd_opts.ResolvedTarget, name: []const u8) 
     }
     if (target.pane) |wp| {
         win.window_pane_options_changed(wp, name);
+    }
+}
+
+fn validate_command_option_value(
+    oe: ?*const T.OptionsTableEntry,
+    value: ?[]const u8,
+    cause: *?[]u8,
+) bool {
+    if (oe == null or oe.?.type != .command) return true;
+
+    const command = value orelse {
+        cause.* = xm.xstrdup("empty value");
+        return false;
+    };
+
+    var parse_input = T.CmdParseInput{};
+    const parsed = cmd_mod.cmd_parse_from_string(command, &parse_input);
+    switch (parsed.status) {
+        .success => {
+            if (parsed.cmdlist) |cmdlist|
+                cmd_mod.cmd_list_free(@ptrCast(@alignCast(cmdlist)));
+            return true;
+        },
+        .@"error" => {
+            cause.* = parsed.@"error" orelse xm.xstrdup("parse error");
+            return false;
+        },
     }
 }
 
@@ -404,6 +437,47 @@ test "set-option stores session hook options" {
     try std.testing.expectEqual(@as(usize, 1), hook.len);
     try std.testing.expectEqual(@as(u32, 0), hook[0].index);
     try std.testing.expectEqualStrings("display-message hi", hook[0].value);
+}
+
+test "set-option stores validated server command options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-s", "default-client-command", "display-message hi" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("display-message hi", opts.options_get_command_string(opts.global_options, "default-client-command"));
+}
+
+test "set-option rejects invalid server command option syntax" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const result = try capture_stderr(&.{ "set-option", "-s", "default-client-command", "display-message \"unterminated" });
+    defer xm.allocator.free(result.stderr);
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", result.retval);
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "unterminated quote"));
+    try std.testing.expectEqualStrings("new-session", opts.options_get_command_string(opts.global_options, "default-client-command"));
 }
 
 test "set-hook stores window-scoped hooks in global window options" {

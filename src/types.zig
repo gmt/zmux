@@ -950,7 +950,7 @@ pub const OptionsValue = union(OptionsType) {
     style: Style,
     flag: bool,
     array: std.ArrayList(OptionsArrayItem),
-    command: ?*anyopaque, // cmd_list pointer, opaque for now
+    command: []u8,
 };
 
 pub const Options = struct {

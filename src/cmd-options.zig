@@ -336,6 +336,7 @@ fn lookup_value(oo: *T.Options, name: []const u8, include_inherited: bool) ?Coll
 fn should_escape_value(value: *const T.OptionsValue, oe: ?*const T.OptionsTableEntry) bool {
     return switch (value.*) {
         .string => if (oe) |entry| entry.type == .string else true,
+        .command => true,
         else => false,
     };
 }

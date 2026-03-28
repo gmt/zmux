@@ -82,6 +82,41 @@ pub fn cmd_find_from_session(current: *T.CmdFindState, s: *T.Session, flags: u32
     current.wp = if (current.w) |w| w.active else null;
 }
 
+pub fn cmd_find_from_winlink(fs: *T.CmdFindState, wl: *T.Winlink, flags: u32) bool {
+    if (!sess.session_alive(wl.session)) return false;
+    if (sess.winlink_find_by_window(&wl.session.windows, wl.window) != wl) return false;
+
+    cmd_find_clear_state(fs, flags);
+    fs.s = wl.session;
+    fs.wl = wl;
+    fs.w = wl.window;
+    fs.wp = wl.window.active orelse if (wl.window.panes.items.len != 0) wl.window.panes.items[0] else null;
+    fs.idx = wl.idx;
+    return fs.wp != null;
+}
+
+pub fn cmd_find_from_session_window(fs: *T.CmdFindState, s: *T.Session, w: *T.Window, flags: u32) bool {
+    const wl = sess.winlink_find_by_window(&s.windows, w) orelse return false;
+    return cmd_find_from_winlink(fs, wl, flags);
+}
+
+pub fn cmd_find_from_window(fs: *T.CmdFindState, w: *T.Window, flags: u32) bool {
+    const s = select_session_for_window(w, flags) orelse return false;
+    return cmd_find_from_session_window(fs, s, w, flags);
+}
+
+pub fn cmd_find_from_pane(fs: *T.CmdFindState, wp: *T.WindowPane, flags: u32) bool {
+    if (!cmd_find_from_window(fs, wp.window, flags)) return false;
+    for (wp.window.panes.items) |pane| {
+        if (pane == wp) {
+            fs.wp = wp;
+            return true;
+        }
+    }
+    cmd_find_clear_state(fs, flags);
+    return false;
+}
+
 pub fn cmd_find_from_mouse(fs: *T.CmdFindState, mouse: *const T.MouseEvent, flags: u32) bool {
     cmd_find_clear_state(fs, flags);
 
@@ -305,7 +340,7 @@ fn resolve_current_state(item: *cmdq_mod.CmdqItem, flags: u32) ?T.CmdFindState {
     return current;
 }
 
-fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
+pub fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
     if (cl == null) return cmd_find_from_nothing(fs, flags);
     const client = cl.?;
 
@@ -327,7 +362,7 @@ fn cmd_find_from_client(fs: *T.CmdFindState, cl: ?*T.Client, flags: u32) bool {
     return cmd_find_from_nothing(fs, flags);
 }
 
-fn cmd_find_from_nothing(fs: *T.CmdFindState, flags: u32) bool {
+pub fn cmd_find_from_nothing(fs: *T.CmdFindState, flags: u32) bool {
     cmd_find_clear_state(fs, flags);
     const s = select_best_session(flags) orelse return false;
     cmd_find_from_session(fs, s, flags);

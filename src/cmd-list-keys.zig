@@ -38,7 +38,7 @@ const PrintMode = enum {
     notes_only,
 };
 
-const DEFAULT_TEMPLATE = "bind-key#{?key_has_repeat, -r,} -T #{p|#{key_table_width}|:#{key_table}} #{p|#{key_string_width}|:#{key_string}}#{?key_command, #{key_command},}";
+const DEFAULT_TEMPLATE = "bind-key #{?key_has_repeat,#{?key_repeat,-r,  },} -T #{p|#{key_table_width}|:#{key_table}} #{p|#{key_string_width}|:#{key_string}}#{?key_command, #{key_command},}";
 const DEFAULT_NOTES_TEMPLATE = "#{?key_prefix,#{key_prefix} ,}#{p|#{key_string_width}|:#{key_string}} #{?key_note,#{key_note},#{key_command}}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -89,8 +89,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const count = if (args.has('1') and bindings.len > 1) @as(usize, 1) else bindings.len;
     const key_width = max_key_width(bindings[0..count]);
     const table_width = max_table_width(bindings[0..count]);
+    const has_repeat = key_bindings.key_bindings_has_repeat(bindings[0..count]) != 0;
     for (bindings[0..count]) |binding| {
-        const line = require_binding_line(item, binding, template, mode, prefix, key_width, table_width) orelse return .@"error";
+        const line = require_binding_line(item, binding, template, mode, prefix, has_repeat, key_width, table_width) orelse return .@"error";
         defer xm.allocator.free(line);
         if ((args.has('1') and target_client != null) or count == 1) {
             status_runtime.status_message_set_text_optional(target_client, -1, true, false, false, line);
@@ -101,12 +102,13 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
-fn require_binding_line(item: *cmdq.CmdqItem, binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, key_width: u32, table_width: u32) ?[]u8 {
+fn require_binding_line(item: *cmdq.CmdqItem, binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, has_repeat: bool, key_width: u32, table_width: u32) ?[]u8 {
     const command = render_binding_command(binding);
     defer xm.allocator.free(command);
 
     const ctx = format_mod.FormatContext{
         .key_binding = binding,
+        .key_has_repeat = has_repeat,
         .key_command = command,
         .key_prefix = prefix,
         .key_string_width = key_width,
@@ -153,12 +155,13 @@ fn collect_root_prefix_bindings(sort_crit: T.SortCriteria) []*T.KeyBinding {
     return list.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
-fn render_binding_line(binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, key_width: u32, table_width: u32) ?[]u8 {
+fn render_binding_line(binding: *T.KeyBinding, template: []const u8, mode: PrintMode, prefix: []const u8, has_repeat: bool, key_width: u32, table_width: u32) ?[]u8 {
     const command = render_binding_command(binding);
     defer xm.allocator.free(command);
 
     const ctx = format_mod.FormatContext{
         .key_binding = binding,
+        .key_has_repeat = has_repeat,
         .key_command = command,
         .key_prefix = prefix,
         .key_string_width = key_width,
@@ -250,12 +253,12 @@ test "list-keys renders binding command and notes views" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(bind_cmd, &bind_item));
 
     const binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("root", false).?, T.KEYC_F1).?;
-    const normal = render_binding_line(binding, DEFAULT_TEMPLATE, .normal, "C-b", 0, utf8.displayWidth("root")).?;
+    const normal = render_binding_line(binding, DEFAULT_TEMPLATE, .normal, "C-b", false, 0, utf8.displayWidth("root")).?;
     defer xm.allocator.free(normal);
-    try std.testing.expectEqualStrings("bind-key -T root F1 display-message \"hello world\"", normal);
+    try std.testing.expectEqualStrings("bind-key  -T root F1 display-message \"hello world\"", normal);
 
     const note_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("prefix", false).?, T.KEYC_CTRL | 'b').?;
-    const notes = render_binding_line(note_binding, DEFAULT_NOTES_TEMPLATE, .notes_only, "C-b", utf8.displayWidth("C-b"), 0).?;
+    const notes = render_binding_line(note_binding, DEFAULT_NOTES_TEMPLATE, .notes_only, "C-b", false, utf8.displayWidth("C-b"), 0).?;
     defer xm.allocator.free(notes);
     try std.testing.expectEqualStrings("C-b C-b repeat me", notes);
 }
@@ -281,7 +284,7 @@ test "list-keys command supports format accepts shared sort orders and rejects i
     key_bindings.key_bindings_add("unit-list-keys-sort", T.KEYC_CTRL | 'b', null, false, null);
 
     const binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("root", false).?, T.KEYC_F1).?;
-    const rendered = render_binding_line(binding, "#{key_string}", .normal, "", 0, 0).?;
+    const rendered = render_binding_line(binding, "#{key_string}", .normal, "", false, 0, 0).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("F1", rendered);
 
@@ -307,7 +310,7 @@ test "list-keys command supports format accepts shared sort orders and rejects i
         var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
         try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(order_cmd, &item));
         try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
-        try std.testing.expectEqualStrings("message: bind-key -T unit-list-keys-sort F1", server.message_log.items[0].msg);
+        try std.testing.expectEqualStrings("message: bind-key  -T unit-list-keys-sort F1", server.message_log.items[0].msg);
         server.server_reset_message_log();
     }
 
@@ -333,7 +336,7 @@ test "list-keys command honors table selection single key and prefix override" {
     );
     defer xm.allocator.free(prefix_bindings);
     try std.testing.expectEqual(@as(usize, 1), prefix_bindings.len);
-    const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", utf8.displayWidth("C-b"), 0).?;
+    const line = render_binding_line(prefix_bindings[0], DEFAULT_NOTES_TEMPLATE, .notes_only, "ZZ", false, utf8.displayWidth("C-b"), 0).?;
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("ZZ C-b prefix-note", line);
 }
@@ -366,11 +369,43 @@ test "list-keys default template pads table and key columns to the filtered maxi
         DEFAULT_TEMPLATE,
         .normal,
         "",
+        false,
         max_key_width(subset[0..]),
         max_table_width(subset[0..]),
     ).?;
     defer xm.allocator.free(rendered);
-    try std.testing.expectEqualStrings("bind-key -T short             F1  display-message short", rendered);
+    try std.testing.expectEqualStrings("bind-key  -T short             F1  display-message short", rendered);
+}
+
+test "list-keys default template keeps the repeat column aligned" {
+    key_bindings.key_bindings_init();
+    var cause: ?[]u8 = null;
+
+    const repeat_cmd = try cmd_mod.cmd_parse_one(&.{ "bind-key", "-r", "-T", "unit-repeat", "C-b", "display-message", "repeat" }, null, &cause);
+    defer cmd_mod.cmd_free(repeat_cmd);
+    var repeat_list: cmd_mod.CmdList = .{};
+    var repeat_item = cmdq.CmdqItem{ .client = null, .cmdlist = &repeat_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(repeat_cmd, &repeat_item));
+
+    const plain_cmd = try cmd_mod.cmd_parse_one(&.{ "bind-key", "-T", "unit-repeat", "F1", "display-message", "plain" }, null, &cause);
+    defer cmd_mod.cmd_free(plain_cmd);
+    var plain_list: cmd_mod.CmdList = .{};
+    var plain_item = cmdq.CmdqItem{ .client = null, .cmdlist = &plain_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(plain_cmd, &plain_item));
+
+    const repeat_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("unit-repeat", false).?, T.KEYC_CTRL | 'b').?;
+    const plain_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("unit-repeat", false).?, T.KEYC_F1).?;
+    const subset = [_]*T.KeyBinding{ repeat_binding, plain_binding };
+    const key_width = max_key_width(subset[0..]);
+    const table_width = max_table_width(subset[0..]);
+
+    const repeat_line = render_binding_line(repeat_binding, DEFAULT_TEMPLATE, .normal, "", true, key_width, table_width).?;
+    defer xm.allocator.free(repeat_line);
+    try std.testing.expectEqualStrings("bind-key -r -T unit-repeat C-b display-message repeat", repeat_line);
+
+    const plain_line = render_binding_line(plain_binding, DEFAULT_TEMPLATE, .normal, "", true, key_width, table_width).?;
+    defer xm.allocator.free(plain_line);
+    try std.testing.expectEqualStrings("bind-key    -T unit-repeat F1  display-message plain", plain_line);
 }
 
 test "list-keys -1 shows a single binding through the shared status runtime" {

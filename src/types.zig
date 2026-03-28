@@ -839,6 +839,8 @@ pub const Window = struct {
     references: u32 = 0,
     winlinks: std.ArrayList(*Winlink) = .{},
     alerts_timer: ?*c.libevent.event = null,
+    name_event: ?*c.libevent.event = null,
+    name_time: std.posix.timeval = .{ .sec = 0, .usec = 0 },
     alerts_queued: bool = false,
 };
 

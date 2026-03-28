@@ -92,6 +92,63 @@ pub fn resize_pane_to(wp: *T.WindowPane, type_: T.LayoutType, new_size: u32) boo
     return resize_leaf(root, leaf, type_, change, true);
 }
 
+pub fn resize_by_border_drag(w: *T.Window, x: u32, y: u32, last_x: u32, last_y: u32) bool {
+    var builder = Builder.init(w.panes.items);
+    defer builder.arena.deinit();
+    const root = builder.build() catch return false;
+
+    const dx64 = @as(i64, @intCast(x)) - @as(i64, @intCast(last_x));
+    const dy64 = @as(i64, @intCast(y)) - @as(i64, @intCast(last_y));
+    const dx: i32 = std.math.cast(i32, dx64) orelse return false;
+    const dy: i32 = std.math.cast(i32, dy64) orelse return false;
+    if (dx == 0 and dy == 0) return false;
+
+    const offsets = [_][2]i32{
+        .{ 0, 0 },
+        .{ 0, 1 },
+        .{ 1, 0 },
+        .{ 0, -1 },
+        .{ -1, 0 },
+    };
+    var cells: [offsets.len]*Cell = undefined;
+    var ncells: usize = 0;
+
+    for (offsets) |offset| {
+        const border_x = offsetCoord(last_x, offset[0]) orelse continue;
+        const border_y = offsetCoord(last_y, offset[1]) orelse continue;
+        const cell = search_by_border(root, border_x, border_y) orelse continue;
+
+        var duplicate = false;
+        for (cells[0..ncells]) |existing| {
+            if (existing == cell) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        cells[ncells] = cell;
+        ncells += 1;
+    }
+
+    var changed = false;
+    for (cells[0..ncells]) |cell| {
+        const parent = cell.parent orelse continue;
+        switch (parent.type) {
+            .topbottom => {
+                if (dy != 0 and resize_layout(root, cell, .topbottom, dy, false))
+                    changed = true;
+            },
+            .leftright => {
+                if (dx != 0 and resize_layout(root, cell, .leftright, dx, false))
+                    changed = true;
+            },
+            .windowpane => {},
+        }
+    }
+    return changed;
+}
+
 pub fn dump_window(w: *T.Window) ?[]u8 {
     if (w.panes.items.len == 0)
         return null;
@@ -1123,6 +1180,41 @@ fn pane_rect(wp: *T.WindowPane) Rect {
 
 fn rect_equal(a: Rect, b: Rect) bool {
     return a.xoff == b.xoff and a.yoff == b.yoff and a.sx == b.sx and a.sy == b.sy;
+}
+
+fn offsetCoord(value: u32, delta: i32) ?u32 {
+    const shifted = @as(i64, @intCast(value)) + delta;
+    return std.math.cast(u32, shifted);
+}
+
+fn search_by_border(lc: *Cell, x: u32, y: u32) ?*Cell {
+    var last: ?*Cell = null;
+
+    for (lc.cells.items) |child| {
+        if (x >= child.xoff and x < child.xoff + child.sx and y >= child.yoff and y < child.yoff + child.sy)
+            return search_by_border(child, x, y);
+
+        if (last == null) {
+            last = child;
+            continue;
+        }
+
+        switch (lc.type) {
+            .leftright => {
+                if (x < child.xoff and x >= last.?.xoff + last.?.sx)
+                    return last;
+            },
+            .topbottom => {
+                if (y < child.yoff and y >= last.?.yoff + last.?.sy)
+                    return last;
+            },
+            .windowpane => {},
+        }
+
+        last = child;
+    }
+
+    return null;
 }
 
 fn find_leaf(root: *Cell, wp: *T.WindowPane) ?*Cell {

@@ -240,6 +240,11 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
             return true;
         }
         server_client_mod.server_client_refresh_click_timer(cl);
+        if ((event.key & T.KEYC_MASK_KEY) == T.KEYC_DRAGGING) {
+            if (cl.tty.mouse_drag_update) |update|
+                update(cl, &event.m);
+            return true;
+        }
         if (cmd_find.cmd_find_from_mouse(&mouse_find_state, &event.m, 0)) {
             binding_find_state = &mouse_find_state;
             target_session = mouse_find_state.s orelse s;

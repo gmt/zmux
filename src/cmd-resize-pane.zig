@@ -26,6 +26,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const grid_mod = @import("grid.zig");
 const layout_mod = @import("layout.zig");
+const mouse_runtime = @import("mouse-runtime.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
 
@@ -44,8 +45,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
     if (args.has('M')) {
-        cmdq.cmdq_error(item, "mouse resize not supported yet", .{});
-        return .@"error";
+        const event = cmdq.cmdq_get_event(item);
+        var mouse_session: ?*T.Session = null;
+        if (!event.m.valid or mouse_runtime.cmd_mouse_window(&event.m, &mouse_session) == null)
+            return .normal;
+        const c = cmdq.cmdq_get_client(item) orelse return .normal;
+        if (c.session != mouse_session)
+            return .normal;
+        c.tty.mouse_drag_update = cmd_resize_pane_mouse_update;
+        cmd_resize_pane_mouse_update(c, &event.m);
+        return .normal;
     }
     if (args.has('Z')) {
         if (!win.window_unzoom(w)) _ = win.window_zoom(wp);
@@ -122,6 +131,32 @@ fn trim_history(wp: *T.WindowPane) bool {
     wp.base.cy += adjust;
     wp.flags |= T.PANE_REDRAW;
     return true;
+}
+
+fn cmd_resize_pane_mouse_update(c: *T.Client, m: *T.MouseEvent) void {
+    const wl = mouse_runtime.cmd_mouse_window(m, null) orelse {
+        c.tty.mouse_drag_update = null;
+        c.tty.mouse_drag_release = null;
+        return;
+    };
+    const w = wl.window;
+
+    var y = m.y + m.oy;
+    const x = m.x + m.ox;
+    if (m.statusat == 0 and y >= m.statuslines)
+        y -= m.statuslines
+    else if (m.statusat > 0 and y >= @as(u32, @intCast(m.statusat)))
+        y = @as(u32, @intCast(m.statusat - 1));
+
+    var ly = m.ly + m.oy;
+    const lx = m.lx + m.ox;
+    if (m.statusat == 0 and ly >= m.statuslines)
+        ly -= m.statuslines
+    else if (m.statusat > 0 and ly >= @as(u32, @intCast(m.statusat)))
+        ly = @as(u32, @intCast(m.statusat - 1));
+
+    if (layout_mod.resize_by_border_drag(w, x, y, lx, ly))
+        server_fn.server_redraw_window(w);
 }
 
 pub const entry: cmd_mod.CmdEntry = .{
@@ -455,4 +490,81 @@ test "resize-pane -Z toggles the reduced zoom flag and targets the requested pan
     try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_ZOOMED);
     try std.testing.expect(win.window_pane_visible(first));
     try std.testing.expect(win.window_pane_visible(second));
+}
+
+test "resize-pane -M installs the mouse drag callback and resizes the border path" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-mouse", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-mouse") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const left = wl.window.active.?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const right = spawn.spawn_pane(&right_ctx, &cause).?;
+    s.curw = wl;
+
+    set_pane_geometry(left, 0, 0, 40, 24);
+    set_pane_geometry(right, 41, 0, 39, 24);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const target = std.fmt.allocPrint(xm.allocator, "%{d}", .{left.id}) catch unreachable;
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-M", "-t", target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(resize_cmd);
+
+    var event = T.key_event{ .key = T.keycMouse(T.KEYC_MOUSEDRAG1, .border), .len = 1 };
+    event.m = .{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDRAG1, .border),
+        .s = @intCast(s.id),
+        .w = @intCast(wl.window.id),
+        .wp = @intCast(left.id),
+        .x = 45,
+        .y = 5,
+        .lx = 40,
+        .ly = 5,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = T.MOUSE_BUTTON_1 | T.MOUSE_MASK_DRAG,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list, .event = event };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expect(client.tty.mouse_drag_update != null);
+    try std.testing.expectEqual(@as(u32, 45), left.sx);
+    try std.testing.expectEqual(@as(u32, 46), right.xoff);
+    try std.testing.expectEqual(@as(u32, 34), right.sx);
+
+    var followup = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    followup.m = .{
+        .x = 47,
+        .y = 5,
+        .lx = 45,
+        .ly = 5,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = T.MOUSE_BUTTON_1 | T.MOUSE_MASK_DRAG,
+    };
+    try std.testing.expect(server_fn.server_client_handle_key(&client, &followup));
+    try std.testing.expectEqual(@as(u32, 47), left.sx);
+    try std.testing.expectEqual(@as(u32, 48), right.xoff);
+    try std.testing.expectEqual(@as(u32, 32), right.sx);
 }

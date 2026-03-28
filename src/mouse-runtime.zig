@@ -173,6 +173,8 @@ pub fn translate_client_mouse_event(cl: *T.Client, event: *T.key_event) bool {
 
     if (kind != .drag and kind != .wheel and kind != .double and kind != .triple and cl.tty.mouse_drag_flag != 0) {
         if (cl.tty.mouse_scrolling_flag) resolved.target = .scrollbar_slider;
+        if (cl.tty.mouse_drag_release) |release|
+            release(cl, &event.m);
         const family = drag_end_family(cl.tty.mouse_drag_flag - 1) orelse {
             clearDragState(cl);
             return false;
@@ -200,6 +202,10 @@ pub fn translate_client_mouse_event(cl: *T.Client, event: *T.key_event) bool {
             if (event.m.statusat == 0) {
                 cl.tty.mouse_slider_mpos += @intCast(event.m.statuslines);
             }
+        }
+        if (cl.tty.mouse_drag_update != null) {
+            assign_translated_mouse_event(event, T.KEYC_DRAGGING, resolved, effective.ignore, button_bits);
+            return true;
         }
     }
 
@@ -437,7 +443,18 @@ fn finish_translation(
     ignore: bool,
     button_bits: u32,
 ) void {
-    var translated = T.keycMouse(family, target);
+    const translated = T.keycMouse(family, target);
+    assign_translated_mouse_event(event, translated, resolved, ignore, button_bits);
+}
+
+fn assign_translated_mouse_event(
+    event: *T.key_event,
+    base_key: T.key_code,
+    resolved: ResolvedTarget,
+    ignore: bool,
+    button_bits: u32,
+) void {
+    var translated = base_key;
     if (button_bits & T.MOUSE_MASK_META != 0) translated |= T.KEYC_META;
     if (button_bits & T.MOUSE_MASK_CTRL != 0) translated |= T.KEYC_CTRL;
     if (button_bits & T.MOUSE_MASK_SHIFT != 0) translated |= T.KEYC_SHIFT;
@@ -494,9 +511,13 @@ fn clearClickState(cl: *T.Client) void {
 
 fn clearDragState(cl: *T.Client) void {
     cl.tty.mouse_drag_flag = 0;
+    cl.tty.mouse_drag_update = null;
+    cl.tty.mouse_drag_release = null;
     cl.tty.mouse_scrolling_flag = false;
     cl.tty.mouse_slider_mpos = -1;
 }
+
+fn testDragCallback(_: *T.Client, _: *T.MouseEvent) void {}
 
 test "translate_client_mouse_event maps status pane ranges onto shared status targets" {
     const env_mod = @import("environ.zig");
@@ -813,4 +834,72 @@ test "translate_client_mouse_event emits drag-end keys when a drag stops" {
     try std.testing.expect(translate_client_mouse_event(&client, &release));
     try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDRAGEND1, .pane), release.key);
     try std.testing.expectEqual(@as(u32, 0), client.tty.mouse_drag_flag);
+}
+
+test "translate_client_mouse_event emits KEYC_DRAGGING when a drag callback is installed" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "mouse-drag-callback", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(10, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 10, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 10, .sy = 3 };
+    client.tty.mouse_drag_update = testDragCallback;
+    client.tty.mouse_drag_release = testDragCallback;
+
+    var drag = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    drag.m = .{
+        .x = 3,
+        .y = 1,
+        .lx = 2,
+        .ly = 1,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = T.MOUSE_BUTTON_1 | T.MOUSE_MASK_DRAG,
+    };
+    try std.testing.expect(translate_client_mouse_event(&client, &drag));
+    try std.testing.expectEqual(T.KEYC_DRAGGING, drag.key);
+    try std.testing.expect(drag.m.valid);
+    try std.testing.expectEqual(@as(i32, @intCast(s.id)), drag.m.s);
+    try std.testing.expectEqual(@as(i32, @intCast(w.id)), drag.m.w);
+    try std.testing.expectEqual(@as(i32, @intCast(wp.id)), drag.m.wp);
+
+    var release = T.key_event{ .key = T.KEYC_MOUSE, .len = 1 };
+    release.m = .{
+        .x = 3,
+        .y = 1,
+        .lb = T.MOUSE_BUTTON_1,
+        .b = 3,
+    };
+    try std.testing.expect(translate_client_mouse_event(&client, &release));
+    try std.testing.expectEqual(T.keycMouse(T.KEYC_MOUSEDRAGEND1, .pane), release.key);
+    try std.testing.expectEqual(@as(u32, 0), client.tty.mouse_drag_flag);
+    try std.testing.expect(client.tty.mouse_drag_update == null);
+    try std.testing.expect(client.tty.mouse_drag_release == null);
 }

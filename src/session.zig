@@ -103,6 +103,16 @@ pub fn session_group_add(sg: *T.SessionGroup, s: *T.Session) void {
     sg.sessions.append(xm.allocator, s) catch unreachable;
 }
 
+pub fn session_group_synchronize_to(s: *T.Session) void {
+    const sg = session_group_contains(s) orelse return;
+
+    for (sg.sessions.items) |target| {
+        if (target == s) continue;
+        session_group_synchronize1(target, s);
+        return;
+    }
+}
+
 fn session_group_remove(s: *T.Session) void {
     const sg = session_group_contains(s) orelse return;
 
@@ -195,26 +205,21 @@ fn session_group_synchronize1(target: *T.Session, s: *T.Session) void {
 // ── Creation / destruction ────────────────────────────────────────────────
 
 pub fn session_create(
-    _prefix: ?[]const u8,
+    prefix: ?[]const u8,
     name: ?[]const u8,
     cwd: []const u8,
     environment: *T.Environ,
     oo: *T.Options,
     _tio: ?*anyopaque,
 ) *T.Session {
-    _ = _prefix;
     _ = _tio;
 
     const s = xm.allocator.create(T.Session) catch unreachable;
-    const sid = next_session_id;
-    next_session_id += 1;
-
-    const actual_name = if (name) |n| xm.xstrdup(n) else xm.xasprintf("{d}", .{sid});
     const now = std.time.milliTimestamp();
 
     s.* = T.Session{
-        .id = sid,
-        .name = actual_name,
+        .id = 0,
+        .name = undefined,
         .cwd = xm.xstrdup(cwd),
         .created = now,
         .activity_time = now,
@@ -222,6 +227,28 @@ pub fn session_create(
         .options = oo,
         .environ = environment,
     };
+
+    if (name) |explicit_name| {
+        s.id = next_session_id;
+        next_session_id += 1;
+        s.name = xm.xstrdup(explicit_name);
+    } else {
+        while (true) {
+            s.id = next_session_id;
+            next_session_id += 1;
+
+            const generated_name = if (prefix) |name_prefix|
+                xm.xasprintf("{s}-{d}", .{ name_prefix, s.id })
+            else
+                xm.xasprintf("{d}", .{s.id});
+
+            if (sessions.get(generated_name) == null) {
+                s.name = generated_name;
+                break;
+            }
+            xm.allocator.free(generated_name);
+        }
+    }
 
     sessions.put(s.name, s) catch unreachable;
     log.log_debug("new session $%{d} {s}", .{ s.id, s.name });

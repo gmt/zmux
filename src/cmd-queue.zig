@@ -571,6 +571,11 @@ pub fn cmdq_running(cl: ?*T.Client) ?*CmdqItem {
     return item;
 }
 
+pub fn cmdq_has_pending(cl: ?*T.Client) bool {
+    const queue = get_queue(cl, false) orelse return false;
+    return queue.head != null;
+}
+
 pub fn cmdq_resolve_target_client(item: *CmdqItem, cmd: *cmd_mod.Cmd) ?*T.Client {
     const flags = cmd.entry.flags;
     if (flags & (T.CMD_CLIENT_CFLAG | T.CMD_CLIENT_TFLAG) == 0) return item.target_client;

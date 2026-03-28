@@ -508,6 +508,41 @@ fn server_client_set_cwd(cl: *T.Client, cwd: []const u8) void {
     cl.cwd = xm.xstrdup(cwd);
 }
 
+fn server_client_send_exit_status(cl: *T.Client, retval: i32) void {
+    if (cl.peer) |peer| {
+        _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+    }
+}
+
+fn server_client_enqueue_command_list(cl: *T.Client, cmd_list: *cmd_mod.CmdList) void {
+    if (cl.flags & T.CLIENT_READONLY != 0 and !cmd_mod.cmd_list_all_have(@ptrCast(cmd_list), T.CMD_READONLY)) {
+        cmd_mod.cmd_list_free(cmd_list);
+        status_runtime.present_client_message(cl, "client is read-only");
+        server_client_send_exit_status(cl, 1);
+        return;
+    }
+    cmdq_mod.cmdq_append(cl, cmd_list);
+}
+
+fn server_client_dispatch_default_command(cl: *T.Client) void {
+    const command = opts.options_get_command_string(opts.global_options, "default-client-command");
+    var parse_input = T.CmdParseInput{ .c = cl };
+    const parsed = cmd_mod.cmd_parse_from_string(command, &parse_input);
+    switch (parsed.status) {
+        .success => {
+            const cmd_list: *cmd_mod.CmdList = @ptrCast(@alignCast(parsed.cmdlist.?));
+            server_client_enqueue_command_list(cl, cmd_list);
+        },
+        .@"error" => {
+            const message = parsed.@"error" orelse xm.xstrdup("parse error");
+            defer xm.allocator.free(message);
+            log.log_warn("client {*} default command parse error: {s}", .{ cl, message });
+            status_runtime.present_client_message(cl, message);
+            server_client_send_exit_status(cl, 1);
+        },
+    }
+}
+
 fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len < @sizeOf(protocol.MsgCommand)) {
@@ -517,6 +552,11 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const msg_cmd: *const protocol.MsgCommand = @ptrCast(@alignCast(imsg_msg.data));
     const argc: i32 = msg_cmd.argc;
     if (argc < 0) return;
+    if (argc == 0) {
+        log.log_debug("client {*} command argc=0 uses default-client-command", .{cl});
+        server_client_dispatch_default_command(cl);
+        return;
+    }
 
     const argv_ptr: [*]const u8 = @ptrCast(@alignCast(@as([*]const u8, @ptrCast(imsg_msg.data)) + @sizeOf(protocol.MsgCommand)));
     const argv_len = data_len - @sizeOf(protocol.MsgCommand);
@@ -538,13 +578,10 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
         defer if (cause) |msg| xm.allocator.free(msg);
         log.log_warn("client {*} parse error: {s}", .{ cl, cause orelse "parse error" });
         status_runtime.present_client_message(cl, cause orelse "parse error");
-        if (cl.peer) |peer| {
-            const retval: i32 = 1;
-            _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
-        }
+        server_client_send_exit_status(cl, 1);
         return;
     };
-    cmdq_mod.cmdq_append(cl, cmd_list);
+    server_client_enqueue_command_list(cl, cmd_list);
 }
 
 pub fn server_client_loop() void {
@@ -1689,6 +1726,43 @@ test "server_client_send_shell returns default shell over shell message" {
     try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
     try std.testing.expectEqualStrings("/bin/sh", payload[0 .. payload.len - 1]);
     try std.testing.expectEqual(@as(u8, 0), payload[payload.len - 1]);
+}
+
+test "server_client_dispatch_command queues default-client-command when argc is zero" {
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_command(opts.global_options, "default-client-command", "list-commands");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .pane_cache = .{},
+        .stdin_pending = .{},
+    };
+    defer env_mod.environ_free(client.environ);
+    defer client.stdin_pending.deinit(xm.allocator);
+    client.tty = .{ .client = &client };
+
+    var payload = protocol.MsgCommand{ .argc = 0 };
+    var imsg_msg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.len = @as(@TypeOf(imsg_msg.hdr.len), @sizeOf(c.imsg.imsg_hdr) + @sizeOf(protocol.MsgCommand));
+    imsg_msg.data = @ptrCast(&payload);
+
+    server_client_dispatch_command(&client, &imsg_msg);
+
+    try std.testing.expect(cmdq_mod.cmdq_has_pending(&client));
 }
 
 test "build_client_draw_payload keeps multi-pane status-only redraw off the full-clear body path" {

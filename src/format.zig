@@ -41,6 +41,7 @@ const key_string = @import("key-string.zig");
 const names = @import("names.zig");
 const paste_mod = @import("paste.zig");
 const layout_mod = @import("layout.zig");
+const marked_pane_mod = @import("marked-pane.zig");
 const sess = @import("session.zig");
 const window_mod = @import("window.zig");
 const window_copy = @import("window-copy.zig");
@@ -174,6 +175,9 @@ const resolver_table = [_]Resolver{
     .{ .name = "pane_id", .func = resolve_pane_id },
     .{ .name = "pane_in_mode", .func = resolve_pane_in_mode },
     .{ .name = "pane_index", .func = resolve_pane_index },
+    .{ .name = "pane_marked", .func = resolve_pane_marked },
+    .{ .name = "pane_marked_set", .func = resolve_pane_marked_set },
+    .{ .name = "pane_mode", .func = resolve_pane_mode },
     .{ .name = "pane_pid", .func = resolve_pane_pid },
     .{ .name = "pane_pipe", .func = resolve_pane_pipe },
     .{ .name = "pane_pipe_pid", .func = resolve_pane_pipe_pid },
@@ -2721,6 +2725,24 @@ fn resolve_pane_in_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
     return alloc.dupe(u8, value) catch unreachable;
 }
 
+fn resolve_pane_marked(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const value: []const u8 = if (marked_pane_mod.check() and marked_pane_mod.marked_pane.wp == wp) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_marked_set(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx_pane(ctx) orelse return null;
+    const value: []const u8 = if (marked_pane_mod.check()) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_pane_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const wme = window_mod.window_pane_mode(wp) orelse return null;
+    return alloc.dupe(u8, wme.mode.name) catch unreachable;
+}
+
 fn resolve_pane_current_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     if (wp.argv) |argv| {
@@ -2955,6 +2977,56 @@ test "format_expand resolves mouse word line and hyperlink in copy mode" {
     const hyperlink = format_require_complete(xm.allocator, "#{mouse_hyperlink}", &link_ctx).?;
     defer xm.allocator.free(hyperlink);
     try std.testing.expectEqualStrings("https://example.com/docs", hyperlink);
+}
+
+test "format_expand resolves pane mode and marked flags" {
+    const args_mod = @import("arguments.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "format-pane-mode", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 20, 6);
+    w.active = wp;
+
+    marked_pane_mod.set(s, wl, wp);
+    defer marked_pane_mod.clear();
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = window_copy.enterMode(wp, wp, &args);
+
+    const ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{pane_in_mode}:#{pane_mode}:#{pane_marked}:#{pane_marked_set}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+    try std.testing.expectEqualStrings("1:copy-mode:1:1", expanded);
 }
 
 test "format_expand resolves direct keys and aliases" {

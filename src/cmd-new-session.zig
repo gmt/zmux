@@ -88,18 +88,27 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const no_attach = (cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_NOATTACH) != 0;
     var target: T.CmdFindState = .{};
     var cause: ?[]u8 = null;
+    const group_name = args.get('t');
 
     // has-session: just validate the -t target (cmd_find_target already did it)
     if (cmd.entry == &entry_has) {
         return .normal;
     }
 
+    if (group_name != null and (args.count() != 0 or args.has('n'))) {
+        cmdq.cmdq_error(item, "command or window name given with target", .{});
+        return .@"error";
+    }
+
     // Determine session name
     var session_name: ?[]u8 = null;
-    if (args.get('s')) |name| {
-        session_name = sess.session_check_name(name);
+    if (args.get('s')) |name_template| {
+        const expanded = format_mod.format_single(@ptrCast(item), name_template, cl, null, null, null);
+        defer xm.allocator.free(expanded);
+
+        session_name = sess.session_check_name(expanded);
         if (session_name == null) {
-            cmdq.cmdq_error(item, "invalid session name: {s}", .{name});
+            cmdq.cmdq_error(item, "invalid session: {s}", .{expanded});
             return .@"error";
         }
     }
@@ -154,10 +163,32 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     var group_target: ?*T.Session = null;
-    if (args.get('t')) |target_name| {
-        if (cmd_find.cmd_find_target(&target, item, target_name, .session, 0) != 0)
+    var group: ?*T.SessionGroup = null;
+    var group_prefix: ?[]u8 = null;
+    defer if (group_prefix) |prefix| xm.allocator.free(prefix);
+
+    if (group_name) |target_name| {
+        if (cmd_find.cmd_find_target(&target, item, target_name, .session, T.CMD_FIND_CANFAIL) != 0)
             return .@"error";
         group_target = target.s;
+
+        if (group_target) |target_session| {
+            if (sess.session_group_contains(target_session)) |existing_group| {
+                group = existing_group;
+                group_prefix = xm.xstrdup(existing_group.name);
+            } else {
+                group_prefix = xm.xstrdup(target_session.name);
+            }
+        } else if (sess.session_group_find(target_name)) |existing_group| {
+            group = existing_group;
+            group_prefix = xm.xstrdup(existing_group.name);
+        } else {
+            group_prefix = sess.session_check_name(target_name);
+            if (group_prefix == null) {
+                cmdq.cmdq_error(item, "invalid session group: {s}", .{target_name});
+                return .@"error";
+            }
+        }
     }
 
     // Create session
@@ -167,7 +198,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const sess_opts = opts.options_create(opts.global_s_options);
 
     const s = sess.session_create(
-        null,
+        group_prefix,
         session_name,
         cwd,
         new_env,
@@ -175,48 +206,43 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null,
     );
 
-    var wl: ?*T.Winlink = null;
-    if (group_target) |group_session| {
-        var keys: std.ArrayList(i32) = .{};
-        defer keys.deinit(xm.allocator);
-        var it = group_session.windows.keyIterator();
-        while (it.next()) |idx| keys.append(xm.allocator, idx.*) catch unreachable;
-        std.sort.block(i32, keys.items, {}, std.sort.asc(i32));
+    // Spawn the initial window.
+    var spawn_cause: ?[]u8 = null;
+    var sc = T.SpawnContext{
+        .item = @ptrCast(item),
+        .s = s,
+        .idx = -1,
+        .cwd = cwd,
+        .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
+    };
+    const argv = argv_tail(args, 0);
+    defer if (argv) |slice| free_argv(slice);
+    if (argv) |slice| {
+        sc.argv = slice;
+        if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
+    }
+    var wl = spawn_mod.spawn_window(&sc, &spawn_cause);
+    if (wl == null) {
+        cmdq.cmdq_error(item, "create window failed: {s}", .{spawn_cause orelse "unknown"});
+        sess.session_destroy(s, false, "exec_new_session");
+        return .@"error";
+    }
 
-        for (keys.items) |idx| {
-            const existing = sess.winlink_find_by_index(&group_session.windows, idx) orelse continue;
-            const new_wl = sess.session_attach(s, existing.window, idx, &cause) orelse {
-                cmdq.cmdq_error(item, "attach grouped window failed", .{});
-                sess.session_destroy(s, false, "exec_new_session");
-                return .@"error";
-            };
-            if (group_session.curw != null and existing.idx == group_session.curw.?.idx) {
-                s.curw = new_wl;
+    if (group_name) |target_name| {
+        if (group == null) {
+            if (group_target) |target_session| {
+                group = sess.session_group_new(target_session.name);
+                sess.session_group_add(group.?, target_session);
+            } else {
+                group = sess.session_group_new(target_name);
             }
         }
+        sess.session_group_add(group.?, s);
+        sess.session_group_synchronize_to(s);
+        if (sess.session_first_winlink(s)) |first_wl| {
+            _ = sess.session_set_current(s, first_wl);
+        }
         wl = s.curw;
-    } else {
-        // Spawn the initial window
-        var spawn_cause: ?[]u8 = null;
-        var sc = T.SpawnContext{
-            .item = @ptrCast(item),
-            .s = s,
-            .idx = -1,
-            .cwd = cwd,
-            .flags = if (args.has('d')) T.SPAWN_DETACHED else 0,
-        };
-        const argv = argv_tail(args, 0);
-        defer if (argv) |slice| free_argv(slice);
-        if (argv) |slice| {
-            sc.argv = slice;
-            if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
-        }
-        wl = spawn_mod.spawn_window(&sc, &spawn_cause);
-        if (wl == null) {
-            cmdq.cmdq_error(item, "create window failed: {s}", .{spawn_cause orelse "unknown"});
-            sess.session_destroy(s, false, "exec_new_session");
-            return .@"error";
-        }
     }
 
     // Apply explicit -x/-y dimensions
@@ -296,7 +322,7 @@ fn exec_start_server(_cmd: *cmd_mod.Cmd, _item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "new-session",
     .alias = "new",
-    .usage = "[-AdDEPX] [-c start-directory] [-e environment] [-F format] [-f flags] [-n session-name] [-s group-name] [-t target-session] [shell-command]",
+    .usage = "[-AdDEPX] [-c start-directory] [-e environment] [-F format] [-f flags] [-n window-name] [-s session-name] [-t target-session] [shell-command [argument ...]]",
     .template = "Ac:dDe:EF:f:n:Ps:t:x:Xy:",
     .lower = 0,
     .upper = -1,
@@ -333,6 +359,7 @@ fn new_session_test_init() void {
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
     opts.global_s_options = opts.options_create(null);
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_set_string(opts.global_s_options, false, "default-shell", "/bin/true");
     opts.global_w_options = opts.options_create(null);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
@@ -386,6 +413,7 @@ fn new_session_test_client(name: []const u8, session: ?*T.Session) T.Client {
 
 fn new_session_test_free_client(client: *T.Client) void {
     env_mod.environ_free(client.environ);
+    if (client.message_string) |message| xm.allocator.free(message);
     if (client.name) |name| xm.allocator.free(@constCast(name));
     if (client.exit_session) |name| xm.allocator.free(name);
 }
@@ -448,4 +476,119 @@ test "new-session -A -t attaches to the target session and detaches peers with -
     try std.testing.expect(peer.session == null);
     try std.testing.expectEqual(T.ClientExitReason.detached, peer.exit_reason);
     try std.testing.expectEqualStrings("new-session-target-existing", peer.exit_session.?);
+}
+
+test "new-session -t creates a fresh session group when the target name does not exist" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-session", "-d", "-t", "fresh-group" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var sessions_it = sess.sessions.valueIterator();
+    const created = sessions_it.next().?;
+    try std.testing.expect(sessions_it.next() == null);
+    try std.testing.expect(std.mem.startsWith(u8, created.*.name, "fresh-group-"));
+
+    const group = sess.session_group_find("fresh-group").?;
+    try std.testing.expectEqual(group, sess.session_group_contains(created.*).?);
+}
+
+test "new-session -t joins the target session group and synchronizes windows" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var leader_setup = new_session_test_make_session("group-leader");
+    defer new_session_test_free_session(&leader_setup);
+
+    const extra_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var extra_cause: ?[]u8 = null;
+    const extra_wl = sess.session_attach(leader_setup.session, extra_window, -1, &extra_cause).?;
+    const extra_wp = win_mod.window_add_pane(extra_window, null, 80, 24);
+    extra_window.active = extra_wp;
+    _ = sess.session_set_current(leader_setup.session, extra_wl);
+    defer win_mod.window_remove_ref(extra_window, "test");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-session", "-d", "-s", "group-peer", "-t", "group-leader" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const peer = sess.session_find("group-peer").?;
+    const group = sess.session_group_contains(leader_setup.session).?;
+    try std.testing.expectEqual(group, sess.session_group_contains(peer).?);
+    try std.testing.expectEqual(leader_setup.session.windows.count(), peer.windows.count());
+
+    var leader_it = leader_setup.session.windows.iterator();
+    while (leader_it.next()) |leader_entry| {
+        const peer_wl = sess.winlink_find_by_index(&peer.windows, leader_entry.key_ptr.*).?;
+        try std.testing.expectEqual(leader_entry.value_ptr.*.window, peer_wl.window);
+    }
+}
+
+test "new-session rejects -t combined with a window name" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("target-validation-current");
+    defer new_session_test_free_session(&current_setup);
+    var client = new_session_test_client("target-validation-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    client_registry.add(&client);
+
+    const session_count_before = sess.sessions.count();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-t",
+        "target-validation-current",
+        "-n",
+        "forbidden",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Command or window name given with target", client.message_string.?);
+    try std.testing.expectEqual(session_count_before, sess.sessions.count());
+}
+
+test "new-session rejects -t combined with a shell command" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("target-validation-command");
+    defer new_session_test_free_session(&current_setup);
+    var client = new_session_test_client("target-validation-command-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    client_registry.add(&client);
+
+    const session_count_before = sess.sessions.count();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-d",
+        "-t",
+        "target-validation-command",
+        "echo",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Command or window name given with target", client.message_string.?);
+    try std.testing.expectEqual(session_count_before, sess.sessions.count());
 }

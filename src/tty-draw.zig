@@ -164,6 +164,17 @@ pub fn tty_draw_render_window(
     sy_limit: u32,
     row_offset: u32,
 ) !WindowRenderResult {
+    return tty_draw_render_window_region(w, 0, 0, sx_limit, sy_limit, row_offset);
+}
+
+pub fn tty_draw_render_window_region(
+    w: *T.Window,
+    view_x: u32,
+    view_y: u32,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) !WindowRenderResult {
     var result = WindowRenderResult{};
     if (sx_limit == 0 or sy_limit == 0) return result;
 
@@ -176,18 +187,27 @@ pub fn tty_draw_render_window(
         if (!window_mod.window_pane_visible(wp)) continue;
 
         const bounds = window_mod.window_pane_draw_bounds(wp);
-        if (bounds.xoff >= sx_limit or bounds.yoff >= sy_limit) continue;
-
-        const draw_width = @min(bounds.sx, sx_limit - bounds.xoff);
-        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
+        const region = intersect_region(bounds.xoff, bounds.yoff, bounds.sx, bounds.sy, view_x, view_y, sx_limit, sy_limit) orelse continue;
         const screen = screen_mod.screen_current(wp);
         const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
 
-        for (0..draw_height) |row_idx| {
-            const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), draw_width, scrollbar);
+        for (0..region.height) |row_idx| {
+            const absolute_row = region.start_y + @as(u32, @intCast(row_idx));
+            const rendered = try render_pane_row_region(
+                wp,
+                screen.grid,
+                absolute_row - bounds.yoff,
+                region.start_x - bounds.xoff,
+                region.width,
+                scrollbar,
+            );
             defer xm.allocator.free(rendered);
 
-            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, bounds.xoff + 1);
+            try append_move(
+                &out,
+                row_offset + (absolute_row - view_y) + 1,
+                region.start_x - view_x + 1,
+            );
             try out.appendSlice(xm.allocator, rendered);
         }
     }
@@ -203,10 +223,12 @@ pub fn tty_draw_render_window(
                 0;
             const cursor_x = bounds.xoff + cursor_prefix + screen.cx;
             const cursor_y = bounds.yoff + screen.cy;
-            if (cursor_x < sx_limit and cursor_y < sy_limit) {
+            if (cursor_x >= view_x and cursor_x < view_x + sx_limit and
+                cursor_y >= view_y and cursor_y < view_y + sy_limit)
+            {
                 result.cursor_visible = true;
-                result.cursor_x = cursor_x;
-                result.cursor_y = row_offset + cursor_y;
+                result.cursor_x = cursor_x - view_x;
+                result.cursor_y = row_offset + (cursor_y - view_y);
                 try append_move(&out, result.cursor_y + 1, result.cursor_x + 1);
                 try out.appendSlice(xm.allocator, "\x1b[?25h");
             }
@@ -223,6 +245,17 @@ pub fn tty_draw_render_dirty_panes(
     sy_limit: u32,
     row_offset: u32,
 ) ![]u8 {
+    return tty_draw_render_dirty_panes_region(w, 0, 0, sx_limit, sy_limit, row_offset);
+}
+
+pub fn tty_draw_render_dirty_panes_region(
+    w: *T.Window,
+    view_x: u32,
+    view_y: u32,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
@@ -231,18 +264,27 @@ pub fn tty_draw_render_dirty_panes(
         if (wp.flags & T.PANE_REDRAW == 0) continue;
 
         const bounds = window_mod.window_pane_draw_bounds(wp);
-        if (bounds.xoff >= sx_limit or bounds.yoff >= sy_limit) continue;
-
-        const draw_width = @min(bounds.sx, sx_limit - bounds.xoff);
-        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
+        const region = intersect_region(bounds.xoff, bounds.yoff, bounds.sx, bounds.sy, view_x, view_y, sx_limit, sy_limit) orelse continue;
         const screen = screen_mod.screen_current(wp);
         const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
 
-        for (0..draw_height) |row_idx| {
-            const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), draw_width, scrollbar);
+        for (0..region.height) |row_idx| {
+            const absolute_row = region.start_y + @as(u32, @intCast(row_idx));
+            const rendered = try render_pane_row_region(
+                wp,
+                screen.grid,
+                absolute_row - bounds.yoff,
+                region.start_x - bounds.xoff,
+                region.width,
+                scrollbar,
+            );
             defer xm.allocator.free(rendered);
 
-            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, bounds.xoff + 1);
+            try append_move(
+                &out,
+                row_offset + (absolute_row - view_y) + 1,
+                region.start_x - view_x + 1,
+            );
             try out.appendSlice(xm.allocator, rendered);
         }
     }
@@ -257,12 +299,28 @@ pub fn tty_draw_render_borders(
     sy_limit: u32,
     row_offset: u32,
 ) ![]u8 {
+    return tty_draw_render_borders_region(tty, w, 0, 0, sx_limit, sy_limit, row_offset);
+}
+
+pub fn tty_draw_render_borders_region(
+    tty: ?*const T.Tty,
+    w: *T.Window,
+    view_x: u32,
+    view_y: u32,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
     for (0..sy_limit) |row_idx| {
         for (0..sx_limit) |col_idx| {
-            const border = borderCellAt(w, @intCast(col_idx), @intCast(row_idx)) orelse continue;
+            const border = borderCellAt(
+                w,
+                @intCast(view_x + @as(u32, @intCast(col_idx))),
+                @intCast(view_y + @as(u32, @intCast(row_idx))),
+            ) orelse continue;
             const cell = makeBorderCell(tty, border.pane, border.cell_type);
 
             var renderer = RowRenderer{};
@@ -285,6 +343,17 @@ pub fn tty_draw_render_scrollbars(
     sy_limit: u32,
     row_offset: u32,
 ) ![]u8 {
+    return tty_draw_render_scrollbars_region(w, 0, 0, sx_limit, sy_limit, row_offset);
+}
+
+pub fn tty_draw_render_scrollbars_region(
+    w: *T.Window,
+    view_x: u32,
+    view_y: u32,
+    sx_limit: u32,
+    sy_limit: u32,
+    row_offset: u32,
+) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
@@ -296,15 +365,33 @@ pub fn tty_draw_render_scrollbars(
             bounds.xoff
         else
             bounds.xoff + bounds.sx - (layout.width + layout.pad);
-        if (start_x >= sx_limit or bounds.yoff >= sy_limit) continue;
-
-        const draw_width = @min(layout.width + layout.pad, sx_limit - start_x);
-        const draw_height = @min(bounds.sy, sy_limit - bounds.yoff);
-        for (0..draw_height) |row_idx| {
-            const rendered = try render_scrollbar_row(wp, @intCast(row_idx), draw_width, layout.left, layout);
+        const region = intersect_region(
+            start_x,
+            bounds.yoff,
+            layout.width + layout.pad,
+            bounds.sy,
+            view_x,
+            view_y,
+            sx_limit,
+            sy_limit,
+        ) orelse continue;
+        for (0..region.height) |row_idx| {
+            const absolute_row = region.start_y + @as(u32, @intCast(row_idx));
+            const rendered = try render_scrollbar_row_region(
+                wp,
+                absolute_row - bounds.yoff,
+                region.start_x - start_x,
+                region.width,
+                layout.left,
+                layout,
+            );
             defer xm.allocator.free(rendered);
 
-            try append_move(&out, row_offset + bounds.yoff + @as(u32, @intCast(row_idx)) + 1, start_x + 1);
+            try append_move(
+                &out,
+                row_offset + (absolute_row - view_y) + 1,
+                region.start_x - view_x + 1,
+            );
             try out.appendSlice(xm.allocator, rendered);
         }
     }
@@ -382,7 +469,18 @@ fn render_pane_row(
     sx: u32,
     scrollbar: ?window_mod.ScrollbarLayout,
 ) ![]u8 {
-    if (scrollbar == null) return render_text_row(gd, row, sx);
+    return render_pane_row_region(wp, gd, row, 0, sx, scrollbar);
+}
+
+fn render_pane_row_region(
+    wp: *T.WindowPane,
+    gd: *T.Grid,
+    row: u32,
+    start_col: u32,
+    sx: u32,
+    scrollbar: ?window_mod.ScrollbarLayout,
+) ![]u8 {
+    if (scrollbar == null) return render_text_row_region(gd, row, start_col, sx);
 
     const layout = scrollbar.?;
     const extra = layout.width + layout.pad;
@@ -390,26 +488,46 @@ fn render_pane_row(
     errdefer renderer.deinit();
 
     if (layout.left) {
-        try append_scrollbar_segment(&renderer, wp, row, @min(sx, extra), true, layout);
-        if (sx > extra) try append_text_cells(&renderer, gd, row, sx - extra);
+        const scrollbar_width = overlap_width(start_col, sx, 0, extra);
+        if (scrollbar_width != 0)
+            try append_scrollbar_segment_range(&renderer, wp, row, start_col, scrollbar_width, true, layout);
+
+        const text_start = @max(start_col, extra) - extra;
+        const text_width = overlap_width(start_col, sx, extra, wp.sx);
+        if (text_width != 0)
+            try append_text_cells_range(&renderer, gd, row, text_start, text_width);
     } else {
-        const text_width = if (sx > extra) sx - extra else 0;
-        if (text_width != 0) try append_text_cells(&renderer, gd, row, text_width);
-        if (sx > text_width) try append_scrollbar_segment(&renderer, wp, row, sx - text_width, false, layout);
+        const text_width = overlap_width(start_col, sx, 0, wp.sx);
+        if (text_width != 0)
+            try append_text_cells_range(&renderer, gd, row, start_col, text_width);
+
+        const scrollbar_start = @max(start_col, wp.sx) - wp.sx;
+        const scrollbar_width = overlap_width(start_col, sx, wp.sx, extra);
+        if (scrollbar_width != 0)
+            try append_scrollbar_segment_range(&renderer, wp, row, scrollbar_start, scrollbar_width, false, layout);
     }
 
     return renderer.finish();
 }
 
 fn render_text_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
+    return render_text_row_region(gd, row, 0, sx);
+}
+
+fn render_text_row_region(gd: *T.Grid, row: u32, start_col: u32, sx: u32) ![]u8 {
     var renderer = RowRenderer{};
     errdefer renderer.deinit();
-    try append_text_cells(&renderer, gd, row, sx);
+    try append_text_cells_range(&renderer, gd, row, start_col, sx);
     return renderer.finish();
 }
 
 fn append_text_cells(renderer: *RowRenderer, gd: *T.Grid, row: u32, sx: u32) !void {
-    for (0..sx) |col_idx| {
+    try append_text_cells_range(renderer, gd, row, 0, sx);
+}
+
+fn append_text_cells_range(renderer: *RowRenderer, gd: *T.Grid, row: u32, start_col: u32, sx: u32) !void {
+    for (0..sx) |idx| {
+        const col_idx = start_col + @as(u32, @intCast(idx));
         var cell: T.GridCell = undefined;
         grid_mod.get_cell(gd, row, @intCast(col_idx), &cell);
         if (cell.isPadding()) continue;
@@ -425,6 +543,18 @@ fn append_scrollbar_segment(
     left: bool,
     layout: window_mod.ScrollbarLayout,
 ) !void {
+    try append_scrollbar_segment_range(renderer, wp, row, 0, count, left, layout);
+}
+
+fn append_scrollbar_segment_range(
+    renderer: *RowRenderer,
+    wp: *T.WindowPane,
+    row: u32,
+    start: u32,
+    count: u32,
+    left: bool,
+    layout: window_mod.ScrollbarLayout,
+) !void {
     var gc = wp.scrollbar_style.gc;
     var slider_gc = gc;
     slider_gc.fg = gc.bg;
@@ -432,7 +562,8 @@ fn append_scrollbar_segment(
 
     var idx: u32 = 0;
     while (idx < count) : (idx += 1) {
-        const is_pad = if (left) idx >= layout.width else idx < layout.pad;
+        const segment_idx = start + idx;
+        const is_pad = if (left) segment_idx >= layout.width else segment_idx < layout.pad;
         if (is_pad) {
             try renderer.appendCell(&T.grid_default_cell);
             continue;
@@ -454,10 +585,57 @@ fn render_scrollbar_row(
     left: bool,
     layout: window_mod.ScrollbarLayout,
 ) ![]u8 {
+    return render_scrollbar_row_region(wp, row, 0, sx, left, layout);
+}
+
+fn render_scrollbar_row_region(
+    wp: *T.WindowPane,
+    row: u32,
+    start_col: u32,
+    sx: u32,
+    left: bool,
+    layout: window_mod.ScrollbarLayout,
+) ![]u8 {
     var renderer = RowRenderer{};
     errdefer renderer.deinit();
-    try append_scrollbar_segment(&renderer, wp, row, sx, left, layout);
+    try append_scrollbar_segment_range(&renderer, wp, row, start_col, sx, left, layout);
     return renderer.finish();
+}
+
+const RegionIntersection = struct {
+    start_x: u32,
+    start_y: u32,
+    width: u32,
+    height: u32,
+};
+
+fn intersect_region(
+    rect_x: u32,
+    rect_y: u32,
+    rect_w: u32,
+    rect_h: u32,
+    view_x: u32,
+    view_y: u32,
+    view_w: u32,
+    view_h: u32,
+) ?RegionIntersection {
+    const start_x = @max(rect_x, view_x);
+    const start_y = @max(rect_y, view_y);
+    const end_x = @min(rect_x + rect_w, view_x + view_w);
+    const end_y = @min(rect_y + rect_h, view_y + view_h);
+    if (start_x >= end_x or start_y >= end_y) return null;
+    return .{
+        .start_x = start_x,
+        .start_y = start_y,
+        .width = end_x - start_x,
+        .height = end_y - start_y,
+    };
+}
+
+fn overlap_width(start_col: u32, width: u32, seg_start: u32, seg_width: u32) u32 {
+    const start = @max(start_col, seg_start);
+    const end = @min(start_col + width, seg_start + seg_width);
+    return if (start >= end) 0 else end - start;
 }
 
 fn style_of(cell: T.GridCell) CellStyle {

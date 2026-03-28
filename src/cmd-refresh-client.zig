@@ -13,6 +13,7 @@ const cmdq = @import("cmd-queue.zig");
 const server = @import("server.zig");
 const server_client_mod = @import("server-client.zig");
 const tty_mod = @import("tty.zig");
+const window_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -21,17 +22,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     };
 
+    if (args.has('c') or args.has('L') or args.has('R') or args.has('U') or args.has('D'))
+        return execPanCommand(args, target_client, item);
+
     if (unsupportedFlag(args, 'A', item) or
         unsupportedFlag(args, 'B', item) or
-        unsupportedFlag(args, 'c', item) or
-        unsupportedFlag(args, 'D', item) or
         unsupportedFlag(args, 'f', item) or
         unsupportedFlag(args, 'F', item) or
         unsupportedFlag(args, 'l', item) or
-        unsupportedFlag(args, 'L', item) or
         unsupportedFlag(args, 'r', item) or
-        unsupportedFlag(args, 'R', item) or
-        unsupportedFlag(args, 'U', item))
+        false)
     {
         return .@"error";
     }
@@ -65,10 +65,96 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     return .normal;
 }
 
+fn execPanCommand(args: *const args_mod.Arguments, target_client: *T.Client, item: *cmdq.CmdqItem) T.CmdRetval {
+    const adjust = parseAdjustment(args, item) orelse return .@"error";
+
+    if (args.has('c')) {
+        target_client.pan_window = null;
+        target_client.pan_ox = 0;
+        target_client.pan_oy = 0;
+        server_client_mod.server_client_force_redraw(target_client);
+        return .normal;
+    }
+
+    const session = target_client.session orelse {
+        cmdq.cmdq_error(item, "no current session", .{});
+        return .@"error";
+    };
+    const wl = session.curw orelse {
+        cmdq.cmdq_error(item, "no current window", .{});
+        return .@"error";
+    };
+
+    const viewport = server_client_mod.server_client_viewport(target_client) orelse {
+        cmdq.cmdq_error(item, "no current window", .{});
+        return .@"error";
+    };
+    const window = wl.window;
+
+    if (target_client.pan_window != window) {
+        target_client.pan_window = window;
+        target_client.pan_ox = viewport.x;
+        target_client.pan_oy = viewport.y;
+    }
+
+    if (args.has('L')) {
+        target_client.pan_ox = target_client.pan_ox -| adjust;
+    } else if (args.has('R')) {
+        const max_x = windowVisibleWidth(window) -| viewport.sx;
+        target_client.pan_ox = @min(target_client.pan_ox + adjust, max_x);
+    } else if (args.has('U')) {
+        target_client.pan_oy = target_client.pan_oy -| adjust;
+    } else if (args.has('D')) {
+        const max_y = windowVisibleHeight(window) -| viewport.sy;
+        target_client.pan_oy = @min(target_client.pan_oy + adjust, max_y);
+    }
+
+    server_client_mod.server_client_force_redraw(target_client);
+    return .normal;
+}
+
 fn unsupportedFlag(args: *const args_mod.Arguments, flag: u8, item: *cmdq.CmdqItem) bool {
     if (!args.has(flag)) return false;
     cmdq.cmdq_error(item, "refresh-client -{c} is not supported yet", .{flag});
     return true;
+}
+
+fn parseAdjustment(args: *const args_mod.Arguments, item: *cmdq.CmdqItem) ?u32 {
+    if (args.count() == 0) return 1;
+    const raw = args.value_at(0) orelse return 1;
+    const parsed = std.fmt.parseInt(u32, raw, 10) catch |err| {
+        const reason = switch (err) {
+            error.InvalidCharacter => "invalid",
+            error.Overflow => "too large",
+        };
+        cmdq.cmdq_error(item, "adjustment {s}", .{reason});
+        return null;
+    };
+    if (parsed == 0) {
+        cmdq.cmdq_error(item, "adjustment too small", .{});
+        return null;
+    }
+    return parsed;
+}
+
+fn windowVisibleWidth(w: *T.Window) u32 {
+    var width = w.sx;
+    for (w.panes.items) |pane| {
+        if (!window_mod.window_pane_visible(pane)) continue;
+        const bounds = window_mod.window_pane_draw_bounds(pane);
+        width = @max(width, bounds.xoff + bounds.sx);
+    }
+    return width;
+}
+
+fn windowVisibleHeight(w: *T.Window) u32 {
+    var height = w.sy;
+    for (w.panes.items) |pane| {
+        if (!window_mod.window_pane_visible(pane)) continue;
+        const bounds = window_mod.window_pane_draw_bounds(pane);
+        height = @max(height, bounds.yoff + bounds.sy);
+    }
+    return height;
 }
 
 const ControlSize = struct {
@@ -245,4 +331,83 @@ test "refresh-client rejects unsupported panes and non-control size requests" {
     defer cmd_mod.cmd_free(resize);
     var resize_item = cmdq.CmdqItem{ .target_client = &target_client };
     try std.testing.expectEqual(T.CmdRetval.@"error", exec(resize, &resize_item));
+}
+
+test "refresh-client pan commands update and clear the target client viewport" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const session_mod = @import("session.zig");
+    const xm = @import("xmalloc.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    const session = session_mod.session_create(null, "refresh-pan", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (session_mod.session_find("refresh-pan") != null) session_mod.session_destroy(session, false, "test");
+
+    const window = window_mod.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    const wl = session_mod.session_attach(session, window, 0, &attach_cause) orelse unreachable;
+    session.curw = wl;
+
+    const left = window_mod.window_add_pane(window, null, 3, 2);
+    const right = window_mod.window_add_pane(window, null, 3, 2);
+    left.xoff = 0;
+    right.xoff = 3;
+    window.active = right;
+
+    var queue_env = T.Environ.init(std.testing.allocator);
+    defer queue_env.deinit();
+    var target_env = T.Environ.init(std.testing.allocator);
+    defer target_env.deinit();
+
+    var queue_client = T.Client{
+        .name = "queue",
+        .environ = &queue_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    queue_client.tty.client = &queue_client;
+
+    var target_client = T.Client{
+        .name = "target",
+        .environ = &target_env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
+        .session = session,
+    };
+    target_client.tty.client = &target_client;
+    tty_mod.tty_set_size(&target_client.tty, 3, 2, 0, 0);
+
+    var cause: ?[]u8 = null;
+    const pan_right = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-R" }, null, &cause);
+    defer cmd_mod.cmd_free(pan_right);
+
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(pan_right, &item));
+    try std.testing.expect(target_client.pan_window == window);
+    try std.testing.expectEqual(@as(u32, 3), target_client.pan_ox);
+    try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
+
+    target_client.flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF;
+    const clear_pan = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-c" }, null, &cause);
+    defer cmd_mod.cmd_free(clear_pan);
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(clear_pan, &item));
+    try std.testing.expect(target_client.pan_window == null);
+    try std.testing.expectEqual(@as(u32, 0), target_client.pan_ox);
+    try std.testing.expectEqual(@as(u32, 0), target_client.pan_oy);
+    try std.testing.expect(target_client.flags & T.CLIENT_REDRAW != 0);
 }

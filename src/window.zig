@@ -816,6 +816,21 @@ pub fn window_pane_synchronize_key_bytes(wp: *T.WindowPane, key: T.key_code, byt
     }
 }
 
+pub fn window_zoom(wp: *T.WindowPane) bool {
+    const w = wp.window;
+    if (w.flags & T.WINDOW_ZOOMED != 0) return false;
+    if (window_count_panes(w) <= 1) return false;
+    if (w.active != wp) _ = window_set_active_pane(w, wp, true);
+    w.flags |= T.WINDOW_ZOOMED;
+    return true;
+}
+
+pub fn window_unzoom(w: *T.Window) bool {
+    if (w.flags & T.WINDOW_ZOOMED == 0) return false;
+    w.flags &= ~@as(u32, T.WINDOW_ZOOMED);
+    return true;
+}
+
 /// Push current zoom state.
 pub fn window_push_zoom(w: *T.Window, always: bool, zoom: bool) bool {
     if (zoom and (always or (w.flags & T.WINDOW_ZOOMED != 0)))
@@ -823,17 +838,16 @@ pub fn window_push_zoom(w: *T.Window, always: bool, zoom: bool) bool {
     else
         w.flags &= ~@as(u32, T.WINDOW_WASZOOMED);
 
-    if (w.flags & T.WINDOW_ZOOMED == 0) return false;
-    w.flags &= ~@as(u32, T.WINDOW_ZOOMED);
-    return true;
+    return window_unzoom(w);
 }
 
 /// Pop zoom state.
 pub fn window_pop_zoom(w: *T.Window) bool {
     if (w.flags & T.WINDOW_WASZOOMED == 0) return false;
     w.flags &= ~@as(u32, T.WINDOW_WASZOOMED);
-    w.flags |= T.WINDOW_ZOOMED;
-    return true;
+
+    const active = w.active orelse return false;
+    return window_zoom(active);
 }
 
 pub fn window_redraw_active_switch(_w: *T.Window, _wp: *T.WindowPane) void {
@@ -1149,6 +1163,42 @@ test "window_rotate_panes rotates order and active pane" {
     try std.testing.expectEqual(second, w.panes.items[1]);
     try std.testing.expectEqual(third, w.panes.items[2]);
     try std.testing.expectEqual(second, w.active.?);
+}
+
+test "window_zoom switches to the target pane and window_unzoom clears the reduced flag" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window_init_globals(xm.allocator);
+
+    const w = window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const first = window_add_pane(w, null, 80, 24);
+    const second = window_add_pane(w, null, 80, 24);
+
+    try std.testing.expectEqual(first, w.active.?);
+    try std.testing.expect(window_zoom(second));
+    try std.testing.expectEqual(second, w.active.?);
+    try std.testing.expect(w.flags & T.WINDOW_ZOOMED != 0);
+    try std.testing.expect(!window_pane_visible(first));
+    try std.testing.expect(window_pane_visible(second));
+
+    try std.testing.expect(window_unzoom(w));
+    try std.testing.expectEqual(@as(u32, 0), w.flags & T.WINDOW_ZOOMED);
+    try std.testing.expect(window_pane_visible(first));
+    try std.testing.expect(window_pane_visible(second));
 }
 
 test "window_plan_split computes reduced split geometry for horizontal and before splits" {

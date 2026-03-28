@@ -184,6 +184,7 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
         },
         .input_pending = .{},
     };
+    screen_mod.screen_reset_tabs(&wp.base);
     screen_mod.screen_reset_hyperlinks(&wp.base);
     window_pane_options_changed(wp, null);
     next_window_pane_id += 1;
@@ -532,6 +533,8 @@ pub fn window_pane_pop_mode(wp: *T.WindowPane, wme: *T.WindowModeEntry) bool {
     for (wp.modes.items, 0..) |current, idx| {
         if (current != wme) continue;
         _ = wp.modes.orderedRemove(idx);
+        if (wp.modes.items.len == 0)
+            wp.flags &= ~T.PANE_UNSEENCHANGES;
         xm.allocator.destroy(wme);
         return true;
     }

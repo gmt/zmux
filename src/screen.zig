@@ -34,6 +34,7 @@ pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
         .mode = T.MODE_CURSOR | T.MODE_WRAP,
         .rlower = if (sy == 0) 0 else sy - 1,
     };
+    screen_reset_tabs(s);
     screen_reset_hyperlinks(s);
     return s;
 }
@@ -59,6 +60,7 @@ pub fn screen_reset(s: *T.Screen) void {
     s.saved_cx = 0;
     s.saved_cy = 0;
     s.saved_grid = null;
+    screen_reset_tabs(s);
     screen_reset_hyperlinks(s);
 }
 
@@ -80,6 +82,7 @@ pub fn screen_reset_active(s: *T.Screen) void {
     s.mode = T.MODE_CURSOR | T.MODE_WRAP;
     s.cursor_visible = true;
     s.bracketed_paste = false;
+    screen_reset_tabs(s);
     screen_reset_hyperlinks(s);
 }
 
@@ -93,6 +96,56 @@ pub fn screen_reset_hyperlinks(s: *T.Screen) void {
 
 pub fn screen_current(wp: *T.WindowPane) *T.Screen {
     return if (screen_alternate_active(wp)) wp.screen else &wp.base;
+}
+
+pub fn screen_reset_tabs(s: *T.Screen) void {
+    if (s.tabs) |old| xm.allocator.free(old);
+
+    const tab_bytes = (s.grid.sx + 7) / 8;
+    const tabs = xm.allocator.alloc(u8, tab_bytes) catch unreachable;
+    @memset(tabs, 0);
+    s.tabs = tabs;
+
+    var x: u32 = 8;
+    while (x < s.grid.sx) : (x += 8) {
+        screen_set_tab(s, x);
+    }
+}
+
+pub fn screen_set_tab(s: *T.Screen, x: u32) void {
+    const tabs = s.tabs orelse return;
+    const byte_index: usize = @intCast(x / 8);
+    if (byte_index >= tabs.len) return;
+    tabs[byte_index] |= @as(u8, 1) << @intCast(x % 8);
+}
+
+pub fn screen_clear_tab(s: *T.Screen, x: u32) void {
+    const tabs = s.tabs orelse return;
+    const byte_index: usize = @intCast(x / 8);
+    if (byte_index >= tabs.len) return;
+    tabs[byte_index] &= ~(@as(u8, 1) << @intCast(x % 8));
+}
+
+pub fn screen_clear_all_tabs(s: *T.Screen) void {
+    const tabs = s.tabs orelse return;
+    @memset(tabs, 0);
+}
+
+pub fn screen_has_tab(s: *const T.Screen, x: u32) bool {
+    const tabs = s.tabs orelse return x != 0 and x % 8 == 0;
+    const byte_index: usize = @intCast(x / 8);
+    if (byte_index >= tabs.len) return false;
+    return (tabs[byte_index] & (@as(u8, 1) << @intCast(x % 8))) != 0;
+}
+
+pub fn screen_next_tabstop(s: *const T.Screen) u32 {
+    if (s.grid.sx == 0) return 0;
+
+    var x = s.cx + 1;
+    while (x < s.grid.sx) : (x += 1) {
+        if (screen_has_tab(s, x)) return x;
+    }
+    return s.grid.sx;
 }
 
 pub fn screen_alternate_active(wp: *T.WindowPane) bool {

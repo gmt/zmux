@@ -38,7 +38,7 @@ const PrintMode = enum {
     notes_only,
 };
 
-const DEFAULT_TEMPLATE = "bind-key#{?key_has_repeat, -r,} -T #{p|#{key_table_width}|:#{key_table}} #{key_string}#{?key_command, #{key_command},}";
+const DEFAULT_TEMPLATE = "bind-key#{?key_has_repeat, -r,} -T #{p|#{key_table_width}|:#{key_table}} #{p|#{key_string_width}|:#{key_string}}#{?key_command, #{key_command},}";
 const DEFAULT_NOTES_TEMPLATE = "#{?key_prefix,#{key_prefix} ,}#{p|#{key_string_width}|:#{key_string}} #{?key_note,#{key_note},#{key_command}}";
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -338,27 +338,39 @@ test "list-keys command honors table selection single key and prefix override" {
     try std.testing.expectEqualStrings("ZZ C-b prefix-note", line);
 }
 
-test "list-keys default template pads table names to the filtered maximum width" {
+test "list-keys default template pads table and key columns to the filtered maximum width" {
     key_bindings.key_bindings_init();
-    key_bindings.key_bindings_add("short", T.KEYC_F1, "short note", false, null);
-    key_bindings.key_bindings_add("much-longer-table", T.KEYC_F2, "long note", false, null);
+    var cause: ?[]u8 = null;
 
-    const bindings = collect_bindings(null, false, true, null, .{ .order = .index, .reversed = false });
-    defer xm.allocator.free(bindings);
+    const short_cmd = try cmd_mod.cmd_parse_one(&.{ "bind-key", "-T", "short", "F1", "display-message", "short" }, null, &cause);
+    defer cmd_mod.cmd_free(short_cmd);
+    var short_list: cmd_mod.CmdList = .{};
+    var short_item = cmdq.CmdqItem{ .client = null, .cmdlist = &short_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(short_cmd, &short_item));
 
-    try std.testing.expectEqual(@as(u32, utf8.displayWidth("much-longer-table")), max_table_width(bindings));
+    const long_cmd = try cmd_mod.cmd_parse_one(&.{ "bind-key", "-T", "much-longer-table", "C-b", "display-message", "longer" }, null, &cause);
+    defer cmd_mod.cmd_free(long_cmd);
+    var long_list: cmd_mod.CmdList = .{};
+    var long_item = cmdq.CmdqItem{ .client = null, .cmdlist = &long_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(long_cmd, &long_item));
 
     const short_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("short", false).?, T.KEYC_F1).?;
+    const long_binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("much-longer-table", false).?, T.KEYC_CTRL | 'b').?;
+    const subset = [_]*T.KeyBinding{ short_binding, long_binding };
+
+    try std.testing.expectEqual(@as(u32, utf8.displayWidth("much-longer-table")), max_table_width(subset[0..]));
+    try std.testing.expectEqual(@as(u32, utf8.displayWidth("C-b")), max_key_width(subset[0..]));
+
     const rendered = render_binding_line(
         short_binding,
         DEFAULT_TEMPLATE,
         .normal,
         "",
-        max_key_width(bindings),
-        max_table_width(bindings),
+        max_key_width(subset[0..]),
+        max_table_width(subset[0..]),
     ).?;
     defer xm.allocator.free(rendered);
-    try std.testing.expectEqualStrings("bind-key -T short             F1", rendered);
+    try std.testing.expectEqualStrings("bind-key -T short             F1  display-message short", rendered);
 }
 
 test "list-keys -1 shows a single binding through the shared status runtime" {

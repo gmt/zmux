@@ -24,7 +24,10 @@ const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
+const paste_mod = @import("paste.zig");
 const screen_mod = @import("screen.zig");
+const tty_mod = @import("tty.zig");
+const xm = @import("xmalloc.zig");
 
 const FixedSequence = struct {
     key: T.key_code,
@@ -107,6 +110,12 @@ const MOUSE_PARAM_MAX: u32 = 0xff;
 const MOUSE_PARAM_UTF8_MAX: u32 = 0x7ff;
 const MOUSE_PARAM_BTN_OFF: u32 = 0x20;
 const MOUSE_PARAM_POS_OFF: u32 = 0x21;
+
+const OscParseResult = union(enum) {
+    consumed: usize,
+    partial,
+    no_match,
+};
 
 pub fn input_key_get(bytes: []const u8, event: *T.key_event) ?usize {
     return input_key_get_client(null, bytes, event);
@@ -222,6 +231,13 @@ pub fn input_key_mouse_pane(wp: *T.WindowPane, m: *const T.MouseEvent, buf: *[40
 
 fn parse_escape(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len == 1) return null;
+    if (bytes[1] == ']') {
+        switch (parse_osc(client, bytes, event)) {
+            .consumed => |consumed| return consumed,
+            .partial => return null,
+            .no_match => {},
+        }
+    }
     if (bytes[1] == '[') return parse_csi(client, bytes, event);
     if (bytes[1] == 'O') return parse_ss3(bytes, event);
 
@@ -235,6 +251,53 @@ fn parse_escape(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usi
     event.data[0] = 0x1b;
     @memcpy(event.data[1 .. 1 + inner.len], inner.data[0..inner.len]);
     return 1 + consumed;
+}
+
+fn parse_osc(client: ?*T.Client, bytes: []const u8, event: *T.key_event) OscParseResult {
+    if (bytes.len == 2) return .partial;
+    if (bytes[2] != '5') return .no_match;
+    if (bytes.len == 3) return .partial;
+    if (bytes[3] != '2') return .no_match;
+    if (bytes.len == 4) return .partial;
+    if (bytes[4] != ';') return .no_match;
+    if (bytes.len == 5) return .partial;
+
+    const terminator = find_osc_terminator(bytes[5..]) orelse return .partial;
+    return .{ .consumed = handle_osc_52_reply(client, bytes[5 .. 5 + terminator.payload_len], event, 5 + terminator.consumed) };
+}
+
+fn find_osc_terminator(bytes: []const u8) ?struct { payload_len: usize, consumed: usize } {
+    for (bytes, 0..) |ch, idx| {
+        if (ch == '\x07')
+            return .{ .payload_len = idx, .consumed = idx + 1 };
+        if (idx > 0 and bytes[idx - 1] == '\x1b' and ch == '\\')
+            return .{ .payload_len = idx - 1, .consumed = idx + 1 };
+    }
+    return null;
+}
+
+fn handle_osc_52_reply(client: ?*T.Client, payload: []const u8, event: *T.key_event, consumed: usize) usize {
+    const separator = std.mem.indexOfScalar(u8, payload, ';') orelse return ignore_event(event, consumed);
+    if (separator + 1 >= payload.len) return ignore_event(event, consumed);
+
+    const encoded = payload[separator + 1 ..];
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return ignore_event(event, consumed);
+    if (decoded_len == 0) return ignore_event(event, consumed);
+
+    const decoded = xm.allocator.alloc(u8, decoded_len) catch unreachable;
+    errdefer xm.allocator.free(decoded);
+    std.base64.standard.Decoder.decode(decoded, encoded) catch return ignore_event(event, consumed);
+
+    if (client) |cl| {
+        if ((cl.tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) != 0) {
+            paste_mod.paste_add(null, decoded);
+            tty_mod.tty_finish_clipboard_query(&cl.tty);
+            return ignore_event(event, consumed);
+        }
+    }
+
+    xm.allocator.free(decoded);
+    return ignore_event(event, consumed);
 }
 
 fn parse_plain(bytes: []const u8, event: *T.key_event) ?usize {
@@ -935,6 +998,85 @@ test "input_key_get keeps tmux tty focus, paste, and theme report prefixes parti
     try std.testing.expect(input_key_get("\x1b[?997;1", &event) == null);
 }
 
+test "input_key_get_client consumes OSC 52 query replies into the paste buffer" {
+    paste_mod.paste_reset_for_tests();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var env = T.Environ.init(std.testing.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_mod.tty_init(&client.tty, &client);
+    client.tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
+
+    var event: T.key_event = .{};
+    const reply = "\x1b]52;c;aGVsbG8=\x07";
+    try std.testing.expectEqual(reply.len, input_key_get_client(&client, reply, &event).?);
+    try std.testing.expectEqual(@as(T.key_code, T.KEYC_UNKNOWN), event.key);
+    try std.testing.expectEqual(@as(usize, 0), event.len);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) == 0);
+
+    const pb = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello", paste_mod.paste_buffer_data(pb, null));
+}
+
+test "input_key_get_client accepts ST terminated OSC 52 query replies" {
+    paste_mod.paste_reset_for_tests();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var env = T.Environ.init(std.testing.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_mod.tty_init(&client.tty, &client);
+    client.tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
+
+    var event: T.key_event = .{};
+    const reply = "\x1b]52;c;d29ybGQ=\x1b\\";
+    try std.testing.expectEqual(reply.len, input_key_get_client(&client, reply, &event).?);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) == 0);
+
+    const pb = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("world", paste_mod.paste_buffer_data(pb, null));
+}
+
+test "input_key_get_client keeps OSC 52 reply prefixes partial and discards unsolicited replies" {
+    paste_mod.paste_reset_for_tests();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var env = T.Environ.init(std.testing.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_mod.tty_init(&client.tty, &client);
+
+    var event: T.key_event = .{};
+    try std.testing.expect(input_key_get_client(&client, "\x1b]", &event) == null);
+    try std.testing.expect(input_key_get_client(&client, "\x1b]52;c;aGVsbG8=\x1b", &event) == null);
+
+    const reply = "\x1b]52;c;aGVsbG8=\x07";
+    try std.testing.expectEqual(reply.len, input_key_get_client(&client, reply, &event).?);
+    try std.testing.expect(paste_mod.paste_get_top(null) == null);
+}
+
 test "input_key_get_client decodes mouse sequences and tracks the previous state" {
     const env_mod = @import("environ.zig");
 
@@ -1055,7 +1197,6 @@ test "input_key_encode_screen ports backspace and extended-key options" {
 
 test "input_key_mouse_pane encodes SGR mouse bytes with pane-relative coordinates" {
     const win = @import("window.zig");
-    const xm = @import("xmalloc.zig");
 
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);

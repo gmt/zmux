@@ -64,10 +64,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "invalid sort order", .{});
         return .@"error";
     }
-    if (!order_supported(requested_order) and requested_order != .end) {
-        cmdq.cmdq_error(item, "invalid sort order", .{});
-        return .@"error";
-    }
 
     const table = if (args.get('T')) |name|
         key_bindings.key_bindings_get_table(name, false) orelse {
@@ -210,13 +206,6 @@ fn effective_sort_criteria(sort_crit: T.SortCriteria) T.SortCriteria {
     };
 }
 
-fn order_supported(order: T.SortOrder) bool {
-    return switch (order) {
-        .index, .modifier, .name, .order, .end => true,
-        else => false,
-    };
-}
-
 fn normalize_key(key: T.key_code) T.key_code {
     return key & (T.KEYC_MASK_KEY | T.KEYC_MASK_MODIFIERS);
 }
@@ -262,23 +251,62 @@ test "list-keys renders binding command and notes views" {
     try std.testing.expectEqualStrings("C-b C-b repeat me", notes);
 }
 
-test "list-keys command supports format and rejects unsupported sort order" {
+test "list-keys command supports format accepts shared sort orders and rejects invalid sort order" {
+    const env_mod = @import("environ.zig");
+    const server = @import("server.zig");
+
     key_bindings.key_bindings_init();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
     opts.global_s_options = opts.options_create(null);
     defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    server.server_reset_message_log();
+    defer server.server_reset_message_log();
     key_bindings.key_bindings_add("root", T.KEYC_F1, "Display help", false, null);
+    key_bindings.key_bindings_add("unit-list-keys-sort", T.KEYC_F1, null, false, null);
+    key_bindings.key_bindings_add("unit-list-keys-sort", T.KEYC_CTRL | 'b', null, false, null);
 
     const binding = key_bindings.key_bindings_get(key_bindings.key_bindings_get_table("root", false).?, T.KEYC_F1).?;
     const rendered = render_binding_line(binding, "#{key_string}", .normal, "", 0).?;
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("F1", rendered);
 
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty.client = &client;
+
+    inline for (&[_][]const u8{ "activity", "creation", "size" }) |order| {
+        var cause: ?[]u8 = null;
+        const order_cmd = try cmd_mod.cmd_parse_one(
+            &.{ "list-keys", "-O", order, "-T", "unit-list-keys-sort", "-P", "", "F1" },
+            null,
+            &cause,
+        );
+        defer cmd_mod.cmd_free(order_cmd);
+        var list: cmd_mod.CmdList = .{};
+        var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+        try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(order_cmd, &item));
+        try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
+        try std.testing.expectEqualStrings("message: bind-key -T unit-list-keys-sort F1", server.message_log.items[0].msg);
+        server.server_reset_message_log();
+    }
+
     var cause: ?[]u8 = null;
-    const order_cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-O", "size" }, null, &cause);
+    const order_cmd = try cmd_mod.cmd_parse_one(&.{ "list-keys", "-O", "mystery" }, null, &cause);
     defer cmd_mod.cmd_free(order_cmd);
     var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(order_cmd, &item));
 }
 

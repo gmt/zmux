@@ -12,9 +12,13 @@ const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
+const key_bindings = @import("key-bindings.zig");
 const sess = @import("session.zig");
+const env_mod = @import("environ.zig");
+const opts = @import("options.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
+const status_runtime = @import("status-runtime.zig");
 const win_mod = @import("window.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -98,6 +102,15 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const wl = target.wl;
     const wp = target.wp;
 
+    if (args.get('T')) |tablename| {
+        const table = key_bindings.key_bindings_get_table(tablename, false) orelse {
+            cmdq.cmdq_error(item, "table {s} doesn't exist", .{tablename});
+            return .@"error";
+        };
+        if (cl) |c| server_client_mod.server_client_set_key_table(c, table.name);
+        return .normal;
+    }
+
     // Switch pane if pane was specified
     if (wl != null and wp != null) {
         const w = wl.?.window;
@@ -126,3 +139,116 @@ pub const entry: cmd_mod.CmdEntry = .{
     .flags = T.CMD_READONLY | T.CMD_CLIENT_CFLAG,
     .exec = exec,
 };
+
+fn switchClientTestInit() void {
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.global_s_options = opts.options_create(null);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    key_bindings.key_bindings_init();
+}
+
+fn switchClientTestFinish() void {
+    env_mod.environ_free(env_mod.global_environ);
+    opts.options_free(opts.global_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_w_options);
+}
+
+fn switchClientTestMakeSession(name: []const u8) struct {
+    session: *T.Session,
+    window: *T.Window,
+} {
+    const s = sess.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, -1, &cause).?;
+    const wp = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    s.curw = wl;
+    return .{ .session = s, .window = w };
+}
+
+fn switchClientTestFreeSession(setup: *@TypeOf(switchClientTestMakeSession("unused"))) void {
+    if (sess.session_find(setup.session.name) != null) sess.session_destroy(setup.session, false, "test");
+    win_mod.window_remove_ref(setup.window, "test");
+}
+
+fn switchClientTestMakeClient(name: []const u8, session: ?*T.Session) T.Client {
+    var client = T.Client{
+        .name = xm.xstrdup(name),
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = if (session != null) T.CLIENT_ATTACHED else 0,
+        .session = session,
+    };
+    client.tty.client = &client;
+    if (session) |s| s.attached += 1;
+    return client;
+}
+
+fn switchClientTestFreeClient(client: *T.Client) void {
+    status_runtime.status_message_clear(client);
+    status_runtime.status_cleanup(client);
+    if (client.session) |s| {
+        if (s.attached > 0) s.attached -= 1;
+    }
+    env_mod.environ_free(client.environ);
+    if (client.name) |name| xm.allocator.free(@constCast(name));
+    if (client.key_table_name) |name| xm.allocator.free(name);
+}
+
+test "switch-client -T selects an existing key table" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-table");
+    defer switchClientTestFreeSession(&setup);
+
+    var client = switchClientTestMakeClient("switch-client-table-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+
+    _ = key_bindings.key_bindings_get_table("copy-mode-test", true);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-T", "copy-mode-test" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("copy-mode-test", client.key_table_name.?);
+    try std.testing.expect(client.session == setup.session);
+}
+
+test "switch-client -T rejects a missing key table" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-missing-table");
+    defer switchClientTestFreeSession(&setup);
+
+    var client = switchClientTestMakeClient("switch-client-missing-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+    client.key_table_name = xm.xstrdup("prefix");
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-T", "no-such-table" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("prefix", client.key_table_name.?);
+    try std.testing.expect(client.session == setup.session);
+}

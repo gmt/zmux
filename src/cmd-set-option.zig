@@ -954,6 +954,90 @@ test "set-window-option exact matches win over longer prefixed names" {
     );
 }
 
+test "set-option accepts tty compatibility options across scopes" {
+    const sess = @import("session.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "set-option-tty-compat", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(session, false, "test");
+
+    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, 0, &attach_cause).?;
+    session.curw = wl;
+    const pane = win.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+
+    const pane_target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{pane.id});
+    defer xm.allocator.free(pane_target);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var state = cmdq.CmdqState{
+        .current = .{
+            .s = session,
+            .wl = wl,
+            .idx = wl.idx,
+            .w = window,
+            .wp = pane,
+        },
+    };
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list, .state = &state };
+
+    const set_get_clipboard = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "get-clipboard", "both" }, null, &cause);
+    defer cmd_mod.cmd_free(set_get_clipboard);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_get_clipboard, &item));
+    try std.testing.expectEqual(@as(i64, 3), opts.options_get_number(opts.global_options, "get-clipboard"));
+
+    const set_input_buffer_size = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "input-buffer-size", "1048576" }, null, &cause);
+    defer cmd_mod.cmd_free(set_input_buffer_size);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_input_buffer_size, &item));
+    try std.testing.expectEqual(@as(i64, 1048576), opts.options_get_number(opts.global_options, "input-buffer-size"));
+
+    const set_prefix_timeout = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "prefix-timeout", "123" }, null, &cause);
+    defer cmd_mod.cmd_free(set_prefix_timeout);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_prefix_timeout, &item));
+    try std.testing.expectEqual(@as(i64, 123), opts.options_get_number(opts.global_options, "prefix-timeout"));
+
+    const set_initial_repeat_time = try cmd_mod.cmd_parse_one(&.{ "set-option", "initial-repeat-time", "250" }, null, &cause);
+    defer cmd_mod.cmd_free(set_initial_repeat_time);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_initial_repeat_time, &item));
+    try std.testing.expectEqual(@as(i64, 250), opts.options_get_number(session.options, "initial-repeat-time"));
+
+    const set_allow_set_title = try cmd_mod.cmd_parse_one(&.{ "set-window-option", "allow-set-title", "off" }, null, &cause);
+    defer cmd_mod.cmd_free(set_allow_set_title);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_allow_set_title, &item));
+    try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(window.options, "allow-set-title"));
+
+    const set_cursor_style = try cmd_mod.cmd_parse_one(&.{ "set-option", "-p", "-t", pane_target, "cursor-style", "blinking-bar" }, null, &cause);
+    defer cmd_mod.cmd_free(set_cursor_style);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_cursor_style, &item));
+    try std.testing.expectEqual(@as(i64, 5), opts.options_get_number(pane.options, "cursor-style"));
+
+    const set_xterm_keys = try cmd_mod.cmd_parse_one(&.{ "set-window-option", "-g", "xterm-keys", "off" }, null, &cause);
+    defer cmd_mod.cmd_free(set_xterm_keys);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_xterm_keys, &item));
+    try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(opts.global_w_options, "xterm-keys"));
+}
+
 test "set-window-option marks active panes changed when automatic rename is enabled globally" {
     const sess = @import("session.zig");
     const env_mod = @import("environ.zig");

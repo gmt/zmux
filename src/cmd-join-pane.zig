@@ -20,26 +20,16 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
+const xm = @import("xmalloc.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
-    if (args.has('f')) {
-        cmdq.cmdq_error(item, "-f not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('h') or args.has('v')) {
-        cmdq.cmdq_error(item, "join-pane layout selection not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('l') or args.has('p')) {
-        cmdq.cmdq_error(item, "join-pane sizing not supported yet", .{});
-        return .@"error";
-    }
 
     var source: T.CmdFindState = .{};
     if (cmd_find.cmd_find_target(&source, item, args.get('s'), .pane, 0) != 0)
@@ -62,13 +52,45 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
+    const type_: T.LayoutType = if (args.has('h')) .leftright else .topbottom;
+    var size_cause: ?[]u8 = null;
+    defer if (size_cause) |msg| xm.allocator.free(msg);
+    const size = parse_join_size(args, dst_w, dst_wp, type_, &size_cause);
+    if (size_cause != null) {
+        cmdq.cmdq_error(item, "size {s}", .{size_cause.?});
+        return .@"error";
+    }
+
+    var spawn_flags: u32 = 0;
+    if (args.has('b')) spawn_flags |= T.SPAWN_BEFORE;
+    if (args.has('f')) spawn_flags |= T.SPAWN_FULLSIZE;
+
+    const plan = win.window_plan_split(dst_wp, type_, size, spawn_flags) catch |err| switch (err) {
+        error.FullSizeNeedsLayout => {
+            cmdq.cmdq_error(item, "full-size split still needs layout support", .{});
+            return .@"error";
+        },
+        error.NoSpace => {
+            cmdq.cmdq_error(item, "create pane failed: pane too small", .{});
+            return .@"error";
+        },
+    };
+
     const source_was_last = win.window_count_panes(src_w) == 1;
     _ = win.window_detach_pane(src_w, src_wp);
     win.window_adopt_pane_before(dst_w, src_wp, insertion_anchor(dst_w, dst_wp, args.has('b')));
+    win.window_apply_split_plan(dst_wp, src_wp, plan);
 
     if (!args.has('d')) {
         _ = win.window_set_active_pane(dst_w, src_wp, true);
         dst_s.curw = dst_wl;
+        var current = cmdq.cmdq_get_current(item);
+        current.s = dst_s;
+        current.wl = dst_wl;
+        current.w = dst_w;
+        current.wp = src_wp;
+        current.idx = dst_wl.idx;
+        item.state.current = current;
     }
 
     if (source_was_last) {
@@ -81,6 +103,43 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     server_fn.server_status_window(dst_w);
     server_fn.server_redraw_session(dst_s);
     return .normal;
+}
+
+fn parse_join_size(
+    args: *const args_mod.Arguments,
+    w: *T.Window,
+    wp: *T.WindowPane,
+    type_: T.LayoutType,
+    cause: *?[]u8,
+) i32 {
+    const curval: i64 = blk: {
+        if (!(args.has('l') or args.has('p')))
+            break :blk 0;
+        if (args.has('f')) {
+            break :blk switch (type_) {
+                .leftright => w.sx,
+                .topbottom => w.sy,
+                else => 0,
+            };
+        }
+        break :blk switch (type_) {
+            .leftright => wp.sx,
+            .topbottom => wp.sy,
+            else => 0,
+        };
+    };
+
+    if (args.has('l'))
+        return @intCast(args_mod.args_percentage(args, 'l', 0, std.math.maxInt(i32), curval, cause));
+
+    if (args.has('p')) {
+        const pct = args_mod.args_strtonum(args, 'p', 0, 100, cause);
+        if (cause.* != null) return -1;
+        return @intCast(@divTrunc(curval * pct, 100));
+    }
+
+    cause.* = null;
+    return -1;
 }
 
 fn insertion_anchor(w: *T.Window, target: *T.WindowPane, before: bool) ?*T.WindowPane {
@@ -170,7 +229,6 @@ test "move-pane removes the source window when its last pane moves out" {
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
-    const xm = @import("xmalloc.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -218,7 +276,6 @@ test "join-pane -b inserts before the destination and -d preserves current pane"
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
-    const xm = @import("xmalloc.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -266,11 +323,131 @@ test "join-pane -b inserts before the destination and -d preserves current pane"
     try std.testing.expectEqual(dst_second, dst_wl.window.active.?);
 }
 
-test "join-pane rejects unsupported sizing flags" {
+test "join-pane applies horizontal sizing flags and closes the source gap" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const xm_local = @import("xmalloc.zig");
+
+    sess.session_init_globals(xm_local.allocator);
+    win.window_init_globals(xm_local.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "join-size", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("join-size") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    const src_first = src_wl.window.active.?;
+    var src_second_ctx: T.SpawnContext = .{ .s = s, .wl = src_wl, .flags = T.SPAWN_EMPTY };
+    const moved = spawn.spawn_pane(&src_second_ctx, &cause).?;
+    const src_plan = try win.window_plan_split(src_first, .leftright, 25, 0);
+    win.window_apply_split_plan(src_first, moved, src_plan);
+
+    var dst_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl = spawn.spawn_window(&dst_ctx, &cause).?;
+    s.curw = src_wl;
+
+    const src_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{moved.id}) catch unreachable;
+    defer xm_local.allocator.free(src_target);
+    const dst_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{dst_wl.window.active.?.id}) catch unreachable;
+    defer xm_local.allocator.free(dst_target);
+
     var parse_cause: ?[]u8 = null;
-    const join_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-l", "10" }, null, &parse_cause);
+    const join_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-h", "-l", "25", "-s", src_target, "-t", dst_target }, null, &parse_cause);
     defer cmd_mod.cmd_free(join_cmd);
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(join_cmd, &item));
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(join_cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 1), src_wl.window.panes.items.len);
+    try std.testing.expectEqual(@as(u32, 80), src_first.sx);
+    try std.testing.expectEqual(@as(u32, 24), src_first.sy);
+    try std.testing.expectEqual(@as(usize, 2), dst_wl.window.panes.items.len);
+    try std.testing.expectEqual(@as(u32, 54), dst_wl.window.panes.items[0].sx);
+    try std.testing.expectEqual(@as(u32, 25), moved.sx);
+    try std.testing.expectEqual(@as(u32, 55), moved.xoff);
+}
+
+test "join-pane accepts reduced full-size sizing on a single-pane target and rejects it otherwise" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const xm_local = @import("xmalloc.zig");
+
+    sess.session_init_globals(xm_local.allocator);
+    win.window_init_globals(xm_local.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "join-fullsize", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("join-fullsize") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    const moved = src_wl.window.active.?;
+
+    var dst_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const dst_wl = spawn.spawn_window(&dst_ctx, &cause).?;
+
+    const src_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{moved.id}) catch unreachable;
+    defer xm_local.allocator.free(src_target);
+    const dst_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{dst_wl.window.active.?.id}) catch unreachable;
+    defer xm_local.allocator.free(dst_target);
+
+    var parse_cause: ?[]u8 = null;
+    const ok_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-f", "-s", src_target, "-t", dst_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(ok_cmd);
+    var ok_list: cmd_mod.CmdList = .{};
+    var ok_item = cmdq.CmdqItem{ .client = null, .cmdlist = &ok_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(ok_cmd, &ok_item));
+
+    const still_src = dst_wl.window.panes.items[0];
+    var extra_ctx: T.SpawnContext = .{ .s = s, .wl = dst_wl, .flags = T.SPAWN_EMPTY };
+    const extra = spawn.spawn_pane(&extra_ctx, &cause).?;
+    const dst_plan = try win.window_plan_split(still_src, .topbottom, -1, 0);
+    win.window_apply_split_plan(still_src, extra, dst_plan);
+
+    var second_src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const second_src_wl = spawn.spawn_window(&second_src_ctx, &cause).?;
+    const second_moved = second_src_wl.window.active.?;
+
+    const second_src_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{second_moved.id}) catch unreachable;
+    defer xm_local.allocator.free(second_src_target);
+    const same_dst_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{still_src.id}) catch unreachable;
+    defer xm_local.allocator.free(same_dst_target);
+
+    parse_cause = null;
+    const fail_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-f", "-s", second_src_target, "-t", same_dst_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(fail_cmd);
+    var fail_list: cmd_mod.CmdList = .{};
+    var fail_item = cmdq.CmdqItem{ .client = null, .cmdlist = &fail_list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(fail_cmd, &fail_item));
 }

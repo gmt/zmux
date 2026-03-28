@@ -279,7 +279,9 @@ pub fn notify_session_window(name: []const u8, s: *T.Session, w: *T.Window) void
 pub fn notify_window(name: []const u8, w: *T.Window) void {
     if (notificationsSuppressed()) return;
 
-    if (std.mem.eql(u8, name, "window-renamed"))
+    if (std.mem.eql(u8, name, "window-layout-changed"))
+        control_notify.control_notify_window_layout_changed(w)
+    else if (std.mem.eql(u8, name, "window-renamed"))
         control_notify.control_notify_window_renamed(w);
 
     var fs: T.CmdFindState = .{ .idx = -1 };
@@ -418,4 +420,106 @@ test "notify hooks from client queue run after the client tail" {
 
     try std.testing.expectEqual(@as(u32, 2), cmdq.cmdq_next(null));
     try std.testing.expectEqualStrings("hook", env_mod.environ_find(env_mod.global_environ, "ORDER").?.value.?);
+}
+
+test "notify_window emits %layout-change to matching control clients" {
+    const c = @import("c.zig");
+    const env_mod = @import("environ.zig");
+    const layout_mod = @import("layout.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const win = @import("window.zig");
+    const registry = @import("client-registry.zig");
+
+    const helpers = struct {
+        fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+    };
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "notify-layout-control", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(session, false, "test");
+    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const pane = win.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, -1, &cause).?;
+    session.curw = wl;
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    const dumped = layout_mod.dump_window(window).?;
+    defer xm.allocator.free(dumped);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "notify-layout-control-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = "layout-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], helpers.noopDispatch, null);
+    defer {
+        registry.remove(&client);
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+    registry.add(&client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    notify_window("window-layout-changed", window);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const expected = xm.xasprintf("%layout-change @{d} {s} {s} *\n", .{ window.id, dumped, dumped });
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }

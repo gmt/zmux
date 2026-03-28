@@ -36,6 +36,7 @@ const xm = @import("xmalloc.zig");
 const key_string = @import("key-string.zig");
 const names = @import("names.zig");
 const paste_mod = @import("paste.zig");
+const layout_mod = @import("layout.zig");
 const sess = @import("session.zig");
 const window_mod = @import("window.zig");
 
@@ -183,6 +184,7 @@ const resolver_table = [_]Resolver{
     .{ .name = "window_id", .func = resolve_window_id },
     .{ .name = "window_index", .func = resolve_window_index },
     .{ .name = "window_last_flag", .func = resolve_window_last_flag },
+    .{ .name = "window_layout", .func = resolve_window_layout },
     .{ .name = "window_linked", .func = resolve_window_linked },
     .{ .name = "window_name", .func = resolve_window_name },
     .{ .name = "window_offset_x", .func = resolve_window_offset_x },
@@ -190,6 +192,7 @@ const resolver_table = [_]Resolver{
     .{ .name = "window_panes", .func = resolve_window_panes },
     .{ .name = "window_raw_flags", .func = resolve_window_raw_flags },
     .{ .name = "window_silence_flag", .func = resolve_window_silence_flag },
+    .{ .name = "window_visible_layout", .func = resolve_window_visible_layout },
     .{ .name = "window_zoomed_flag", .func = resolve_window_zoomed_flag },
     .{ .name = "window_width", .func = resolve_window_width },
     .{ .name = "version", .func = resolve_version },
@@ -2027,6 +2030,24 @@ fn resolve_window_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
     const w = ctx_window(ctx) orelse return null;
     _ = alloc;
     return xm.xasprintf("{d}", .{w.sy});
+}
+
+fn resolve_window_layout(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const w = ctx_window(ctx) orelse return null;
+    _ = alloc;
+    if (w.saved_layout_root) |saved|
+        return layout_mod.dump_root(saved);
+    if (w.layout_root) |root|
+        return layout_mod.dump_root(root);
+    return layout_mod.dump_window(w);
+}
+
+fn resolve_window_visible_layout(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const w = ctx_window(ctx) orelse return null;
+    _ = alloc;
+    if (w.layout_root) |root|
+        return layout_mod.dump_root(root);
+    return layout_mod.dump_window(w);
 }
 
 fn resolve_window_panes(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

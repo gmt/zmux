@@ -23,6 +23,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
+const format_mod = @import("format.zig");
 const xm = @import("xmalloc.zig");
 const registry = @import("client-registry.zig");
 
@@ -84,6 +85,26 @@ pub fn control_notify_client_session_changed(changed: *T.Client) void {
 
 pub fn control_notify_client_detached(changed: *T.Client) void {
     for (registry.clients.items) |cl| write_control(cl, "%client-detached {s}", .{client_display_name(changed)});
+}
+
+pub fn control_notify_window_layout_changed(w: *T.Window) void {
+    const wl = if (w.winlinks.items.len > 0) w.winlinks.items[0] else return;
+    const ctx: format_mod.FormatContext = .{
+        .winlink = wl,
+        .window = w,
+    };
+    const payload = format_mod.format_require_complete(
+        xm.allocator,
+        "%layout-change #{window_id} #{window_layout} #{window_visible_layout} #{window_raw_flags}",
+        &ctx,
+    ) orelse return;
+    defer xm.allocator.free(payload);
+
+    for (registry.clients.items) |cl| {
+        if (!should_notify_client(cl) or cl.session == null) continue;
+        if (session_has_window(cl.session.?, w))
+            write_control(cl, "{s}", .{payload});
+    }
 }
 
 pub fn control_notify_window_renamed(w: *T.Window) void {

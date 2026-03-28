@@ -40,7 +40,7 @@ pub const StringCellsOptions = struct {
 pub fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
     const g = xm.allocator.create(T.Grid) catch unreachable;
     const lines = xm.allocator.alloc(T.GridLine, sy) catch unreachable;
-    for (lines) |*l| l.* = .{};
+    init_lines(lines);
     g.* = .{
         .flags = if (hlimit != 0) T.GRID_HISTORY else 0,
         .sx = sx,
@@ -49,6 +49,29 @@ pub fn grid_create(sx: u32, sy: u32, hlimit: u32) *T.Grid {
         .linedata = lines,
     };
     return g;
+}
+
+fn init_lines(lines: []T.GridLine) void {
+    for (lines) |*line| line.* = .{};
+}
+
+fn resize_linedata(gd: *T.Grid, new_len: usize) void {
+    const old_len = gd.linedata.len;
+    gd.linedata = xm.allocator.realloc(gd.linedata, new_len) catch unreachable;
+    if (new_len > old_len) init_lines(gd.linedata[old_len..new_len]);
+}
+
+fn stored_history_rows(gd: *const T.Grid) usize {
+    return gd.linedata.len -| @as(usize, @intCast(gd.sy));
+}
+
+pub fn absolute_row_to_storage(gd: *const T.Grid, absolute_row: u32) ?u32 {
+    const history_rows: u32 = @intCast(@min(@as(usize, @intCast(gd.hsize)), stored_history_rows(gd)));
+    if (absolute_row < history_rows) return gd.sy + absolute_row;
+
+    const visible_row = absolute_row - history_rows;
+    if (visible_row >= gd.sy) return null;
+    return visible_row;
 }
 
 pub fn grid_free(gd: *T.Grid) void {
@@ -64,6 +87,12 @@ pub fn grid_reset(gd: *T.Grid) void {
 }
 
 pub fn grid_clear_history(gd: *T.Grid) void {
+    const history_start: usize = @intCast(gd.sy);
+    const history_rows = stored_history_rows(gd);
+    for (gd.linedata[history_start .. history_start + history_rows]) |*line| {
+        free_line_storage(line);
+    }
+    if (gd.linedata.len != gd.sy) resize_linedata(gd, gd.sy);
     gd.hsize = 0;
     gd.hscrolled = 0;
 }
@@ -120,9 +149,55 @@ pub fn delete_lines(gd: *T.Grid, row: u32, bottom: u32, count: u32) void {
 }
 
 pub fn remove_history(gd: *T.Grid, count: u32) void {
-    if (count > gd.hsize) return;
+    if (count == 0 or count > gd.hsize) return;
+
+    const history_rows = stored_history_rows(gd);
+    const drop = @min(@as(usize, @intCast(count)), history_rows);
+    if (drop != 0) {
+        const history_start: usize = @intCast(gd.sy);
+        const history_end = history_start + history_rows;
+
+        for (gd.linedata[history_start .. history_start + drop]) |*line| {
+            free_line_storage(line);
+        }
+        if (history_rows > drop) {
+            std.mem.copyForwards(
+                T.GridLine,
+                gd.linedata[history_start .. history_start + history_rows - drop],
+                gd.linedata[history_start + drop .. history_end],
+            );
+        }
+        resize_linedata(gd, gd.linedata.len - drop);
+    }
+
     gd.hsize -= count;
     if (gd.hscrolled > gd.hsize) gd.hscrolled = gd.hsize;
+}
+
+pub fn scroll_full_screen_into_history(gd: *T.Grid) void {
+    if (gd.sy == 0) return;
+    if ((gd.flags & T.GRID_HISTORY) == 0 or gd.hlimit == 0) {
+        scroll_up(gd, 0, gd.sy - 1);
+        return;
+    }
+
+    if (gd.hsize >= gd.hlimit) remove_history(gd, gd.hsize - gd.hlimit + 1);
+
+    const old_len = gd.linedata.len;
+    resize_linedata(gd, old_len + 1);
+
+    const top_line = gd.linedata[0];
+    const blank_line = gd.linedata[old_len];
+    if (gd.sy > 1) {
+        std.mem.copyForwards(T.GridLine, gd.linedata[0 .. gd.sy - 1], gd.linedata[1..gd.sy]);
+    }
+    gd.linedata[gd.sy - 1] = blank_line;
+
+    const history_index: usize = @intCast(gd.sy + gd.hsize);
+    gd.linedata[history_index] = top_line;
+    gd.linedata[history_index].time = std.time.timestamp();
+    gd.hscrolled += 1;
+    gd.hsize += 1;
 }
 
 pub fn set_ascii(gd: *T.Grid, row: u32, col: u32, ch: u8) void {
@@ -996,31 +1071,47 @@ test "grid set_ascii and scroll_up keep content bounded" {
     try std.testing.expectEqual(@as(u8, ' '), ascii_at(gd, 1, 0));
 }
 
-test "grid remove_history trims tracked history and clamps hscrolled" {
+test "grid remove_history trims stored history rows and clamps hscrolled" {
     const gd = grid_create(4, 2, 100);
     defer grid_free(gd);
 
-    gd.hsize = 5;
+    set_ascii(gd, 0, 0, 'a');
+    set_ascii(gd, 1, 0, 'b');
+    scroll_full_screen_into_history(gd);
+
+    set_ascii(gd, 0, 0, 'c');
+    set_ascii(gd, 1, 0, 'd');
+    scroll_full_screen_into_history(gd);
+
     gd.hscrolled = 7;
 
-    remove_history(gd, 3);
-    try std.testing.expectEqual(@as(u32, 2), gd.hsize);
-    try std.testing.expectEqual(@as(u32, 2), gd.hscrolled);
+    remove_history(gd, 1);
+    try std.testing.expectEqual(@as(u32, 1), gd.hsize);
+    try std.testing.expectEqual(@as(u32, 1), gd.hscrolled);
+    try std.testing.expectEqual(@as(usize, 3), gd.linedata.len);
+
+    const history_row = absolute_row_to_storage(gd, 0).?;
+    const rendered = string_cells(gd, history_row, gd.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(rendered);
+    try std.testing.expectEqualStrings("c", rendered);
 
     remove_history(gd, 3);
-    try std.testing.expectEqual(@as(u32, 2), gd.hsize);
+    try std.testing.expectEqual(@as(u32, 1), gd.hsize);
 }
 
-test "grid_clear_history drops history offsets" {
+test "grid_clear_history drops stored history rows and offsets" {
     const gd = grid_create(4, 2, 100);
     defer grid_free(gd);
 
-    gd.hsize = 5;
+    set_ascii(gd, 0, 0, 'a');
+    set_ascii(gd, 1, 0, 'b');
+    scroll_full_screen_into_history(gd);
     gd.hscrolled = 3;
 
     grid_clear_history(gd);
     try std.testing.expectEqual(@as(u32, 0), gd.hsize);
     try std.testing.expectEqual(@as(u32, 0), gd.hscrolled);
+    try std.testing.expectEqual(@as(usize, gd.sy), gd.linedata.len);
 }
 
 test "grid stores multibyte cells and padding through the shared cell API" {

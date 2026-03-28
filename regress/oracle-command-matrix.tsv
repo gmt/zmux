@@ -83,7 +83,7 @@ show-window-options	window	unsupported
 source-file	none	unsupported
 split-window	pane	unsupported
 start-server	none	implemented
-suspend-client	client	unsupported
+suspend-client	client	implemented
 swap-pane	pane	unsupported
 swap-window	window	unsupported
 switch-client	client	implemented

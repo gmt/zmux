@@ -14,6 +14,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const key_bindings = @import("key-bindings.zig");
 const sess = @import("session.zig");
+const sort_mod = @import("sort.zig");
 const env_mod = @import("environ.zig");
 const opts = @import("options.zig");
 const server_client_mod = @import("server-client.zig");
@@ -37,14 +38,52 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         if (cl) |c| toggleReadonlyFlags(c);
     }
 
+    if (args.get('T')) |tablename| {
+        const table = key_bindings.key_bindings_get_table(tablename, false) orelse {
+            cmdq.cmdq_error(item, "table {s} doesn't exist", .{tablename});
+            return .@"error";
+        };
+        if (cl) |c| server_client_mod.server_client_set_key_table(c, table.name);
+        return .normal;
+    }
+
+    const sort_crit = T.SortCriteria{
+        .order = sort_mod.sort_order_from_string(args.get('O')),
+        .reversed = args.has('r'),
+    };
+    if (sort_crit.order == .end and args.has('O')) {
+        cmdq.cmdq_error(item, "invalid sort order", .{});
+        return .@"error";
+    }
+
     var target: T.CmdFindState = .{};
     const tflag = args.get('t');
+
+    if (tflag) |t| {
+        const is_window_target = std.mem.indexOfScalar(u8, t, ':') != null or
+            std.mem.indexOfScalar(u8, t, '.') != null;
+        if (is_window_target) {
+            if (cmd_find.cmd_find_target(&target, item, tflag, .window, 0) != 0)
+                return .@"error";
+        } else if (cmd_find.cmd_find_target(&target, item, tflag, .session, 0) != 0) {
+            return .@"error";
+        }
+    } else if (cmd_find.cmd_find_target(&target, item, null, .session, 0) != 0) {
+        return .@"error";
+    }
+
+    const s = target.s orelse {
+        cmdq.cmdq_error(item, "no session", .{});
+        return .@"error";
+    };
+    const wl = target.wl;
+    const wp = target.wp;
 
     // -n: next session
     if (args.has('n')) {
         const cur_s = if (cl) |c| c.session else null;
         if (cur_s) |cs| {
-            if (sess.session_next_session(cs, null)) |next| {
+            if (sess.session_next_session(cs, &sort_crit)) |next| {
                 if (cl) |c| {
                     server_client_mod.server_client_set_session(c, next);
                     server_client_mod.server_client_set_key_table(c, null);
@@ -62,7 +101,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.has('p')) {
         const cur_s = if (cl) |c| c.session else null;
         if (cur_s) |cs| {
-            if (sess.session_previous_session(cs, null)) |prev| {
+            if (sess.session_previous_session(cs, &sort_crit)) |prev| {
                 if (cl) |c| {
                     server_client_mod.server_client_set_session(c, prev);
                     server_client_mod.server_client_set_key_table(c, null);
@@ -93,35 +132,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    if (tflag) |t| {
-        const is_window_target = std.mem.indexOfScalar(u8, t, ':') != null or
-            std.mem.indexOfScalar(u8, t, '.') != null;
-        if (is_window_target) {
-            if (cmd_find.cmd_find_target(&target, item, tflag, .window, 0) != 0)
-                return .@"error";
-        } else if (cmd_find.cmd_find_target(&target, item, tflag, .session, 0) != 0) {
-            return .@"error";
-        }
-    } else if (cmd_find.cmd_find_target(&target, item, null, .session, 0) != 0) {
-        return .@"error";
-    }
-
-    const s = target.s orelse {
-        cmdq.cmdq_error(item, "no session", .{});
-        return .@"error";
-    };
-    const wl = target.wl;
-    const wp = target.wp;
-
-    if (args.get('T')) |tablename| {
-        const table = key_bindings.key_bindings_get_table(tablename, false) orelse {
-            cmdq.cmdq_error(item, "table {s} doesn't exist", .{tablename});
-            return .@"error";
-        };
-        if (cl) |c| server_client_mod.server_client_set_key_table(c, table.name);
-        return .normal;
-    }
-
     // Switch pane if pane was specified
     if (wl != null and wp != null) {
         const w = wl.?.window;
@@ -143,7 +153,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 pub const entry: cmd_mod.CmdEntry = .{
     .name = "switch-client",
     .alias = "switchc",
-    .usage = "[-ElnprZ] [-c target-client] [-t target-session] [-T key-table]",
+    .usage = "[-ElnprZ] [-c target-client] [-t target-session] [-T key-table] [-O order]",
     .template = "c:EFlnO:pt:rT:Z",
     .lower = 0,
     .upper = 0,
@@ -328,4 +338,84 @@ test "switch-client -r clears readonly flags on the target client before switchi
     try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE == 0);
     try std.testing.expect(queue_client.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
     try std.testing.expect(target_client.session == beta.session);
+}
+
+test "switch-client -n honors -O sort order for session cycling" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var beta = switchClientTestMakeSession("switch-client-order-beta");
+    defer switchClientTestFreeSession(&beta);
+    var alpha = switchClientTestMakeSession("switch-client-order-alpha");
+    defer switchClientTestFreeSession(&alpha);
+    var gamma = switchClientTestMakeSession("switch-client-order-gamma");
+    defer switchClientTestFreeSession(&gamma);
+
+    var client = switchClientTestMakeClient("switch-client-order-client", beta.session);
+    defer switchClientTestFreeClient(&client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-n", "-O", "name" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expect(client.session == gamma.session);
+}
+
+test "switch-client -r -p reverses ordered session cycling and toggles readonly flags" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var beta = switchClientTestMakeSession("switch-client-reversed-beta");
+    defer switchClientTestFreeSession(&beta);
+    var alpha = switchClientTestMakeSession("switch-client-reversed-alpha");
+    defer switchClientTestFreeSession(&alpha);
+    var gamma = switchClientTestMakeSession("switch-client-reversed-gamma");
+    defer switchClientTestFreeSession(&gamma);
+
+    var queue_client = switchClientTestMakeClient("switch-client-reversed-queue-client", beta.session);
+    defer switchClientTestFreeClient(&queue_client);
+    var target_client = switchClientTestMakeClient("switch-client-reversed-target-client", beta.session);
+    defer switchClientTestFreeClient(&target_client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-r", "-p", "-O", "name" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{
+        .client = &queue_client,
+        .target_client = &target_client,
+        .cmdlist = &list,
+    };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(cmd, &item));
+    try std.testing.expect(target_client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(target_client.flags & T.CLIENT_IGNORESIZE != 0);
+    try std.testing.expect(queue_client.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
+    try std.testing.expect(target_client.session == gamma.session);
+}
+
+test "switch-client rejects invalid sort order" {
+    switchClientTestInit();
+    defer switchClientTestFinish();
+
+    var setup = switchClientTestMakeSession("switch-client-invalid-order");
+    defer switchClientTestFreeSession(&setup);
+
+    var client = switchClientTestMakeClient("switch-client-invalid-order-client", setup.session);
+    defer switchClientTestFreeClient(&client);
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "switch-client", "-n", "-O", "bogus" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", exec(cmd, &item));
+    try std.testing.expect(client.session == setup.session);
 }

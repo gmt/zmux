@@ -23,6 +23,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const c = @import("c.zig");
 const cmd_render = @import("cmd-render.zig");
+const cmdq = @import("cmd-queue.zig");
 const colour = @import("colour.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
@@ -87,6 +88,13 @@ const resolver_table = [_]Resolver{
     .{ .name = "message_time", .func = resolve_message_time },
     .{ .name = "message_text", .func = resolve_message_text },
     .{ .name = "command_prompt", .func = resolve_command_prompt },
+    .{ .name = "hook", .func = resolve_hook },
+    .{ .name = "hook_client", .func = resolve_hook_client },
+    .{ .name = "hook_session", .func = resolve_hook_session },
+    .{ .name = "hook_session_name", .func = resolve_hook_session_name },
+    .{ .name = "hook_window", .func = resolve_hook_window },
+    .{ .name = "hook_window_name", .func = resolve_hook_window_name },
+    .{ .name = "hook_pane", .func = resolve_hook_pane },
 
     .{ .name = "client_control_mode", .func = resolve_client_control_mode },
     .{ .name = "client_height", .func = resolve_client_height },
@@ -1648,6 +1656,39 @@ fn resolve_message_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
 
 fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, if (ctx.command_prompt orelse false) "1" else "0") catch unreachable;
+}
+
+fn resolve_hook_value(alloc: std.mem.Allocator, ctx: *const FormatContext, key: []const u8) ?[]u8 {
+    const value = cmdq.cmdq_lookup_hook(ctx.item, key) orelse return null;
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_hook(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook");
+}
+
+fn resolve_hook_client(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_client");
+}
+
+fn resolve_hook_session(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_session");
+}
+
+fn resolve_hook_session_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_session_name");
+}
+
+fn resolve_hook_window(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_window");
+}
+
+fn resolve_hook_window_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_window_name");
+}
+
+fn resolve_hook_pane(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "hook_pane");
 }
 
 fn resolve_client_control_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

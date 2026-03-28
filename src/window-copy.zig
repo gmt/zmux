@@ -26,17 +26,28 @@ const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
+const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
 const word_whitespace = "\t ";
 
+const JumpType = enum {
+    off,
+    forward,
+    backward,
+    to_forward,
+    to_backward,
+};
+
 const CopyModeData = struct {
     backing: *T.Screen,
     top: u32 = 0,
     cx: u32 = 0,
     cy: u32 = 0,
+    jump_type: JumpType = .off,
+    jump_char: T.Utf8Data = std.mem.zeroes(T.Utf8Data),
     hide_position: bool = false,
     scroll_exit: bool = false,
 };
@@ -249,6 +260,26 @@ fn copyModeCommand(
         moveCursorX(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "cursor-right")) {
         moveCursorX(wme, @intCast(count));
+    } else if (std.mem.eql(u8, command, "jump-again")) {
+        repeatJump(wme, modeData(wme).jump_type);
+    } else if (std.mem.eql(u8, command, "jump-reverse")) {
+        repeatJump(wme, reverseJumpType(modeData(wme).jump_type));
+    } else if (std.mem.eql(u8, command, "jump-backward")) {
+        if (args.value_at(1)) |arg|
+            if (setJumpCharacter(modeData(wme), .backward, arg))
+                repeatJump(wme, .backward);
+    } else if (std.mem.eql(u8, command, "jump-forward")) {
+        if (args.value_at(1)) |arg|
+            if (setJumpCharacter(modeData(wme), .forward, arg))
+                repeatJump(wme, .forward);
+    } else if (std.mem.eql(u8, command, "jump-to-backward")) {
+        if (args.value_at(1)) |arg|
+            if (setJumpCharacter(modeData(wme), .to_backward, arg))
+                repeatJump(wme, .to_backward);
+    } else if (std.mem.eql(u8, command, "jump-to-forward")) {
+        if (args.value_at(1)) |arg|
+            if (setJumpCharacter(modeData(wme), .to_forward, arg))
+                repeatJump(wme, .to_forward);
     } else if (std.mem.eql(u8, command, "next-space")) {
         var remaining = count;
         while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, "");
@@ -534,6 +565,44 @@ fn copyModeUsesViKeys(wme: *T.WindowModeEntry) bool {
     return opts.options_get_number(wme.wp.window.options, "mode-keys") == T.MODEKEY_VI;
 }
 
+fn setJumpCharacter(data: *CopyModeData, jump_type: JumpType, text: []const u8) bool {
+    if (text.len == 0) return false;
+
+    const cells = utf8.utf8_fromcstr(text);
+    defer xm.allocator.free(cells);
+
+    if (cells.len == 0 or cells[0].isEmpty()) return false;
+    data.jump_type = jump_type;
+    data.jump_char = cells[0];
+    return true;
+}
+
+fn reverseJumpType(jump_type: JumpType) JumpType {
+    return switch (jump_type) {
+        .forward => .backward,
+        .backward => .forward,
+        .to_forward => .to_backward,
+        .to_backward => .to_forward,
+        .off => .off,
+    };
+}
+
+fn repeatJump(wme: *T.WindowModeEntry, jump_type: JumpType) void {
+    const data = modeData(wme);
+    if (jump_type == .off or data.jump_char.isEmpty()) return;
+
+    var remaining = repeatCount(wme);
+    while (remaining > 0) : (remaining -= 1) {
+        switch (jump_type) {
+            .forward => cursorJump(wme),
+            .backward => cursorJumpBack(wme),
+            .to_forward => cursorJumpTo(wme),
+            .to_backward => cursorJumpToBack(wme),
+            .off => return,
+        }
+    }
+}
+
 fn startWordMotionReader(wme: *T.WindowModeEntry, gr: *T.GridReader) bool {
     if (rowCount(modeData(wme).backing) == 0) return false;
     grid.grid_reader_start(gr, modeData(wme).backing.grid, modeData(wme).cx, absoluteCursorRow(wme));
@@ -554,6 +623,45 @@ fn cursorNextWord(wme: *T.WindowModeEntry, separators: []const u8) void {
     if (!startWordMotionReader(wme, &gr)) return;
 
     grid.grid_reader_cursor_next_word(&gr, separators);
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorJump(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    gr.cx = modeData(wme).cx + 1;
+    if (!grid.grid_reader_cursor_jump(&gr, &modeData(wme).jump_char)) return;
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorJumpBack(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_left(&gr, false);
+    if (!grid.grid_reader_cursor_jump_back(&gr, &modeData(wme).jump_char)) return;
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorJumpTo(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    gr.cx = modeData(wme).cx + 2;
+    if (!grid.grid_reader_cursor_jump(&gr, &modeData(wme).jump_char)) return;
+    grid.grid_reader_cursor_left(&gr, true);
+    applyWordMotionReader(wme, &gr);
+}
+
+fn cursorJumpToBack(wme: *T.WindowModeEntry) void {
+    var gr: T.GridReader = undefined;
+    if (!startWordMotionReader(wme, &gr)) return;
+
+    grid.grid_reader_cursor_left(&gr, false);
+    grid.grid_reader_cursor_left(&gr, false);
+    if (!grid.grid_reader_cursor_jump_back(&gr, &modeData(wme).jump_char)) return;
+    grid.grid_reader_cursor_right(&gr, true, false);
     applyWordMotionReader(wme, &gr);
 }
 
@@ -806,17 +914,19 @@ fn setGridLineText(gd: *T.Grid, row: u32, text: []const u8) void {
 }
 
 fn runCopyModeTestCommand(wme: *T.WindowModeEntry, command: []const u8) !void {
-    var args = args_mod.Arguments.init(xm.allocator);
-    defer args.deinit();
-    try args.values.append(xm.allocator, xm.xstrdup(command));
-    copyModeCommand(wme, null, undefined, undefined, @ptrCast(&args), null);
+    return runCopyModeTestCommandArgs(wme, null, &.{command});
 }
 
 fn runCopyModeTestCommandWithSession(wme: *T.WindowModeEntry, session: *T.Session, command: []const u8) !void {
+    return runCopyModeTestCommandArgs(wme, session, &.{command});
+}
+
+fn runCopyModeTestCommandArgs(wme: *T.WindowModeEntry, session: ?*T.Session, values: []const []const u8) !void {
     var args = args_mod.Arguments.init(xm.allocator);
     defer args.deinit();
-    try args.values.append(xm.allocator, xm.xstrdup(command));
-    copyModeCommand(wme, null, session, undefined, @ptrCast(&args), null);
+    for (values) |value|
+        try args.values.append(xm.allocator, xm.xstrdup(value));
+    copyModeCommand(wme, null, if (session) |s| s else undefined, undefined, @ptrCast(&args), null);
 }
 
 test "window-copy snapshots the source pane and refresh-from-pane updates it" {
@@ -1143,6 +1253,93 @@ test "window-copy word and space motions use session separators and mode keys" {
     modeData(wme).cx = 0;
     try runCopyModeTestCommandWithSession(wme, &session, "next-space-end");
     try std.testing.expectEqual(@as(u32, 3), modeData(wme).cx);
+}
+
+test "window-copy jump char motions remember direction and target character" {
+    const source_grid = grid.grid_create(16, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(16, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(16, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(16, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 70,
+        .name = xm.xstrdup("copy-window-jump"),
+        .sx = 16,
+        .sy = 1,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 71,
+        .window = &window_,
+        .options = undefined,
+        .sx = 16,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 72,
+        .window = &window_,
+        .options = undefined,
+        .sx = 16,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "abc def ghi def");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "jump-forward", "d" });
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cx);
+    try std.testing.expectEqual(JumpType.forward, modeData(wme).jump_type);
+    try std.testing.expectEqual(@as(u8, 'd'), modeData(wme).jump_char.data[0]);
+
+    try runCopyModeTestCommand(wme, "jump-again");
+    try std.testing.expectEqual(@as(u32, 12), modeData(wme).cx);
+
+    try runCopyModeTestCommand(wme, "jump-reverse");
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cx);
+
+    modeData(wme).cx = 0;
+    try runCopyModeTestCommandArgs(wme, null, &.{ "jump-to-forward", "d" });
+    try std.testing.expectEqual(@as(u32, 3), modeData(wme).cx);
+    try std.testing.expectEqual(JumpType.to_forward, modeData(wme).jump_type);
+
+    modeData(wme).cx = 12;
+    try runCopyModeTestCommandArgs(wme, null, &.{ "jump-to-backward", "d" });
+    try std.testing.expectEqual(@as(u32, 5), modeData(wme).cx);
+    try std.testing.expectEqual(JumpType.to_backward, modeData(wme).jump_type);
+
+    modeData(wme).cx = 12;
+    try runCopyModeTestCommandArgs(wme, null, &.{ "jump-backward", "d" });
+    try std.testing.expectEqual(@as(u32, 4), modeData(wme).cx);
+    try std.testing.expectEqual(JumpType.backward, modeData(wme).jump_type);
 }
 
 test "window-copy downward commands keep viewport scrolling separate from cancel variants" {

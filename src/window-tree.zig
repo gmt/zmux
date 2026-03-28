@@ -22,6 +22,7 @@ const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
+const key_string = @import("key-string.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
@@ -35,6 +36,12 @@ const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "switch-client -Zt '%%'";
+const DEFAULT_KEY_FORMAT =
+    "#{?#{e|<:#{line},10}," ++
+    "#{line}" ++
+    ",#{e|<:#{line},36}," ++
+    "M-#{a:#{e|+:97,#{e|-:#{line},10}}}" ++
+    "}";
 const DEFAULT_SESSION_FORMAT = "#{session_name}: #{session_windows} windows#{?session_attached, (attached),}";
 const DEFAULT_WINDOW_FORMAT = "#{window_index}:#{window_name}#{window_flags}";
 const DEFAULT_PANE_FORMAT = "#{pane_index}: #{pane_current_command}#{?pane_active,*,}#{?pane_title, \"#{pane_title}\",}";
@@ -50,6 +57,7 @@ pub const EnterConfig = struct {
     fs: *const T.CmdFindState,
     kind: DisplayKind = .pane,
     format: ?[]const u8 = null,
+    key_format: ?[]const u8 = null,
     filter: ?[]const u8 = null,
     command: ?[]const u8 = null,
     sort_crit: T.SortCriteria = .{},
@@ -76,6 +84,7 @@ const WindowTreeModeData = struct {
     tree: *mode_tree.Data,
     items: std.ArrayList(*TreeItem) = .{},
     format: []u8,
+    key_format: []u8,
     filter: ?[]u8 = null,
     command: []u8,
     sort_crit: T.SortCriteria = .{},
@@ -110,6 +119,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
         .fs = config.fs.*,
         .tree = undefined,
         .format = xm.xstrdup(config.format orelse defaultFormat(config.kind)),
+        .key_format = xm.xstrdup(config.key_format orelse DEFAULT_KEY_FORMAT),
         .filter = if (config.filter) |filter| xm.xstrdup(filter) else null,
         .command = xm.xstrdup(config.command orelse DEFAULT_COMMAND),
         .sort_crit = config.sort_crit,
@@ -122,6 +132,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
         .zoom = config.zoom,
         .buildcb = buildTree,
         .searchcb = searchItem,
+        .keycb = keyForLineCallback,
     });
 
     const wme = window_mode_runtime.pushMode(wp, &window_tree_mode, @ptrCast(data), null);
@@ -231,19 +242,22 @@ fn windowTreeCommand(
 
 fn windowTreeKey(
     wme: *T.WindowModeEntry,
-    _client: ?*T.Client,
-    _session: *T.Session,
-    _wl: *T.Winlink,
+    client: ?*T.Client,
+    session: *T.Session,
+    wl: *T.Winlink,
     key: T.key_code,
     mouse: ?*const T.MouseEvent,
 ) void {
-    _ = _client;
-    _ = _session;
-    _ = _wl;
-
     if (mouse != null) return;
 
     const data = modeData(wme);
+    if (shortcutLineForKey(data.tree, key)) |line_index| {
+        data.tree.current = line_index;
+        adjustOffsetForCurrent(data.tree);
+        chooseCurrent(wme, client, session, wl);
+        return;
+    }
+
     switch (key) {
         T.KEYC_WHEELUP => {
             mode_tree.up(data.tree, false);
@@ -263,6 +277,7 @@ fn windowTreeClose(wme: *T.WindowModeEntry) void {
     freeItems(data);
     data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
+    xm.allocator.free(data.key_format);
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
     xm.allocator.destroy(data);
@@ -288,6 +303,9 @@ fn refreshFromConfig(wme: *T.WindowModeEntry, config: EnterConfig) void {
 
     xm.allocator.free(data.format);
     data.format = xm.xstrdup(config.format orelse defaultFormat(config.kind));
+
+    xm.allocator.free(data.key_format);
+    data.key_format = xm.xstrdup(config.key_format orelse DEFAULT_KEY_FORMAT);
 
     if (data.filter) |filter| xm.allocator.free(filter);
     data.filter = if (config.filter) |filter| xm.xstrdup(filter) else null;
@@ -519,6 +537,24 @@ fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
     out.appendSlice(xm.allocator, tagged) catch unreachable;
     out.append(xm.allocator, ' ') catch unreachable;
 
+    const key_width = maxKeyLabelWidth(tree);
+    if (key_width != 0) {
+        const label_width = key_width + 2;
+        if (line.item.keystr) |keystr| {
+            out.append(xm.allocator, '[') catch unreachable;
+            out.appendSlice(xm.allocator, keystr) catch unreachable;
+            out.append(xm.allocator, ']') catch unreachable;
+
+            const pad = label_width - (keystr.len + 2);
+            var i: usize = 0;
+            while (i < pad) : (i += 1) out.append(xm.allocator, ' ') catch unreachable;
+        } else {
+            var i: usize = 0;
+            while (i < label_width) : (i += 1) out.append(xm.allocator, ' ') catch unreachable;
+        }
+        out.append(xm.allocator, ' ') catch unreachable;
+    }
+
     var depth: u32 = 0;
     while (depth < line.depth) : (depth += 1) {
         out.appendSlice(xm.allocator, "  ") catch unreachable;
@@ -744,6 +780,52 @@ fn repeatCount(wme: *T.WindowModeEntry) u32 {
     return if (wme.prefix == 0) 1 else wme.prefix;
 }
 
+fn keyForLineCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, line: u32) T.key_code {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item: *TreeItem = @ptrCast(@alignCast(itemdata.?));
+    return keyForLine(data, item, line);
+}
+
+fn keyForLine(data: *const WindowTreeModeData, item: *const TreeItem, line: u32) T.key_code {
+    var ctx = formatContext(item.session, item.winlink, item.pane);
+    ctx.line = line;
+
+    const expanded = format_mod.format_require_complete(xm.allocator, data.key_format, &ctx) orelse return T.KEYC_NONE;
+    defer xm.allocator.free(expanded);
+
+    const key = key_string.key_string_lookup_string(expanded);
+    if (key == T.KEYC_UNKNOWN or key == T.KEYC_NONE) return T.KEYC_NONE;
+    return key;
+}
+
+fn maxKeyLabelWidth(tree: *const mode_tree.Data) usize {
+    var width: usize = 0;
+    for (tree.line_list.items) |line| {
+        if (line.item.keystr) |keystr|
+            width = @max(width, keystr.len);
+    }
+    return width;
+}
+
+fn shortcutLineForKey(tree: *const mode_tree.Data, key: T.key_code) ?u32 {
+    if (key == T.KEYC_NONE or key == T.KEYC_UNKNOWN) return null;
+    for (tree.line_list.items, 0..) |line, idx| {
+        if (line.item.key == key)
+            return @intCast(idx);
+    }
+    return null;
+}
+
+fn adjustOffsetForCurrent(tree: *mode_tree.Data) void {
+    if (tree.height == 0) return;
+    if (tree.current < tree.offset) {
+        tree.offset = tree.current;
+        return;
+    }
+    if (tree.current >= tree.offset + tree.height)
+        tree.offset = tree.current - tree.height + 1;
+}
+
 fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
     const cl = client orelse return;
     const text = xm.xasprintf("Tree-mode command not supported yet: {s}", .{command});
@@ -880,7 +962,97 @@ test "window-tree choose runs the command template for the selected target" {
     var args = try args_mod.args_parse(xm.allocator, &.{"choose"}, "", 1, 1, &args_cause);
     defer args.deinit();
     windowTreeCommand(wme, &client, session_ptr, wl, @ptrCast(&args), null);
-    while (cmdq_mod.cmdq_next(null) != 0) {}
+    while (cmdq_mod.cmdq_next(&client) != 0) {}
+
+    try std.testing.expect(wl.window.active == extra);
+    try std.testing.expect(window.window_pane_mode(extra) == null);
+}
+
+test "window-tree custom key format renders labels and chooses the matching line" {
+    const cmdq_mod = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-key-format", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-key-format") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    const original = wl.window.active.?;
+    const extra = window.window_add_pane(wl.window, null, 80, 24);
+    wl.window.active = extra;
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "tree-key-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .flags = T.CLIENT_ATTACHED,
+        .session = session_ptr,
+    };
+    client.tty = .{ .client = &client };
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = extra,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(extra, .{
+        .fs = &target,
+        .kind = .pane,
+        .command = "select-pane -t '%%'",
+        .key_format = "#{line}",
+    });
+    try std.testing.expect(window.window_pane_mode(extra) != null);
+
+    const data = modeData(wme);
+    try std.testing.expectEqual(@as(T.key_code, '0'), data.tree.line_list.items[0].item.key);
+    try std.testing.expectEqual(@as(T.key_code, '1'), data.tree.line_list.items[1].item.key);
+    const first_line = renderLine(data.tree, 0);
+    defer xm.allocator.free(first_line);
+    try std.testing.expect(std.mem.indexOf(u8, first_line, "[0]") != null);
+
+    const target_key = blk: {
+        for (data.tree.line_list.items) |line| {
+            const tree_item: *TreeItem = @ptrCast(@alignCast(line.item.itemdata.?));
+            if (tree_item.item_type == .pane and tree_item.pane == extra)
+                break :blk line.item.key;
+        }
+        return error.TestUnexpectedResult;
+    };
+
+    wl.window.active = original;
+    windowTreeKey(wme, &client, session_ptr, wl, target_key, null);
+    while (cmdq_mod.cmdq_next(&client) != 0) {}
 
     try std.testing.expect(wl.window.active == extra);
     try std.testing.expect(window.window_pane_mode(extra) == null);

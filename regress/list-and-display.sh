@@ -22,6 +22,7 @@ smoke_init list-and-display
 
 smoke_cmd new-session -d -s main -x 100 -y 40 || exit 1
 smoke_cmd new-window -d -t main || exit 1
+smoke_cmd split-window -d -t main:1 || exit 1
 smoke_cmd select-window -t main:1 || exit 1
 
 smoke_cmd list-sessions -F '#{session_name}' | grep -qx 'main' || {
@@ -29,13 +30,20 @@ smoke_cmd list-sessions -F '#{session_name}' | grep -qx 'main' || {
     exit 1
 }
 
-smoke_cmd list-windows -t main | grep -q '^0:' || {
-    echo "list-windows missing window 0"
+LIST_WINDOWS=$(smoke_cmd list-windows -t main) || exit 1
+printf '%s\n' "$LIST_WINDOWS" | grep -Eq '^0: .* \(1 panes\) \[100x40\] \[layout .+\] @[0-9]+$' || {
+    echo "list-windows missing tmux-style default details for window 0: $LIST_WINDOWS"
     exit 1
 }
 
-smoke_cmd list-windows -t main | grep -q '^1:' || {
-    echo "list-windows missing window 1"
+printf '%s\n' "$LIST_WINDOWS" | grep -Eq '^1: .* \(2 panes\) \[100x40\] \[layout .+\] @[0-9]+ \(active\)$' || {
+    echo "list-windows missing tmux-style default details for active window: $LIST_WINDOWS"
+    exit 1
+}
+
+LIST_WINDOWS_ALL=$(smoke_cmd list-windows -a) || exit 1
+printf '%s\n' "$LIST_WINDOWS_ALL" | grep -Eq '^main:1: .* \(2 panes\) \[100x40\]$' || {
+    echo "list-windows -a default format mismatch: $LIST_WINDOWS_ALL"
     exit 1
 }
 

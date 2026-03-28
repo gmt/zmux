@@ -45,6 +45,7 @@ fn attach_existing_session(
     detach_other: bool,
     kill_other: bool,
     cwd_template: ?[]const u8,
+    flags_text: ?[]const u8,
 ) T.CmdRetval {
     var cause: ?[]u8 = null;
 
@@ -58,6 +59,8 @@ fn attach_existing_session(
             cmdq.cmdq_error(item, "not a terminal", .{});
             return .@"error";
         }
+        if (flags_text) |flags|
+            server_client_mod.server_client_set_flags(c, flags);
         if (detach_other or kill_other) {
             const msg_type: protocol.MsgType = if (kill_other) .detachkill else .detach;
             for (client_registry.clients.items) |loop| {
@@ -123,7 +126,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     // If name exists and -A flag set, attach instead
     if (args.has('A')) {
         if (find_existing_attach_session(item, session_name, args.get('t'))) |existing|
-            return attach_existing_session(item, cl, existing, args.has('D'), args.has('X'), args.get('c'));
+            return attach_existing_session(item, cl, existing, args.has('D'), args.has('X'), args.get('c'), args.get('f'));
     }
 
     if (session_name) |n| {
@@ -277,6 +280,8 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
                 c.tty.sx = sx;
                 c.tty.sy = sy;
             }
+            if (args.get('f')) |flags_text|
+                server_client_mod.server_client_set_flags(c, flags_text);
             server_client_mod.server_client_attach(c, s);
         }
     }
@@ -473,6 +478,73 @@ test "new-session -A attaches to an existing named session" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(existing_setup.session, client.session.?);
+    try std.testing.expectEqual(current_setup.session, client.last_session.?);
+}
+
+test "new-session -f applies client flags before attaching a new session" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("new-session-flags-current");
+    defer new_session_test_free_session(&current_setup);
+
+    var client = new_session_test_client("new-session-flags-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    client_registry.add(&client);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-f",
+        "read-only,ignore-size",
+        "-s",
+        "new-session-flags",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(client.flags & T.CLIENT_IGNORESIZE != 0);
+    try std.testing.expectEqual(current_setup.session, client.last_session.?);
+    try std.testing.expectEqual(sess.session_find("new-session-flags").?, client.session.?);
+}
+
+test "new-session -A -f applies client flags to the invoking client" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var current_setup = new_session_test_make_session("new-session-attach-flags-current");
+    defer new_session_test_free_session(&current_setup);
+    var existing_setup = new_session_test_make_session("new-session-attach-flags-existing");
+    defer new_session_test_free_session(&existing_setup);
+
+    var client = new_session_test_client("new-session-attach-flags-client", current_setup.session);
+    defer new_session_test_free_client(&client);
+    var peer = new_session_test_client("new-session-attach-flags-peer", existing_setup.session);
+    defer new_session_test_free_client(&peer);
+    client_registry.add(&client);
+    client_registry.add(&peer);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{
+        "new-session",
+        "-A",
+        "-f",
+        "read-only,ignore-size",
+        "-s",
+        "new-session-attach-flags-existing",
+    }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(client.flags & T.CLIENT_IGNORESIZE != 0);
+    try std.testing.expect(peer.flags & (T.CLIENT_READONLY | T.CLIENT_IGNORESIZE) == 0);
     try std.testing.expectEqual(existing_setup.session, client.session.?);
     try std.testing.expectEqual(current_setup.session, client.last_session.?);
 }

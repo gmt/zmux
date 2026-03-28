@@ -196,6 +196,9 @@ fn server_loop() bool {
     if (client_registry.clients.items.len > 0)
         return false;
 
+    if (job_mod.job_still_running())
+        return false;
+
     log.log_debug("server_loop: exiting", .{});
     return true;
 }
@@ -545,6 +548,39 @@ test "server status helpers mark attached clients for status-only redraw" {
     try std.testing.expect(client3.flags & T.CLIENT_REDRAWSTATUS == 0);
     try std.testing.expect(client1.flags & T.CLIENT_REDRAWWINDOW == 0);
     try std.testing.expect(client2.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
+test "server loop keeps server alive while shared jobs still run" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+    defer job_mod.job_reset_all();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.options_set_number(opts.global_options, "exit-empty", 1);
+    opts.options_set_number(opts.global_options, "exit-unattached", 1);
+    const old_server_exit = server_exit;
+    defer server_exit = old_server_exit;
+    server_exit = false;
+
+    const job = job_mod.job_register("sleep 30", 0);
+    job_mod.job_started(job, 99, -1);
+
+    try std.testing.expect(!server_loop());
+
+    job_mod.job_finished(job, 0);
+    try std.testing.expect(server_loop());
 }
 
 test "server session-group redraw and status helpers fan out across grouped sessions" {

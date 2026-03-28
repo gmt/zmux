@@ -1181,6 +1181,7 @@ pub const Client = struct {
     message_timer: ?*c.libevent.event = null,
     display_panes_timer: ?*c.libevent.event = null,
     display_panes_data: ?*anyopaque = null,
+    popup_data: ?*anyopaque = null,
 
     flags: u64 = 0,
     session: ?*Session = null,

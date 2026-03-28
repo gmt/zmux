@@ -400,13 +400,27 @@ pub fn tty_draw_render_scrollbars_region(
 }
 
 pub fn tty_draw_render_screen(screen: *T.Screen, sx: u32, sy: u32, row_offset: u32) ![]u8 {
+    return tty_draw_render_screen_region(screen, 0, 0, sx, sy, row_offset, 0);
+}
+
+pub fn tty_draw_render_screen_region(
+    screen: *T.Screen,
+    view_x: u32,
+    view_y: u32,
+    sx: u32,
+    sy: u32,
+    row_offset: u32,
+    col_offset: u32,
+) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
 
     for (0..sy) |row_idx| {
-        const rendered = try render_row(screen.grid, @intCast(row_idx), sx);
+        const row = view_y + @as(u32, @intCast(row_idx));
+        if (row >= screen.grid.sy) break;
+        const rendered = try render_text_row_region(screen.grid, row, view_x, sx);
         defer xm.allocator.free(rendered);
-        try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, 1);
+        try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, col_offset + 1);
         try out.appendSlice(xm.allocator, rendered);
         try out.appendSlice(xm.allocator, "\x1b[K");
     }

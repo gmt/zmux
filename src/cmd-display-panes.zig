@@ -24,6 +24,7 @@ const c = @import("c.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const opts = @import("options.zig");
+const popup = @import("popup.zig");
 const proc_mod = @import("proc.zig");
 const server = @import("server.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -399,7 +400,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     };
 
-    if (overlay_active(target_client)) return .normal;
+    if (overlay_active(target_client) or popup.overlay_active(target_client)) return .normal;
 
     var delay_ms: u32 = @intCast(opts.options_get_number(session.options, "display-panes-time"));
     if (args.has('d')) {

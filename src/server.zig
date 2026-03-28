@@ -27,6 +27,7 @@ const proc_mod = @import("proc.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
+const names_mod = @import("names.zig");
 const server_client_mod = @import("server-client.zig");
 const cmdq = @import("cmd-queue.zig");
 const job_mod = @import("job.zig");
@@ -159,6 +160,11 @@ fn server_loop() bool {
     }
 
     server_client_mod.server_client_loop();
+
+    var windows_it = win.windows.valueIterator();
+    while (windows_it.next()) |w| {
+        names_mod.check_window_name(w.*);
+    }
 
     const exit_empty = opts.options_get_number(opts.global_options, "exit-empty");
     const exit_unattached = opts.options_get_number(opts.global_options, "exit-unattached");

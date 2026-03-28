@@ -86,7 +86,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         const expanded = format_mod.format_single(item, title, cmdq.cmdq_get_client(item), s, wl, wp);
         defer xm.allocator.free(expanded);
 
-        if (screen.screen_set_title(wp.screen, expanded)) {
+        if (screen.screen_set_title(&wp.base, expanded)) {
             server_fn.server_redraw_window_borders(wl.window);
             server_fn.server_status_window(wl.window);
             notify.notify_pane("pane-title-changed", wp);
@@ -419,7 +419,7 @@ test "select-pane can set pane title" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_cmd, &item));
-    try std.testing.expectEqualStrings("logs", wl.window.active.?.screen.title.?);
+    try std.testing.expectEqualStrings("logs", wl.window.active.?.base.title.?);
 }
 
 test "select-pane formats pane titles" {
@@ -458,7 +458,50 @@ test "select-pane formats pane titles" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_cmd, &item));
-    try std.testing.expectEqualStrings("select-pane-format-title-0", wl.window.active.?.screen.title.?);
+    try std.testing.expectEqualStrings("select-pane-format-title-0", wl.window.active.?.base.title.?);
+}
+
+test "select-pane stores pane title on the base screen when alternate is active" {
+    const opts_mod = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess_mod = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess_mod.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess_mod.session_create(null, "select-pane-alt-title", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess_mod.session_find("select-pane-alt-title") != null) sess_mod.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    s.curw = wl;
+
+    screen.screen_enter_alternate(wl.window.active.?, true);
+    try std.testing.expect(screen.screen_set_title(wl.window.active.?.screen, "alternate"));
+
+    var parse_cause: ?[]u8 = null;
+    const select_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-t", "select-pane-alt-title:0.0", "-T", "logs" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(select_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_cmd, &item));
+    try std.testing.expectEqualStrings("logs", wl.window.active.?.base.title.?);
+    try std.testing.expectEqualStrings("alternate", wl.window.active.?.screen.title.?);
 }
 
 test "select-pane selects directional neighbours and toggles pane input" {

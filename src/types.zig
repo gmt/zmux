@@ -1033,6 +1033,13 @@ pub const StatusLineEntry = struct {
     ranges: StyleRanges = .{},
 };
 
+pub const ClientWindow = struct {
+    window: u32,
+    pane: ?*WindowPane = null,
+    sx: u32 = 0,
+    sy: u32 = 0,
+};
+
 pub const ClientPaneCache = struct {
     pane_id: ?u32 = null,
     sx: u32 = 0,
@@ -1116,6 +1123,7 @@ pub const Client = struct {
     flags: u64 = 0,
     session: ?*Session = null,
     last_session: ?*Session = null,
+    client_windows: std.ArrayListUnmanaged(ClientWindow) = .{},
     pan_window: ?*Window = null,
     pan_ox: u32 = 0,
     pan_oy: u32 = 0,

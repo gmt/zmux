@@ -22,6 +22,7 @@ const T = @import("types.zig");
 const client_registry = @import("client-registry.zig");
 const notify = @import("notify.zig");
 const opts = @import("options.zig");
+const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
@@ -244,8 +245,10 @@ fn clients_calculate_size(
                 continue;
         }
 
-        const cx = loop.tty.sx;
-        const cy = line_clamped_height(loop);
+        const cw = if (w) |window| server_client_mod.server_client_get_client_window(loop, window.id) else null;
+        const use_window_size = cw != null and cw.?.sx != 0 and cw.?.sy != 0;
+        const cx = if (use_window_size) cw.?.sx else loop.tty.sx;
+        const cy = if (use_window_size) cw.?.sy else line_clamped_height(loop);
 
         if (size_type == T.WINDOW_SIZE_LARGEST) {
             sx.* = @max(sx.*, cx);
@@ -258,6 +261,23 @@ fn clients_calculate_size(
         if (loop.tty.xpixel > xpixel.* and loop.tty.ypixel > ypixel.*) {
             xpixel.* = loop.tty.xpixel;
             ypixel.* = loop.tty.ypixel;
+        }
+    }
+
+    if (w) |window| {
+        for (client_registry.clients.items) |loop| {
+            if (loop != c and ignore_client_size(loop))
+                continue;
+            if (loop != c and skip_client(loop, size_type, current, s, window))
+                continue;
+            if (loop.flags & T.CLIENT_WINDOWSIZECHANGED == 0)
+                continue;
+
+            const cw = server_client_mod.server_client_get_client_window(loop, window.id) orelse continue;
+            if (cw.sx != 0 and sx.* > cw.sx)
+                sx.* = cw.sx;
+            if (cw.sy != 0 and sy.* > cw.sy)
+                sy.* = cw.sy;
         }
     }
 
@@ -466,4 +486,78 @@ test "recalculate_size applies smallest client size to a linked window" {
     try std.testing.expectEqual(@as(u32, 29), w.sy);
     try std.testing.expectEqual(@as(u32, 90), wp.sx);
     try std.testing.expectEqual(@as(u32, 29), wp.sy);
+}
+
+test "recalculate_size honors per-window control client sizes" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "resize-window-control", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-window-control") != null) sess.session_destroy(s, false, "test");
+    status_update_cache(s);
+
+    var cause: ?[]u8 = null;
+    const w = win.window_create(120, 50, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wl = sess.session_attach(s, w, -1, &cause).?;
+    const wp = win.window_add_pane(w, null, 120, 50);
+    w.active = wp;
+    s.curw = wl;
+
+    var big: T.Client = .{
+        .name = "big",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    defer env_mod.environ_free(big.environ);
+    defer big.client_windows.deinit(xm.allocator);
+    big.tty = .{ .client = &big, .sx = 120, .sy = 40, .xpixel = 20, .ypixel = 40 };
+    big.session = s;
+
+    var small: T.Client = .{
+        .name = "small",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    defer env_mod.environ_free(small.environ);
+    small.tty = .{ .client = &small, .sx = 90, .sy = 30, .xpixel = 18, .ypixel = 36 };
+    small.session = s;
+
+    const cw = server_client_mod.server_client_add_client_window(&big, w.id);
+    big.flags |= T.CLIENT_WINDOWSIZECHANGED;
+
+    try client_registry.clients.append(xm.allocator, &big);
+    try client_registry.clients.append(xm.allocator, &small);
+    defer client_registry.clients.clearRetainingCapacity();
+
+    cw.sx = 80;
+    cw.sy = 20;
+    opts.options_set_number(w.options, "window-size", T.WINDOW_SIZE_SMALLEST);
+    recalculate_size(w, true);
+
+    try std.testing.expectEqual(@as(u32, 80), w.sx);
+    try std.testing.expectEqual(@as(u32, 20), w.sy);
+    try std.testing.expectEqual(@as(u32, 80), wp.sx);
+    try std.testing.expectEqual(@as(u32, 20), wp.sy);
+
+    cw.sx = 110;
+    cw.sy = 25;
+    opts.options_set_number(w.options, "window-size", T.WINDOW_SIZE_LARGEST);
+    recalculate_size(w, true);
+
+    try std.testing.expectEqual(@as(u32, 110), w.sx);
+    try std.testing.expectEqual(@as(u32, 25), w.sy);
+    try std.testing.expectEqual(@as(u32, 110), wp.sx);
+    try std.testing.expectEqual(@as(u32, 25), wp.sy);
 }

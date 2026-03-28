@@ -78,6 +78,7 @@ const cmd_list_panes = @import("cmd-list-panes.zig");
 const cmd_list_clients = @import("cmd-list-clients.zig");
 const cmd_list_buffers = @import("cmd-list-buffers.zig");
 const cmd_choose_tree = @import("cmd-choose-tree.zig");
+const cmd_copy_mode = @import("cmd-copy-mode.zig");
 const cmd_display_message = @import("cmd-display-message.zig");
 const cmd_command_prompt = @import("cmd-command-prompt.zig");
 const cmd_confirm_before = @import("cmd-confirm-before.zig");
@@ -147,6 +148,8 @@ const cmd_table: []const *const CmdEntry = &.{
     &cmd_choose_tree.entry_client,
     &cmd_choose_tree.entry_buffer,
     &cmd_choose_tree.entry_customize_mode,
+    &cmd_copy_mode.entry_clock,
+    &cmd_copy_mode.entry,
     &cmd_display_message.entry,
     &cmd_command_prompt.entry,
     &cmd_confirm_before.entry,

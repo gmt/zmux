@@ -52,9 +52,12 @@ var client_stdin_event: ?*c.libevent.event = null;
 var client_control_input: std.ArrayList(u8) = .{};
 var client_control_stdin_closed = false;
 var client_attached = false;
+var client_suspended = false;
+var client_suspend_restore_attached = false;
 var client_raw_tty = false;
 var client_saved_tio: c.posix_sys.termios = undefined;
 var client_have_saved_tio = false;
+var client_suspend_signal_hook: ?*const fn () void = null;
 
 // ── Socket connection ─────────────────────────────────────────────────────
 
@@ -292,6 +295,11 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             if (raw[data_len - 1] != 0) return;
             client_handle_lock_command(raw[0 .. data_len - 1]);
         },
+        .@"suspend" => {
+            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+            if (data_len != 0) return;
+            client_handle_suspend();
+        },
         else => {},
     }
 }
@@ -489,6 +497,42 @@ fn client_handle_lock_command(cmd: []const u8) void {
     if (client_peer) |peer| _ = proc_mod.proc_send(peer, .unlock, -1, null, 0);
 }
 
+fn client_set_tstp_handler(sig_handler: usize) void {
+    const action = std.posix.Sigaction{
+        .handler = .{ .handler = sig_handler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.os.linux.SA.RESTART,
+    };
+    std.posix.sigaction(std.posix.SIG.TSTP, &action, null);
+}
+
+fn client_deliver_suspend_signal() void {
+    if (client_suspend_signal_hook) |hook| {
+        hook();
+        return;
+    }
+    _ = std.c.kill(std.c.getpid(), std.posix.SIG.TSTP);
+}
+
+fn client_handle_suspend() void {
+    client_suspend_restore_attached = client_attached;
+    if (client_attached or client_raw_tty) client_leave_attached_mode();
+    client_set_tstp_handler(std.posix.SIG.DFL);
+    client_suspended = true;
+    client_deliver_suspend_signal();
+}
+
+fn client_handle_continue() void {
+    client_set_tstp_handler(std.posix.SIG.IGN);
+    if (client_suspend_restore_attached) {
+        client_enter_attached_mode();
+        client_send_resize();
+    }
+    client_suspend_restore_attached = false;
+    client_suspended = false;
+    if (client_peer) |peer| _ = proc_mod.proc_send(peer, .wakeup, -1, null, 0);
+}
+
 export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     _ = _events;
     _ = _arg;
@@ -640,9 +684,10 @@ pub fn client_main(
 export fn client_signal(signo: c_int) void {
     switch (signo) {
         std.posix.SIG.TERM, std.posix.SIG.INT => {
-            client_exitreason = .terminated;
+            if (!client_suspended) client_exitreason = .terminated;
             proc_mod.proc_exit(client_proc.?);
         },
+        std.posix.SIG.CONT => client_handle_continue(),
         std.posix.SIG.WINCH => {
             if (client_attached) client_send_resize();
         },
@@ -758,4 +803,59 @@ test "client lock command runs shell command then sends unlock" {
     try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
     defer c.imsg.imsg_free(&imsg_msg);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.unlock))), c.imsg.imsg_get_type(&imsg_msg));
+}
+
+fn client_test_suspend_hook() void {}
+
+test "client suspend and continue round-trip wakeup state" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-suspend-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    client_attached = true;
+    client_suspended = false;
+    client_suspend_restore_attached = false;
+    client_raw_tty = false;
+    client_have_saved_tio = false;
+    client_suspend_signal_hook = client_test_suspend_hook;
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+        client_proc = null;
+        client_attached = false;
+        client_suspended = false;
+        client_suspend_restore_attached = false;
+        client_suspend_signal_hook = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    client_handle_suspend();
+    try std.testing.expect(client_suspended);
+    try std.testing.expect(!client_attached);
+    try std.testing.expect(client_suspend_restore_attached);
+
+    client_handle_continue();
+    try std.testing.expect(!client_suspended);
+    try std.testing.expect(client_attached);
+    try std.testing.expect(!client_suspend_restore_attached);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.wakeup))), c.imsg.imsg_get_type(&imsg_msg));
 }

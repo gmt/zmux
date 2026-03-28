@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_find = @import("cmd-find.zig");
 const cmd_format = @import("cmd-format.zig");
 const cmdq = @import("cmd-queue.zig");
 const cfg_mod = @import("cfg.zig");
@@ -59,14 +60,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const quoted_cwd = quote_cwd_for_glob(server_client_mod.server_client_get_cwd(cl, null));
     defer xm.allocator.free(quoted_cwd);
 
+    var path_format_ctx: format_mod.FormatContext = undefined;
+    const path_format_ctx_ptr = if (args.has('F')) blk: {
+        path_format_ctx = build_path_format_context(item, args);
+        break :blk &path_format_ctx;
+    } else null;
+
     var idx: usize = 0;
     while (args.value_at(idx)) |raw_path| : (idx += 1) {
-        const path = if (args.has('F')) blk: {
-            const ctx = format_mod.FormatContext{
-                .item = @ptrCast(item),
-                .client = cl,
-            };
-            break :blk cmd_format.require(item, raw_path, &ctx) orelse {
+        const path = if (path_format_ctx_ptr) |ctx| blk: {
+            break :blk cmd_format.require(item, raw_path, ctx) orelse {
                 free_state(state);
                 return .@"error";
             };
@@ -77,6 +80,21 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     return drive_state(state, false);
+}
+
+fn build_path_format_context(item: *cmdq.CmdqItem, args: *const @import("arguments.zig").Arguments) format_mod.FormatContext {
+    var target: T.CmdFindState = .{};
+    const has_lookup_context = args.get('t') != null or
+        cmdq.cmdq_get_client(item) != null or
+        cmd_find.cmd_find_valid_state(&cmdq.cmdq_get_target(item)) or
+        cmd_find.cmd_find_valid_state(&cmdq.cmdq_get_current(item));
+    if (has_lookup_context)
+        _ = cmd_find.cmd_find_target(&target, item, args.get('t'), .pane, T.CMD_FIND_CANFAIL);
+
+    var ctx = cmd_format.target_context(&target, null);
+    ctx.item = @ptrCast(item);
+    ctx.client = cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item);
+    return ctx;
 }
 
 fn expand_path_argument(state: *SourceFileState, quoted_cwd: []const u8, path: []const u8) void {
@@ -344,6 +362,89 @@ test "source-file expands relative glob patterns from the client cwd" {
 
     const two = paste_mod.paste_get_name("two") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("loaded-two", paste_mod.paste_buffer_data(two, null));
+}
+
+fn test_session_with_empty_pane(name: []const u8) !struct { s: *T.Session, wp: *T.WindowPane } {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    opts.global_s_options = opts.options_create(null);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+
+    const s = sess.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    s.curw = wl;
+    return .{ .s = s, .wp = wl.window.active.? };
+}
+
+fn test_teardown_session(name: []const u8, s: *T.Session) void {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+
+    if (sess.session_find(name) != null) sess.session_destroy(s, false, "test");
+    env_mod.environ_free(env_mod.global_environ);
+    opts.options_free(opts.global_w_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_options);
+}
+
+test "source-file -F expands paths from the target pane context" {
+    paste_mod.paste_reset_for_tests();
+    defer paste_mod.paste_reset_for_tests();
+
+    const setup = try test_session_with_empty_pane("source-file-target-format");
+    defer test_teardown_session("source-file-target-format", setup.s);
+
+    setup.wp.screen.title = xm.xstrdup("target-pane");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "target-pane.conf", .data = "set-buffer -b target loaded-target\n" });
+
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .cwd = cwd,
+    };
+    client.tty.client = &client;
+
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    const cmd = try cmd_mod.cmd_parse_one(
+        &.{ "source-file", "-F", "-t", "source-file-target-format:0.0", "#{pane_title}.conf" },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const pb = paste_mod.paste_get_name("target") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("loaded-target", paste_mod.paste_buffer_data(pb, null));
 }
 
 test "source-file quiet glob nomatch does not fail" {

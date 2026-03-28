@@ -151,6 +151,26 @@ pub fn server_client_add_client_window(cl: *T.Client, id: u32) *T.ClientWindow {
     return &cl.client_windows.items[cl.client_windows.items.len - 1];
 }
 
+pub fn server_client_get_pane(cl: *T.Client) ?*T.WindowPane {
+    const s = cl.session orelse return null;
+    const wl = s.curw orelse return null;
+    const active = wl.window.active;
+
+    if (cl.flags & T.CLIENT_ACTIVEPANE == 0)
+        return active;
+    if (server_client_get_client_window(cl, wl.window.id)) |cw| {
+        if (cw.pane) |pane| return pane;
+    }
+    return active;
+}
+
+pub fn server_client_set_pane(cl: *T.Client, wp: *T.WindowPane) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const cw = server_client_add_client_window(cl, wl.window.id);
+    cw.pane = wp;
+}
+
 export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void {
     const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
 

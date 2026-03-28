@@ -783,11 +783,14 @@ pub const WindowPane = struct {
     scrollbar_style: Style = .{},
     sb_slider_y: u32 = 0,
     sb_slider_h: u32 = 0,
+    offset: WindowPaneOffset = .{},
+    base_offset: usize = 0,
 
     // Pipe (pipe-pane)
     pipe_fd: i32 = -1,
     pipe_pid: std.posix.pid_t = -1,
     pipe_event: ?*c.libevent.event = null,
+    pipe_offset: WindowPaneOffset = .{},
 };
 
 // ── Window ────────────────────────────────────────────────────────────────
@@ -1085,6 +1088,20 @@ pub const ControlSubscription = struct {
     }
 };
 
+pub const WindowPaneOffset = struct {
+    used: usize = 0,
+};
+
+pub const CONTROL_PANE_OFF: u8 = 0x1;
+pub const CONTROL_PANE_PAUSED: u8 = 0x2;
+
+pub const ControlPane = struct {
+    pane: u32,
+    offset: WindowPaneOffset = .{},
+    queued: WindowPaneOffset = .{},
+    flags: u8 = 0,
+};
+
 pub const ClientPaneCache = struct {
     pane_id: ?u32 = null,
     sx: u32 = 0,
@@ -1169,6 +1186,7 @@ pub const Client = struct {
     session: ?*Session = null,
     last_session: ?*Session = null,
     client_windows: std.ArrayListUnmanaged(ClientWindow) = .{},
+    control_panes: std.ArrayListUnmanaged(ControlPane) = .{},
     control_subscriptions: std.ArrayListUnmanaged(ControlSubscription) = .{},
     control_subs_timer: ?*c.libevent.event = null,
     pan_window: ?*Window = null,

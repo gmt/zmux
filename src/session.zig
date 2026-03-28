@@ -580,8 +580,108 @@ pub fn session_first_winlink(s: *T.Session) ?*T.Winlink {
     return best;
 }
 
+fn session_last_winlink(s: *T.Session) ?*T.Winlink {
+    var best: ?*T.Winlink = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        if (best == null or wl.*.idx > best.?.idx) best = wl.*;
+    }
+    return best;
+}
+
+fn session_next_alert(wl: ?*T.Winlink, s: *T.Session) ?*T.Winlink {
+    var next = wl;
+    while (next) |candidate| {
+        if (session_has_live_winlink_ptr(s, candidate) and candidate.flags & T.WINLINK_ALERTFLAGS != 0)
+            return candidate;
+
+        var best: ?*T.Winlink = null;
+        var it = s.windows.valueIterator();
+        while (it.next()) |entry| {
+            const current = entry.*;
+            if (current.idx <= candidate.idx) continue;
+            if (best == null or current.idx < best.?.idx) best = current;
+        }
+        next = best;
+    }
+    return null;
+}
+
+fn session_previous_alert(wl: ?*T.Winlink, s: *T.Session) ?*T.Winlink {
+    var previous = wl;
+    while (previous) |candidate| {
+        if (session_has_live_winlink_ptr(s, candidate) and candidate.flags & T.WINLINK_ALERTFLAGS != 0)
+            return candidate;
+
+        var best: ?*T.Winlink = null;
+        var it = s.windows.valueIterator();
+        while (it.next()) |entry| {
+            const current = entry.*;
+            if (current.idx >= candidate.idx) continue;
+            if (best == null or current.idx > best.?.idx) best = current;
+        }
+        previous = best;
+    }
+    return null;
+}
+
 pub fn session_get_by_name(name: []const u8) ?*T.Session {
     return sessions.get(name);
+}
+
+pub fn session_next(s: *T.Session, alert: bool) bool {
+    session_repair_current(s);
+    const current = s.curw orelse return false;
+
+    var next = blk: {
+        var best: ?*T.Winlink = null;
+        var it = s.windows.valueIterator();
+        while (it.next()) |wl| {
+            const candidate = wl.*;
+            if (candidate.idx <= current.idx) continue;
+            if (best == null or candidate.idx < best.?.idx) best = candidate;
+        }
+        break :blk best;
+    };
+    if (alert) next = session_next_alert(next, s);
+    if (next == null) {
+        next = session_first_winlink(s);
+        if (alert) next = session_next_alert(next, s);
+    }
+
+    return session_set_current(s, next orelse return false);
+}
+
+pub fn session_previous(s: *T.Session, alert: bool) bool {
+    session_repair_current(s);
+    const current = s.curw orelse return false;
+
+    var previous = blk: {
+        var best: ?*T.Winlink = null;
+        var it = s.windows.valueIterator();
+        while (it.next()) |wl| {
+            const candidate = wl.*;
+            if (candidate.idx >= current.idx) continue;
+            if (best == null or candidate.idx > best.?.idx) best = candidate;
+        }
+        break :blk best;
+    };
+    if (alert) previous = session_previous_alert(previous, s);
+    if (previous == null) {
+        previous = session_last_winlink(s);
+        if (alert) previous = session_previous_alert(previous, s);
+    }
+
+    return session_set_current(s, previous orelse return false);
+}
+
+pub fn session_select(s: *T.Session, idx: i32) bool {
+    return session_set_current(s, winlink_find_by_index(&s.windows, idx) orelse return false);
+}
+
+pub fn session_last(s: *T.Session) bool {
+    session_repair_current(s);
+    return session_set_current(s, if (s.lastw.items.len > 0) s.lastw.items[0] else return false);
 }
 
 pub fn session_next_session(

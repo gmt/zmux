@@ -441,9 +441,165 @@ const default_mouse_down3_pane_argv = [_][]const u8{
 const default_binding_specs = [_]DefaultBindingSpec{
     .{
         .table = "prefix",
+        .key_name = "C-b",
+        .note = "Send the prefix key",
+        .command = "send-prefix",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-o",
+        .note = "Rotate through the panes",
+        .command = "rotate-window",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-z",
+        .note = "Suspend the current client",
+        .command = "suspend-client",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "Space",
+        .note = "Select next layout",
+        .command = "next-layout",
+    },
+    .{
+        .table = "prefix",
+        .key = '!',
+        .note = "Break pane to a new window",
+        .command = "break-pane",
+    },
+    .{
+        .table = "prefix",
+        .key = '"',
+        .note = "Split window vertically",
+        .command = "split-window",
+    },
+    .{
+        .table = "prefix",
+        .key = '#',
+        .note = "List all paste buffers",
+        .command = "list-buffers",
+    },
+    .{
+        .table = "prefix",
+        .key = '$',
+        .note = "Rename current session",
+        .command = "command-prompt -I'#S' \"rename-session -- '%%'\"",
+    },
+    .{
+        .table = "prefix",
+        .key = '%',
+        .note = "Split window horizontally",
+        .command = "split-window -h",
+    },
+    .{
+        .table = "prefix",
+        .key = '&',
+        .note = "Kill current window",
+        .command = "confirm-before -p'kill-window #W? (y/n)' kill-window",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "'",
+        .note = "Prompt for window index to select",
+        .command = "command-prompt -T window-target -pindex \"select-window -t ':%%'\"",
+    },
+    .{
+        .table = "prefix",
+        .key = '(',
+        .note = "Switch to previous client",
+        .command = "switch-client -p",
+    },
+    .{
+        .table = "prefix",
+        .key = ')',
+        .note = "Switch to next client",
+        .command = "switch-client -n",
+    },
+    .{
+        .table = "prefix",
+        .key = ',',
+        .note = "Rename current window",
+        .command = "command-prompt -I'#W' \"rename-window -- '%%'\"",
+    },
+    .{
+        .table = "prefix",
+        .key = '-',
+        .note = "Delete the most recent paste buffer",
+        .command = "delete-buffer",
+    },
+    .{
+        .table = "prefix",
+        .key = '.',
+        .note = "Move the current window",
+        .command = "command-prompt -T target \"move-window -t '%%'\"",
+    },
+    .{
+        .table = "prefix",
+        .key = '/',
+        .note = "Describe key binding",
+        .command = "command-prompt -kpkey \"list-keys -1N '%%'\"",
+    },
+    .{
+        .table = "prefix",
+        .key = ':',
+        .note = "Prompt for a command",
+        .command = "command-prompt",
+    },
+    .{
+        .table = "prefix",
+        .key = ';',
+        .note = "Move to the previously active pane",
+        .command = "last-pane",
+    },
+    .{
+        .table = "prefix",
+        .key = '=',
+        .note = "Choose a paste buffer from a list",
+        .command = "choose-buffer -Z",
+    },
+    .{
+        .table = "prefix",
         .key = '?',
         .note = "List key bindings",
         .argv = default_list_keys_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = 'D',
+        .note = "Choose and detach a client from a list",
+        .command = "choose-client -Z",
+    },
+    .{
+        .table = "prefix",
+        .key = 'E',
+        .note = "Spread panes out evenly",
+        .command = "select-layout -E",
+    },
+    .{
+        .table = "prefix",
+        .key = 'L',
+        .note = "Switch to the last client",
+        .command = "switch-client -l",
+    },
+    .{
+        .table = "prefix",
+        .key = 'M',
+        .note = "Clear the marked pane",
+        .command = "select-pane -M",
+    },
+    .{
+        .table = "prefix",
+        .key = '[',
+        .note = "Enter copy mode",
+        .command = "copy-mode",
+    },
+    .{
+        .table = "prefix",
+        .key = ']',
+        .note = "Paste the most recent paste buffer",
+        .command = "paste-buffer -p",
     },
     .{
         .table = "prefix",
@@ -453,15 +609,302 @@ const default_binding_specs = [_]DefaultBindingSpec{
     },
     .{
         .table = "prefix",
+        .key = 'd',
+        .note = "Detach the current client",
+        .command = "detach-client",
+    },
+    .{
+        .table = "prefix",
+        .key = 'f',
+        .note = "Search for a pane",
+        .command = "command-prompt \"find-window -Z -- '%%'\"",
+    },
+    .{
+        .table = "prefix",
         .key = 'i',
         .note = "Display window information",
         .argv = default_display_message_argv[0..],
     },
     .{
         .table = "prefix",
+        .key = 'l',
+        .note = "Select the previously current window",
+        .command = "last-window",
+    },
+    .{
+        .table = "prefix",
+        .key = 'm',
+        .note = "Toggle the marked pane",
+        .command = "select-pane -m",
+    },
+    .{
+        .table = "prefix",
+        .key = 'n',
+        .note = "Select the next window",
+        .command = "next-window",
+    },
+    .{
+        .table = "prefix",
+        .key = 'o',
+        .note = "Select the next pane",
+        .command = "select-pane -t:.+",
+    },
+    .{
+        .table = "prefix",
+        .key = 'C',
+        .note = "Customize options",
+        .command = "customize-mode -Z",
+    },
+    .{
+        .table = "prefix",
+        .key = 'p',
+        .note = "Select the previous window",
+        .command = "previous-window",
+    },
+    .{
+        .table = "prefix",
+        .key = 'q',
+        .note = "Display pane numbers",
+        .command = "display-panes",
+    },
+    .{
+        .table = "prefix",
         .key = 'r',
         .note = "Redraw the current client",
         .argv = default_refresh_client_argv[0..],
+    },
+    .{
+        .table = "prefix",
+        .key = 's',
+        .note = "Choose a session from a list",
+        .command = "choose-tree -Zs",
+    },
+    .{
+        .table = "prefix",
+        .key = 't',
+        .note = "Show a clock",
+        .command = "clock-mode",
+    },
+    .{
+        .table = "prefix",
+        .key = 'w',
+        .note = "Choose a window from a list",
+        .command = "choose-tree -Zw",
+    },
+    .{
+        .table = "prefix",
+        .key = 'x',
+        .note = "Kill the active pane",
+        .command = "confirm-before -p'kill-pane #P? (y/n)' kill-pane",
+    },
+    .{
+        .table = "prefix",
+        .key = 'z',
+        .note = "Zoom the active pane",
+        .command = "resize-pane -Z",
+    },
+    .{
+        .table = "prefix",
+        .key = '{',
+        .note = "Swap the active pane with the pane above",
+        .command = "swap-pane -U",
+    },
+    .{
+        .table = "prefix",
+        .key = '}',
+        .note = "Swap the active pane with the pane below",
+        .command = "swap-pane -D",
+    },
+    .{
+        .table = "prefix",
+        .key = '~',
+        .note = "Show messages",
+        .command = "show-messages",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "PPage",
+        .note = "Enter copy mode and scroll up",
+        .command = "copy-mode -u",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "Up",
+        .note = "Select the pane above the active pane",
+        .repeat = true,
+        .command = "select-pane -U",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "Down",
+        .note = "Select the pane below the active pane",
+        .repeat = true,
+        .command = "select-pane -D",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "Left",
+        .note = "Select the pane to the left of the active pane",
+        .repeat = true,
+        .command = "select-pane -L",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "Right",
+        .note = "Select the pane to the right of the active pane",
+        .repeat = true,
+        .command = "select-pane -R",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-1",
+        .note = "Set the even-horizontal layout",
+        .command = "select-layout even-horizontal",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-2",
+        .note = "Set the even-vertical layout",
+        .command = "select-layout even-vertical",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-3",
+        .note = "Set the main-horizontal layout",
+        .command = "select-layout main-horizontal",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-4",
+        .note = "Set the main-vertical layout",
+        .command = "select-layout main-vertical",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-5",
+        .note = "Select the tiled layout",
+        .command = "select-layout tiled",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-6",
+        .note = "Set the main-horizontal-mirrored layout",
+        .command = "select-layout main-horizontal-mirrored",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-7",
+        .note = "Set the main-vertical-mirrored layout",
+        .command = "select-layout main-vertical-mirrored",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-n",
+        .note = "Select the next window with an alert",
+        .command = "next-window -a",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-o",
+        .note = "Rotate through the panes in reverse",
+        .command = "rotate-window -D",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-p",
+        .note = "Select the previous window with an alert",
+        .command = "previous-window -a",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "S-Up",
+        .note = "Move the visible part of the window up",
+        .repeat = true,
+        .command = "refresh-client -U 10",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "S-Down",
+        .note = "Move the visible part of the window down",
+        .repeat = true,
+        .command = "refresh-client -D 10",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "S-Left",
+        .note = "Move the visible part of the window left",
+        .repeat = true,
+        .command = "refresh-client -L 10",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "S-Right",
+        .note = "Move the visible part of the window right",
+        .repeat = true,
+        .command = "refresh-client -R 10",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "DC",
+        .note = "Reset so the visible part of the window follows the cursor",
+        .repeat = true,
+        .command = "refresh-client -c",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-Up",
+        .note = "Resize the pane up by 5",
+        .repeat = true,
+        .command = "resize-pane -U 5",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-Down",
+        .note = "Resize the pane down by 5",
+        .repeat = true,
+        .command = "resize-pane -D 5",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-Left",
+        .note = "Resize the pane left by 5",
+        .repeat = true,
+        .command = "resize-pane -L 5",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "M-Right",
+        .note = "Resize the pane right by 5",
+        .repeat = true,
+        .command = "resize-pane -R 5",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-Up",
+        .note = "Resize the pane up",
+        .repeat = true,
+        .command = "resize-pane -U",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-Down",
+        .note = "Resize the pane down",
+        .repeat = true,
+        .command = "resize-pane -D",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-Left",
+        .note = "Resize the pane left",
+        .repeat = true,
+        .command = "resize-pane -L",
+    },
+    .{
+        .table = "prefix",
+        .key_name = "C-Right",
+        .note = "Resize the pane right",
+        .repeat = true,
+        .command = "resize-pane -R",
     },
     .{
         .table = "prefix",
@@ -1853,8 +2296,16 @@ test "key_bindings_init creates root and prefix tables" {
 
     try std.testing.expect(key_bindings_get_table("root", false) != null);
     try std.testing.expect(key_bindings_get_table("prefix", false) != null);
-    try std.testing.expectEqualStrings("prefix", key_bindings_first_table().?.name);
-    try std.testing.expectEqualStrings("root", key_bindings_next_table(key_bindings_first_table().?).?.name);
+
+    var saw_root = false;
+    var saw_prefix = false;
+    var table = key_bindings_first_table();
+    while (table) |current| : (table = key_bindings_next_table(current)) {
+        if (std.mem.eql(u8, current.name, "root")) saw_root = true;
+        if (std.mem.eql(u8, current.name, "prefix")) saw_prefix = true;
+    }
+    try std.testing.expect(saw_root);
+    try std.testing.expect(saw_prefix);
 }
 
 test "key bindings tables iterate in tmux name order" {
@@ -1905,10 +2356,38 @@ test "key bindings init seeds prefix menu defaults and root menu mouse defaults"
 
     const prefix = key_bindings_get_table("prefix", false).?;
     const root = key_bindings_get_table("root", false).?;
-    try std.testing.expectEqual(@as(usize, 16), prefix.order.items.len);
+    try std.testing.expectEqual(@as(usize, 87), prefix.order.items.len);
     try std.testing.expectEqual(@as(usize, 21), root.order.items.len);
     try std.testing.expect(key_bindings_get_default(prefix, '?') != null);
     try std.testing.expect(key_bindings_get(prefix, '?') != null);
+
+    const send_prefix = key_bindings_get(prefix, key_string.key_string_lookup_string("C-b")).?;
+    try std.testing.expectEqualStrings("Send the prefix key", send_prefix.note.?);
+    try std.testing.expectEqualStrings("send-prefix", cmdlist_nth(binding_cmdlist(send_prefix), 0).entry.name);
+
+    const kill_window = key_bindings_get(prefix, '&').?;
+    try std.testing.expectEqualStrings("Kill current window", kill_window.note.?);
+    const kill_window_cmd = cmdlist_nth(binding_cmdlist(kill_window), 0);
+    try std.testing.expectEqualStrings("confirm-before", kill_window_cmd.entry.name);
+    try std.testing.expectEqualStrings("kill-window #W? (y/n)", cmd_mod.cmd_get_args(kill_window_cmd).get('p').?);
+
+    const last_window = key_bindings_get(prefix, 'l').?;
+    try std.testing.expectEqualStrings("last-window", cmdlist_nth(binding_cmdlist(last_window), 0).entry.name);
+
+    const alert_next = key_bindings_get(prefix, key_string.key_string_lookup_string("M-n")).?;
+    const alert_next_cmd = cmdlist_nth(binding_cmdlist(alert_next), 0);
+    try std.testing.expectEqualStrings("next-window", alert_next_cmd.entry.name);
+    try std.testing.expect(cmd_mod.cmd_get_args(alert_next_cmd).has('a'));
+
+    const shifted_left = key_bindings_get(prefix, key_string.key_string_lookup_string("S-Left")).?;
+    try std.testing.expect(shifted_left.flags & T.KEY_BINDING_REPEAT != 0);
+    const shifted_left_cmd = cmdlist_nth(binding_cmdlist(shifted_left), 0);
+    try std.testing.expectEqualStrings("refresh-client", shifted_left_cmd.entry.name);
+    try std.testing.expectEqualStrings("10", cmd_mod.cmd_get_args(shifted_left_cmd).value_at(0).?);
+
+    const resize_up = key_bindings_get(prefix, key_string.key_string_lookup_string("C-Up")).?;
+    try std.testing.expect(resize_up.flags & T.KEY_BINDING_REPEAT != 0);
+    try std.testing.expectEqualStrings("resize-pane", cmdlist_nth(binding_cmdlist(resize_up), 0).entry.name);
 
     const window_menu = key_bindings_get(prefix, '<').?;
     try std.testing.expectEqualStrings("Display window menu", window_menu.note.?);
@@ -2016,12 +2495,12 @@ test "key bindings reset table restores default prefix set" {
     const prefix = key_bindings_get_table("prefix", false).?;
     const original_count = prefix.order.items.len;
     key_bindings_remove("prefix", '?');
-    key_bindings_add("prefix", 'x', "temporary", false, null);
+    key_bindings_add("prefix", 'v', "temporary", false, null);
     key_bindings_reset_table("prefix");
     const restored = key_bindings_get_table("prefix", false).?;
     try std.testing.expectEqual(original_count, restored.order.items.len);
     try std.testing.expect(key_bindings_get(restored, '?') != null);
-    try std.testing.expect(key_bindings_get(restored, 'x') == null);
+    try std.testing.expect(key_bindings_get(restored, 'v') == null);
 }
 
 test "key bindings remove table removes prefix entirely" {

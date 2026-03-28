@@ -269,6 +269,7 @@ fn parse_csi(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize 
     if (bytes[2] == 'M' or bytes[2] == '<') {
         return parse_mouse(if (client) |cl| &cl.tty else null, bytes, event);
     }
+    if (bytes[2] == '?') return parse_csi_private(bytes, event);
 
     const final = bytes[2];
     switch (final) {
@@ -278,6 +279,8 @@ fn parse_csi(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize 
         'D' => return fill_event(event, T.KEYC_LEFT | T.KEYC_CURSOR | T.KEYC_IMPLIED_META, bytes[0..3]),
         'H' => return fill_event(event, T.KEYC_HOME | T.KEYC_IMPLIED_META, bytes[0..3]),
         'F' => return fill_event(event, T.KEYC_END | T.KEYC_IMPLIED_META, bytes[0..3]),
+        'I' => return fill_event(event, T.KEYC_FOCUS_IN, bytes[0..3]),
+        'O' => return fill_event(event, T.KEYC_FOCUS_OUT, bytes[0..3]),
         else => {},
     }
 
@@ -293,12 +296,35 @@ fn parse_csi(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize 
                 4, 8 => T.KEYC_END | T.KEYC_IMPLIED_META,
                 5 => T.KEYC_PPAGE | T.KEYC_IMPLIED_META,
                 6 => T.KEYC_NPAGE | T.KEYC_IMPLIED_META,
+                200 => T.KEYC_PASTE_START | T.KEYC_IMPLIED_META,
+                201 => T.KEYC_PASTE_END | T.KEYC_IMPLIED_META,
                 else => T.KEYC_UNKNOWN,
             };
             return fill_event(event, key, bytes[0 .. idx + 1]);
         }
         if ((ch < '0' or ch > '9') and ch != ';') break;
     }
+    return null;
+}
+
+fn parse_csi_private(bytes: []const u8, event: *T.key_event) ?usize {
+    if (bytes.len < 4) return null;
+
+    var idx: usize = 3;
+    while (idx < bytes.len) : (idx += 1) {
+        const ch = bytes[idx];
+        if (ch == 'n') {
+            const key = if (std.mem.eql(u8, bytes[3..idx], "997;1"))
+                T.KEYC_REPORT_DARK_THEME
+            else if (std.mem.eql(u8, bytes[3..idx], "997;2"))
+                T.KEYC_REPORT_LIGHT_THEME
+            else
+                T.KEYC_UNKNOWN;
+            return fill_event(event, key, bytes[0 .. idx + 1]);
+        }
+        if ((ch < '0' or ch > '9') and ch != ';') break;
+    }
+
     return null;
 }
 
@@ -875,6 +901,38 @@ test "input_key_get handles meta and utf8 input" {
 
     try std.testing.expectEqual(@as(usize, 2), input_key_get("é", &event).?);
     try std.testing.expectEqual(key_string.key_string_lookup_string("é"), event.key);
+}
+
+test "input_key_get decodes tmux tty focus, paste, and theme report sequences" {
+    var event: T.key_event = .{};
+
+    try std.testing.expectEqual(@as(usize, 3), input_key_get("\x1b[I", &event).?);
+    try std.testing.expectEqual(T.KEYC_FOCUS_IN, event.key);
+
+    try std.testing.expectEqual(@as(usize, 3), input_key_get("\x1b[O", &event).?);
+    try std.testing.expectEqual(T.KEYC_FOCUS_OUT, event.key);
+
+    try std.testing.expectEqual(@as(usize, 6), input_key_get("\x1b[200~", &event).?);
+    try std.testing.expectEqual(T.KEYC_PASTE_START | T.KEYC_IMPLIED_META, event.key);
+
+    try std.testing.expectEqual(@as(usize, 6), input_key_get("\x1b[201~", &event).?);
+    try std.testing.expectEqual(T.KEYC_PASTE_END | T.KEYC_IMPLIED_META, event.key);
+
+    try std.testing.expectEqual(@as(usize, 9), input_key_get("\x1b[?997;1n", &event).?);
+    try std.testing.expectEqual(T.KEYC_REPORT_DARK_THEME, event.key);
+
+    try std.testing.expectEqual(@as(usize, 9), input_key_get("\x1b[?997;2n", &event).?);
+    try std.testing.expectEqual(T.KEYC_REPORT_LIGHT_THEME, event.key);
+}
+
+test "input_key_get keeps tmux tty focus, paste, and theme report prefixes partial" {
+    var event: T.key_event = .{};
+
+    try std.testing.expect(input_key_get("\x1b[", &event) == null);
+    try std.testing.expect(input_key_get("\x1b[2", &event) == null);
+    try std.testing.expect(input_key_get("\x1b[200", &event) == null);
+    try std.testing.expect(input_key_get("\x1b[?997", &event) == null);
+    try std.testing.expect(input_key_get("\x1b[?997;1", &event) == null);
 }
 
 test "input_key_get_client decodes mouse sequences and tracks the previous state" {

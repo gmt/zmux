@@ -48,6 +48,39 @@ extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_
 
 /// Create a new window (and initial pane) in session sc.s.
 pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
+    if (sc.flags & T.SPAWN_RESPAWN != 0) {
+        const wl = sc.wl orelse {
+            cause.* = xm.xstrdup("no window");
+            return null;
+        };
+        const s = sc.s orelse wl.session;
+        const w = wl.window;
+
+        if (sc.flags & T.SPAWN_KILL == 0) {
+            for (w.panes.items) |wp| {
+                if (wp.fd >= 0) {
+                    cause.* = xm.xasprintf("window {s}:{d} still active", .{ s.name, wl.idx });
+                    return null;
+                }
+            }
+        }
+
+        const survivor = w.panes.items[0];
+        while (w.panes.items.len > 1) {
+            const pane = w.panes.items[1];
+            win.window_remove_pane(w, pane);
+        }
+
+        survivor.xoff = 0;
+        survivor.yoff = 0;
+        win.window_pane_resize(survivor, w.sx, w.sy);
+        w.active = survivor;
+        sc.wp0 = survivor;
+
+        _ = respawn_pane(sc, cause) orelse return null;
+        return wl;
+    }
+
     const s = sc.s orelse {
         cause.* = xm.xstrdup("no session");
         return null;

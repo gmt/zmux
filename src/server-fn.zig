@@ -134,6 +134,24 @@ pub fn server_kill_window(w: *T.Window, detach_last: bool) void {
     }
 }
 
+pub fn server_renumber_session(s: *T.Session) void {
+    if (opts.options_get_number(s.options, "renumber-windows") == 0) return;
+
+    if (sess.session_group_contains(s)) |group| {
+        for (group.sessions.items) |member|
+            sess.session_renumber_windows(member);
+        return;
+    }
+
+    sess.session_renumber_windows(s);
+}
+
+pub fn server_renumber_all() void {
+    var it = sess.sessions.valueIterator();
+    while (it.next()) |s|
+        server_renumber_session(s.*);
+}
+
 pub fn server_link_window(
     src: *T.Session,
     srcwl: *T.Winlink,

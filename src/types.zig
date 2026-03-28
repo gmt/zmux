@@ -720,6 +720,7 @@ pub const LayoutCell = struct {
 pub const PANE_REDRAW: u32 = 0x0001;
 pub const PANE_FOCUSED: u32 = 0x0004;
 pub const PANE_INPUTOFF: u32 = 0x0040;
+pub const PANE_CHANGED: u32 = 0x0080;
 pub const PANE_EXITED: u32 = 0x0100;
 pub const PANE_EMPTY: u32 = 0x0800;
 pub const PANE_STYLECHANGED: u32 = 0x1000;

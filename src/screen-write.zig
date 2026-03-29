@@ -141,9 +141,15 @@ pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
     if (gd.sx == 0 or gd.sy == 0) return;
     if (gc.isPadding()) return;
 
-    if (combineCell(ctx, gc)) return;
+    // Apply screen's current cell state (fg/bg/attr) to the cell.
+    var merged = gc.*;
+    if (gc.fg == 8) merged.fg = @intCast(s.cell_fg);
+    if (gc.bg == 8) merged.bg = @intCast(s.cell_bg);
+    merged.attr |= s.cell_attr;
 
-    const width: u32 = gc.data.width;
+    if (combineCell(ctx, &merged)) return;
+
+    const width: u32 = merged.data.width;
     if (width == 0) return;
 
     if ((s.mode & T.MODE_WRAP) == 0 and
@@ -166,7 +172,7 @@ pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
         grid.set_padding(gd, s.cy, xx);
     }
 
-    grid.set_cell(gd, s.cy, s.cx, gc);
+    grid.set_cell(gd, s.cy, s.cx, &merged);
     advanceCursorAfterWrite(ctx, @intCast(width));
 }
 

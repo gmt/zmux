@@ -31,9 +31,7 @@ zig build smoke-soak
 zig build smoke-docker
 ```
 
-Use `/tmp` for ephemeral sockets and stress artifacts by default. If the agent
-wants persistent logs or screenshots, store them under
-`/goodz/work/agents/zmux`.
+Use `/tmp` for ephemeral sockets and stress artifacts by default.
 
 If any automated suite fails, stop and inspect that failure before manual smoke.
 Manual validation is not a substitute for a deterministic breakage.
@@ -130,18 +128,3 @@ Fail the smoke if any of these happen:
 - attach/detach/exit leaves the terminal broken
 - stderr shows repeated warnings, protocol noise, or unexpected stack traces
 - memory, FD count, or client count grows without settling during soak runs
-
-Record as an explicit gap, not an execution failure:
-
-- a command or behavior that the checked-in command matrix marks unsupported in
-  current zmux
-
-## Agent Output
-
-The agent’s final report should include:
-
-- the exact suites and manual scenarios run
-- whether the oracle tmux behaved differently
-- screenshots or transcript paths when rendering/input issues were observed
-- a short list of confirmed failures
-- a short list of unsupported-but-requested behaviors still missing in zmux

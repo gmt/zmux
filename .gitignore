@@ -6,6 +6,11 @@ zig-cache/
 # Tmux-style log files
 tmux-*.log
 
+# tmux-museum generated artifacts
+tmux-museum/build/
+tmux-museum/out/
+tmux-museum/rebuild/
+
 # Editor / IDE
 .vscode/
 *.swp

@@ -13,12 +13,8 @@ file into a planner blob.
 
 ## Truth Split
 
-- `/home/greg/src/tmux` is the behavioral oracle. Read the C when behavior is
-  unclear.
+- `tmux` is the behavioral oracle. Read the C when behavior is unclear.
 - this file decides where ported behavior should live in the Zig stack
-- `ralphq` owns live work selection
-- `/goodz/work/agents/zmux/TODO.md` is elegance debt only
-- `/goodz/work/agents/zmux/NOTES.md` is archival context only
 
 ## Identity And Independence
 

@@ -81,6 +81,12 @@ pub fn tty_invalidate(tty: *T.Tty) void {
     tty.fg = 8;
     tty.bg = 8;
     tty.us = 8;
+
+    // Force re-emission of region and margin on next use.
+    tty.rupper = 0;
+    tty.rlower = 0;
+    tty.rleft = 0;
+    tty.rright = 0;
 }
 
 /// Context for pane-relative cursor positioning.
@@ -307,6 +313,220 @@ pub fn tty_cursor_pane_unless_wrap(tty: *T.Tty, ctx: *const TtyCursorCtx, px: u3
     {
         tty_cursor_pane(tty, ctx, px, py);
     }
+}
+
+// ── Clear / region / margin operations ────────────────────────────────────────
+
+/// Check whether BCE must be faked because the terminal lacks it and the
+/// background colour is non-default.
+/// Ported from tmux tty_fake_bce().
+pub fn tty_fake_bce(tty: *const T.Tty, gc: *const T.GridCell, bg: u32) bool {
+    if (tty_term.hasCapability(tty, "bce")) return false;
+    if (!colour_default(@intCast(bg)) or !colour_default(gc.bg)) return true;
+    return false;
+}
+
+/// Write N space characters, tracking cursor position.
+/// Ported from tmux tty_repeat_space().
+pub fn tty_repeat_space(tty: *T.Tty, n: u32) void {
+    const spaces = [1]u8{' '} ** 500;
+    var remaining = n;
+    while (remaining > 500) {
+        tty_putn(tty, &spaces, 500);
+        remaining -= 500;
+    }
+    if (remaining > 0) {
+        tty_putn(tty, spaces[0..remaining], remaining);
+    }
+}
+
+/// Clear a line (or part of it: left-of-cursor, right-of-cursor, or whole line).
+/// Uses el (erase to end of line), el1 (erase to start of line), and ech (erase
+/// characters) capabilities, falling back to spaces when needed.
+/// Ported from tmux tty_clear_line().
+pub fn tty_clear_line(tty: *T.Tty, defaults: *const T.GridCell, py: u32, px: u32, nx: u32, bg: u32) void {
+    // Nothing to clear.
+    if (nx == 0) return;
+
+    // If genuine BCE is available, try escape sequences.
+    if (!tty_fake_bce(tty, defaults, bg)) {
+        // Off the end of the line -- use EL if available.
+        if (px + nx >= tty.sx and tty_term.hasCapability(tty, "el")) {
+            tty_cursor(tty, px, py);
+            tty_putcode(tty, "el");
+            return;
+        }
+
+        // At the start of the line -- use EL1.
+        if (px == 0 and tty_term.hasCapability(tty, "el1")) {
+            tty_cursor(tty, px + nx - 1, py);
+            tty_putcode(tty, "el1");
+            return;
+        }
+
+        // Section of line -- use ECH if possible.
+        if (tty_term.hasCapability(tty, "ech")) {
+            tty_cursor(tty, px, py);
+            tty_putcode_i(tty, "ech", nx);
+            return;
+        }
+    }
+
+    // Couldn't use an escape sequence -- use spaces.
+    tty_cursor(tty, px, py);
+    tty_repeat_space(tty, nx);
+}
+
+/// Clear a rectangular area of the screen. Uses ED, DECFRA, scrolling, or
+/// falls back to per-line clearing via tty_clear_line.
+/// Ported from tmux tty_clear_area().
+pub fn tty_clear_area(tty: *T.Tty, defaults: *const T.GridCell, py: u32, ny: u32, px: u32, nx: u32, bg: u32) void {
+    // Nothing to clear.
+    if (nx == 0 or ny == 0) return;
+
+    // If genuine BCE is available, try escape sequences.
+    if (!tty_fake_bce(tty, defaults, bg)) {
+        // Use ED if clearing off the bottom of the terminal.
+        if (px == 0 and
+            px + nx >= tty.sx and
+            py + ny >= tty.sy and
+            tty_term.hasCapability(tty, "ed"))
+        {
+            tty_cursor(tty, 0, py);
+            tty_putcode(tty, "ed");
+            return;
+        }
+
+        // Use DECFRA if the terminal supports it and bg is non-default.
+        if (tty_term.hasCapability(tty, "Rect") and !colour_default(@intCast(bg))) {
+            const seq = std.fmt.allocPrint(xm.allocator, "\x1b[32;{d};{d};{d};{d}$x", .{
+                py + 1,
+                px + 1,
+                py + ny,
+                px + nx,
+            }) catch return;
+            defer xm.allocator.free(seq);
+            tty_write(tty, seq);
+            return;
+        }
+
+        // Full lines can be scrolled away to clear them.
+        if (px == 0 and
+            px + nx >= tty.sx and
+            ny > 2 and
+            tty_term.hasCapability(tty, "csr") and
+            tty_term.hasCapability(tty, "indn"))
+        {
+            tty_region(tty, py, py + ny - 1);
+            tty_margin_off(tty);
+            tty_putcode_i(tty, "indn", ny);
+            return;
+        }
+
+        // If margins are supported, scroll the area off to clear it.
+        if (nx > 2 and
+            ny > 2 and
+            tty_term.hasCapability(tty, "csr") and
+            tty_use_margin(tty) and
+            tty_term.hasCapability(tty, "indn"))
+        {
+            tty_region(tty, py, py + ny - 1);
+            tty_margin(tty, px, px + nx - 1);
+            tty_putcode_i(tty, "indn", ny);
+            return;
+        }
+    }
+
+    // Couldn't use an escape sequence -- loop over the lines.
+    var yy: u32 = py;
+    while (yy < py + ny) : (yy += 1) {
+        tty_clear_line(tty, defaults, yy, px, nx, bg);
+    }
+}
+
+/// Clear the whole screen. Delegates to tty_clear_area for the full terminal size.
+/// Ported from the relevant portion of tmux tty_clear_screen().
+pub fn tty_clear_screen(tty: *T.Tty, defaults: *const T.GridCell, bg: u32) void {
+    tty_clear_area(tty, defaults, 0, tty.sy, 0, tty.sx, bg);
+}
+
+/// Set the scrolling region (top/bottom margins). Uses the csr capability.
+/// Tracks rupper/rlower in the Tty struct to avoid redundant emission.
+/// Ported from tmux tty_region().
+pub fn tty_region(tty: *T.Tty, rupper: u32, rlower: u32) void {
+    if (tty.rlower == rlower and tty.rupper == rupper) return;
+    if (!tty_term.hasCapability(tty, "csr")) return;
+
+    tty.rupper = rupper;
+    tty.rlower = rlower;
+
+    // Some terminals (such as PuTTY) do not correctly reset the cursor to
+    // 0,0 if it is beyond the last column (they do not reset their wrap
+    // flag so further output causes a line feed). Do an explicit move to 0.
+    if (tty.cx >= tty.sx) {
+        if (tty.cy == std.math.maxInt(u32)) {
+            tty_cursor(tty, 0, 0);
+        } else {
+            tty_cursor(tty, 0, tty.cy);
+        }
+    }
+
+    tty_putcode_ii(tty, "csr", tty.rupper, tty.rlower);
+    tty.cx = std.math.maxInt(u32);
+    tty.cy = std.math.maxInt(u32);
+}
+
+/// Reset the scrolling region to the full terminal height.
+/// Ported from tmux tty_region_off().
+pub fn tty_region_off(tty: *T.Tty) void {
+    tty_region(tty, 0, tty.sy - 1);
+}
+
+/// Set the scrolling region inside a pane. Translates pane-relative coordinates
+/// to absolute by adding the pane offset and subtracting the window origin.
+/// Ported from tmux tty_region_pane().
+pub fn tty_region_pane(tty: *T.Tty, ctx: *const TtyCursorCtx, rupper: u32, rlower: u32) void {
+    tty_region(tty, ctx.yoff + rupper - ctx.woy, ctx.yoff + rlower - ctx.woy);
+}
+
+/// Check whether the terminal supports DECSLRM (left/right margins).
+/// Ported from tmux tty_use_margin() macro.
+pub fn tty_use_margin(tty: *const T.Tty) bool {
+    return tty_features.supportsTty(tty, .margins);
+}
+
+/// Set left/right margins. Uses SLRM (DECSLRM) via Clmg (clear margins) and
+/// Cmg (set margins) capabilities. Tracks rleft/rright in the Tty struct.
+/// Ported from tmux tty_margin().
+pub fn tty_margin(tty: *T.Tty, rleft: u32, rright: u32) void {
+    if (!tty_use_margin(tty)) return;
+    if (tty.rleft == rleft and tty.rright == rright) return;
+
+    // Must re-emit the vertical scrolling region first (csr).
+    tty_putcode_ii(tty, "csr", tty.rupper, tty.rlower);
+
+    tty.rleft = rleft;
+    tty.rright = rright;
+
+    if (rleft == 0 and rright == tty.sx - 1) {
+        tty_putcode(tty, "Clmg");
+    } else {
+        tty_putcode_ii(tty, "Cmg", rleft, rright);
+    }
+    tty.cx = std.math.maxInt(u32);
+    tty.cy = std.math.maxInt(u32);
+}
+
+/// Reset left/right margins to the full terminal width.
+/// Ported from tmux tty_margin_off().
+pub fn tty_margin_off(tty: *T.Tty) void {
+    tty_margin(tty, 0, tty.sx - 1);
+}
+
+/// Set margins inside a pane. Translates pane coordinates to absolute.
+/// Ported from tmux tty_margin_pane().
+pub fn tty_margin_pane(tty: *T.Tty, ctx: *const TtyCursorCtx) void {
+    tty_margin(tty, ctx.xoff - ctx.wox, ctx.xoff + ctx.sx - 1 - ctx.wox);
 }
 
 /// Emit a terminfo string capability with one integer parameter.

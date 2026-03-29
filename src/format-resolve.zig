@@ -261,6 +261,22 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "window_width", .func = resolve_window_width },
     .{ .name = "synchronized_output_flag", .func = resolve_synchronized_output_flag },
     .{ .name = "version", .func = resolve_version },
+
+    // Copy-mode format resolvers
+    .{ .name = "scroll_position", .func = resolve_scroll_position },
+    .{ .name = "top_line_time", .func = resolve_top_line_time },
+    .{ .name = "rectangle_toggle", .func = resolve_rectangle_toggle },
+    .{ .name = "copy_cursor_x", .func = resolve_copy_cursor_x },
+    .{ .name = "copy_cursor_y", .func = resolve_copy_cursor_y },
+    .{ .name = "copy_cursor_word", .func = resolve_copy_cursor_word },
+    .{ .name = "copy_cursor_line", .func = resolve_copy_cursor_line },
+    .{ .name = "selection_start_x", .func = resolve_selection_start_x },
+    .{ .name = "selection_start_y", .func = resolve_selection_start_y },
+    .{ .name = "selection_end_x", .func = resolve_selection_end_x },
+    .{ .name = "selection_end_y", .func = resolve_selection_end_y },
+    .{ .name = "selection_active", .func = resolve_selection_active },
+    .{ .name = "selection_present", .func = resolve_selection_present },
+    .{ .name = "selection_mode", .func = resolve_selection_mode },
 };
 
 fn c_string_bytes(bytes: []const u8) []const u8 {
@@ -2018,5 +2034,172 @@ fn resolve_version(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
 fn resolve_synchronized_output_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_SYNC) != 0) "1" else "0") catch unreachable;
+}
+
+// ── Copy-mode format resolvers ────────────────────────────────────────────
+
+/// Helper: obtain copy-mode data for a pane that is actually in copy mode.
+fn copyModeDataFromCtx(ctx: *const FormatContext) ?*window_copy.CopyModeData {
+    const wp = ctx_pane(ctx) orelse return null;
+    const wme = window_mod.window_pane_mode(wp) orelse return null;
+    if (wme.mode != &window_copy.window_copy_mode) return null;
+    return window_copy.modeData(wme);
+}
+
+fn resolve_scroll_position(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    // In tmux, scroll_position = data->oy which is the number of history
+    // lines scrolled past.  Our `top` is the absolute row index of the top
+    // visible row.  The scrollback offset is the number of history rows
+    // above the current viewport, i.e. the hsize of the backing minus the
+    // rows already accounted for minus top.
+    const backing = data.backing;
+    const hsize = backing.grid.hsize;
+    // The total scrollable content is hsize + sy rows.  When top = 0 the
+    // viewport is at the very top (oldest history), scroll_position = hsize.
+    // When top = hsize, viewport is at the newest content, scroll_position = 0.
+    const scroll_pos = hsize -| @min(data.top, hsize);
+    return xm.xasprintf("{d}", .{scroll_pos});
+}
+
+fn resolve_top_line_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    const gd = data.backing.grid;
+    const hsize = gd.hsize;
+    const row = hsize -| @min(data.top, hsize);
+    if (row >= gd.linedata.len) return alloc.dupe(u8, "0") catch unreachable;
+    return xm.xasprintf("{d}", .{gd.linedata[row].time});
+}
+
+fn resolve_rectangle_toggle(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    return alloc.dupe(u8, if (data.rectflag) "1" else "0") catch unreachable;
+}
+
+fn resolve_copy_cursor_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{data.cx});
+}
+
+fn resolve_copy_cursor_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{data.cy});
+}
+
+fn resolve_copy_cursor_word(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    const gd = data.backing.grid;
+    const abs_row = data.top + data.cy;
+    if (abs_row >= gd.linedata.len) return alloc.dupe(u8, "") catch unreachable;
+
+    // Read the word at the cursor position (simplified: gather non-whitespace
+    // cells under and around cx).
+    var start_x: u32 = data.cx;
+    while (start_x > 0) : (start_x -= 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, abs_row, start_x - 1, &gc);
+        if (gc.data.size == 0 or gc.data.data[0] == ' ' or gc.data.data[0] == '\t') break;
+    } else {
+        start_x = 0;
+    }
+    var end_x: u32 = data.cx + 1;
+    while (end_x < gd.sx) : (end_x += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, abs_row, end_x, &gc);
+        if (gc.data.size == 0 or gc.data.data[0] == ' ' or gc.data.data[0] == '\t') break;
+    } else {
+        end_x = gd.sx;
+    }
+
+    _ = wp;
+    var buf: std.ArrayList(u8) = .{};
+    var col: u32 = start_x;
+    while (col < end_x) : (col += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, abs_row, col, &gc);
+        if (gc.isPadding()) continue;
+        if (gc.data.size >= 1) {
+            buf.appendSlice(alloc, gc.data.data[0..gc.data.size]) catch unreachable;
+        }
+    }
+    return buf.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_copy_cursor_line(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    const gd = data.backing.grid;
+    const abs_row = data.top + data.cy;
+    if (abs_row >= gd.linedata.len) return alloc.dupe(u8, "") catch unreachable;
+
+    const length = grid.line_length(gd, abs_row);
+    var buf: std.ArrayList(u8) = .{};
+    var col: u32 = 0;
+    while (col < length) : (col += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, abs_row, col, &gc);
+        if (gc.isPadding()) continue;
+        if (gc.data.size >= 1) {
+            buf.appendSlice(alloc, gc.data.data[0..gc.data.size]) catch unreachable;
+        }
+    }
+    return buf.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_selection_start_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag == .none and data.lineflag == .none) return null;
+    return xm.xasprintf("{d}", .{data.selx});
+}
+
+fn resolve_selection_start_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag == .none and data.lineflag == .none) return null;
+    return xm.xasprintf("{d}", .{data.sely});
+}
+
+fn resolve_selection_end_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag == .none and data.lineflag == .none) return null;
+    return xm.xasprintf("{d}", .{data.endselx});
+}
+
+fn resolve_selection_end_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag == .none and data.lineflag == .none) return null;
+    return xm.xasprintf("{d}", .{data.endsely});
+}
+
+fn resolve_selection_active(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag != .none) {
+        return alloc.dupe(u8, "1") catch unreachable;
+    }
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_selection_present(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    if (data.cursordrag == .none and data.lineflag == .none) return alloc.dupe(u8, "0") catch unreachable;
+    if (data.endselx != data.selx or data.endsely != data.sely) {
+        return alloc.dupe(u8, "1") catch unreachable;
+    }
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_selection_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const data = copyModeDataFromCtx(ctx) orelse return null;
+    return switch (data.selflag) {
+        .char => alloc.dupe(u8, "char") catch unreachable,
+        .word => alloc.dupe(u8, "word") catch unreachable,
+        .line => alloc.dupe(u8, "line") catch unreachable,
+    };
 }
 

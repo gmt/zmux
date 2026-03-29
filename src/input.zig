@@ -144,6 +144,27 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
             i += consumed;
             continue;
         }
+        if (next == '(' or next == ')') {
+            // ESC ( C / ESC ) C — SCS (select character set)
+            if (i + 2 >= wp.input_pending.items.len) break;
+            const charset = wp.input_pending.items[i + 2];
+            if (next == '(') {
+                ctx.s.g0set = if (charset == '0') 1 else 0;
+            } else {
+                ctx.s.g1set = if (charset == '0') 1 else 0;
+            }
+            i += 3;
+            continue;
+        }
+        if (next == '#') {
+            // ESC # 8 — DECALN (screen alignment test)
+            if (i + 2 >= wp.input_pending.items.len) break;
+            if (wp.input_pending.items[i + 2] == '8') {
+                screen_write.alignmenttest(&ctx);
+            }
+            i += 3;
+            continue;
+        }
 
         // Reduced default: swallow other ESC sequences for now.
         i += 2;
@@ -965,4 +986,141 @@ test "input handles VT, FF, SO, SI and MODE_CRLF" {
     input_parse_screen(wp, "  IJ\nKL");
     try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 2, 0));
     try std.testing.expectEqual(@as(u8, 'L'), grid.ascii_at(wp.base.grid, 2, 1));
+}
+
+test "input handles ACS charset selection ESC ( 0 / ESC ( B / ESC ) 0 / ESC ) B" {
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    const s = screen_mod.screen_current(wp);
+
+    // Default: both G0 and G1 are ASCII (0)
+    try std.testing.expectEqual(@as(u8, 0), s.g0set);
+    try std.testing.expectEqual(@as(u8, 0), s.g1set);
+
+    // ESC ( 0 — select DEC line drawing for G0
+    input_parse_screen(wp, "\x1b(0");
+    try std.testing.expectEqual(@as(u8, 1), s.g0set);
+    try std.testing.expectEqual(@as(u8, 0), s.g1set);
+
+    // ESC ( B — select ASCII for G0
+    input_parse_screen(wp, "\x1b(B");
+    try std.testing.expectEqual(@as(u8, 0), s.g0set);
+    try std.testing.expectEqual(@as(u8, 0), s.g1set);
+
+    // ESC ) 0 — select DEC line drawing for G1
+    input_parse_screen(wp, "\x1b)0");
+    try std.testing.expectEqual(@as(u8, 0), s.g0set);
+    try std.testing.expectEqual(@as(u8, 1), s.g1set);
+
+    // ESC ) B — select ASCII for G1
+    input_parse_screen(wp, "\x1b)B");
+    try std.testing.expectEqual(@as(u8, 0), s.g0set);
+    try std.testing.expectEqual(@as(u8, 0), s.g1set);
+
+    // Verify no pending bytes remain
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input handles ESC # 8 DECALN alignment test" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+
+    // Write some initial content, then run DECALN
+    input_parse_screen(wp, "ABCD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
+
+    // ESC # 8 fills screen with 'E'
+    input_parse_screen(wp, "\x1b#8");
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 0, 3));
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 1, 3));
+
+    // Cursor should be reset to 0,0
+    const s = screen_mod.screen_current(wp);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 0), s.cy);
+}
+
+test "input keeps incomplete ESC ( sequence pending" {
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+
+    // Send ESC ( without the third byte — should stay pending
+    input_parse_screen(wp, "\x1b(");
+    try std.testing.expectEqual(@as(usize, 2), wp.input_pending.items.len);
+
+    // Complete the sequence
+    input_parse_screen(wp, "0");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+    const s = screen_mod.screen_current(wp);
+    try std.testing.expectEqual(@as(u8, 1), s.g0set);
+
+    // Same for ESC # without third byte
+    input_parse_screen(wp, "\x1b#");
+    try std.testing.expectEqual(@as(usize, 2), wp.input_pending.items.len);
+    input_parse_screen(wp, "8");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }

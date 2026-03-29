@@ -690,6 +690,12 @@ pub const Tty = struct {
     bg: i32 = 8,
     us: i32 = 8,
     flags: i32 = 0,
+
+    /// Current TTY attribute/colour state (tracks what the terminal has set).
+    cell: GridCell = grid_default_cell,
+    /// Last cell rendered via tty_attributes (used to skip redundant output).
+    last_cell: GridCell = grid_default_cell,
+
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,
     acs: [256][2]u8 = [_][2]u8{[_]u8{ 0, 0 }} ** 256,

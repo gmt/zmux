@@ -20,7 +20,7 @@
 //! tty.zig – reduced server-side tty lifecycle and metadata helpers.
 
 const std = @import("std");
-const c = @import("c.zig");
+const c_zig = @import("c.zig");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
 const proc_mod = @import("proc.zig");
@@ -1186,10 +1186,10 @@ fn armClipboardTimer(tty: *T.Tty) void {
     const base = proc_mod.libevent orelse return;
 
     if (tty.clipboard_timer == null) {
-        tty.clipboard_timer = c.libevent.event_new(
+        tty.clipboard_timer = c_zig.libevent.event_new(
             base,
             -1,
-            @intCast(c.libevent.EV_TIMEOUT),
+            @intCast(c_zig.libevent.EV_TIMEOUT),
             tty_clipboard_query_timeout_cb,
             tty,
         );
@@ -1197,19 +1197,19 @@ fn armClipboardTimer(tty: *T.Tty) void {
     if (tty.clipboard_timer) |ev| {
         tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
         var tv = std.posix.timeval{ .sec = 5, .usec = 0 };
-        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+        _ = c_zig.libevent.event_add(ev, @ptrCast(&tv));
     }
 }
 
 fn cancelClipboardQuery(tty: *T.Tty) void {
-    if (tty.clipboard_timer) |ev| _ = c.libevent.event_del(ev);
+    if (tty.clipboard_timer) |ev| _ = c_zig.libevent.event_del(ev);
     tty.flags &= ~@as(i32, @intCast(T.TTY_OSC52QUERY));
 }
 
 fn freeClipboardTimer(tty: *T.Tty) void {
     cancelClipboardQuery(tty);
     if (tty.clipboard_timer) |ev| {
-        c.libevent.event_free(ev);
+        c_zig.libevent.event_free(ev);
         tty.clipboard_timer = null;
     }
 }
@@ -1407,33 +1407,33 @@ test "tty_clipboard_query emits the recorded Ms capability query" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
     }
 
-    var reader: c.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
     defer {
-        c.imsg.imsgbuf_clear(&reader);
+        c_zig.imsg.imsgbuf_clear(&reader);
         std.posix.close(pair[1]);
     }
 
     tty_clipboard_query(&cl.tty);
 
-    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
 
-    var imsg_msg: c.imsg.imsg = undefined;
-    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c.imsg.imsg_free(&imsg_msg);
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
 
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(@import("zmux-protocol.zig").MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(@import("zmux-protocol.zig").MsgType.write))), c_zig.imsg.imsg_get_type(&imsg_msg));
 
-    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
     var payload = try xm.allocator.alloc(u8, payload_len);
     defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
 
     var stream: i32 = 0;
     @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
@@ -1441,7 +1441,7 @@ test "tty_clipboard_query emits the recorded Ms capability query" {
     try std.testing.expectEqualStrings("\x1b]52;c;!\x07\x1b]52;c;?\x07", payload[@sizeOf(i32)..]);
 }
 
-fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+fn test_peer_dispatch(_: ?*c_zig.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
 test "tty_cursor updates cx/cy to target position" {
     const proc_mod_local = @import("proc.zig");
@@ -1470,7 +1470,7 @@ test "tty_cursor updates cx/cy to target position" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1508,7 +1508,7 @@ test "tty_cursor skips when already at target position" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1547,7 +1547,7 @@ test "tty_cursor clamps x to right margin" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1585,7 +1585,7 @@ test "tty_cursor_pane translates pane-relative to absolute coordinates" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1624,7 +1624,7 @@ test "tty_cursor_pane subtracts window origin offset" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1663,7 +1663,7 @@ test "tty_cursor_pane_unless_wrap delegates when not wrapped" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
@@ -1703,32 +1703,32 @@ test "tty_cursor emits CUP with correct parameter expansion" {
     cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
         std.posix.close(peer.ibuf.fd);
         xm.allocator.destroy(peer);
         proc.peers.clearRetainingCapacity();
     }
 
     // Flush any pending data from the socket.
-    var reader: c.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
     defer {
-        c.imsg.imsgbuf_clear(&reader);
+        c_zig.imsg.imsgbuf_clear(&reader);
         std.posix.close(pair[1]);
     }
 
     tty_cursor(&cl.tty, 4, 7);
 
-    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
 
-    var imsg_msg: c.imsg.imsg = undefined;
-    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c.imsg.imsg_free(&imsg_msg);
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
 
-    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
     var payload = try xm.allocator.alloc(u8, payload_len);
     defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
 
     // %i increments both params: row=7+1=8, col=4+1=5 => \x1b[8;5H
     const expected = "\x1b[8;5H";

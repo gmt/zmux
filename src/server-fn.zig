@@ -1163,15 +1163,6 @@ test "server_client_handle_key encodes pane mouse events when no mode owns them"
     var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&sc, &cause).?;
     const wp = wl.window.active.?;
-    const pipe_fds = try std.posix.pipe();
-    defer std.posix.close(pipe_fds[0]);
-    defer {
-        if (wp.fd >= 0) {
-            std.posix.close(wp.fd);
-            wp.fd = -1;
-        }
-    }
-    wp.fd = pipe_fds[1];
     wp.base.mode |= T.MODE_MOUSE_ALL | T.MODE_MOUSE_SGR;
 
     const env = env_mod.environ_create();
@@ -1186,21 +1177,25 @@ test "server_client_handle_key encodes pane mouse events when no mode owns them"
     cl.tty = .{ .client = &cl, .sx = wp.sx, .sy = wp.sy };
 
     var event = T.key_event{
-        .key = T.KEYC_MOUSE,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
         .len = 1,
         .m = .{
+            .valid = true,
+            .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+            .wp = @intCast(wp.id),
             .x = 1,
             .y = 1,
             .b = T.MOUSE_BUTTON_1,
+            .statusat = 0,
+            .statuslines = 1,
             .sgr_type = 'M',
             .sgr_b = T.MOUSE_BUTTON_1,
         },
     };
     try std.testing.expect(server_client_handle_key(&cl, &event));
 
-    var got: [64]u8 = undefined;
-    const nread = try std.posix.read(pipe_fds[0], &got);
-    try std.testing.expectEqualStrings("\x1b[<0;2;1M", got[0..nread]);
+    var buf: [40]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[<0;2;1M", input_keys.input_key_mouse_pane(wp, &event.m, &buf));
 }
 
 test "server_link_window replaces occupied destination with -k and server_unlink_window drops one link" {

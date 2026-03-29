@@ -19,6 +19,7 @@ const format_mod = @import("format.zig");
 const client_registry = @import("client-registry.zig");
 const notify = @import("notify.zig");
 const resize_mod = @import("resize.zig");
+const tty_mod = @import("tty.zig");
 
 const NEW_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
@@ -442,7 +443,7 @@ test "select-window records latest client on the newly selected window across se
     var client = T.Client{
         .name = "select-window-latest-client",
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = driver.session,
@@ -451,7 +452,7 @@ test "select-window records latest client on the newly selected window across se
         if (client.message_string) |message| xm.allocator.free(message);
         env_mod.environ_free(client.environ);
     }
-    client.tty.client = &client;
+    tty_mod.tty_init(&client.tty, &client);
     client_registry.add(&client);
 
     var cause: ?[]u8 = null;
@@ -494,24 +495,24 @@ test "new-window synchronizes grouped peers and uses shared group status-only in
     var leader_client = T.Client{
         .name = "new-window-group-leader",
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = leader,
     };
     defer env_mod.environ_free(leader_client.environ);
-    leader_client.tty.client = &leader_client;
+    tty_mod.tty_init(&leader_client.tty, &leader_client);
 
     var peer_client = T.Client{
         .name = "new-window-group-peer",
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = peer,
     };
     defer env_mod.environ_free(peer_client.environ);
-    peer_client.tty.client = &peer_client;
+    tty_mod.tty_init(&peer_client.tty, &peer_client);
 
     client_registry.add(&leader_client);
     client_registry.add(&peer_client);
@@ -555,7 +556,7 @@ test "new-window -S -n reuses one matching existing window" {
     var client = T.Client{
         .name = "new-window-reuse-client",
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = session,
@@ -564,7 +565,7 @@ test "new-window -S -n reuses one matching existing window" {
         if (client.message_string) |message| xm.allocator.free(message);
         env_mod.environ_free(client.environ);
     }
-    client.tty.client = &client;
+    tty_mod.tty_init(&client.tty, &client);
     client_registry.add(&client);
 
     const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-S", "-n", "shared" }, &client, &cause);
@@ -606,7 +607,7 @@ test "new-window -S -n errors when multiple windows share the name" {
     var client = T.Client{
         .name = "new-window-reuse-ambiguous-client",
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = session,
@@ -615,7 +616,7 @@ test "new-window -S -n errors when multiple windows share the name" {
         if (client.message_string) |message| xm.allocator.free(message);
         env_mod.environ_free(client.environ);
     }
-    client.tty.client = &client;
+    tty_mod.tty_init(&client.tty, &client);
     client_registry.add(&client);
 
     const cmd = try cmd_mod.cmd_parse_one(&.{ "new-window", "-S", "-n", "dup" }, &client, &cause);

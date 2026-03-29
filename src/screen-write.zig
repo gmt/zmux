@@ -704,6 +704,150 @@ pub fn reset(ctx: *T.ScreenWriteCtx) void {
     s.cy = 0;
 }
 
+/// Draw a box with ACS line-drawing characters (screen_write_box).
+/// Draws top border, bottom border, and vertical sides at cursor position.
+/// Restores cursor to original position when done.
+pub fn box_draw(ctx: *T.ScreenWriteCtx, nx: u32, ny: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+    if (nx < 2 or ny < 2) return;
+
+    const cx = s.cx;
+    const cy = s.cy;
+
+    var gc = T.grid_default_cell;
+    gc.attr |= T.GRID_ATTR_CHARSET;
+    gc.flags |= T.GRID_FLAG_NOPALETTE;
+
+    // Top border: top-left corner, horizontal lines, top-right corner
+    utf8.utf8_set(&gc.data, 'l'); // ACS top-left
+    putCell(ctx, &gc);
+    utf8.utf8_set(&gc.data, 'q'); // ACS horizontal
+    var i: u32 = 1;
+    while (i < nx - 1) : (i += 1) {
+        putCell(ctx, &gc);
+    }
+    utf8.utf8_set(&gc.data, 'k'); // ACS top-right
+    putCell(ctx, &gc);
+
+    // Bottom border
+    cursor_to(ctx, cy + ny - 1, cx);
+    utf8.utf8_set(&gc.data, 'm'); // ACS bottom-left
+    putCell(ctx, &gc);
+    utf8.utf8_set(&gc.data, 'q'); // ACS horizontal
+    i = 1;
+    while (i < nx - 1) : (i += 1) {
+        putCell(ctx, &gc);
+    }
+    utf8.utf8_set(&gc.data, 'j'); // ACS bottom-right
+    putCell(ctx, &gc);
+
+    // Vertical sides
+    utf8.utf8_set(&gc.data, 'x'); // ACS vertical
+    i = 1;
+    while (i < ny - 1) : (i += 1) {
+        // Left side
+        cursor_to(ctx, cy + i, cx);
+        putCell(ctx, &gc);
+        // Right side
+        cursor_to(ctx, cy + i, cx + nx - 1);
+        putCell(ctx, &gc);
+    }
+
+    cursor_to(ctx, cy, cx);
+}
+
+/// Draw a horizontal line across the screen (screen_write_hline).
+/// If `left` is true, use a left-join at the start; otherwise a plain horizontal.
+/// If `right` is true, use a right-join at the end; otherwise a plain horizontal.
+/// Restores cursor to original position when done.
+pub fn hline(ctx: *T.ScreenWriteCtx, nx: u32, left: bool, right: bool) void {
+    const s = ctx.s;
+    if (s.grid.sx == 0 or nx == 0) return;
+
+    const cx = s.cx;
+    const cy = s.cy;
+
+    var gc = T.grid_default_cell;
+    gc.attr |= T.GRID_ATTR_CHARSET;
+
+    // Start character: left-join or plain horizontal
+    if (left) {
+        utf8.utf8_set(&gc.data, 't'); // ACS left join
+    } else {
+        utf8.utf8_set(&gc.data, 'q'); // ACS horizontal
+    }
+    putCell(ctx, &gc);
+
+    // Middle characters: plain horizontal
+    utf8.utf8_set(&gc.data, 'q');
+    var i: u32 = 1;
+    while (i < nx - 1) : (i += 1) {
+        putCell(ctx, &gc);
+    }
+
+    // End character: right-join or plain horizontal
+    if (right) {
+        utf8.utf8_set(&gc.data, 'u'); // ACS right join
+    } else {
+        utf8.utf8_set(&gc.data, 'q'); // ACS horizontal
+    }
+    putCell(ctx, &gc);
+
+    cursor_to(ctx, cy, cx);
+}
+
+/// Draw a vertical line on the screen (screen_write_vline).
+/// If `top` is true, use a top-join at the start; otherwise a plain vertical.
+/// If `bottom` is true, use a bottom-join at the end; otherwise a plain vertical.
+/// Restores cursor to original position when done.
+pub fn vline(ctx: *T.ScreenWriteCtx, ny: u32, top: bool, bottom: bool) void {
+    const s = ctx.s;
+    if (s.grid.sy == 0 or ny == 0) return;
+
+    const cx = s.cx;
+    const cy = s.cy;
+
+    var gc = T.grid_default_cell;
+    gc.attr |= T.GRID_ATTR_CHARSET;
+
+    // Start character: top-join or plain vertical
+    if (top) {
+        utf8.utf8_set(&gc.data, 'w'); // ACS top join
+    } else {
+        utf8.utf8_set(&gc.data, 'x'); // ACS vertical
+    }
+    putCell(ctx, &gc);
+
+    // Middle characters: plain vertical
+    utf8.utf8_set(&gc.data, 'x');
+    var i: u32 = 1;
+    while (i < ny - 1) : (i += 1) {
+        cursor_to(ctx, cy + i, cx);
+        putCell(ctx, &gc);
+    }
+
+    // End character: bottom-join or plain vertical
+    cursor_to(ctx, cy + ny - 1, cx);
+    if (bottom) {
+        utf8.utf8_set(&gc.data, 'v'); // ACS bottom join
+    } else {
+        utf8.utf8_set(&gc.data, 'x'); // ACS vertical
+    }
+    putCell(ctx, &gc);
+
+    cursor_to(ctx, cy, cx);
+}
+
+/// Force a full redraw of the pane content (screen_write_fullredraw).
+/// In tmux this invokes the TTY redraw callback; zmux's reduced screen-write
+/// layer has no TTY connection, so this is a no-op stub. The server-client
+/// draw path handles redraws via PANE_REDRAW flags on the pane.
+pub fn fullredraw(ctx: *T.ScreenWriteCtx) void {
+    _ = ctx;
+}
+
 /// Clear scrollback history (screen_write_clearhistory).
 pub fn clearhistory(ctx: *T.ScreenWriteCtx) void {
     grid.grid_clear_history(ctx.s.grid);
@@ -858,4 +1002,171 @@ test "screen-write preview copies a cursor-centered viewport" {
 
     try std.testing.expectEqualStrings("uvwx", first);
     try std.testing.expectEqualStrings("2345", second);
+}
+
+test "screen-write box_draw draws four corners and borders with ACS charset" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 4, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    box_draw(&ctx, 6, 4);
+
+    // Top-left corner should be 'l' with CHARSET attr
+    var gc: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 0, &gc);
+    try std.testing.expect(gc.attr & T.GRID_ATTR_CHARSET != 0);
+    try std.testing.expectEqual(@as(u8, 'l'), gc.data.data[0]);
+
+    // Top-right corner should be 'k'
+    grid.get_cell(s.grid, 0, 5, &gc);
+    try std.testing.expectEqual(@as(u8, 'k'), gc.data.data[0]);
+
+    // Bottom-left corner should be 'm'
+    grid.get_cell(s.grid, 3, 0, &gc);
+    try std.testing.expectEqual(@as(u8, 'm'), gc.data.data[0]);
+
+    // Bottom-right corner should be 'j'
+    grid.get_cell(s.grid, 3, 5, &gc);
+    try std.testing.expectEqual(@as(u8, 'j'), gc.data.data[0]);
+
+    // Top edge middle should be 'q' (horizontal)
+    grid.get_cell(s.grid, 0, 3, &gc);
+    try std.testing.expectEqual(@as(u8, 'q'), gc.data.data[0]);
+
+    // Left side should be 'x' (vertical)
+    grid.get_cell(s.grid, 1, 0, &gc);
+    try std.testing.expectEqual(@as(u8, 'x'), gc.data.data[0]);
+
+    // Right side should be 'x' (vertical)
+    grid.get_cell(s.grid, 2, 5, &gc);
+    try std.testing.expectEqual(@as(u8, 'x'), gc.data.data[0]);
+
+    // Cursor should be restored to original position
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 0), s.cy);
+}
+
+test "screen-write hline draws horizontal line with join characters" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 3, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    cursor_to(&ctx, 1, 1);
+    hline(&ctx, 6, true, true);
+
+    // Left join at start
+    var gc: T.GridCell = undefined;
+    grid.get_cell(s.grid, 1, 1, &gc);
+    try std.testing.expect(gc.attr & T.GRID_ATTR_CHARSET != 0);
+    try std.testing.expectEqual(@as(u8, 't'), gc.data.data[0]);
+
+    // Horizontal in the middle
+    grid.get_cell(s.grid, 1, 3, &gc);
+    try std.testing.expectEqual(@as(u8, 'q'), gc.data.data[0]);
+
+    // Right join at end
+    grid.get_cell(s.grid, 1, 6, &gc);
+    try std.testing.expectEqual(@as(u8, 'u'), gc.data.data[0]);
+
+    // Cursor restored
+    try std.testing.expectEqual(@as(u32, 1), s.cx);
+    try std.testing.expectEqual(@as(u32, 1), s.cy);
+}
+
+test "screen-write hline without joins uses plain horizontal" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 1, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    hline(&ctx, 4, false, false);
+
+    var gc: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 0, &gc);
+    try std.testing.expectEqual(@as(u8, 'q'), gc.data.data[0]);
+
+    grid.get_cell(s.grid, 0, 3, &gc);
+    try std.testing.expectEqual(@as(u8, 'q'), gc.data.data[0]);
+}
+
+test "screen-write vline draws vertical line with join characters" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(5, 6, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    cursor_to(&ctx, 0, 2);
+    vline(&ctx, 5, true, true);
+
+    // Top join at start
+    var gc: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 2, &gc);
+    try std.testing.expect(gc.attr & T.GRID_ATTR_CHARSET != 0);
+    try std.testing.expectEqual(@as(u8, 'w'), gc.data.data[0]);
+
+    // Vertical in the middle
+    grid.get_cell(s.grid, 2, 2, &gc);
+    try std.testing.expectEqual(@as(u8, 'x'), gc.data.data[0]);
+
+    // Bottom join at end
+    grid.get_cell(s.grid, 4, 2, &gc);
+    try std.testing.expectEqual(@as(u8, 'v'), gc.data.data[0]);
+
+    // Cursor restored
+    try std.testing.expectEqual(@as(u32, 2), s.cx);
+    try std.testing.expectEqual(@as(u32, 0), s.cy);
+}
+
+test "screen-write vline without joins uses plain vertical" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(3, 4, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    cursor_to(&ctx, 0, 1);
+    vline(&ctx, 3, false, false);
+
+    var gc: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 1, &gc);
+    try std.testing.expectEqual(@as(u8, 'x'), gc.data.data[0]);
+
+    grid.get_cell(s.grid, 2, 1, &gc);
+    try std.testing.expectEqual(@as(u8, 'x'), gc.data.data[0]);
+}
+
+test "screen-write fullredraw is a no-op that doesn't corrupt content" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(3, 2, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    putn(&ctx, "abc");
+
+    // fullredraw is a no-op stub; just verify it doesn't crash
+    fullredraw(&ctx);
+
+    // Content should be unchanged
+    try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(s.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(s.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'c'), grid.ascii_at(s.grid, 0, 2));
 }

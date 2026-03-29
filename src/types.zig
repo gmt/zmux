@@ -686,6 +686,7 @@ pub const Tty = struct {
     mode: i32 = 0,
     fg: i32 = 8,
     bg: i32 = 8,
+    us: i32 = 8,
     flags: i32 = 0,
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,

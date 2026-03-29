@@ -674,6 +674,7 @@ pub const TTY_STARTED: u32 = 0x0010;
 pub const TTY_OPENED: u32 = 0x0020;
 pub const TTY_OSC52QUERY: u32 = 0x0040;
 pub const TTY_BLOCK: u32 = 0x0080;
+pub const TTY_NOBLOCK: u32 = 0x0100;
 
 pub const Tty = struct {
     client: *Client,
@@ -704,6 +705,14 @@ pub const Tty = struct {
     rleft: u32 = 0,
     /// Right margin (DECSLRM).
     rright: u32 = 0,
+
+    /// Window offset — position of the visible pane area within the window.
+    /// Set when the window is larger than the terminal viewport.
+    oflag: bool = false,
+    oox: u32 = 0,
+    ooy: u32 = 0,
+    osx: u32 = 0,
+    osy: u32 = 0,
 
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,

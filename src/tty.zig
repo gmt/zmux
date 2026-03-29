@@ -1506,6 +1506,147 @@ pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
     tty_write(tty, sequence.?);
 }
 
+// ── tty_cmd_* command dispatch wrappers ─────────────────────────────────────
+
+/// TTY command context — a reduced version of tmux's struct tty_ctx that
+/// captures just the fields needed by the tty_cmd_* functions ported so far.
+pub const TtyCmdCtx = struct {
+    /// Clipboard target (e.g. "c" for system clipboard, "s" for primary).
+    clip: []const u8 = "",
+    /// Selection data buffer (raw bytes to base64-encode for OSC 52).
+    buf: []const u8 = "",
+    /// Number of bytes in buf.
+    num: usize = 0,
+    /// Window title.
+    title: []const u8 = "",
+    /// Hyperlink ID string.
+    link_id: []const u8 = "",
+    /// Hyperlink URI string.
+    link_uri: []const u8 = "",
+};
+
+/// Set the clipboard selection (OSC 52).  Ported from tmux tty_cmd_setselection.
+pub fn tty_cmd_setselection(tty: *T.Tty, ctx: *const TtyCmdCtx) void {
+    tty_set_selection(tty, ctx.clip, ctx.buf, ctx.num);
+}
+
+/// Set the window title via tsl/fsl capabilities.
+/// Ported from tmux tty_cmd_settitle.
+pub fn tty_cmd_settitle(tty: *T.Tty, ctx: *const TtyCmdCtx) void {
+    tty_set_title(tty, ctx.title);
+}
+
+/// Set hyperlink via OSC 8.  Ported from tmux tty_cmd_sethyperlink.
+pub fn tty_cmd_sethyperlink(tty: *T.Tty, ctx: *const TtyCmdCtx) void {
+    tty_hyperlink_direct(tty, ctx.link_id, ctx.link_uri);
+}
+
+/// Set the clipboard selection via OSC 52 (Ms capability).
+/// Ported from tmux tty_set_selection().
+pub fn tty_set_selection(tty: *T.Tty, clip: []const u8, buf: []const u8, len: usize) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    if (!tty_term.hasCapability(tty, "Ms")) return;
+
+    // Base64-encode the selection data.
+    const encoded_len = std.base64.standard.Encoder.calcSize(len);
+    const encoded = xm.allocator.alloc(u8, encoded_len) catch return;
+    defer xm.allocator.free(encoded);
+    const encoded_slice = std.base64.standard.Encoder.encode(encoded, buf[0..len]);
+
+    tty.flags |= @as(i32, @intCast(T.TTY_NOBLOCK));
+    tty_putcode_ss(tty, "Ms", clip, encoded_slice);
+}
+
+/// Set or clear a hyperlink via OSC 8 (Hls capability).
+/// Ported from tmux tty_hyperlink().
+pub fn tty_hyperlink_direct(tty: *T.Tty, id: []const u8, uri: []const u8) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    tty_putcode_ss(tty, "Hls", id, uri);
+}
+
+// ── Window offset helpers ──────────────────────────────────────────────────
+
+/// Report whether the window is bigger than the terminal viewport.
+/// When true, the stored offset (oox/ooy/osx/osy) describes which part of
+/// the window is visible.
+/// Ported from tmux tty_window_offset().
+pub fn tty_window_offset(tty: *const T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) bool {
+    ox.* = tty.oox;
+    oy.* = tty.ooy;
+    sx.* = tty.osx;
+    sy.* = tty.osy;
+    return tty.oflag;
+}
+
+/// Check whether the window is bigger than the terminal.
+/// Ported from tmux tty_window_bigger().
+pub fn tty_window_bigger(tty: *const T.Tty, wsx: u32, wsy: u32, status_lines: u32) bool {
+    return tty.sx < wsx or tty.sy -| status_lines < wsy;
+}
+
+/// Calculate the window offset for when the window is bigger than the terminal.
+/// Returns true when offset is needed (window bigger than viewport).
+/// Ported from tmux tty_window_offset1().
+pub fn tty_window_offset_calc(
+    tty: *T.Tty,
+    wsx: u32,
+    wsy: u32,
+    status_lines: u32,
+    cursor_x: u32,
+    cursor_y: u32,
+    cursor_visible: bool,
+    pan_window: bool,
+    pan_ox: u32,
+    pan_oy: u32,
+) bool {
+    const view_sx = tty.sx;
+    const view_sy = tty.sy -| status_lines;
+
+    if (view_sx >= wsx and view_sy >= wsy) {
+        tty.oox = 0;
+        tty.ooy = 0;
+        tty.osx = wsx;
+        tty.osy = wsy;
+        tty.oflag = false;
+        return false;
+    }
+
+    tty.osx = view_sx;
+    tty.osy = view_sy;
+
+    if (pan_window) {
+        tty.oox = clampAxis(pan_ox, view_sx, wsx);
+        tty.ooy = clampAxis(pan_oy, view_sy, wsy);
+        tty.oflag = true;
+        return true;
+    }
+
+    if (!cursor_visible) {
+        tty.oox = 0;
+        tty.ooy = 0;
+    } else {
+        tty.oox = followAxis(cursor_x, view_sx, wsx);
+        tty.ooy = followAxis(cursor_y, view_sy, wsy);
+    }
+
+    tty.oflag = true;
+    return true;
+}
+
+/// Clamp an offset so the viewport stays within the window bounds.
+fn clampAxis(offset: u32, view: u32, total: u32) u32 {
+    if (view >= total) return 0;
+    if (offset + view > total) return total - view;
+    return offset;
+}
+
+/// Follow a cursor position, centering the viewport on it.
+fn followAxis(cursor: u32, view: u32, total: u32) u32 {
+    if (cursor < view) return 0;
+    if (cursor > total - view) return total - view;
+    return cursor - view / 2;
+}
+
 pub fn tty_clipboard_query(tty: *T.Tty) void {
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
     if ((tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) != 0) return;
@@ -2193,4 +2334,370 @@ test "expand_tparm handles literal text without parameters" {
     const result = try expand_tparm_1("\x1b[2J", 0);
     defer xm.allocator.free(result);
     try std.testing.expectEqualStrings("\x1b[2J", result);
+}
+
+// ── Tests for P1-06 additions ──────────────────────────────────────────────
+
+test "tty_window_bigger detects when window exceeds terminal" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 24;
+
+    // Window 100x30 is bigger than terminal 80x24 minus 1 status line.
+    try std.testing.expect(tty_window_bigger(&cl.tty, 100, 30, 1));
+    // Window 80x24 fits within 80x24 minus 0 status lines.
+    try std.testing.expect(!tty_window_bigger(&cl.tty, 80, 24, 0));
+    // Same size as terminal minus status — not bigger.
+    try std.testing.expect(!tty_window_bigger(&cl.tty, 80, 23, 1));
+}
+
+test "tty_window_offset_calc returns false when window fits" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    const result = tty_window_offset_calc(&cl.tty, 80, 24, 1, 0, 0, true, false, 0, 0);
+    try std.testing.expect(!result);
+    try std.testing.expect(!cl.tty.oflag);
+    try std.testing.expectEqual(@as(u32, 0), cl.tty.oox);
+    try std.testing.expectEqual(@as(u32, 0), cl.tty.ooy);
+    try std.testing.expectEqual(@as(u32, 80), cl.tty.osx);
+    try std.testing.expectEqual(@as(u32, 24), cl.tty.osy);
+}
+
+test "tty_window_offset_calc follows cursor when window is bigger" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    // Window 160x50, viewport 80x24, cursor at (100, 30).
+    const result = tty_window_offset_calc(&cl.tty, 160, 50, 1, 100, 30, true, false, 0, 0);
+    try std.testing.expect(result);
+    try std.testing.expect(cl.tty.oflag);
+    // Cursor at 100 with viewport 80 => 100 - 80/2 = 60.
+    try std.testing.expectEqual(@as(u32, 60), cl.tty.oox);
+    // Cursor at 30 with viewport 24 => 30 - 24/2 = 18.
+    try std.testing.expectEqual(@as(u32, 18), cl.tty.ooy);
+}
+
+test "tty_window_offset_calc clamps to right edge" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    // Window 100x30, viewport 80x24, cursor at (95, 20).
+    const result = tty_window_offset_calc(&cl.tty, 100, 30, 1, 95, 20, true, false, 0, 0);
+    try std.testing.expect(result);
+    // 95 > 100 - 80 = 20, so oox = 100 - 80 = 20.
+    try std.testing.expectEqual(@as(u32, 20), cl.tty.oox);
+    // 20 < 24, so ooy = 0.
+    try std.testing.expectEqual(@as(u32, 0), cl.tty.ooy);
+}
+
+test "tty_window_offset_calc uses pan offset in pan mode" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    const result = tty_window_offset_calc(&cl.tty, 160, 50, 1, 0, 0, true, true, 40, 10);
+    try std.testing.expect(result);
+    try std.testing.expectEqual(@as(u32, 40), cl.tty.oox);
+    try std.testing.expectEqual(@as(u32, 10), cl.tty.ooy);
+}
+
+test "tty_window_offset_calc clamps pan offset to right edge" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    const result = tty_window_offset_calc(&cl.tty, 100, 50, 1, 0, 0, true, true, 50, 10);
+    try std.testing.expect(result);
+    // pan_ox=50 + view_sx=80 > wsx=100, so clamp to 100-80=20.
+    try std.testing.expectEqual(@as(u32, 20), cl.tty.oox);
+}
+
+test "tty_window_offset reports stored values" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+
+    cl.tty.oflag = true;
+    cl.tty.oox = 10;
+    cl.tty.ooy = 5;
+    cl.tty.osx = 80;
+    cl.tty.osy = 24;
+
+    var ox: u32 = 0;
+    var oy: u32 = 0;
+    var sx: u32 = 0;
+    var sy: u32 = 0;
+    const has_offset = tty_window_offset(&cl.tty, &ox, &oy, &sx, &sy);
+    try std.testing.expect(has_offset);
+    try std.testing.expectEqual(@as(u32, 10), ox);
+    try std.testing.expectEqual(@as(u32, 5), oy);
+    try std.testing.expectEqual(@as(u32, 80), sx);
+    try std.testing.expectEqual(@as(u32, 24), sy);
+}
+
+test "tty_set_selection encodes and emits OSC 52 via Ms capability" {
+    const proc_mod_local = @import("proc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "tty-set-selection-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var caps = [_][]u8{
+        @constCast("Ms=\x1b]52;%p1%s;%p2%s\x07"),
+    };
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = caps[0..],
+    };
+    tty_init(&cl.tty, &cl);
+    tty_start_tty(&cl.tty);
+    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c_zig.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const data = "hello world";
+    tty_set_selection(&cl.tty, "c", data, data.len);
+
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
+
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    const actual = payload[@sizeOf(i32)..];
+    // "hello world" base64 is "aGVsbG8gd29ybGQ="
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\x1b]52;c;aGVsbG8gd29ybGQ=\x07") != null);
+}
+
+test "tty_cmd_setselection delegates to tty_set_selection" {
+    const proc_mod_local = @import("proc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "tty-cmd-setselection-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var caps = [_][]u8{
+        @constCast("Ms=\x1b]52;%p1%s;%p2%s\x07"),
+    };
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = caps[0..],
+    };
+    tty_init(&cl.tty, &cl);
+    tty_start_tty(&cl.tty);
+    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c_zig.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var ctx = TtyCmdCtx{ .clip = "s", .buf = "test", .num = 4 };
+    tty_cmd_setselection(&cl.tty, &ctx);
+
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
+
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    const actual = payload[@sizeOf(i32)..];
+    // "test" base64 is "dGVzdA=="
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\x1b]52;s;dGVzdA==\x07") != null);
+}
+
+test "tty_cmd_settitle delegates to tty_set_title" {
+    const proc_mod_local = @import("proc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "tty-cmd-settitle-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var caps = [_][]u8{
+        @constCast("tsl=\x1b]0;"),
+        @constCast("fsl=\x07"),
+    };
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = caps[0..],
+    };
+    tty_init(&cl.tty, &cl);
+    tty_start_tty(&cl.tty);
+    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c_zig.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var ctx = TtyCmdCtx{ .title = "My Window" };
+    tty_cmd_settitle(&cl.tty, &ctx);
+
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
+
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    const actual = payload[@sizeOf(i32)..];
+    try std.testing.expectEqualStrings("\x1b]0;My Window\x07", actual);
+}
+
+test "tty_set_selection skips when tty not started" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .term_caps = &.{},
+    };
+    tty_init(&cl.tty, &cl);
+    // tty not started — should silently do nothing.
+
+    tty_set_selection(&cl.tty, "c", "data", 4);
+}
+
+test "tty_window_offset_calc with cursor not visible centers at origin" {
+    const env_mod = @import("environ.zig");
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+    };
+    tty_init(&cl.tty, &cl);
+    cl.tty.sx = 80;
+    cl.tty.sy = 25;
+
+    const result = tty_window_offset_calc(&cl.tty, 160, 50, 1, 100, 30, false, false, 0, 0);
+    try std.testing.expect(result);
+    try std.testing.expectEqual(@as(u32, 0), cl.tty.oox);
+    try std.testing.expectEqual(@as(u32, 0), cl.tty.ooy);
 }

@@ -540,6 +540,24 @@ pub fn job_free(job: *Job) void {
     xm.allocator.destroy(job);
 }
 
+pub fn job_tidy() void {
+    jobs_lock.lock();
+    defer jobs_lock.unlock();
+
+    var i: usize = 0;
+    while (i < jobs.items.len) {
+        const job = jobs.items[i];
+        if (job.state != .running) {
+            // Free completed/failed/dead jobs
+            xm.allocator.free(job.cmd);
+            xm.allocator.destroy(job);
+            _ = jobs.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub fn job_kill_all() void {
     jobs_lock.lock();
     defer jobs_lock.unlock();

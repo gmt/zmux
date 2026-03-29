@@ -12,8 +12,7 @@ file into a planner blob.
 
 ## Truth Split
 
-- `tmux` is the behavioral oracle. Read the C when behavior is
-  unclear.
+- `tmux` is the behavioral oracle. Read the C when behavior is unclear.
 - this file decides where ported behavior should live in the Zig stack
 
 ## Identity And Independence

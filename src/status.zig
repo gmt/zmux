@@ -22,6 +22,7 @@
 const std = @import("std");
 const T = @import("types.zig");
 const c_import = @import("c.zig");
+const client_registry = @import("client-registry.zig");
 const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
 const opts = @import("options.zig");
@@ -47,6 +48,112 @@ const Area = struct {
     width: u32,
     line: u32,
 };
+
+pub fn status_init(c: *T.Client) void {
+    for (&c.status.entries) |*entry| {
+        entry.ranges = .{};
+        entry.expanded = null;
+    }
+    const lines = resize_mod.status_line_size(c);
+    if (lines == 0) {
+        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0);
+    } else {
+        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0);
+    }
+    c.status.timer = null;
+}
+
+pub fn status_timer_start_all() void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != null) status_timer_start(cl);
+    }
+}
+
+pub fn status_redraw(c: *T.Client) bool {
+    if (c.tty.sx == 0 or c.tty.sy == 0) return false;
+
+    const lines = resize_mod.status_line_size(c);
+    if (lines == 0) return false;
+
+    const s = c.session orelse return false;
+
+    var base_gc = T.grid_default_cell;
+    style_mod.style_apply(&base_gc, s.options, "status-style", null);
+    const fg = opts.options_get_number(s.options, "status-fg");
+    if (fg != 8) base_gc.fg = @intCast(fg);
+    const bg = opts.options_get_number(s.options, "status-bg");
+    if (bg != 8) base_gc.bg = @intCast(bg);
+
+    var force = false;
+    if (!gridCellsEqual(&base_gc, &c.status.style)) {
+        force = true;
+        c.status.style = base_gc;
+    }
+
+    const width = c.tty.sx;
+    if (c.status.screen.grid.sx != width or c.status.screen.grid.sy != lines) {
+        screen_mod.screen_resize(&c.status.screen, width, lines);
+        force = true;
+    }
+
+    var changed = false;
+    var ctx = T.ScreenWriteCtx{ .s = &c.status.screen };
+
+    var row: u32 = 0;
+    while (row < lines) : (row += 1) {
+        const row_index: usize = @intCast(row);
+        const format_text = opts.options_get_array_item(s.options, "status-format", row) orelse {
+            clear_cached_status_entry(&c.status.entries[row_index]);
+            screen_write.cursor_to(&ctx, row, 0);
+            var col: u32 = 0;
+            while (col < width) : (col += 1) {
+                screen_write.putCell(&ctx, &base_gc);
+            }
+            changed = true;
+            continue;
+        };
+
+        var fmt_ctx = format_context(c);
+        const expanded = format_mod.format_expand(xm.allocator, format_text, &fmt_ctx);
+        errdefer xm.allocator.free(expanded.text);
+
+        const entry = &c.status.entries[row_index];
+        if (!force and entry.expanded != null and std.mem.eql(u8, expanded.text, entry.expanded.?)) {
+            xm.allocator.free(expanded.text);
+            continue;
+        }
+        changed = true;
+
+        var left_gc = base_gc;
+        style_mod.style_apply(&left_gc, s.options, "status-style", null);
+        if (fg != 8) left_gc.fg = @intCast(fg);
+        if (bg != 8) left_gc.bg = @intCast(bg);
+
+        screen_write.cursor_to(&ctx, row, 0);
+        var col: u32 = 0;
+        while (col < width) : (col += 1) {
+            screen_write.putCell(&ctx, &left_gc);
+        }
+        screen_write.cursor_to(&ctx, row, 0);
+
+        replace_cached_status_entry(entry, expanded.text);
+        entry.ranges.clearRetainingCapacity();
+        format_draw.format_draw_ranges(&ctx, &left_gc, width, expanded.text, &entry.ranges);
+        xm.allocator.free(expanded.text);
+    }
+    clear_status_entries_from(c, row);
+
+    return force or changed;
+}
+
+fn gridCellsEqual(a: *const T.GridCell, b: *const T.GridCell) bool {
+    return a.attr == b.attr and
+        a.flags == b.flags and
+        a.fg == b.fg and
+        a.bg == b.bg and
+        a.us == b.us and
+        std.mem.eql(u8, a.data.data[0..@as(usize, @intCast(a.data.size))], b.data.data[0..@as(usize, @intCast(b.data.size))]);
+}
 
 pub fn pane_row_offset(c: *T.Client) u32 {
     const lines = resize_mod.status_line_size(c);
@@ -692,4 +799,139 @@ test "status timer reuses the shared redraw seam and suppresses overlay churn" {
 
     status_timer_callback(-1, 0, &client);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWSTATUS != 0);
+}
+
+test "status_init allocates screen and status_redraw detects style changes" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_string(session_opts, false, "status-right", "#{pane_title}");
+    opts.options_set_number(session_opts, "status-right-length", 16);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "init-test", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(20, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(w.name);
+    w.name = xm.xstrdup("init-win");
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 20, .sy = 4 };
+
+    status_init(&client);
+
+    try std.testing.expect(client.status.screen.grid.sx == 20);
+
+    // First redraw should always return true (forced)
+    const first = status_redraw(&client);
+    try std.testing.expect(first);
+
+    // Second redraw with same content should return false (no change)
+    const second = status_redraw(&client);
+    try std.testing.expect(!second);
+
+    // Change the format string, should trigger a change
+    opts.options_set_array(s.options, "status-format", &.{"#[fg=red]changed"});
+    const third = status_redraw(&client);
+    try std.testing.expect(third);
+
+    // Same content again should be stable
+    const fourth = status_redraw(&client);
+    try std.testing.expect(!fourth);
+}
+
+test "status_prompt_complete matches command names and returns common prefix" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    // "new-" should match "new-session" and "new-window"
+    const result = status_prompt.status_prompt_complete("new-", true);
+    if (result) |r| {
+        defer xm.allocator.free(r);
+        // Should be the common prefix "new-"
+        try std.testing.expect(std.mem.eql(u8, r, "new-"));
+    }
+
+    // Exact match for a unique command should get a trailing space
+    const exact = status_prompt.status_prompt_complete("new-session", true);
+    if (exact) |e| {
+        defer xm.allocator.free(e);
+        try std.testing.expect(std.mem.eql(u8, e, "new-session "));
+    }
+
+    // No match should return null
+    const nope = status_prompt.status_prompt_complete("zzz-nonexistent-", true);
+    try std.testing.expect(nope == null);
+}
+
+test "status_prompt_load_history reads typed history from a temp file" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    const ts = std.time.milliTimestamp();
+    const abs_path = std.fmt.allocPrint(xm.allocator, "/tmp/zmux-test-hist-{d}.txt", .{ts}) catch return;
+    defer {
+        xm.allocator.free(abs_path);
+        std.fs.cwd().deleteFile(abs_path) catch {};
+    }
+
+    // Write a temp file to /tmp
+    {
+        const file = std.fs.cwd().createFile(abs_path, .{ .truncate = true }) catch return;
+        defer file.close();
+        const writer = file.writer();
+        writer.writeAll("command:hello\nsearch:world\ncommand:foo\n") catch return;
+    }
+
+    opts.options_set_string(opts.global_options, false, "history-file", abs_path);
+
+    status_prompt.status_prompt_history_clear(null);
+    status_prompt.status_prompt_load_history();
+
+    try std.testing.expectEqual(@as(usize, 2), status_prompt.status_prompt_history_count(.command));
+    try std.testing.expectEqual(@as(usize, 1), status_prompt.status_prompt_history_count(.search));
+    try std.testing.expectEqualStrings("hello", status_prompt.status_prompt_history_item(.command, 0).?);
+    try std.testing.expectEqualStrings("foo", status_prompt.status_prompt_history_item(.command, 1).?);
+    try std.testing.expectEqualStrings("world", status_prompt.status_prompt_history_item(.search, 0).?);
+
+    // Save, clear, and reload to verify round-trip
+    status_prompt.status_prompt_save_history();
+    status_prompt.status_prompt_history_clear(null);
+    try std.testing.expectEqual(@as(usize, 0), status_prompt.status_prompt_history_count(.command));
+
+    status_prompt.status_prompt_load_history();
+    try std.testing.expectEqual(@as(usize, 2), status_prompt.status_prompt_history_count(.command));
+
+    status_prompt.status_prompt_history_clear(null);
 }

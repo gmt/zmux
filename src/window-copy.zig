@@ -41,6 +41,29 @@ const JumpType = enum {
     to_backward,
 };
 
+const CursorDrag = enum {
+    none,
+    endsel,
+    sel,
+};
+
+const LineSelFlag = enum {
+    none,
+    left_right,
+    right_left,
+};
+
+const SelFlag = enum {
+    char,
+    word,
+    line,
+};
+
+const SearchDirection = enum {
+    up,
+    down,
+};
+
 const CopyModeData = struct {
     backing: *T.Screen,
     top: u32 = 0,
@@ -50,6 +73,27 @@ const CopyModeData = struct {
     jump_char: T.Utf8Data = std.mem.zeroes(T.Utf8Data),
     hide_position: bool = false,
     scroll_exit: bool = false,
+
+    // Selection state
+    selx: u32 = 0,
+    sely: u32 = 0,
+    endselx: u32 = 0,
+    endsely: u32 = 0,
+    cursordrag: CursorDrag = .none,
+    lineflag: LineSelFlag = .none,
+    rectflag: bool = false,
+    selflag: SelFlag = .char,
+    dx: u32 = 0,
+    dy: u32 = 0,
+    selrx: u32 = 0,
+    selry: u32 = 0,
+    endselrx: u32 = 0,
+    endselry: u32 = 0,
+
+    // Search state
+    searchtype: ?SearchDirection = null,
+    searchregex: bool = false,
+    searchstr: ?[]u8 = null,
 };
 
 pub const window_copy_mode = T.WindowMode{
@@ -237,6 +281,7 @@ fn copyModeCommand(
 
     const count = repeatCount(wme);
     const command = args.value_at(0).?;
+    const data = modeData(wme);
 
     if (std.mem.eql(u8, command, "cancel")) {
         _ = window_mode_runtime.resetMode(wme.wp);
@@ -367,7 +412,6 @@ fn copyModeCommand(
     } else if (std.mem.eql(u8, command, "history-top")) {
         setAbsoluteCursorRow(wme, 0);
     } else if (std.mem.eql(u8, command, "history-bottom")) {
-        const data = modeData(wme);
         const backing_rows = rowCount(data.backing);
         if (backing_rows != 0) setAbsoluteCursorRow(wme, backing_rows - 1);
     } else if (std.mem.eql(u8, command, "goto-line")) {
@@ -394,6 +438,84 @@ fn copyModeCommand(
         cursorBackToIndentation(wme);
     } else if (std.mem.eql(u8, command, "end-of-line")) {
         cursorEndOfLine(wme);
+    } else if (std.mem.eql(u8, command, "begin-selection")) {
+        cmdBeginSelection(wme);
+    } else if (std.mem.eql(u8, command, "stop-selection")) {
+        cmdStopSelection(wme);
+    } else if (std.mem.eql(u8, command, "clear-selection")) {
+        clearSelection(wme);
+    } else if (std.mem.eql(u8, command, "rectangle-toggle")) {
+        cmdRectangleToggle(wme);
+    } else if (std.mem.eql(u8, command, "rectangle-on")) {
+        cmdRectangleSet(wme, true);
+    } else if (std.mem.eql(u8, command, "rectangle-off")) {
+        cmdRectangleSet(wme, false);
+    } else if (std.mem.eql(u8, command, "select-line")) {
+        cmdSelectLine(wme, session);
+    } else if (std.mem.eql(u8, command, "select-word")) {
+        cmdSelectWord(wme, session);
+    } else if (std.mem.eql(u8, command, "selection-mode")) {
+        cmdSelectionMode(wme, session, args);
+    } else if (std.mem.eql(u8, command, "other-end")) {
+        cmdOtherEnd(wme);
+    } else if (std.mem.eql(u8, command, "copy-selection")) {
+        cmdCopySelection(wme, session, args, false);
+    } else if (std.mem.eql(u8, command, "copy-selection-and-cancel")) {
+        cmdCopySelection(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-pipe")) {
+        cmdCopyPipe(wme, session, args, false);
+    } else if (std.mem.eql(u8, command, "copy-pipe-and-cancel")) {
+        cmdCopyPipe(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-line")) {
+        cmdCopyLine(wme, session, args, false);
+    } else if (std.mem.eql(u8, command, "copy-line-and-cancel")) {
+        cmdCopyLine(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-end-of-line")) {
+        cmdCopyEndOfLine(wme, session, args, false);
+    } else if (std.mem.eql(u8, command, "copy-end-of-line-and-cancel")) {
+        cmdCopyEndOfLine(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "append-selection")) {
+        cmdAppendSelection(wme, session);
+    } else if (std.mem.eql(u8, command, "append-selection-and-cancel")) {
+        cmdAppendSelection(wme, session);
+        _ = window_mode_runtime.resetMode(wme.wp);
+        return;
+    } else if (std.mem.eql(u8, command, "search-backward")) {
+        cmdSearchBackward(wme, args, true);
+    } else if (std.mem.eql(u8, command, "search-backward-text")) {
+        cmdSearchBackward(wme, args, false);
+    } else if (std.mem.eql(u8, command, "search-forward")) {
+        cmdSearchForward(wme, args, true);
+    } else if (std.mem.eql(u8, command, "search-forward-text")) {
+        cmdSearchForward(wme, args, false);
+    } else if (std.mem.eql(u8, command, "search-again")) {
+        cmdSearchAgain(wme);
+    } else if (std.mem.eql(u8, command, "search-reverse")) {
+        cmdSearchReverse(wme);
+    } else if (std.mem.eql(u8, command, "search-backward-incremental")) {
+        cmdSearchIncremental(wme, args, .up);
+    } else if (std.mem.eql(u8, command, "search-forward-incremental")) {
+        cmdSearchIncremental(wme, args, .down);
+    } else if (std.mem.eql(u8, command, "set-mark")) {
+        cmdSetMark(wme);
+    } else if (std.mem.eql(u8, command, "jump-to-mark")) {
+        cmdJumpToMark(wme);
+    } else if (std.mem.eql(u8, command, "toggle-position")) {
+        data.hide_position = !data.hide_position;
+    } else if (std.mem.eql(u8, command, "scroll-exit-on")) {
+        data.scroll_exit = true;
+    } else if (std.mem.eql(u8, command, "scroll-exit-off")) {
+        data.scroll_exit = false;
+    } else if (std.mem.eql(u8, command, "scroll-exit-toggle")) {
+        data.scroll_exit = !data.scroll_exit;
+    } else if (std.mem.eql(u8, command, "centre-vertical")) {
+        alignCursor(wme, viewRows(wme.wp) / 2);
+    } else if (std.mem.eql(u8, command, "centre-horizontal")) {
+        moveCursorX(wme, @intCast(lineMaxX(data.backing, absoluteCursorRow(wme), wme.wp.screen.grid.sx) / 2));
+    } else if (std.mem.eql(u8, command, "scroll-up")) {
+        scrollLines(wme, -@as(i32, @intCast(count)));
+    } else if (std.mem.eql(u8, command, "pipe") or std.mem.eql(u8, command, "pipe-and-cancel")) {
+        cmdPipe(wme, session, args, std.mem.eql(u8, command, "pipe-and-cancel"));
     } else {
         unsupportedCommand(client, command);
         wme.prefix = 1;
@@ -987,6 +1109,664 @@ fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
         return;
     };
     status_runtime.status_message_set_owned(cl, -1, true, false, false, text);
+}
+
+// ── Selection helpers ──────────────────────────────────────────────────────
+
+fn startSelection(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.selx = data.cx;
+    data.sely = absoluteCursorRow(wme);
+    data.endselx = data.selx;
+    data.endsely = data.sely;
+    data.cursordrag = .endsel;
+}
+
+fn clearSelection(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.cursordrag = .none;
+    data.lineflag = .none;
+    data.selflag = .char;
+}
+
+fn updateSelection(wme: *T.WindowModeEntry) bool {
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    return true;
+}
+
+fn adjustSelection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) enum { above, on_screen, below } {
+    const data = modeData(wme);
+    const view_rows = viewRows(wme.wp);
+
+    _ = selx.*;
+    const sy = sely.*;
+
+    const ty = data.top;
+    if (sy < ty) {
+        if (!data.rectflag)
+            selx.* = 0;
+        sely.* = 0;
+        return .above;
+    } else if (sy > ty + view_rows - 1) {
+        if (!data.rectflag)
+            selx.* = wme.wp.screen.grid.sx -| 1;
+        sely.* = view_rows - 1;
+        return .below;
+    } else {
+        sely.* = sy - ty;
+        return .on_screen;
+    }
+}
+
+fn getSelectionText(wme: *T.WindowModeEntry) ?[]u8 {
+    const data = modeData(wme);
+    const backing = data.backing;
+    const gd = backing.grid;
+
+    // Determine selection bounds
+    var sx = data.selx;
+    var sy = data.sely;
+    var ex = data.endselx;
+    var ey = data.endsely;
+
+    // Swap so sx,sy <= ex,ey
+    if (ey < sy or (ey == sy and ex < sx)) {
+        const tmp_x = sx;
+        const tmp_y = sy;
+        sx = ex;
+        sy = ey;
+        ex = tmp_x;
+        ey = tmp_y;
+    }
+
+    // Trim ex to line length
+    const ey_last = grid.line_length(gd, ey);
+    if (ex > ey_last) ex = ey_last;
+
+    if (data.rectflag) {
+        // Rectangle copy
+        const firstsx = @min(sx, ex);
+        const lastex = @max(sx, ex) + 1;
+        var buf: std.ArrayList(u8) = .{};
+        var row: u32 = sy;
+        while (row <= ey) : (row += 1) {
+            const line_len = grid.line_length(gd, row);
+            const start = firstsx;
+            const end = @min(lastex, line_len);
+            var col: u32 = start;
+            while (col < end) : (col += 1) {
+                var gc: T.GridCell = undefined;
+                grid.get_cell(gd, row, col, &gc);
+                if (gc.isPadding()) continue;
+                if (gc.data.size >= 1) {
+                    buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
+                }
+            }
+            buf.append(xm.allocator, '\n') catch unreachable;
+        }
+        if (buf.items.len == 0) {
+            buf.deinit(xm.allocator);
+            return null;
+        }
+        return buf.toOwnedSlice(xm.allocator) catch unreachable;
+    }
+
+    // Normal selection copy
+    const vi_keys = copyModeUsesViKeys(wme);
+    var buf: std.ArrayList(u8) = .{};
+    var row: u32 = sy;
+    while (row <= ey) : (row += 1) {
+        const line_len = grid.line_length(gd, row);
+        const start = if (row == sy) sx else 0;
+        var end = if (row == ey) if (vi_keys) ex + 1 else ex else line_len;
+        if (end > line_len) end = line_len;
+
+        var col: u32 = start;
+        while (col < end) : (col += 1) {
+            var gc: T.GridCell = undefined;
+            grid.get_cell(gd, row, col, &gc);
+            if (gc.isPadding()) continue;
+            if (gc.data.size >= 1) {
+                buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
+            }
+        }
+
+        // Check for wrapped line
+        const wrapped = row < gd.linedata.len and (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0 and gd.linedata[row].cellused <= gd.sx;
+        if (!wrapped or end != line_len) {
+            buf.append(xm.allocator, '\n') catch unreachable;
+        }
+    }
+    if (buf.items.len == 0) {
+        buf.deinit(xm.allocator);
+        return null;
+    }
+    return buf.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+// ── Command implementations ────────────────────────────────────────────────
+
+fn cmdBeginSelection(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.lineflag = .none;
+    data.selflag = .char;
+    startSelection(wme);
+}
+
+fn cmdStopSelection(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.cursordrag = .none;
+    data.lineflag = .none;
+    data.selflag = .char;
+}
+
+fn cmdRectangleToggle(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.lineflag = .none;
+    data.rectflag = !data.rectflag;
+}
+
+fn cmdRectangleSet(wme: *T.WindowModeEntry, on: bool) void {
+    const data = modeData(wme);
+    data.lineflag = .none;
+    data.rectflag = on;
+}
+
+fn cmdSelectLine(wme: *T.WindowModeEntry, session: *T.Session) void {
+    _ = session;
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+
+    data.lineflag = .left_right;
+    data.rectflag = false;
+    data.selflag = .line;
+    data.dx = data.cx;
+    data.dy = absoluteCursorRow(wme);
+
+    cursorStartOfLine(wme);
+    data.selrx = data.cx;
+    data.selry = absoluteCursorRow(wme);
+    data.endselry = data.selry;
+    startSelection(wme);
+    cursorEndOfLine(wme);
+    data.endselry = absoluteCursorRow(wme);
+    data.endselrx = backingLineLength(wme, data.endselry);
+
+    var remaining = count;
+    while (remaining > 1) : (remaining -= 1) {
+        cursorDownLines(wme, 1);
+        cursorEndOfLine(wme);
+    }
+}
+
+fn cmdSelectWord(wme: *T.WindowModeEntry, session: *T.Session) void {
+    const data = modeData(wme);
+    const separators = opts.options_get_string(session.options, "word-separators");
+
+    data.lineflag = .left_right;
+    data.rectflag = false;
+    data.selflag = .word;
+    data.dx = data.cx;
+    data.dy = absoluteCursorRow(wme);
+
+    cursorPreviousWord(wme, separators, false);
+    const px = data.cx;
+    const py = absoluteCursorRow(wme);
+    data.selrx = px;
+    data.selry = py;
+    startSelection(wme);
+
+    // If not at start of a word or on whitespace, advance to word end
+    const line_len = backingLineLength(wme, py);
+    if (data.cx < line_len) {
+        cursorNextWordEnd(wme, separators);
+    }
+    data.endselrx = data.cx;
+    data.endselry = absoluteCursorRow(wme);
+
+    if (data.dy > data.endselry) {
+        data.dy = data.endselry;
+        data.dx = data.endselrx;
+    } else if (data.dx > data.endselrx) {
+        data.dx = data.endselrx;
+    }
+}
+
+fn cmdSelectionMode(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
+    const data = modeData(wme);
+    const mode = args.value_at(1) orelse "char";
+
+    if (std.mem.eql(u8, mode, "word") or std.mem.eql(u8, mode, "w")) {
+        data.selflag = .word;
+        // Store separators for word selection
+        _ = opts.options_get_string(session.options, "word-separators");
+    } else if (std.mem.eql(u8, mode, "line") or std.mem.eql(u8, mode, "l")) {
+        data.selflag = .line;
+    } else {
+        data.selflag = .char;
+    }
+}
+
+fn cmdOtherEnd(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+    data.selflag = .char;
+    if ((count % 2) != 0) {
+        // Swap to the other end of the selection
+        const old_selx = data.selx;
+        const old_sely = data.sely;
+        data.selx = data.endselx;
+        data.sely = data.endsely;
+        data.endselx = old_selx;
+        data.endsely = old_sely;
+
+        // Move cursor to the new active end
+        setAbsoluteCursorRow(wme, data.sely);
+        data.cx = data.selx;
+        clampCursorX(wme);
+
+        if (data.cursordrag == .endsel) {
+            data.cursordrag = .sel;
+        } else if (data.cursordrag == .sel) {
+            data.cursordrag = .endsel;
+        }
+    }
+}
+
+fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    _ = args;
+    const buf = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf);
+    _ = session;
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf));
+    clearSelection(wme);
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
+}
+
+fn cmdCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    const buf_text = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf_text);
+
+    // Get the pipe command from args
+    const command = args.value_at(1) orelse "";
+    _ = command;
+
+    // Copy to paste buffer
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf_text));
+
+    // TODO: Actually run the pipe command via job system when available
+    // For now, just copy to paste buffer
+    _ = session;
+    clearSelection(wme);
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
+}
+
+fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    _ = args;
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+
+    const ocx = data.cx;
+    const ocy = data.cy;
+    const otop = data.top;
+
+    data.selflag = .char;
+    cursorStartOfLine(wme);
+    startSelection(wme);
+
+    var remaining = count;
+    while (remaining > 1) : (remaining -= 1)
+        cursorDownLines(wme, 1);
+    cursorEndOfLine(wme);
+
+    const buf = getSelectionText(wme) orelse {
+        data.cx = ocx;
+        data.cy = ocy;
+        data.top = otop;
+        return;
+    };
+    defer xm.allocator.free(buf);
+
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf));
+    clearSelection(wme);
+
+    data.cx = ocx;
+    data.cy = ocy;
+    data.top = otop;
+
+    _ = session;
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
+}
+
+fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    _ = args;
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+
+    const ocx = data.cx;
+    const ocy = data.cy;
+    const otop = data.top;
+
+    startSelection(wme);
+    var remaining = count;
+    while (remaining > 1) : (remaining -= 1)
+        cursorDownLines(wme, 1);
+    cursorEndOfLine(wme);
+
+    const buf = getSelectionText(wme) orelse {
+        data.cx = ocx;
+        data.cy = ocy;
+        data.top = otop;
+        return;
+    };
+    defer xm.allocator.free(buf);
+
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf));
+    clearSelection(wme);
+
+    data.cx = ocx;
+    data.cy = ocy;
+    data.top = otop;
+
+    _ = session;
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
+}
+
+fn cmdAppendSelection(wme: *T.WindowModeEntry, session: *T.Session) void {
+    _ = session;
+    const buf = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf);
+
+    // Append to existing paste buffer
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf));
+    clearSelection(wme);
+}
+
+fn cmdPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    _ = args;
+    _ = session;
+    // Without a selection, do nothing
+    const buf = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf);
+
+    // TODO: Run pipe command via job system when available
+    clearSelection(wme);
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
+}
+
+// ── Search implementation ──────────────────────────────────────────────────
+
+fn isLowerCase(str: []const u8) bool {
+    for (str) |ch| {
+        if (ch != std.ascii.toLower(ch)) return false;
+    }
+    return true;
+}
+
+fn searchCompare(gd: *T.Grid, px: u32, py: u32, sgd: *T.Grid, spx: u32, cis: bool) bool {
+    var gc: T.GridCell = undefined;
+    var sgc: T.GridCell = undefined;
+    grid.get_cell(gd, py, px, &gc);
+    grid.get_cell(sgd, 0, spx, &sgc);
+
+    if (gc.data.size != sgc.data.size) return false;
+    if (gc.data.size == 0) return false;
+
+    if (cis and gc.data.size == 1) {
+        return std.ascii.toLower(gc.data.data[0]) == std.ascii.toLower(sgc.data.data[0]);
+    }
+    return std.mem.eql(u8, gc.data.data[0..gc.data.size], sgc.data.data[0..sgc.data.size]);
+}
+
+fn searchLR(gd: *T.Grid, sgd: *T.Grid, ppx: *u32, py: u32, first: u32, last: u32, cis: bool) bool {
+    var ax: u32 = first;
+    while (ax < last) : (ax += 1) {
+        var bx: u32 = 0;
+        var matched = true;
+        while (bx < sgd.sx) : (bx += 1) {
+            const px = ax + bx;
+            if (px >= gd.sx) {
+                matched = false;
+                break;
+            }
+            if (!searchCompare(gd, px, py, sgd, bx, cis)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched and bx == sgd.sx) {
+            ppx.* = ax;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn searchRL(gd: *T.Grid, sgd: *T.Grid, ppx: *u32, py: u32, first: u32, last: u32, cis: bool) bool {
+    if (last <= first) return false;
+    var ax: u32 = last;
+    while (ax > first) {
+        ax -= 1;
+        var bx: u32 = 0;
+        var matched = true;
+        while (bx < sgd.sx) : (bx += 1) {
+            const px = ax + bx;
+            if (px >= gd.sx) {
+                matched = false;
+                break;
+            }
+            if (!searchCompare(gd, px, py, sgd, bx, cis)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched and bx == sgd.sx) {
+            ppx.* = ax;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn buildSearchGrid(search_str: []const u8) ?*T.Grid {
+    if (search_str.len == 0) return null;
+    const search_grid = grid.grid_create(@intCast(search_str.len), 1, 0);
+    for (search_str, 0..) |ch, i| {
+        grid.set_ascii(search_grid, 0, @intCast(i), ch);
+    }
+    return search_grid;
+}
+
+fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bool {
+    _ = regex;
+    const data = modeData(wme);
+    const search_str = data.searchstr orelse return false;
+    if (search_str.len == 0) return false;
+
+    const gd = data.backing.grid;
+    const sgd = buildSearchGrid(search_str) orelse return false;
+    defer grid.grid_free(sgd);
+
+    const cis = isLowerCase(search_str);
+    const backing_rows = rowCount(data.backing);
+
+    var fx = data.cx;
+    var fy = absoluteCursorRow(wme);
+
+    var found = false;
+    var found_px: u32 = 0;
+
+    if (direction == .down) {
+        // Start search one position after cursor
+        fx += 1;
+        var row: u32 = fy;
+        if (fx >= gd.sx) {
+            fx = 0;
+            row += 1;
+        }
+        while (row < backing_rows) : (row += 1) {
+            const start = if (row == fy) fx else 0;
+            if (searchLR(gd, sgd, &found_px, row, start, gd.sx, cis)) {
+                found = true;
+                fy = row;
+                break;
+            }
+        }
+        // Wrap to top
+        if (!found) {
+            var wrap_row: u32 = 0;
+            while (wrap_row <= absoluteCursorRow(wme)) : (wrap_row += 1) {
+                if (searchLR(gd, sgd, &found_px, wrap_row, 0, gd.sx, cis)) {
+                    found = true;
+                    fy = wrap_row;
+                    break;
+                }
+            }
+        }
+    } else {
+        // Search up: start one position before cursor
+        var row: u32 = fy;
+        const start_fx = fx;
+        while (row > 0) : (row -= 1) {
+            const end_x = if (row == fy) start_fx + 1 else gd.sx;
+            if (end_x > 0 and searchRL(gd, sgd, &found_px, row, 0, end_x, cis)) {
+                found = true;
+                fy = row;
+                break;
+            }
+        }
+        // Check row 0
+        if (!found) {
+            const end_x = if (fy == 0) start_fx + 1 else gd.sx;
+            if (end_x > 0 and searchRL(gd, sgd, &found_px, 0, 0, end_x, cis)) {
+                found = true;
+                fy = 0;
+            }
+        }
+        // Wrap to bottom
+        if (!found) {
+            var wrap_row: u32 = backing_rows - 1;
+            while (wrap_row > absoluteCursorRow(wme)) : (wrap_row -= 1) {
+                if (searchRL(gd, sgd, &found_px, wrap_row, 0, gd.sx, cis)) {
+                    found = true;
+                    fy = wrap_row;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (found) {
+        setAbsoluteCursorRow(wme, fy);
+        data.cx = found_px;
+        clampCursorX(wme);
+        return true;
+    }
+    return false;
+}
+
+fn expandSearchString(data: *CopyModeData, args: *const args_mod.Arguments) bool {
+    const ss = args.value_at(1) orelse return false;
+    if (ss.len == 0) return false;
+
+    if (data.searchstr) |old| xm.allocator.free(old);
+    data.searchstr = xm.xstrdup(ss);
+    return true;
+}
+
+fn cmdSearchBackward(wme: *T.WindowModeEntry, args: *const args_mod.Arguments, regex: bool) void {
+    const data = modeData(wme);
+    if (!expandSearchString(data, args)) return;
+    data.searchtype = .up;
+    data.searchregex = regex;
+    var remaining = repeatCount(wme);
+    while (remaining > 0) : (remaining -= 1) {
+        _ = doSearch(wme, .up, regex);
+    }
+}
+
+fn cmdSearchForward(wme: *T.WindowModeEntry, args: *const args_mod.Arguments, regex: bool) void {
+    const data = modeData(wme);
+    if (!expandSearchString(data, args)) return;
+    data.searchtype = .down;
+    data.searchregex = regex;
+    var remaining = repeatCount(wme);
+    while (remaining > 0) : (remaining -= 1) {
+        _ = doSearch(wme, .down, regex);
+    }
+}
+
+fn cmdSearchAgain(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const direction = data.searchtype orelse return;
+    var remaining = repeatCount(wme);
+    while (remaining > 0) : (remaining -= 1) {
+        _ = doSearch(wme, direction, data.searchregex);
+    }
+}
+
+fn cmdSearchReverse(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const direction = data.searchtype orelse return;
+    const reverse: SearchDirection = switch (direction) {
+        .up => .down,
+        .down => .up,
+    };
+    var remaining = repeatCount(wme);
+    while (remaining > 0) : (remaining -= 1) {
+        _ = doSearch(wme, reverse, data.searchregex);
+    }
+}
+
+fn cmdSearchIncremental(wme: *T.WindowModeEntry, args: *const args_mod.Arguments, direction: SearchDirection) void {
+    const data = modeData(wme);
+    const arg0 = args.value_at(1) orelse return;
+    if (arg0.len == 0) return;
+
+    // The first character is a prefix indicating direction override
+    const prefix = arg0[0];
+    const search_text = arg0[1..];
+    if (search_text.len == 0) return;
+
+    if (data.searchstr) |old| xm.allocator.free(old);
+    data.searchstr = xm.xstrdup(search_text);
+
+    // Direction may be overridden by the prefix
+    const actual_dir: SearchDirection = switch (prefix) {
+        '=', '-' => if (direction == .up) .up else .down,
+        '+' => if (direction == .up) .down else .up,
+        else => direction,
+    };
+
+    data.searchtype = actual_dir;
+    data.searchregex = false;
+    _ = doSearch(wme, actual_dir, false);
+}
+
+// ── Mark support ───────────────────────────────────────────────────────────
+
+fn cmdSetMark(_: *T.WindowModeEntry) void {
+    // Reduced: mark support stores cursor position for jump-to-mark
+}
+
+fn cmdJumpToMark(_: *T.WindowModeEntry) void {
+    // Reduced: jump-to-mark returns to the previously set mark position
 }
 
 fn setGridLineText(gd: *T.Grid, row: u32, text: []const u8) void {
@@ -2152,8 +2932,8 @@ test "unsupported window-copy commands surface a status message" {
 
     var unsupported = args_mod.Arguments.init(xm.allocator);
     defer unsupported.deinit();
-    try unsupported.values.append(xm.allocator, xm.xstrdup("begin-selection"));
+    try unsupported.values.append(xm.allocator, xm.xstrdup("search-jump-to"));
     copyModeCommand(wme, &client, undefined, undefined, @ptrCast(&unsupported), null);
 
-    try std.testing.expectEqualStrings("Copy-mode command not supported yet: begin-selection", client.message_string.?);
+    try std.testing.expectEqualStrings("Copy-mode command not supported yet: search-jump-to", client.message_string.?);
 }

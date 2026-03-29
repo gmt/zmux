@@ -22,6 +22,7 @@
 const std = @import("std");
 const c_zig = @import("c.zig");
 const T = @import("types.zig");
+const grid = @import("grid.zig");
 const file_mod = @import("file.zig");
 const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
@@ -70,6 +71,8 @@ pub fn tty_stop_tty(tty: *T.Tty) void {
 }
 
 pub fn tty_invalidate(tty: *T.Tty) void {
+    tty.cell = T.grid_default_cell;
+    tty.last_cell = T.grid_default_cell;
     tty.cx = std.math.maxInt(u32);
     tty.cy = std.math.maxInt(u32);
     tty.cstyle = .default;
@@ -579,21 +582,236 @@ fn colour_palette_get(palette: ?*T.ColourPalette, n: i32) i32 {
 
 // ── TTY reset ───────────────────────────────────────────────────────────────
 
-/// Reset terminal to default attributes and colours.
+/// Reset terminal to default attribute state. Clears colours, attributes,
+/// and hyperlink. Uses terminfo sgr0 or fallback CSI 0m.
 /// Ported from tmux tty_reset().
 pub fn tty_reset(tty: *T.Tty) void {
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
 
-    if (tty.fg != 8 or tty.bg != 8 or tty.us != 8) {
-        // Emit sgr0 (reset all attributes).
-        if (tty_term.stringCapability(tty, "sgr0")) |sgr0| {
-            if (sgr0.len > 0) tty_write(tty, sgr0);
+    const gc = &tty.cell;
+    if (!grid.cells_equal(gc, &T.grid_default_cell)) {
+        if (gc.link != 0) {
+            // Clear hyperlink.
+            tty_putcode_ss(tty, "Hls", "", "");
         }
+        if ((gc.attr & T.GRID_ATTR_CHARSET) != 0)
+            tty_putcode(tty, "rmacs");
+        tty_putcode(tty, "sgr0");
+        tty.cell = T.grid_default_cell;
     }
+    tty.last_cell = T.grid_default_cell;
 
     tty.fg = 8;
     tty.bg = 8;
     tty.us = 8;
+}
+
+/// Apply text attributes (bold, dim, italic, underline, strikethrough, etc.)
+/// and colours to the terminal. Tracks current state in tty.cell to only
+/// emit changes when attributes differ.
+/// Ported from tmux tty_attributes().
+pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell) void {
+    var gc2 = gc.*;
+    const tc = &tty.cell;
+
+    // Update default colours from the defaults cell.
+    if ((gc.flags & T.GRID_FLAG_NOPALETTE) == 0) {
+        if (gc2.fg == 8)
+            gc2.fg = defaults.fg;
+        if (gc2.bg == 8)
+            gc2.bg = defaults.bg;
+    }
+
+    // If the cell looks the same as the last one rendered, skip.
+    if (gc2.attr == tty.last_cell.attr and
+        gc2.fg == tty.last_cell.fg and
+        gc2.bg == tty.last_cell.bg and
+        gc2.us == tty.last_cell.us and
+        gc2.link == tty.last_cell.link)
+    {
+        return;
+    }
+
+    // If no setab, use reverse as best-effort for non-default background.
+    if (!tty_term.hasCapability(tty, "setab")) {
+        if ((gc2.attr & T.GRID_ATTR_REVERSE) != 0) {
+            if (gc2.fg != 7 and !colour_default(gc2.fg))
+                gc2.attr &= ~T.GRID_ATTR_REVERSE;
+        } else {
+            if (gc2.bg != 0 and !colour_default(gc2.bg))
+                gc2.attr |= T.GRID_ATTR_REVERSE;
+        }
+    }
+
+    // If any bits are being cleared, reset everything first.
+    if ((tc.attr & ~gc2.attr) != 0 or (tc.us != gc2.us and gc2.us == 0))
+        tty_reset(tty);
+
+    // Set the colours.
+    tty_colours(tty, &gc2);
+
+    // Filter out attribute bits already set.
+    const changed = gc2.attr & ~tc.attr;
+    tc.attr = gc2.attr;
+
+    // Set the attributes.
+    if ((changed & T.GRID_ATTR_BRIGHT) != 0)
+        tty_putcode(tty, "bold");
+    if ((changed & T.GRID_ATTR_DIM) != 0)
+        tty_putcode(tty, "dim");
+    if ((changed & T.GRID_ATTR_ITALICS) != 0)
+        tty_set_italics(tty);
+    if ((changed & T.GRID_ATTR_ALL_UNDERSCORE) != 0) {
+        if ((changed & T.GRID_ATTR_UNDERSCORE) != 0) {
+            tty_putcode(tty, "smul");
+        } else if ((changed & T.GRID_ATTR_UNDERSCORE_2) != 0) {
+            tty_putcode_i(tty, "Smulx", 2);
+        } else if ((changed & T.GRID_ATTR_UNDERSCORE_3) != 0) {
+            tty_putcode_i(tty, "Smulx", 3);
+        } else if ((changed & T.GRID_ATTR_UNDERSCORE_4) != 0) {
+            tty_putcode_i(tty, "Smulx", 4);
+        } else if ((changed & T.GRID_ATTR_UNDERSCORE_5) != 0) {
+            tty_putcode_i(tty, "Smulx", 5);
+        }
+    }
+    if ((changed & T.GRID_ATTR_BLINK) != 0)
+        tty_putcode(tty, "blink");
+    if ((changed & T.GRID_ATTR_REVERSE) != 0) {
+        if (tty_term.hasCapability(tty, "rev")) {
+            tty_putcode(tty, "rev");
+        } else if (tty_term.hasCapability(tty, "smso")) {
+            tty_putcode(tty, "smso");
+        }
+    }
+    if ((changed & T.GRID_ATTR_HIDDEN) != 0)
+        tty_putcode(tty, "invis");
+    if ((changed & T.GRID_ATTR_STRIKETHROUGH) != 0)
+        tty_putcode(tty, "smxx");
+    if ((changed & T.GRID_ATTR_OVERLINE) != 0)
+        tty_putcode(tty, "Smol");
+    if ((changed & T.GRID_ATTR_CHARSET) != 0)
+        tty_putcode(tty, "smacs");
+
+    tty.last_cell = gc2;
+}
+
+/// Render a single grid cell. Handles character output including padding
+/// characters and single-byte vs multi-byte output. Uses tty_attributes for
+/// attribute/colour state and tty_putc/tty_putn for character emission.
+/// Ported from tmux tty_cell().
+pub fn tty_cell(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell) void {
+    // If this is a padding character, do nothing.
+    if ((gc.flags & T.GRID_FLAG_PADDING) != 0)
+        return;
+
+    // Apply attributes and colours.
+    tty_attributes(tty, gc, defaults);
+
+    // If it is a single-byte character, write with putc.
+    if (gc.data.size == 1) {
+        const ch = gc.data.data[0];
+        if (ch < 0x20 or ch == 0x7f)
+            return;
+        tty_putc(tty, ch);
+        return;
+    }
+
+    // Multi-byte character: write the data.
+    tty_putn(tty, gc.data.data[0..gc.data.size], gc.data.width);
+}
+
+/// Emit a terminfo string capability with no parameters.
+pub fn tty_putcode(tty: *T.Tty, name: []const u8) void {
+    const s = tty_term.stringCapability(tty, name) orelse return;
+    if (s.len == 0) return;
+    tty_write(tty, s);
+}
+
+/// Emit a terminfo string capability with two string parameters.
+fn tty_putcode_ss(tty: *T.Tty, name: []const u8, a: []const u8, b: []const u8) void {
+    const template = tty_term.stringCapability(tty, name) orelse return;
+    if (template.len == 0) return;
+    const expanded = expand_tparm_ss(template, a, b) catch return;
+    defer xm.allocator.free(expanded);
+    tty_write(tty, expanded);
+}
+
+/// Write a single character to the terminal, tracking cursor position.
+fn tty_putc(tty: *T.Tty, ch: u8) void {
+    // Handle ACS charset mode.
+    if ((tty.cell.attr & T.GRID_ATTR_CHARSET) != 0) {
+        if (tty_term.acsCapability(tty, ch)) |acs| {
+            tty_write(tty, acs);
+        } else {
+            tty_write(tty, &[_]u8{ch});
+        }
+    } else {
+        tty_write(tty, &[_]u8{ch});
+    }
+
+    if (ch >= 0x20 and ch != 0x7f) {
+        if (tty.cx >= tty.sx) {
+            tty.cx = 1;
+            tty.cy += 1;
+        } else {
+            tty.cx += 1;
+        }
+    }
+}
+
+/// Write a byte string with known display width, tracking cursor position.
+fn tty_putn(tty: *T.Tty, buf: []const u8, width: u32) void {
+    tty_write(tty, buf);
+    if (tty.cx + width > tty.sx) {
+        tty.cx = (tty.cx + width) - tty.sx;
+        if (tty.cx <= tty.sx)
+            tty.cy += 1
+        else {
+            tty.cx = std.math.maxInt(u32);
+            tty.cy = std.math.maxInt(u32);
+        }
+    } else {
+        tty.cx += width;
+    }
+}
+
+/// Set italics mode. Uses sitm if available, falls back to smso (standout).
+/// Ported from tmux tty_set_italics().
+fn tty_set_italics(tty: *T.Tty) void {
+    if (tty_term.hasCapability(tty, "sitm")) {
+        tty_putcode(tty, "sitm");
+        return;
+    }
+    tty_putcode(tty, "smso");
+}
+
+/// Expand a terminfo string with two string parameters (%p1%s and %p2%s).
+fn expand_tparm_ss(template: []const u8, a: []const u8, b: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    var idx: usize = 0;
+    while (idx < template.len) {
+        if (std.mem.startsWith(u8, template[idx..], "%p1%s")) {
+            try out.appendSlice(xm.allocator, a);
+            idx += "%p1%s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, template[idx..], "%p2%s")) {
+            try out.appendSlice(xm.allocator, b);
+            idx += "%p2%s".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, template[idx..], "%%")) {
+            try out.append(xm.allocator, '%');
+            idx += 2;
+            continue;
+        }
+        try out.append(xm.allocator, template[idx]);
+        idx += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator);
 }
 
 // ── Colour pipeline ─────────────────────────────────────────────────────────

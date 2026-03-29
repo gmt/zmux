@@ -94,6 +94,11 @@ pub const CopyModeData = struct {
     searchtype: ?SearchDirection = null,
     searchregex: bool = false,
     searchstr: ?[]u8 = null,
+
+    // Mark state
+    mark_x: u32 = 0,
+    mark_y: u32 = 0,
+    show_mark: bool = false,
 };
 
 pub const window_copy_mode = T.WindowMode{
@@ -135,6 +140,11 @@ pub fn enterMode(wp: *T.WindowPane, swp: *T.WindowPane, args: *const args_mod.Ar
     const wme = window_mode_runtime.pushMode(wp, &window_copy_mode, @ptrCast(data), swp);
     wme.prefix = 1;
     refreshFromSource(wme, false);
+
+    // Initialize mark to the cursor position (mirrors tmux behaviour).
+    data.mark_x = data.cx;
+    data.mark_y = absoluteCursorRow(wme);
+
     return wme;
 }
 
@@ -1905,10 +1915,26 @@ fn cmdSearchIncremental(wme: *T.WindowModeEntry, args: *const args_mod.Arguments
 
 // ── Mark support ───────────────────────────────────────────────────────────
 
-fn cmdSetMark(_: *T.WindowModeEntry) void {
-    // Reduced: mark support stores cursor position for jump-to-mark
+fn cmdSetMark(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.mark_x = data.cx;
+    data.mark_y = absoluteCursorRow(wme);
+    data.show_mark = true;
 }
 
-fn cmdJumpToMark(_: *T.WindowModeEntry) void {
-    // Reduced: jump-to-mark returns to the previously set mark position
+fn cmdJumpToMark(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+
+    // Swap current cursor position with the mark, mirroring tmux's
+    // window_copy_jump_to_mark which exchanges the two positions so
+    // that repeated jumps toggle back and forth.
+    const tmp_x = data.cx;
+    const tmp_y = absoluteCursorRow(wme);
+
+    data.cx = data.mark_x;
+    setAbsoluteCursorRow(wme, data.mark_y);
+
+    data.mark_x = tmp_x;
+    data.mark_y = tmp_y;
+    data.show_mark = true;
 }

@@ -253,12 +253,12 @@ fn detach_test_client(name: []const u8, session: ?*T.Session) T.Client {
     var client = T.Client{
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
-        .tty = undefined,
+        .tty = .{ .client = undefined },
         .status = .{ .screen = undefined },
         .flags = if (session != null) T.CLIENT_ATTACHED else 0,
         .session = session,
     };
-    client.tty.client = &client;
+    tty_mod.tty_init(&client.tty, &client);
     if (session) |s| s.attached += 1;
     return client;
 }

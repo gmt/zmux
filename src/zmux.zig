@@ -373,4 +373,5 @@ test {
     _ = @import("window-client.zig");
     _ = @import("cmd-send-keys-test.zig");
     _ = @import("window-copy-test.zig");
+    _ = @import("server-client-test.zig");
 }

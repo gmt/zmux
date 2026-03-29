@@ -1191,3 +1191,123 @@ test "unsupported window-copy commands surface a status message" {
 
     try std.testing.expectEqualStrings("Copy-mode command not supported yet: search-jump-to", client.message_string.?);
 }
+
+test "window-copy set-mark and jump-to-mark swap cursor with saved mark" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(6, 6, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 3, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 6, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 3, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 80,
+        .name = xm.xstrdup("copy-source-mark"),
+        .sx = 6,
+        .sy = 6,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 81,
+        .name = xm.xstrdup("copy-target-mark"),
+        .sx = 6,
+        .sy = 3,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 82,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 6,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 5 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 83,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 3,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 2 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    var row: u32 = 0;
+    while (row < 6) : (row += 1) {
+        setGridLineText(source.base.grid, row, "line");
+        source.base.grid.linedata[row].cellused = 4;
+    }
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    // Mark initialises to the cursor position on entry.
+    try std.testing.expect(wc.modeData(wme).show_mark == false);
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).mark_x);
+    try std.testing.expectEqual(wc.absoluteCursorRow(wme), wc.modeData(wme).mark_y);
+
+    // Move cursor away from initial position.
+    var nav_args = args_mod.Arguments.init(xm.allocator);
+    defer nav_args.deinit();
+    try nav_args.values.append(xm.allocator, xm.xstrdup("cursor-right"));
+    wc.copyModeCommand(wme, null, undefined, undefined, @ptrCast(&nav_args), null);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).cx);
+
+    try runCopyModeTestCommand(wme, "cursor-down");
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).cy);
+
+    // Set mark at the new position.
+    try runCopyModeTestCommand(wme, "set-mark");
+    try std.testing.expect(wc.modeData(wme).show_mark);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_x);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_y);
+
+    // Move the cursor further down.
+    try runCopyModeTestCommand(wme, "cursor-down");
+    try std.testing.expectEqual(@as(u32, 2), wc.modeData(wme).cy);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).cx);
+
+    // Jump-to-mark swaps: cursor goes to mark, mark takes old cursor position.
+    try runCopyModeTestCommand(wme, "jump-to-mark");
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_x);
+    try std.testing.expectEqual(@as(u32, 2), wc.modeData(wme).mark_y);
+
+    // Jump again returns to where we were.
+    try runCopyModeTestCommand(wme, "jump-to-mark");
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 2), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_x);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_y);
+}

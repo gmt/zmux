@@ -36,6 +36,9 @@ pub var global_options: *T.Options = undefined;
 pub var global_s_options: *T.Options = undefined;
 pub var global_w_options: *T.Options = undefined;
 
+/// True once the global option trees have been populated at startup.
+pub var options_ready: bool = false;
+
 const empty_array_items = [_]T.OptionsArrayItem{};
 const OptionNameMap = struct {
     from: []const u8,

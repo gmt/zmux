@@ -57,7 +57,14 @@ fn initWindowCopyTestGlobals() void {
 }
 
 test "window-copy snapshots the source pane and refresh-from-pane updates it" {
+    const opts_mod = @import("options.zig");
+
     initWindowCopyTestGlobals();
+
+    // Initialize global options so redraw can access copy-mode-position-format.
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const source_grid = grid.grid_create(6, 2, 0);
     defer grid.grid_free(source_grid);
@@ -74,12 +81,17 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
         xm.allocator.destroy(target_screen);
     }
 
+    const source_window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(source_window_options);
+    const target_window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(target_window_options);
+
     var source_window = T.Window{
         .id = 1,
         .name = xm.xstrdup("copy-source"),
         .sx = 6,
         .sy = 2,
-        .options = undefined,
+        .options = source_window_options,
     };
     defer xm.allocator.free(source_window.name);
     defer source_window.panes.deinit(xm.allocator);
@@ -91,7 +103,7 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
         .name = xm.xstrdup("copy-target"),
         .sx = 6,
         .sy = 2,
-        .options = undefined,
+        .options = target_window_options,
     };
     defer xm.allocator.free(target_window.name);
     defer target_window.panes.deinit(xm.allocator);
@@ -160,7 +172,13 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
 }
 
 test "window-copy navigation commands move through a taller source snapshot" {
+    const opts_mod = @import("options.zig");
+
     initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const source_grid = grid.grid_create(6, 4, 0);
     defer grid.grid_free(source_grid);
@@ -177,12 +195,17 @@ test "window-copy navigation commands move through a taller source snapshot" {
         xm.allocator.destroy(target_screen);
     }
 
+    const source_window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(source_window_options);
+    const target_window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(target_window_options);
+
     var source_window = T.Window{
         .id = 10,
         .name = xm.xstrdup("copy-source-nav"),
         .sx = 6,
         .sy = 4,
-        .options = undefined,
+        .options = source_window_options,
     };
     defer xm.allocator.free(source_window.name);
     defer source_window.panes.deinit(xm.allocator);
@@ -194,7 +217,7 @@ test "window-copy navigation commands move through a taller source snapshot" {
         .name = xm.xstrdup("copy-target-nav"),
         .sx = 6,
         .sy = 2,
-        .options = undefined,
+        .options = target_window_options,
     };
     defer xm.allocator.free(target_window.name);
     defer target_window.panes.deinit(xm.allocator);
@@ -260,7 +283,13 @@ test "window-copy navigation commands move through a taller source snapshot" {
 }
 
 test "window-copy wrapped line motions follow the shared grid reader" {
+    const opts_mod = @import("options.zig");
+
     initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const source_grid = grid.grid_create(5, 2, 0);
     defer grid.grid_free(source_grid);
@@ -277,12 +306,15 @@ test "window-copy wrapped line motions follow the shared grid reader" {
         xm.allocator.destroy(target_screen);
     }
 
+    const window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(window_options);
+
     var window_ = T.Window{
         .id = 14,
         .name = xm.xstrdup("copy-window-wrapped"),
         .sx = 5,
         .sy = 2,
-        .options = undefined,
+        .options = window_options,
     };
     defer xm.allocator.free(window_.name);
     defer window_.panes.deinit(xm.allocator);

@@ -662,6 +662,8 @@ pub const Screen = struct {
     cell_attr: u16 = 0,
     g0set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
     g1set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
+    input_last_valid: bool = false, // true when last_glyph contains a previous printable character
+    last_glyph: Utf8Data = std.mem.zeroes(Utf8Data), // last glyph for CSI REP
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────

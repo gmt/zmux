@@ -611,24 +611,196 @@ fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 
 pub fn server_client_loop() void {
     for (client_registry.clients.items) |cl| {
-        if (cl.flags & T.CLIENT_EXIT != 0) {
-            if (cl.peer) |peer| {
-                const retval: i32 = 0;
-                _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
-            }
-            cl.flags &= ~@as(u64, T.CLIENT_EXIT);
-        }
+        server_client_check_exit(cl);
+
+        if (cl.session == null) continue;
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
         if (cl.flags & T.CLIENT_SUSPENDED != 0) continue;
-        const redraw_flags = cl.flags & T.CLIENT_REDRAW;
-        if (redraw_flags == 0) continue;
-        if (cl.flags & T.CLIENT_CONTROL != 0) {
-            cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
-            continue;
-        }
-        server_client_draw(cl, redraw_flags);
-        cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
+
+        server_client_check_modes(cl);
+        server_client_check_redraw(cl);
+        server_client_reset_state(cl);
     }
+
+    // Clear pane redraw flags after drawing.
+    var wit = win_mod.windows.valueIterator();
+    while (wit.next()) |w_ptr| {
+        const w = w_ptr.*;
+        for (w.panes.items) |wp| {
+            wp.flags &= ~@as(u32, T.PANE_REDRAW);
+        }
+    }
+}
+
+/// Check if client should be exited and send the appropriate message.
+pub fn server_client_check_exit(cl: *T.Client) void {
+    if (cl.flags & T.CLIENT_EXIT == 0) return;
+
+    const peer = cl.peer orelse return;
+
+    switch (cl.exit_reason) {
+        .none, .detached, .detached_hup, .lost_tty, .terminated, .lost_server => {
+            const retval: i32 = cl.retval;
+            _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
+        },
+        .exited => {
+            _ = proc_mod.proc_send(peer, .exiting, -1, null, 0);
+        },
+        .server_exited => {
+            _ = proc_mod.proc_send(peer, .shutdown, -1, null, 0);
+        },
+        .message_provided => {
+            const msg = cl.exit_message orelse "";
+            _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&cl.retval)), @sizeOf(i32));
+            _ = proc_mod.proc_send(peer, .detach, -1, msg.ptr, msg.len + 1);
+        },
+    }
+    cl.flags &= ~@as(u64, T.CLIENT_EXIT);
+    if (cl.exit_message) |msg| {
+        xm.allocator.free(msg);
+        cl.exit_message = null;
+    }
+    if (cl.exit_session) |name| {
+        xm.allocator.free(name);
+        cl.exit_session = null;
+    }
+}
+
+/// Check if pane modes need updating during status redraw.
+/// Currently a stub - mode updates are unported in the Zig WindowMode struct
+/// but the can be addeded when a window-copy or window-copy mode is ported.
+pub fn server_client_check_modes(cl: *T.Client) void {
+    if (cl.flags & T.CLIENT_CONTROL != 0) return;
+    if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
+    if (cl.flags & T.CLIENT_REDRAWSTATUS == 0) return;
+
+    // Mode updates will be called when window-copy or other modes
+    // are added mode update support to WindowMode in types.zig.
+}
+
+/// Check if client needs a redraw and perform it if output buffer is clear.
+pub fn server_client_check_redraw(cl: *T.Client) void {
+    if (cl.flags & T.CLIENT_CONTROL != 0) return;
+    if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
+
+    var needed: bool = false;
+    if (cl.flags & T.CLIENT_REDRAW != 0) {
+        needed = true;
+    }
+
+    if (!needed) {
+        const s = cl.session orelse return;
+        const wl = s.curw orelse return;
+        const w = wl.window;
+        for (w.panes.items) |wp| {
+            if (wp.flags & T.PANE_REDRAW != 0) {
+                needed = true;
+                break;
+            }
+        }
+    }
+
+    if (!needed) return;
+
+    const redraw_flags = cl.flags & T.CLIENT_REDRAW;
+    server_client_draw(cl, redraw_flags);
+    cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
+}
+
+/// Reset terminal cursor and mode state between events.
+pub fn server_client_reset_state(cl: *T.Client) void {
+    if (cl.flags & (T.CLIENT_CONTROL | T.CLIENT_SUSPENDED) != 0) return;
+
+    // If an overlay or the prompt is active, ensure cursor is hidden.
+    const overlay_active = cmd_display_panes.overlay_active(cl) or menu.overlay_active(cl) or popup.overlay_active(cl);
+    const prompt_active = cl.message_string != null;
+    if (overlay_active or prompt_active) {
+        cl.tty.flags |= T.TTY_NOCURSOR;
+    } else {
+        cl.tty.flags &= ~@as(i32, T.TTY_NOCURSOR);
+    }
+}
+
+/// Track the latest (most recently active) client per window.
+pub fn server_client_update_latest(cl: *T.Client) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const w = wl.window;
+    if (w.latest == @as(?*anyopaque, @ptrCast(cl))) return;
+    w.latest = @ptrCast(cl);
+
+    notify.notify_client("client-active", cl);
+    _ = &s; // suppress unused parameter warning
+}
+
+/// Set client title from the window title template.
+pub fn server_client_set_title(cl: *T.Client) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
+
+    const title = if (wp.screen.title) |pane_title| pane_title else wl.window.name;
+    if (title.len == 0) return;
+
+    if (cl.title) |old| {
+        if (std.mem.eql(u8, old, title)) return;
+        xm.allocator.free(old);
+    }
+    cl.title = xm.xstrdup(title);
+    tty_mod.tty_set_title(&cl.tty, title);
+}
+
+/// Set client path from the active pane's working directory.
+pub fn server_client_set_path(cl: *T.Client) void {
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const wp = wl.window.active orelse return;
+
+    const path: []const u8 = if (wp.screen.path) |p| p else "";
+    if (cl.path) |old| {
+        if (std.mem.eql(u8, old, path)) return;
+        xm.allocator.free(old);
+    }
+    cl.path = if (path.len != 0) xm.xstrdup(path) else null;
+}
+
+/// Write raw bytes to client's output peer stream.
+pub fn server_client_write(cl: *T.Client, data: []const u8) void {
+    const peer = cl.peer orelse return;
+    _ = file_mod.sendPeerStream(peer, 1, data);
+}
+
+/// Write a formatted string to client's output peer stream.
+pub fn server_client_write_fmt(cl: *T.Client, comptime fmt: []const u8, args: anytype) void {
+    const msg = xm.xasprintf(fmt, args);
+    defer xm.allocator.free(msg);
+    server_client_write(cl, msg);
+}
+
+/// Print a message to a client. For attached clients, this opens copy-mode.
+/// For control clients, this writes to the control output. For detached
+/// clients, this is sent to the peer's output stream.
+pub fn server_client_print(cl: *T.Client, text: []const u8, parse: bool) void {
+    _ = parse;
+    if (cl.session == null) {
+        server_client_write(cl, text);
+        server_client_write(cl, "\n");
+        return;
+    }
+    if (cl.flags & T.CLIENT_CONTROL != 0) {
+        server_client_write(cl, text);
+        return;
+    }
+
+    const wp = server_client_get_pane(cl) orelse return;
+    if (wp.modes.items.len == 0) {
+        // No active mode; output goes to the pane or is dropped.
+        return;
+    }
+
+    // copy-mode output is stub: window-copy mode is not yet ported.
+    // When a window-copy mode is added, it will parse text line-by-line.
+    // For now, output in copy-mode is dropped.
 }
 
 pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
@@ -1232,20 +1404,10 @@ fn server_client_draw(cl: *T.Client, redraw_flags: u64) void {
         }
     }
 
-    const s = cl.session orelse return;
-    const wl = s.curw orelse return;
-    const wp = wl.window.active orelse return;
-    const title = if (wp.screen.title) |pane_title| pane_title else wl_name(wp.window);
-    const title_changed = blk: {
-        if (title.len == 0) break :blk cl.title != null;
-        if (cl.title) |old| break :blk !std.mem.eql(u8, old, title);
-        break :blk true;
-    };
-    if (title_changed) {
-        if (cl.title) |old| xm.allocator.free(old);
-        cl.title = if (title.len != 0) xm.xstrdup(title) else null;
+    if (redraw_flags & T.CLIENT_REDRAWWINDOW != 0) {
+        server_client_set_title(cl);
+        server_client_set_path(cl);
     }
-    if (title_changed and title.len != 0) tty_mod.tty_set_title(&cl.tty, title);
 }
 
 fn wl_name(w: *T.Window) []const u8 {

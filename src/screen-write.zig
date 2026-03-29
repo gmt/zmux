@@ -141,6 +141,12 @@ pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
     if (gd.sx == 0 or gd.sy == 0) return;
     if (gc.isPadding()) return;
 
+    // Track last written character for CSI REP (repeat previous character).
+    if (gc.data.width > 0 and !gc.isPadding()) {
+        s.last_glyph = gc.data;
+        s.input_last_valid = true;
+    }
+
     // Apply screen's current cell state (fg/bg/attr) to the cell.
     var merged = gc.*;
     if (gc.fg == 8) merged.fg = @intCast(s.cell_fg);

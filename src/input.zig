@@ -163,7 +163,7 @@ fn handle_plain_bytes(ctx: *T.ScreenWriteCtx, bytes: []const u8, keep_incomplete
     while (i < bytes.len) {
         const ch = bytes[i];
         switch (ch) {
-            0x07, '\r', '\n', 0x08, '\t' => {
+            0x07, '\r', '\n', 0x08, '\t', 0x0B, 0x0C, 0x0E, 0x0F => {
                 if (i > chunk_start) {
                     _ = screen_write.putBytes(ctx, bytes[chunk_start..i], false);
                 }
@@ -185,9 +185,20 @@ fn handle_plain_control(ctx: *T.ScreenWriteCtx, ch: u8) void {
     switch (ch) {
         0x07 => if (ctx.wp) |wp| alerts.alerts_queue(wp.window, T.WINDOW_BELL),
         '\r' => screen_write.carriage_return(ctx),
-        '\n' => screen_write.newline(ctx),
+        '\n', 0x0B, 0x0C => {
+            // LF, VT, FF: if MODE_CRLF is set, do carriage return first
+            if (ctx.s.mode & T.MODE_CRLF != 0)
+                screen_write.carriage_return(ctx);
+            screen_write.newline(ctx);
+        },
         0x08 => screen_write.backspace(ctx),
         '\t' => screen_write.tab(ctx),
+        0x0E => {
+            // SO – shift out (select G1 character set, no-op for now)
+        },
+        0x0F => {
+            // SI – shift in (select G0 character set, no-op for now)
+        },
         else => unreachable,
     }
 }
@@ -905,4 +916,53 @@ test "input tracks keypad cursor mouse and extended-key modes" {
     try std.testing.expect(cleared & T.MODE_MOUSE_SGR == 0);
     try std.testing.expect(cleared & T.MODE_BRACKETPASTE == 0);
     try std.testing.expect(cleared & T.EXTENDED_KEY_MODES == 0);
+}
+
+test "input handles VT, FF, SO, SI and MODE_CRLF" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Write text, then VT should move to next line like LF
+    input_parse_screen(wp, "AB\x0BCD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 1, 1));
+
+    // FF should also behave like LF
+    input_parse_screen(wp, "\x0CEF");
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 0));
+    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 1));
+
+    // SO and SI should be silently consumed without corrupting output
+    input_parse_screen(wp, "\x0E\x0FGH");
+    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 0));
+    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 1));
+
+    // MODE_CRLF: LF should do carriage return before newline
+    screen_mod.screen_current(wp).mode |= T.MODE_CRLF;
+    input_parse_screen(wp, "  IJ\nKL");
+    try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 2, 0));
+    try std.testing.expectEqual(@as(u8, 'L'), grid.ascii_at(wp.base.grid, 2, 1));
 }

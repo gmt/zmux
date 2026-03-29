@@ -568,6 +568,160 @@ fn overwriteCells(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell, width: u32) boo
     return done;
 }
 
+// ── Functions ported from tmux screen-write.c ─────────────────────────────
+
+/// Scroll region up by n lines (screen_write_scrollup).
+pub fn scrollup(ctx: *T.ScreenWriteCtx, lines: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sy == 0) return;
+    var n = lines;
+    if (n == 0) n = 1;
+    const top = @min(s.rupper, gd.sy - 1);
+    const bottom = @min(s.rlower, gd.sy - 1);
+    if (n > bottom - top + 1) n = bottom - top + 1;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (top == 0 and bottom == gd.sy - 1)
+            grid.scroll_full_screen_into_history(gd)
+        else
+            grid.scroll_up(gd, top, bottom);
+    }
+}
+
+/// Scroll region down by n lines (screen_write_scrolldown).
+pub fn scrolldown(ctx: *T.ScreenWriteCtx, lines: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sy == 0) return;
+    var n = lines;
+    if (n == 0) n = 1;
+    const top = @min(s.rupper, gd.sy - 1);
+    const bottom = @min(s.rlower, gd.sy - 1);
+    if (n > bottom - top + 1) n = bottom - top + 1;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        grid.scroll_down(gd, top, bottom);
+    }
+}
+
+/// Line feed: move cursor down, scroll up if at bottom of scroll region.
+/// Unlike newline(), this does NOT do a carriage return (screen_write_linefeed).
+pub fn linefeed(ctx: *T.ScreenWriteCtx, wrapped: bool) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sy == 0) return;
+
+    if (wrapped) {
+        const row = @min(gd.hsize + s.cy, gd.linedata.len);
+        if (row < gd.linedata.len) {
+            gd.linedata[row].flags |= T.GRID_LINE_WRAPPED;
+        }
+    }
+
+    if (s.cy == s.rlower) {
+        const top = @min(s.rupper, gd.sy - 1);
+        const bottom = @min(s.rlower, gd.sy - 1);
+        if (top == 0 and bottom == gd.sy - 1)
+            grid.scroll_full_screen_into_history(gd)
+        else
+            grid.scroll_up(gd, top, bottom);
+    } else if (s.cy + 1 < gd.sy) {
+        s.cy += 1;
+    }
+}
+
+/// Reverse index: move cursor up, scroll down if at top of scroll region
+/// (screen_write_reverseindex).
+pub fn reverseindex(ctx: *T.ScreenWriteCtx) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sy == 0) return;
+
+    if (s.cy == s.rupper) {
+        const top = @min(s.rupper, gd.sy - 1);
+        const bottom = @min(s.rlower, gd.sy - 1);
+        grid.scroll_down(gd, top, bottom);
+    } else if (s.cy > 0) {
+        s.cy -= 1;
+    }
+}
+
+/// Set mode bits on the screen (screen_write_mode_set).
+pub fn mode_set(ctx: *T.ScreenWriteCtx, mode: i32) void {
+    ctx.s.mode |= mode;
+}
+
+/// Clear mode bits on the screen (screen_write_mode_clear).
+pub fn mode_clear(ctx: *T.ScreenWriteCtx, mode: i32) void {
+    ctx.s.mode &= ~mode;
+}
+
+/// VT100 alignment test: fill every cell with 'E' (screen_write_alignmenttest).
+pub fn alignmenttest(ctx: *T.ScreenWriteCtx) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+
+    var gc = T.grid_default_cell;
+    gc.data.data[0] = 'E';
+    gc.data.size = 1;
+    gc.data.width = 1;
+    gc.data.have = 1;
+
+    var yy: u32 = 0;
+    while (yy < gd.sy) : (yy += 1) {
+        var xx: u32 = 0;
+        while (xx < gd.sx) : (xx += 1) {
+            grid.set_cell(gd, yy, xx, &gc);
+        }
+    }
+
+    s.cx = 0;
+    s.cy = 0;
+    s.rupper = 0;
+    s.rlower = gd.sy - 1;
+}
+
+/// Full screen reset (screen_write_reset).
+pub fn reset(ctx: *T.ScreenWriteCtx) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+
+    screen_mod.screen_reset_tabs(s);
+    s.rupper = 0;
+    s.rlower = gd.sy - 1;
+    s.mode = T.MODE_CURSOR | T.MODE_WRAP;
+    erase_screen(ctx);
+    s.cx = 0;
+    s.cy = 0;
+}
+
+/// Clear scrollback history (screen_write_clearhistory).
+pub fn clearhistory(ctx: *T.ScreenWriteCtx) void {
+    grid.grid_clear_history(ctx.s.grid);
+}
+
+/// Clear n characters at cursor position (screen_write_clearcharacter).
+pub fn clearcharacter(ctx: *T.ScreenWriteCtx, nx: u32) void {
+    erase_characters(ctx, nx);
+}
+
+/// Write raw escape string to the terminal. No-op stub in zmux since we
+/// don't have a TTY layer that forwards raw sequences (screen_write_rawstring).
+pub fn rawstring(ctx: *T.ScreenWriteCtx, str: []const u8) void {
+    _ = ctx;
+    _ = str;
+}
+
+/// Set clipboard selection. No-op stub in zmux (screen_write_setselection).
+pub fn setselection(ctx: *T.ScreenWriteCtx, clip: []const u8, str: []const u8) void {
+    _ = ctx;
+    _ = clip;
+    _ = str;
+}
+
 test "screen-write handles cursor movement and erase" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(4, 2, 100);

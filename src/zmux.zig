@@ -370,4 +370,5 @@ test {
     _ = @import("mode-tree.zig");
     _ = @import("utf8.zig");
     _ = @import("window-client.zig");
+    _ = @import("cmd-send-keys-test.zig");
 }

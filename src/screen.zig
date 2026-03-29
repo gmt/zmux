@@ -200,6 +200,41 @@ pub fn screen_leave_alternate(wp: *T.WindowPane, restore_cursor: bool) void {
     screen_reset_active(wp.screen);
 }
 
+/// Map a numeric cursor-style option (0-6) to a ScreenCursorStyle and
+/// blinking mode bit.  Ported from tmux screen_set_cursor_style().
+pub fn screen_set_cursor_style(style: u32, cstyle: *T.ScreenCursorStyle, mode: *i32) void {
+    switch (style) {
+        0 => {
+            cstyle.* = .default;
+        },
+        1 => {
+            cstyle.* = .block;
+            mode.* |= T.MODE_CURSOR_BLINKING;
+        },
+        2 => {
+            cstyle.* = .block;
+            mode.* &= ~@as(i32, T.MODE_CURSOR_BLINKING);
+        },
+        3 => {
+            cstyle.* = .underline;
+            mode.* |= T.MODE_CURSOR_BLINKING;
+        },
+        4 => {
+            cstyle.* = .underline;
+            mode.* &= ~@as(i32, T.MODE_CURSOR_BLINKING);
+        },
+        5 => {
+            cstyle.* = .bar;
+            mode.* |= T.MODE_CURSOR_BLINKING;
+        },
+        6 => {
+            cstyle.* = .bar;
+            mode.* &= ~@as(i32, T.MODE_CURSOR_BLINKING);
+        },
+        else => {},
+    }
+}
+
 test "screen_reset clears cursor and region state" {
     const s = screen_init(4, 2, 100);
     defer {

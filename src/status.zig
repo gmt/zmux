@@ -370,14 +370,27 @@ fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResu
     if (area.width == 0) return;
     const command_prompt = status_prompt.status_prompt_command_mode(c);
 
+    // Apply cursor colour and style from session options (mirrors tmux
+    // status_prompt_redraw: prompt-cursor-colour, prompt-cursor-style,
+    // prompt-command-cursor-style).
+    screen.default_ccolour = @intCast(opts.options_get_number(s.options, "prompt-cursor-colour"));
+    const cursor_style_name = if (command_prompt) "prompt-command-cursor-style" else "prompt-cursor-style";
+    const cursor_style_num: u32 = @intCast(opts.options_get_number(s.options, cursor_style_name));
+    screen_mod.screen_set_cursor_style(cursor_style_num, &screen.default_cstyle, &screen.default_mode);
+
     var prompt_gc = T.grid_default_cell;
     const style_name = if (command_prompt) "message-command-style" else "message-style";
     style_mod.style_apply(&prompt_gc, s.options, style_name, null);
     fill_area(screen, area, &prompt_gc, message_fill_colour(s.options, style_name));
 
+    // Build format context with #{message} set to the prompt string and
+    // #{prompt-input} set to the current input text (mirrors tmux
+    // status_prompt_redraw: format_add(prompt-input, ...)).
+    const prompt_input = status_prompt.status_prompt_input(c) orelse "";
     var ctx = format_context(c);
     ctx.message_text = message;
     ctx.command_prompt = command_prompt;
+    ctx.prompt_input = prompt_input;
 
     const fmt = opts.options_get_string(s.options, "message-format");
     const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
@@ -934,4 +947,238 @@ test "status_prompt_load_history reads typed history from a temp file" {
     try std.testing.expectEqual(@as(usize, 2), status_prompt.status_prompt_history_count(.command));
 
     status_prompt.status_prompt_history_clear(null);
+}
+
+test "screen_set_cursor_style maps option values to cursor style and blinking mode" {
+    const scr = @import("screen.zig");
+
+    var cstyle: T.ScreenCursorStyle = .default;
+    var mode: i32 = 0;
+
+    // 0 -> default
+    scr.screen_set_cursor_style(0, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.default, cstyle);
+
+    // 1 -> blinking block
+    scr.screen_set_cursor_style(1, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.block, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // 2 -> steady block
+    mode = T.MODE_CURSOR_BLINKING;
+    scr.screen_set_cursor_style(2, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.block, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING == 0);
+
+    // 3 -> blinking underline
+    scr.screen_set_cursor_style(3, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.underline, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // 4 -> steady underline
+    mode = T.MODE_CURSOR_BLINKING;
+    scr.screen_set_cursor_style(4, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.underline, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING == 0);
+
+    // 5 -> blinking bar
+    scr.screen_set_cursor_style(5, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.bar, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // 6 -> steady bar
+    mode = T.MODE_CURSOR_BLINKING;
+    scr.screen_set_cursor_style(6, &cstyle, &mode);
+    try std.testing.expectEqual(T.ScreenCursorStyle.bar, cstyle);
+    try std.testing.expect(mode & T.MODE_CURSOR_BLINKING == 0);
+}
+
+test "render_prompt applies prompt-cursor-colour and prompt-cursor-style from session options" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_number(session_opts, "prompt-cursor-colour", 5);
+    opts.options_set_number(session_opts, "prompt-cursor-style", 3);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "cursor-test", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(20, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 4);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 20, .sy = 5 };
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+    status_prompt.status_prompt_set(
+        &client,
+        null,
+        "> ",
+        "test",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+    defer status_prompt.status_prompt_clear(&client);
+
+    const result = render(&client);
+    defer if (result.payload.len != 0) xm.allocator.free(result.payload);
+
+    // Verify the overlay contains the prompt text
+    try std.testing.expect(std.mem.indexOf(u8, result.payload, "> ") != null);
+    try std.testing.expect(result.cursor_visible);
+}
+
+test "render_message displays status message overlay on the status line" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "msg-test", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(20, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 4);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 20, .sy = 5 };
+
+    status_runtime.status_message_set_text(&client, 0, false, false, false, "hello world");
+    const result = render(&client);
+    defer if (result.payload.len != 0) xm.allocator.free(result.payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, result.payload, "hello world") != null);
+}
+
+test "status bar colour applies status-fg, status-bg and status-style options" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    resize_mod.status_update_cache(sess.session_create(
+        null,
+        "style-test",
+        "/",
+        env_mod.environ_create(),
+        opts.options_create(opts.global_s_options),
+        null,
+    ));
+    const s = sess.session_find("style-test").?;
+    defer sess.session_destroy(s, false, "test");
+
+    opts.options_set_number(s.options, "status-fg", 2);
+    opts.options_set_number(s.options, "status-bg", 4);
+    opts.options_set_string(s.options, false, "status-style", "fg=red,bg=blue");
+
+    const w = win_mod.window_create(20, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{ .screen = undefined },
+        .session = s,
+    };
+    defer {
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 20, .sy = 4 };
+
+    status_init(&client);
+
+    const changed = status_redraw(&client);
+    try std.testing.expect(changed);
+
+}
+
+test "#{prompt-input} format variable resolves to the current prompt text" {
+    const alloc = xm.allocator;
+    const fmt_mod = @import("format.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var ctx = fmt_mod.FormatContext{
+        .prompt_input = "some text",
+    };
+    const result = fmt_mod.format_expand(alloc, "#{prompt_input}", &ctx);
+    defer alloc.free(result.text);
+    try std.testing.expectEqualStrings("some text", result.text);
 }

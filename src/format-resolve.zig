@@ -67,6 +67,7 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "message_time", .func = resolve_message_time },
     .{ .name = "message_text", .func = resolve_message_text },
     .{ .name = "command_prompt", .func = resolve_command_prompt },
+    .{ .name = "prompt_input", .func = resolve_prompt_input },
     .{ .name = "hook", .func = resolve_hook },
     .{ .name = "hook_client", .func = resolve_hook_client },
     .{ .name = "hook_session", .func = resolve_hook_session },
@@ -699,6 +700,10 @@ fn resolve_message_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
 
 fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, if (ctx.command_prompt orelse false) "1" else "0") catch unreachable;
+}
+
+fn resolve_prompt_input(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.prompt_input orelse "") catch unreachable;
 }
 
 fn resolve_hook_value(alloc: std.mem.Allocator, ctx: *const FormatContext, key: []const u8) ?[]u8 {

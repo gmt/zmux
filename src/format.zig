@@ -62,6 +62,7 @@ pub const FormatContext = struct {
     message_number: ?u32 = null,
     message_time: ?i64 = null,
     command_prompt: ?bool = null,
+    prompt_input: ?[]const u8 = null,
 
     key_binding: ?*const T.KeyBinding = null,
     key_has_repeat: ?bool = null,

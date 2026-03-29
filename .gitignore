@@ -5,6 +5,7 @@ zig-cache/
 
 # Tmux-style log files
 tmux-*.log
+zmux-server-*.log
 
 # tmux-museum generated artifacts
 tmux-museum/build/

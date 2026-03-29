@@ -559,6 +559,15 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         // CSI > c — DA2 secondary device attributes (reduced: no reply, just consume)
         return;
     }
+    if (modify_other_keys and final == 'n') {
+        // CSI > Ps n — MODOFF (extended key mode clear)
+        apply_modify_other_keys_off(ctx, params);
+        return;
+    }
+    if (modify_other_keys and final == 'q') {
+        // CSI > q — XDA (reduced: no reply, just consume)
+        return;
+    }
     if (private and (final == 'h' or final == 'l')) {
         apply_private_modes(ctx, params, final == 'h');
         return;
@@ -582,7 +591,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             screen_write.cursor_up(ctx, first_param(params, 1));
             screen_write.carriage_return(ctx);
         },
-        'G' => screen_write.cursor_to(ctx, ctx.s.cy, first_param(params, 1) -| 1),
+        'G', '`' => screen_write.cursor_to(ctx, ctx.s.cy, first_param(params, 1) -| 1),
         'H', 'f' => {
             const row = first_param(params, 1) -| 1;
             const col = second_param(params, 1) -| 1;
@@ -645,7 +654,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         },
         'b' => {
             // REP – repeat previous printable character
-            // (reduced: not tracked, ignore)
+            apply_rep(ctx, first_param(params, 1));
         },
         'c' => {
             // DA1 – device attributes (reduced: no reply)
@@ -665,6 +674,23 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         'h' => apply_sm(ctx, params, false),
         'l' => apply_rm(ctx, params, false),
         else => {},
+    }
+}
+
+/// CSI Ps b — REP: repeat previous printable character Ps times.
+fn apply_rep(ctx: *T.ScreenWriteCtx, n: u32) void {
+    const s = ctx.s;
+    if (!s.input_last_valid) return;
+    if (s.last_glyph.size == 0) return;
+
+    const max = if (s.cx < s.grid.sx) s.grid.sx - s.cx else 0;
+    var count = @min(n, max);
+    if (count == 0) return;
+
+    // Build a cell from the last glyph with current attributes.
+    var gc = T.GridCell.fromPayload(&s.last_glyph);
+    while (count > 0) : (count -= 1) {
+        screen_write.putCell(ctx, &gc);
     }
 }
 
@@ -856,6 +882,16 @@ fn apply_modify_other_keys(ctx: *T.ScreenWriteCtx, params: []const u32) void {
     if (configured == 2) ctx.s.mode |= T.MODE_KEYS_EXTENDED;
 }
 
+/// Handle CSI > Ps n — MODOFF (extended key mode clear).
+/// Mirrors tmux's INPUT_CSI_MODOFF handler.
+fn apply_modify_other_keys_off(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    if (first_param(params, 0) != 4) return;
+
+    ctx.s.mode &= ~T.EXTENDED_KEY_MODES;
+    const configured = opts.options_get_number(opts.global_options, "extended-keys");
+    if (configured == 2) ctx.s.mode |= T.MODE_KEYS_EXTENDED;
+}
+
 fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) void {
     const wp = ctx.wp orelse return;
     const current = screen_mod.screen_current(wp);
@@ -866,6 +902,42 @@ fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) v
                     current.mode |= T.MODE_KCURSOR
                 else
                     current.mode &= ~T.MODE_KCURSOR;
+            },
+            3 => {
+                // DECCOLM — select 132/80 column mode (reduced: clear screen + home cursor)
+                if (set) {
+                    screen_write.cursor_to(ctx, 0, 0);
+                    screen_write.erase_screen(ctx);
+                } else {
+                    screen_write.cursor_to(ctx, 0, 0);
+                    screen_write.erase_screen(ctx);
+                }
+            },
+            6 => {
+                // DECOM — origin mode
+                if (set)
+                    current.mode |= T.MODE_ORIGIN
+                else {
+                    current.mode &= ~T.MODE_ORIGIN;
+                    screen_write.cursor_to(ctx, 0, 0);
+                }
+            },
+            7 => {
+                // DECAWM — auto-wrap mode
+                if (set)
+                    current.mode |= T.MODE_WRAP
+                else
+                    current.mode &= ~T.MODE_WRAP;
+            },
+            12 => {
+                // Cursor blinking
+                if (set) {
+                    current.mode |= T.MODE_CURSOR_BLINKING;
+                    current.mode |= T.MODE_CURSOR_BLINKING_SET;
+                } else {
+                    current.mode &= ~T.MODE_CURSOR_BLINKING;
+                    current.mode |= T.MODE_CURSOR_BLINKING_SET;
+                }
             },
             25 => {
                 current.cursor_visible = set;
@@ -891,6 +963,13 @@ fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) v
                     current.mode &= ~T.ALL_MOUSE_MODES;
                     current.mode |= T.MODE_MOUSE_ALL;
                 } else current.mode &= ~T.ALL_MOUSE_MODES;
+            },
+            1004 => {
+                // Focus reporting
+                if (set)
+                    current.mode |= T.MODE_FOCUSON
+                else
+                    current.mode &= ~T.MODE_FOCUSON;
             },
             1005 => {
                 if (set)
@@ -922,6 +1001,20 @@ fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) v
                     current.mode |= T.MODE_BRACKETPASTE
                 else
                     current.mode &= ~T.MODE_BRACKETPASTE;
+            },
+            2026 => {
+                // Synchronized output (reduced: track mode bit)
+                if (set)
+                    current.mode |= T.MODE_SYNC
+                else
+                    current.mode &= ~T.MODE_SYNC;
+            },
+            2031 => {
+                // Theme update notifications (reduced: track mode bit)
+                if (set)
+                    current.mode |= T.MODE_THEME_UPDATES
+                else
+                    current.mode &= ~T.MODE_THEME_UPDATES;
             },
             else => {},
         }

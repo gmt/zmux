@@ -657,6 +657,9 @@ pub const Screen = struct {
     saved_cell: GridCell = std.mem.zeroes(GridCell),
     saved_flags: i32 = 0,
     tabs: ?[]u8 = null,
+    cell_fg: u32 = 8,
+    cell_bg: u32 = 8,
+    cell_attr: u16 = 0,
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────

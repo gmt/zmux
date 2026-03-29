@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
+const grid_mod = @import("grid.zig");
 const screen_write = @import("screen-write.zig");
 const alerts = @import("alerts.zig");
 
@@ -85,6 +86,62 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
         if (next == '8') {
             screen_write.restore_cursor(&ctx);
             i += 2;
+            continue;
+        }
+        if (next == 'D') {
+            // IND – index (linefeed)
+            screen_write.newline(&ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'M') {
+            // RI – reverse index
+            const gd = ctx.s.grid;
+            if (ctx.s.cy == ctx.s.rupper)
+                grid_mod.scroll_down(gd, ctx.s.rupper, @min(ctx.s.rlower, gd.sy -| 1))
+            else if (ctx.s.cy > 0)
+                ctx.s.cy -= 1;
+            i += 2;
+            continue;
+        }
+        if (next == 'E') {
+            // NEL – next line
+            screen_write.carriage_return(&ctx);
+            screen_write.newline(&ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'c') {
+            // RIS – full reset
+            ctx.s.cell_fg = 8;
+            ctx.s.cell_bg = 8;
+            ctx.s.cell_attr = 0;
+            screen_write.erase_screen(&ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'P') {
+            // DCS – device control string (reduced: consume until ST)
+            const consumed = parse_dcs(wp.input_pending.items[i..]) orelse break;
+            i += consumed;
+            continue;
+        }
+        if (next == '_') {
+            // APC – application program command (reduced: consume until ST)
+            const consumed = parse_string_to_st(wp.input_pending.items[i..]) orelse break;
+            i += consumed;
+            continue;
+        }
+        if (next == 'k') {
+            // ESC k ... ESC \\ – window rename (reduced: consume until ST)
+            const consumed = parse_rename(wp, wp.input_pending.items[i..]) orelse break;
+            i += consumed;
+            continue;
+        }
+        if (next == 'X') {
+            // SOS – consume until ST
+            const consumed = parse_string_to_st(wp.input_pending.items[i..]) orelse break;
+            i += consumed;
             continue;
         }
 
@@ -176,6 +233,53 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8) void {
     if (std.mem.eql(u8, kind, "7")) {
         screen_mod.screen_set_path(current, value);
     }
+    // OSC 4 – palette set (reduced: swallow)
+    // OSC 8 – hyperlinks (reduced: swallow)
+    // OSC 10/11/12 – fg/bg/cursor color (reduced: swallow)
+    // OSC 52 – clipboard (reduced: swallow)
+    // OSC 104 – palette reset (reduced: swallow)
+    // OSC 133 – semantic prompts (reduced: swallow)
+}
+
+fn parse_dcs(bytes: []const u8) ?usize {
+    // DCS: ESC P ... ST (ESC \ or BEL)
+    var idx: usize = 2; // skip ESC P
+    while (idx < bytes.len) {
+        if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return idx + 2;
+        if (bytes[idx] == 0x07) return idx + 1;
+        idx += 1;
+    }
+    return null;
+}
+
+fn parse_string_to_st(bytes: []const u8) ?usize {
+    // Consume until ESC \ or BEL
+    var idx: usize = 1; // skip the introducer
+    while (idx < bytes.len) {
+        if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return idx + 2;
+        if (bytes[idx] == 0x07) return idx + 1;
+        idx += 1;
+    }
+    return null;
+}
+
+fn parse_rename(_: *T.WindowPane, bytes: []const u8) ?usize {
+    // ESC k name ESC \\ – window rename
+    var idx: usize = 2; // skip ESC k
+    while (idx < bytes.len) {
+        if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') {
+            const name = bytes[2..idx];
+            _ = name; // reduced: would need allow-rename option check
+            return idx + 2;
+        }
+        if (bytes[idx] == 0x07) {
+            const name = bytes[2..idx];
+            _ = name;
+            return idx + 1;
+        }
+        idx += 1;
+    }
+    return null;
 }
 
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
@@ -244,6 +348,49 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             3 => screen_mod.screen_clear_all_tabs(ctx.s),
             else => {},
         },
+        'd' => screen_write.cursor_to(ctx, first_param(params, 1) -| 1, ctx.s.cx),
+        'S' => {
+            // SU – scroll up
+            const gd = ctx.s.grid;
+            const top = ctx.s.rupper;
+            const bottom = @min(ctx.s.rlower, gd.sy -| 1);
+            var n = first_param(params, 1);
+            while (n > 0) : (n -= 1) {
+                grid_mod.scroll_up(gd, top, bottom);
+            }
+        },
+        'T' => {
+            // SD – scroll down
+            const gd = ctx.s.grid;
+            const top = ctx.s.rupper;
+            const bottom = @min(ctx.s.rlower, gd.sy -| 1);
+            var n = first_param(params, 1);
+            while (n > 0) : (n -= 1) {
+                grid_mod.scroll_down(gd, top, bottom);
+            }
+        },
+        'Z' => {
+            // CBT – cursor backward tabulation
+            var cx = ctx.s.cx;
+            if (cx > ctx.s.grid.sx) cx = ctx.s.grid.sx;
+            var n = first_param(params, 1);
+            while (cx > 0 and n > 0) : (n -= 1) {
+                while (cx > 0) : (cx -= 1) {
+                    if (screen_mod.screen_has_tab(ctx.s, cx - 1)) break;
+                }
+            }
+            ctx.s.cx = cx;
+        },
+        'b' => {
+            // REP – repeat previous printable character
+            // (reduced: not tracked, ignore)
+        },
+        'c' => {
+            // DA1 – device attributes (reduced: no reply)
+        },
+        'n' => {
+            // DSR – device status report (reduced: no reply)
+        },
         'r' => {
             const top = first_param(params, 1) -| 1;
             const bottom = second_param(params, ctx.s.grid.sy) -| 1;
@@ -251,8 +398,123 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         },
         's' => screen_write.save_cursor(ctx),
         'u' => screen_write.restore_cursor(ctx),
-        'm', 'h', 'l' => {}, // reduced: ignore SGR and private modes for now
+        'm' => apply_sgr(ctx, params),
+        'h' => apply_sm(ctx, params, false),
+        'l' => apply_rm(ctx, params, false),
         else => {},
+    }
+}
+
+fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    // SGR – Select Graphic Rendition (CSI Ps ; ... m)
+    const s = ctx.s;
+    if (params.len == 0) {
+        s.cell_fg = 8; // default
+        s.cell_bg = 8; // default
+        s.cell_attr = 0;
+        return;
+    }
+    var i: usize = 0;
+    while (i < params.len) : (i += 1) {
+        const n = params[i];
+        switch (n) {
+            0 => {
+                s.cell_fg = 8;
+                s.cell_bg = 8;
+                s.cell_attr = 0;
+            },
+            1 => s.cell_attr |= T.GRID_ATTR_BRIGHT,
+            2 => s.cell_attr |= T.GRID_ATTR_DIM,
+            3 => s.cell_attr |= T.GRID_ATTR_ITALICS,
+            4 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE;
+            },
+            5, 6 => s.cell_attr |= T.GRID_ATTR_BLINK,
+            7 => s.cell_attr |= T.GRID_ATTR_REVERSE,
+            8 => s.cell_attr |= T.GRID_ATTR_HIDDEN,
+            9 => s.cell_attr |= T.GRID_ATTR_STRIKETHROUGH,
+            21 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE_2;
+            },
+            22 => s.cell_attr &= ~(T.GRID_ATTR_BRIGHT | T.GRID_ATTR_DIM),
+            23 => s.cell_attr &= ~T.GRID_ATTR_ITALICS,
+            24 => s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE,
+            25 => s.cell_attr &= ~T.GRID_ATTR_BLINK,
+            27 => s.cell_attr &= ~T.GRID_ATTR_REVERSE,
+            28 => s.cell_attr &= ~T.GRID_ATTR_HIDDEN,
+            29 => s.cell_attr &= ~T.GRID_ATTR_STRIKETHROUGH,
+            30...37 => s.cell_fg = n - 30,
+            39 => s.cell_fg = 8, // default fg
+            40...47 => s.cell_bg = n - 40,
+            49 => s.cell_bg = 8, // default bg
+            53 => s.cell_attr |= T.GRID_ATTR_OVERLINE,
+            55 => s.cell_attr &= ~T.GRID_ATTR_OVERLINE,
+            90...97 => s.cell_fg = n, // bright fg
+            100...107 => s.cell_bg = n - 10, // bright bg
+            38 => {
+                // 256-color or RGB fg
+                if (i + 1 < params.len) {
+                    i += 1;
+                    if (params[i] == 5 and i + 1 < params.len) {
+                        i += 1;
+                        s.cell_fg = params[i] | T.COLOUR_FLAG_256;
+                    } else if (params[i] == 2 and i + 3 < params.len) {
+                        const r = params[i + 1];
+                        const g = params[i + 2];
+                        const b = params[i + 3];
+                        s.cell_fg = T.COLOUR_FLAG_RGB | (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+                        i += 3;
+                    }
+                }
+            },
+            48 => {
+                // 256-color or RGB bg
+                if (i + 1 < params.len) {
+                    i += 1;
+                    if (params[i] == 5 and i + 1 < params.len) {
+                        i += 1;
+                        s.cell_bg = params[i] | T.COLOUR_FLAG_256;
+                    } else if (params[i] == 2 and i + 3 < params.len) {
+                        const r = params[i + 1];
+                        const g = params[i + 2];
+                        const b = params[i + 3];
+                        s.cell_bg = T.COLOUR_FLAG_RGB | (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+                        i += 3;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn apply_sm(ctx: *T.ScreenWriteCtx, params: []const u32, private: bool) void {
+    if (private) {
+        apply_private_modes(ctx, params, true);
+        return;
+    }
+    for (params) |mode| {
+        switch (mode) {
+            4 => ctx.s.mode |= T.MODE_INSERT,
+            34 => ctx.s.mode &= ~T.MODE_CURSOR_VERY_VISIBLE,
+            else => {},
+        }
+    }
+}
+
+fn apply_rm(ctx: *T.ScreenWriteCtx, params: []const u32, private: bool) void {
+    if (private) {
+        apply_private_modes(ctx, params, false);
+        return;
+    }
+    for (params) |mode| {
+        switch (mode) {
+            4 => ctx.s.mode &= ~T.MODE_INSERT,
+            34 => ctx.s.mode |= T.MODE_CURSOR_VERY_VISIBLE,
+            else => {},
+        }
     }
 }
 

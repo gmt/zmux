@@ -122,14 +122,17 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
             continue;
         }
         if (next == 'P') {
-            // DCS – device control string (reduced: consume until ST)
-            const consumed = parse_dcs(wp.input_pending.items[i..]) orelse break;
-            i += consumed;
+            // DCS – device control string with full parameter/intermediate parsing
+            const dcs = parse_dcs_structured(wp.input_pending.items[i..]) orelse break;
+            apply_dcs(dcs);
+            i += dcs.consumed;
             continue;
         }
         if (next == '_') {
-            // APC – application program command (reduced: consume until ST)
-            const consumed = parse_string_to_st(wp.input_pending.items[i..]) orelse break;
+            // APC – application program command
+            // tmux uses APC to set window title (like a secondary OSC 0/2).
+            // Consume until ST, and apply title if allow-set-title is enabled.
+            const consumed = parse_apc(wp, wp.input_pending.items[i..]) orelse break;
             i += consumed;
             continue;
         }
@@ -354,20 +357,122 @@ fn apply_osc_8(s: *T.Screen, value: []const u8) void {
     // If no hyperlink table exists, just swallow (reduced)
 }
 
-fn parse_dcs(bytes: []const u8) ?usize {
-    // DCS: ESC P ... ST (ESC \ or BEL)
-    var idx: usize = 2; // skip ESC P
+/// Parsed DCS structure: parameters, intermediate bytes, and data payload.
+const DcsParsed = struct {
+    /// Total bytes consumed from input (including ESC P and ST).
+    consumed: usize,
+    /// Raw parameter string (digits and ';' between ESC P and the data).
+    params: []const u8,
+    /// Intermediate bytes (0x20-0x2F range) collected before data.
+    interm: []const u8,
+    /// Data payload after params/intermediates, up to ST.
+    data: []const u8,
+};
+
+/// Parse a DCS sequence and extract the structured components.
+fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
+    if (bytes.len < 2) return null;
+    std.debug.assert(bytes[0] == 0x1b and bytes[1] == 'P');
+
+    var idx: usize = 2;
+
+    // Phase 1: Collect parameter bytes.
+    const param_start = idx;
+    var ignore = false;
     while (idx < bytes.len) {
-        if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return idx + 2;
-        if (bytes[idx] == 0x07) return idx + 1;
+        const ch = bytes[idx];
+        if ((ch >= '0' and ch <= '9') or ch == ';') {
+            idx += 1;
+        } else if (ch == ':' or (ch >= '<' and ch <= '?')) {
+            ignore = true;
+            idx += 1;
+            break;
+        } else {
+            break;
+        }
+    }
+    const params = if (!ignore) bytes[param_start..idx] else "";
+
+    // Phase 2: Collect intermediate bytes.
+    const interm_start = idx;
+    while (idx < bytes.len and bytes[idx] >= 0x20 and bytes[idx] <= 0x2F) {
+        idx += 1;
+    }
+    const interm = if (!ignore) bytes[interm_start..idx] else "";
+
+    // Phase 3: Ignore mode — skip to ST.
+    if (ignore) {
+        while (idx < bytes.len) {
+            if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return DcsParsed{ .consumed = idx + 2, .params = "", .interm = "", .data = "" };
+            if (bytes[idx] == 0x07) return DcsParsed{ .consumed = idx + 1, .params = "", .interm = "", .data = "" };
+            idx += 1;
+        }
+        return null;
+    }
+
+    // Phase 4: Collect data payload.
+    const data_start = idx;
+    while (idx < bytes.len) {
+        if (bytes[idx] == 0x1b) {
+            if (idx + 1 >= bytes.len) return null;
+            if (bytes[idx + 1] == '\\') {
+                return DcsParsed{
+                    .consumed = idx + 2,
+                    .params = params,
+                    .interm = interm,
+                    .data = bytes[data_start..idx],
+                };
+            }
+            idx += 2;
+            continue;
+        }
+        if (bytes[idx] == 0x07) {
+            return DcsParsed{
+                .consumed = idx + 1,
+                .params = params,
+                .interm = interm,
+                .data = bytes[data_start..idx],
+            };
+        }
         idx += 1;
     }
     return null;
 }
 
+/// Dispatch a fully-parsed DCS sequence, applying side-effects.
+/// Mirrors tmux's input_dcs_dispatch and input_handle_decrqss.
+/// Currently all sub-commands are stubs; ctx/wp params will be needed
+/// when DECRQSS replies or Sixel rendering are implemented.
+fn apply_dcs(dcs: DcsParsed) void {
+    const data = dcs.data;
+
+    // DECRQSS: DCS $ q <params> ST  (intermediate '$', data starts with 'q')
+    // tmux checks: interm_len == 1 && interm_buf[0] == '$' && data[0] == 'q'
+    // Stub: zmux has no reply path yet, so consume silently.
+    if (dcs.interm.len == 1 and dcs.interm[0] == '$') {
+        return;
+    }
+
+    // Sixel: DCS Ps ; ... q <data> ST  (no intermediate, data starts with 'q')
+    // Stub: consume but do not render.
+    if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
+        // Sixel image data — stub, consumed silently.
+        return;
+    }
+
+    // Passthrough: DCS tmux; <raw> ST
+    // Stub: would need allow-passthrough option check + rawstring output.
+    if (data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
+        // Passthrough — stub, consumed silently.
+        return;
+    }
+
+    // All other DCS sequences: silently consumed.
+}
+
 fn parse_string_to_st(bytes: []const u8) ?usize {
-    // Consume until ESC \ or BEL
-    var idx: usize = 1; // skip the introducer
+    // Consume until ESC \ or BEL, starting after ESC <introducer>
+    var idx: usize = 2; // skip ESC and the introducer character
     while (idx < bytes.len) {
         if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return idx + 2;
         if (bytes[idx] == 0x07) return idx + 1;
@@ -381,18 +486,45 @@ fn parse_rename(_: *T.WindowPane, bytes: []const u8) ?usize {
     var idx: usize = 2; // skip ESC k
     while (idx < bytes.len) {
         if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') {
-            const name = bytes[2..idx];
-            _ = name; // reduced: would need allow-rename option check
+            // const name = bytes[2..idx];
+            // reduced: would need allow-rename option check
             return idx + 2;
         }
         if (bytes[idx] == 0x07) {
-            const name = bytes[2..idx];
-            _ = name;
             return idx + 1;
         }
         idx += 1;
     }
     return null;
+}
+
+/// Parse APC sequence: ESC _ payload ST (ESC \ or BEL).
+/// If allow-set-title is enabled, sets the window title to the APC payload.
+/// Returns total bytes consumed, or null if incomplete.
+fn parse_apc(wp: *T.WindowPane, bytes: []const u8) ?usize {
+    var idx: usize = 2; // skip ESC _
+    while (idx < bytes.len) {
+        if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') {
+            const payload = bytes[2..idx];
+            apply_apc(wp, payload);
+            return idx + 2;
+        }
+        if (bytes[idx] == 0x07) {
+            const payload = bytes[2..idx];
+            apply_apc(wp, payload);
+            return idx + 1;
+        }
+        idx += 1;
+    }
+    return null;
+}
+
+/// Apply APC payload. tmux uses APC to set the window title when
+/// allow-set-title is enabled (mirroring its input_exit_apc handler).
+fn apply_apc(wp: *T.WindowPane, payload: []const u8) void {
+    if (opts.options_get_number(wp.options, "allow-set-title") == 0) return;
+    const s = screen_mod.screen_current(wp);
+    _ = screen_mod.screen_set_title(s, payload);
 }
 
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
@@ -1603,5 +1735,424 @@ test "input CSI t winops and CSI > c DA2 are consumed without error" {
 
     // CSI > c — DA2 secondary device attributes
     input_parse_screen(wp, "\x1b[>c");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS is consumed cleanly and does not corrupt output" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Basic DCS: ESC P data ESC \
+    input_parse_screen(wp, "AB\x1bPsome-dcs-data\x1b\\CD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS with parameters is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // DCS with numeric parameters: ESC P 1;2 data ESC \
+    input_parse_screen(wp, "\x1bP1;2somedata\x1b\\XY");
+    try std.testing.expectEqual(@as(u8, 'X'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'Y'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS with intermediate byte is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // DCS with '$' intermediate (DECRQSS): ESC P $ q Pt ST
+    input_parse_screen(wp, "AB\x1bP$q q\x1b\\CD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS with colon is ignored and consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // DCS with colon in params should be ignored (tmux: dcs_ignore state)
+    input_parse_screen(wp, "\x1bP1:2ignored\x1b\\OK");
+    try std.testing.expectEqual(@as(u8, 'O'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS with BEL terminator is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // DCS terminated by BEL
+    input_parse_screen(wp, "\x1bPdata\x07AB");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS keeps incomplete sequence pending across calls" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Send incomplete DCS
+    input_parse_screen(wp, "\x1bP1;2partial");
+    try std.testing.expect(wp.input_pending.items.len > 0);
+
+    // Complete it
+    input_parse_screen(wp, "data\x1b\\OK");
+    try std.testing.expectEqual(@as(u8, 'O'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS with embedded ESC in data is consumed correctly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // DCS data containing an ESC that is NOT followed by '\' — should be
+    // treated as part of the payload (tmux's dcs_handler allows ESC inside).
+    input_parse_screen(wp, "\x1bPdata\x1bXmore\x1b\\AB");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input APC is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Basic APC: ESC _ data ESC \
+    input_parse_screen(wp, "AB\x1b_some-apc-data\x1b\\CD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input APC keeps incomplete sequence pending across calls" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Send incomplete APC
+    input_parse_screen(wp, "\x1b_partial");
+    try std.testing.expect(wp.input_pending.items.len > 0);
+
+    // Complete it
+    input_parse_screen(wp, "apc\x1b\\OK");
+    try std.testing.expectEqual(@as(u8, 'O'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input APC with BEL terminator is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // APC terminated by BEL
+    input_parse_screen(wp, "\x1b_apc-data\x07AB");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input DCS parsed structure has correct params interm and data" {
+    const testing = std.testing;
+
+    // Simple DCS: ESC P data ST
+    const seq1 = "\x1bPhello\x1b\\";
+    const dcs1 = (parse_dcs_structured(seq1)).?;
+    try testing.expectEqual(@as(usize, 9), dcs1.consumed);
+    try testing.expectEqualStrings("", dcs1.params);
+    try testing.expectEqualStrings("", dcs1.interm);
+    try testing.expectEqualStrings("hello", dcs1.data);
+
+    // DCS with params: ESC P 1;2 data ST
+    const seq2 = "\x1bP1;2data\x1b\\";
+    const dcs2 = (parse_dcs_structured(seq2)).?;
+    try testing.expectEqualStrings("1;2", dcs2.params);
+    try testing.expectEqualStrings("", dcs2.interm);
+    try testing.expectEqualStrings("data", dcs2.data);
+
+    // DCS with intermediate: ESC P $ q Pt ST
+    const seq3 = "\x1bP$q q\x1b\\";
+    const dcs3 = (parse_dcs_structured(seq3)).?;
+    try testing.expectEqualStrings("", dcs3.params);
+    try testing.expectEqualStrings("$", dcs3.interm);
+    try testing.expectEqualStrings("q q", dcs3.data);
+
+    // DCS with params and intermediate
+    const seq4 = "\x1bP1;$x\x1b\\";
+    const dcs4 = (parse_dcs_structured(seq4)).?;
+    try testing.expectEqualStrings("1;", dcs4.params);
+    try testing.expectEqualStrings("$", dcs4.interm);
+    try testing.expectEqualStrings("x", dcs4.data);
+
+    // DCS with colon (should be ignored)
+    const seq5 = "\x1bP1:2bad\x1b\\";
+    const dcs5 = (parse_dcs_structured(seq5)).?;
+    try testing.expectEqualStrings("", dcs5.params);
+    try testing.expectEqualStrings("", dcs5.interm);
+    try testing.expectEqualStrings("", dcs5.data);
+    try testing.expectEqual(@as(usize, seq5.len), dcs5.consumed);
+
+    // DCS with embedded ESC (not ST)
+    const seq6 = "\x1bPdata\x1bXmore\x1b\\";
+    const dcs6 = (parse_dcs_structured(seq6)).?;
+    try testing.expectEqualStrings("data\x1bXmore", dcs6.data);
+
+    // Incomplete sequence
+    try testing.expect(parse_dcs_structured("\x1bPpartial") == null);
+    try testing.expect(parse_dcs_structured("\x1bPdata\x1b") == null);
+}
+
+test "input SOS is consumed cleanly" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // SOS: ESC X data ESC \
+    input_parse_screen(wp, "AB\x1bXsome-sos-data\x1b\\CD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }

@@ -466,6 +466,8 @@ pub fn copyModeCommand(
         cmdCopyPipe(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-pipe-and-cancel")) {
         cmdCopyPipe(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-pipe-no-clear")) {
+        cmdCopyPipeNoClear(wme, session, args);
     } else if (std.mem.eql(u8, command, "copy-line")) {
         cmdCopyLine(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-line-and-cancel")) {
@@ -516,6 +518,8 @@ pub fn copyModeCommand(
         scrollLines(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "pipe") or std.mem.eql(u8, command, "pipe-and-cancel")) {
         cmdPipe(wme, session, args, std.mem.eql(u8, command, "pipe-and-cancel"));
+    } else if (std.mem.eql(u8, command, "pipe-no-clear")) {
+        cmdPipeNoClear(wme, session, args);
     } else {
         unsupportedCommand(client, command);
         wme.prefix = 1;
@@ -1163,8 +1167,13 @@ fn getSelectionText(wme: *T.WindowModeEntry) ?[]u8 {
     const data = modeData(wme);
     const backing = data.backing;
     const gd = backing.grid;
+    const vi_keys = copyModeUsesViKeys(wme);
 
-    // Determine selection bounds
+    // No active selection
+    if (data.cursordrag == .none and data.lineflag == .none)
+        return null;
+
+    // Determine selection bounds (selx,sely = anchor, endselx,endsely = cursor end)
     var sx = data.selx;
     var sy = data.sely;
     var ex = data.endselx;
@@ -1184,65 +1193,119 @@ fn getSelectionText(wme: *T.WindowModeEntry) ?[]u8 {
     const ey_last = grid.line_length(gd, ey);
     if (ex > ey_last) ex = ey_last;
 
-    if (data.rectflag) {
-        // Rectangle copy
-        const firstsx = @min(sx, ex);
-        const lastex = @max(sx, ex) + 1;
-        var buf: std.ArrayList(u8) = .{};
-        var row: u32 = sy;
-        while (row <= ey) : (row += 1) {
-            const line_len = grid.line_length(gd, row);
-            const start = firstsx;
-            const end = @min(lastex, line_len);
-            var col: u32 = start;
-            while (col < end) : (col += 1) {
-                var gc: T.GridCell = undefined;
-                grid.get_cell(gd, row, col, &gc);
-                if (gc.isPadding()) continue;
-                if (gc.data.size >= 1) {
-                    buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
-                }
-            }
-            buf.append(xm.allocator, '\n') catch unreachable;
-        }
-        if (buf.items.len == 0) {
-            buf.deinit(xm.allocator);
-            return null;
-        }
-        return buf.toOwnedSlice(xm.allocator) catch unreachable;
-    }
+    // Compute per-line start/end columns (handles both rect and normal).
+    // In rectangle mode tmux determines the column bounds from the cursor
+    // position relative to the selection anchor; in emacs mode the cursor
+    // column is excluded, in vi mode it is included.
+    const firstsx: u32, const restsx: u32, const lastex: u32, const restex: u32 = if (data.rectflag) rect: {
+        // Determine which column is the "selection" vs "cursor" side
+        const selx: u32 = if (data.cursordrag == .endsel)
+            data.selx
+        else
+            data.endselx;
 
-    // Normal selection copy
-    const vi_keys = copyModeUsesViKeys(wme);
+        var fsx: u32 = undefined;
+        var rsx: u32 = undefined;
+        var lex: u32 = undefined;
+        var rex: u32 = undefined;
+
+        if (selx < data.cx) {
+            // Selection start is on the left, cursor on the right
+            if (vi_keys) {
+                lex = data.cx + 1;
+                rex = data.cx + 1;
+            } else {
+                lex = data.cx;
+                rex = data.cx;
+            }
+            fsx = selx;
+            rsx = selx;
+        } else {
+            // Cursor is on the left
+            lex = selx + 1;
+            rex = selx + 1;
+            fsx = data.cx;
+            rsx = data.cx;
+        }
+        break :rect .{ fsx, rsx, lex, rex };
+    } else normal: {
+        // Normal (non-rectangle) selection
+        const lex: u32 = if (vi_keys) ex + 1 else ex;
+        break :normal .{ sx, 0, lex, gd.sx };
+    };
+
     var buf: std.ArrayList(u8) = .{};
+
+    // Copy each line in the selection range
     var row: u32 = sy;
     while (row <= ey) : (row += 1) {
-        const line_len = grid.line_length(gd, row);
-        const start = if (row == sy) sx else 0;
-        var end = if (row == ey) if (vi_keys) ex + 1 else ex else line_len;
-        if (end > line_len) end = line_len;
-
-        var col: u32 = start;
-        while (col < end) : (col += 1) {
-            var gc: T.GridCell = undefined;
-            grid.get_cell(gd, row, col, &gc);
-            if (gc.isPadding()) continue;
-            if (gc.data.size >= 1) {
-                buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
-            }
-        }
-
-        // Check for wrapped line
-        const wrapped = row < gd.linedata.len and (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0 and gd.linedata[row].cellused <= gd.sx;
-        if (!wrapped or end != line_len) {
-            buf.append(xm.allocator, '\n') catch unreachable;
-        }
+        const line_start = if (row == sy) firstsx else restsx;
+        const line_end = if (row == ey) lastex else restex;
+        copyLineToBuffer(&buf, gd, row, line_start, line_end);
     }
+
     if (buf.items.len == 0) {
         buf.deinit(xm.allocator);
         return null;
     }
+
+    // Remove final \n (unless at end in vi mode)
+    if (!vi_keys or lastex <= ey_last) {
+        const wrapped = ey < gd.linedata.len and
+            (gd.linedata[ey].flags & T.GRID_LINE_WRAPPED) != 0 and
+            gd.linedata[ey].cellused <= gd.sx;
+        if (!wrapped or lastex != ey_last) {
+            if (buf.items.len > 0 and buf.items[buf.items.len - 1] == '\n') {
+                buf.items.len -= 1;
+            }
+        }
+    }
+
     return buf.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+/// Append cells from a single grid row [line_start..line_end) into buf,
+/// respecting wrapped lines and padding.  Adds a trailing newline when
+/// appropriate (mirrors tmux's window_copy_copy_line).
+fn copyLineToBuffer(
+    buf: *std.ArrayList(u8),
+    gd: *T.Grid,
+    row: u32,
+    line_start: u32,
+    line_end: u32,
+) void {
+    if (line_start > line_end) return;
+
+    // Determine effective line length
+    const wrapped = row < gd.linedata.len and
+        (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0 and
+        gd.linedata[row].cellused <= gd.sx;
+    const effective_len: u32 = if (wrapped)
+        gd.linedata[row].cellused
+    else
+        grid.line_length(gd, row);
+
+    var ex = line_end;
+    var sx = line_start;
+    if (ex > effective_len) ex = effective_len;
+    if (sx > effective_len) sx = effective_len;
+
+    // Collect cell data
+    var col: u32 = sx;
+    while (col < ex) : (col += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, row, col, &gc);
+        if (gc.isPadding()) continue;
+        if (gc.data.size >= 1) {
+            buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
+        }
+    }
+
+    // Only add a newline if the line was not wrapped, or we didn't copy
+    // to the full effective width
+    if (!wrapped or ex != effective_len) {
+        buf.append(xm.allocator, '\n') catch unreachable;
+    }
 }
 
 // ── Command implementations ────────────────────────────────────────────────
@@ -1265,12 +1328,25 @@ fn cmdRectangleToggle(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
     data.lineflag = .none;
     data.rectflag = !data.rectflag;
+    rectangleSetUpdateCursor(wme);
 }
 
 fn cmdRectangleSet(wme: *T.WindowModeEntry, on: bool) void {
     const data = modeData(wme);
     data.lineflag = .none;
     data.rectflag = on;
+    rectangleSetUpdateCursor(wme);
+}
+
+/// After toggling rectangle mode, clamp cursor to line length and update
+/// any active selection (mirrors tmux's window_copy_rectangle_set).
+fn rectangleSetUpdateCursor(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const abs_row = absoluteCursorRow(wme);
+    const line_len = grid.line_length(data.backing.grid, abs_row);
+    if (data.cx > line_len)
+        data.cx = line_len;
+    _ = updateSelection(wme);
 }
 
 fn cmdSelectLine(wme: *T.WindowModeEntry, session: *T.Session) void {
@@ -1388,21 +1464,24 @@ fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
 }
 
 fn cmdCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    doCopyPipe(wme, session, args, true, cancel);
+}
+
+fn cmdCopyPipeNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
+    doCopyPipe(wme, session, args, false, false);
+}
+
+fn doCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, do_clear: bool, cancel: bool) void {
     const buf_text = getSelectionText(wme) orelse return;
     defer xm.allocator.free(buf_text);
 
-    // Get the pipe command from args
-    const command = args.value_at(1) orelse "";
-    _ = command;
-
-    // Copy to paste buffer
     const paste_mod = @import("paste.zig");
     paste_mod.paste_add(null, xm.xstrdup(buf_text));
 
-    // TODO: Actually run the pipe command via job system when available
-    // For now, just copy to paste buffer
-    _ = session;
-    clearSelection(wme);
+    const command = if (args.value_at(1)) |a| a else "";
+    pipeRun(wme, session, command, buf_text);
+
+    if (do_clear) clearSelection(wme);
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
     }
@@ -1497,17 +1576,82 @@ fn cmdAppendSelection(wme: *T.WindowModeEntry, session: *T.Session) void {
 }
 
 fn cmdPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
-    _ = args;
-    _ = session;
-    // Without a selection, do nothing
-    const buf = getSelectionText(wme) orelse return;
-    defer xm.allocator.free(buf);
+    doPipe(wme, session, args, true, cancel);
+}
 
-    // TODO: Run pipe command via job system when available
-    clearSelection(wme);
+fn cmdPipeNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
+    doPipe(wme, session, args, false, false);
+}
+
+fn doPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, do_clear: bool, cancel: bool) void {
+    const buf_text = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf_text);
+
+    const command = if (args.value_at(1)) |a| a else "";
+    pipeRun(wme, session, command, buf_text);
+
+    if (do_clear) clearSelection(wme);
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
     }
+}
+
+/// Run a shell command with the selected text piped to its stdin.
+/// Falls back to the "copy-command" global option when command is empty.
+fn pipeRun(wme: *T.WindowModeEntry, session: *T.Session, command: []const u8, input: []const u8) void {
+    _ = wme;
+
+    // Resolve effective command: arg > session option > global option
+    var effective_cmd: []const u8 = command;
+    if (effective_cmd.len == 0) {
+        effective_cmd = opts.options_get_string(session.options, "copy-command");
+    }
+    if (effective_cmd.len == 0) {
+        effective_cmd = opts.options_get_string(opts.global_options, "copy-command");
+    }
+
+    if (effective_cmd.len == 0 or input.len == 0) return;
+
+    // Fork a child process: sh -c <command>, pipe input to stdin
+    const child_pid = std.posix.fork() catch return;
+    if (child_pid == 0) {
+        // Child process — set up pipe for stdin
+        const pipe_fds = std.posix.pipe() catch std.process.exit(1);
+
+        const read_end = pipe_fds[0];
+        const write_end = pipe_fds[1];
+
+        // Fork again so a grandchild can write input while the child
+        // execs the shell command.
+        const grandchild = std.posix.fork() catch std.process.exit(1);
+        if (grandchild == 0) {
+            // Grandchild: write input to the pipe, then exit
+            std.posix.close(read_end);
+            _ = std.posix.write(write_end, input) catch {};
+            std.posix.close(write_end);
+            std.process.exit(0);
+        }
+
+        // Still in child: redirect stdin to the read end of the pipe
+        std.posix.close(write_end);
+        const dev_null = std.posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch std.process.exit(1);
+        std.posix.dup2(read_end, 0) catch std.process.exit(1); // stdin
+        std.posix.dup2(dev_null, 1) catch std.process.exit(1); // stdout -> /dev/null
+        std.posix.dup2(dev_null, 2) catch std.process.exit(1); // stderr -> /dev/null
+        std.posix.close(read_end);
+        std.posix.close(dev_null);
+
+        // Build a null-terminated copy of the command for execve
+        const cmd_z = xm.allocator.allocSentinel(u8, effective_cmd.len, 0) catch std.process.exit(1);
+        @memcpy(cmd_z[0..effective_cmd.len], effective_cmd);
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
+        std.posix.execveZ("/bin/sh", &argv, @ptrCast(std.os.environ.ptr)) catch {
+            std.process.exit(127);
+        };
+    }
+    // Parent: reap child asynchronously (we don't care about its exit status)
+    var status: i32 = 0;
+    _ = std.c.waitpid(child_pid, &status, std.posix.W.NOHANG);
 }
 
 // ── Search implementation ──────────────────────────────────────────────────

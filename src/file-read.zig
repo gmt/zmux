@@ -234,7 +234,20 @@ pub fn reset_for_tests() void {
     next_stream = 3;
 }
 
-pub fn client_cleanup() void {}
+pub fn client_cleanup() void {
+    if (!pending_reads_init) return;
+
+    var it = pending_reads.iterator();
+    var doomed = std.ArrayList(i32){};
+    defer doomed.deinit(xm.allocator);
+    while (it.next()) |entry| {
+        doomed.append(xm.allocator, entry.key_ptr.*) catch unreachable;
+    }
+    for (doomed.items) |stream| {
+        const pending = pending_reads.get(stream) orelse continue;
+        finish_pending_read(pending, @intFromEnum(std.posix.E.PIPE));
+    }
+}
 
 fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
     _ = _imsg;

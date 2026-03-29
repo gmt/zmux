@@ -696,6 +696,15 @@ pub const Tty = struct {
     /// Last cell rendered via tty_attributes (used to skip redundant output).
     last_cell: GridCell = grid_default_cell,
 
+    /// Scrolling region top (csr).
+    rupper: u32 = 0,
+    /// Scrolling region bottom (csr).
+    rlower: u32 = 0,
+    /// Left margin (DECSLRM).
+    rleft: u32 = 0,
+    /// Right margin (DECSLRM).
+    rright: u32 = 0,
+
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,
     acs: [256][2]u8 = [_][2]u8{[_]u8{ 0, 0 }} ** 256,

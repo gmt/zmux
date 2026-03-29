@@ -21,6 +21,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_display = @import("cmd-display-message.zig");
+const cmd_mod = @import("cmd.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const server = @import("server.zig");
@@ -1089,6 +1090,156 @@ pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
 
     prompt_changed(c, state, '=');
     return true;
+}
+
+// ── Prompt history file I/O ─────────────────────────────────────────────
+
+fn historyFilePath() ?[]u8 {
+    const history_file = opts.options_get_string(opts.global_options, "history-file");
+    if (history_file.len == 0) return null;
+    if (history_file[0] == '/') return xm.xstrdup(history_file);
+
+    if (history_file.len < 2 or history_file[0] != '~' or history_file[1] != '/') return null;
+    const home = std.posix.getenv("HOME") orelse return null;
+    return std.fmt.allocPrint(xm.allocator, "{s}{s}", .{ home, history_file[1..] }) catch null;
+}
+
+pub fn status_prompt_load_history() void {
+    const path = historyFilePath() orelse return;
+    defer xm.allocator.free(path);
+
+    const file = std.fs.cwd().openFile(path, .{}) catch return;
+    defer file.close();
+
+    const stat = file.stat() catch return;
+    if (stat.size == 0 or stat.size > 1024 * 1024) return;
+
+    const buf = xm.allocator.alloc(u8, stat.size) catch return;
+    defer xm.allocator.free(buf);
+
+    const bytes_read = file.readAll(buf) catch return;
+    if (bytes_read == 0) return;
+    const data = buf[0..bytes_read];
+
+    ensure_histories_init();
+    var start: usize = 0;
+    while (start < data.len) {
+        const eol = std.mem.indexOfScalarPos(u8, data, start, '\n') orelse data.len;
+        const line = std.mem.trimRight(u8, data[start..eol], "\r");
+        start = if (eol < data.len) eol + 1 else data.len;
+        if (line.len == 0) continue;
+
+        addTypedHistoryFromLine(line);
+    }
+}
+
+fn addTypedHistoryFromLine(line: []const u8) void {
+    const colon_pos = std.mem.indexOfScalar(u8, line, ':');
+    if (colon_pos == null or colon_pos.? == 0) {
+        status_prompt_history_add(line, .command);
+        return;
+    }
+    const type_str = line[0..colon_pos.?];
+    const rest = line[colon_pos.? + 1 ..];
+    const prompt_type = status_prompt_type(type_str);
+    if (prompt_type == .invalid) {
+        status_prompt_history_add(line, .command);
+    } else {
+        status_prompt_history_add(rest, prompt_type);
+    }
+}
+
+pub fn status_prompt_save_history() void {
+    const path = historyFilePath() orelse return;
+    defer xm.allocator.free(path);
+
+    if (!prompt_histories_init) return;
+
+    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
+    defer file.close();
+    const writer = file.writer();
+
+    for (0..prompt_type_count) |type_idx| {
+        const prompt_type: PromptType = @enumFromInt(@as(u8, @intCast(type_idx)));
+        const type_str = status_prompt_type_string(prompt_type);
+        const history = &prompt_histories[type_idx];
+        for (history.items) |item| {
+            writer.print("{s}:{s}\n", .{ type_str, item }) catch {};
+        }
+    }
+}
+
+// ── Prompt completion ───────────────────────────────────────────────────
+
+pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
+    if (word.len == 0 and !at_start) return null;
+
+    var list = std.ArrayList([]const u8).init(xm.allocator);
+    defer {
+        list.deinit(xm.allocator);
+    }
+    const slen = word.len;
+
+    // Match against command names and aliases
+    for (cmd_mod.cmd_entries()) |entry| {
+        if (entry.name.len >= slen and std.mem.eql(u8, entry.name[0..slen], word)) {
+            completionAddUnique(&list, entry.name);
+        }
+        if (entry.alias) |alias| {
+            if (alias.len >= slen and std.mem.eql(u8, alias[0..slen], word)) {
+                completionAddUnique(&list, alias);
+            }
+        }
+    }
+
+    if (at_start) return completeFromList(list.items);
+
+    // Match against layout names
+    const layouts = [_][]const u8{
+        "even-horizontal",       "even-vertical",
+        "main-horizontal",       "main-horizontal-mirrored",
+        "main-vertical",         "main-vertical-mirrored",
+        "tiled",
+    };
+    for (&layouts) |layout| {
+        if (layout.len >= slen and std.mem.eql(u8, layout[0..slen], word)) {
+            completionAddUnique(&list, layout);
+        }
+    }
+
+    return completeFromList(list.items);
+}
+
+fn completionAddUnique(list: *std.ArrayList([]const u8), s: []const u8) void {
+    for (list.items) |item| {
+        if (std.mem.eql(u8, item, s)) return;
+    }
+    list.append(xm.allocator, s) catch unreachable;
+}
+
+fn completeFromList(items: [][]const u8) ?[]u8 {
+    if (items.len == 0) return null;
+    if (items.len == 1) {
+        return std.fmt.allocPrint(xm.allocator, "{s} ", .{items[0]}) catch unreachable;
+    }
+    return completePrefix(items);
+}
+
+fn completePrefix(items: [][]const u8) ?[]u8 {
+    if (items.len == 0) return null;
+    var shortest: usize = items[0].len;
+    for (items[1..]) |item| shortest = @min(shortest, item.len);
+
+    var common_len: usize = shortest;
+    outer: while (common_len > 0) : (common_len -= 1) {
+        const ch = items[0][common_len - 1];
+        for (items[1..]) |item| {
+            if (item[common_len - 1] != ch) continue :outer;
+        }
+        break;
+    }
+    if (common_len == 0) return null;
+    return xm.xstrdup(items[0][0..common_len]);
 }
 
 test "status-prompt history keeps type-local entries and respects the limit" {

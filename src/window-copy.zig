@@ -19,11 +19,14 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
+const format_mod = @import("format.zig");
+const format_draw = @import("format-draw.zig");
 const grid = @import("grid.zig");
 const hyperlinks = @import("hyperlinks.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
@@ -514,6 +517,10 @@ pub fn copyModeCommand(
         cmdJumpToMark(wme);
     } else if (std.mem.eql(u8, command, "toggle-position")) {
         data.hide_position = !data.hide_position;
+    } else if (std.mem.eql(u8, command, "swap-selection-start")) {
+        cmdSwapSelectionStart(wme);
+    } else if (std.mem.eql(u8, command, "swap-selection-end")) {
+        cmdSwapSelectionEnd(wme);
     } else if (std.mem.eql(u8, command, "scroll-exit-on")) {
         data.scroll_exit = true;
     } else if (std.mem.eql(u8, command, "scroll-exit-off")) {
@@ -656,6 +663,21 @@ fn redraw(wme: *T.WindowModeEntry) void {
         const backing_row = data.top + row;
         if (backing_row >= backing.grid.sy) break;
         copyLine(view.grid, row, backing.grid, backing_row, width);
+    }
+
+    // Expand and draw the copy-mode-position-format on the first visible
+    // line (mirrors tmux's window_copy_write_line).
+    if (opts.options_ready and !data.hide_position and rows > 0 and view.grid.sx > 0) {
+        const pos_fmt = opts.options_get_string(wme.wp.window.options, "copy-mode-position-format");
+        if (pos_fmt.len > 0) {
+            const expanded = format_mod.format_single(null, pos_fmt, null, null, null, wme.wp);
+            if (expanded.len > 0) {
+                var ctx = T.ScreenWriteCtx{ .s = view };
+                screen_write.cursor_to(&ctx, 0, 0);
+                format_draw.format_draw(&ctx, &T.grid_default_cell, view.grid.sx, expanded);
+            }
+            xm.allocator.free(expanded);
+        }
     }
 
     if (view.grid.sx != 0) view.cx = @min(data.cx, view.grid.sx - 1) else view.cx = 0;
@@ -1458,6 +1480,48 @@ fn cmdOtherEnd(wme: *T.WindowModeEntry) void {
             data.cursordrag = .endsel;
         }
     }
+}
+
+/// Swap cursor position to the selection start (anchor) point, making it the
+/// new active end.  Mirrors tmux's window_copy_cmd_swap_selection_start.
+fn cmdSwapSelectionStart(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return;
+
+    // The cursor becomes the new endsel; the old sel anchor becomes the
+    // cursor position.
+    data.endselx = data.cx;
+    data.endsely = absoluteCursorRow(wme);
+
+    data.cx = data.selx;
+    setAbsoluteCursorRow(wme, data.sely);
+
+    // Flip the drag state so further cursor motion adjusts the end.
+    if (data.cursordrag == .sel) {
+        data.cursordrag = .endsel;
+    }
+    clampCursorX(wme);
+}
+
+/// Swap cursor position to the selection end point, making it the new active
+/// end.  Mirrors tmux's window_copy_cmd_swap_selection_end.
+fn cmdSwapSelectionEnd(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return;
+
+    // The cursor becomes the new sel anchor; the old endsel becomes the
+    // cursor position.
+    data.selx = data.cx;
+    data.sely = absoluteCursorRow(wme);
+
+    data.cx = data.endselx;
+    setAbsoluteCursorRow(wme, data.endsely);
+
+    // Flip the drag state so further cursor motion adjusts the start.
+    if (data.cursordrag == .endsel) {
+        data.cursordrag = .sel;
+    }
+    clampCursorX(wme);
 }
 
 fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {

@@ -398,6 +398,7 @@ fn parse_rename(_: *T.WindowPane, bytes: []const u8) ?usize {
 fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
     var private = false;
     var modify_other_keys = false;
+    var has_intermediate_space = false;
     var params_raw = raw_params;
     if (params_raw.len != 0 and params_raw[0] == '?') {
         private = true;
@@ -405,6 +406,13 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
     } else if (params_raw.len != 0 and params_raw[0] == '>') {
         modify_other_keys = true;
         params_raw = params_raw[1..];
+    }
+
+    // Check for space (0x20) intermediate byte — used by DECSCUSR (CSI Ps SP q).
+    // The intermediate byte sits between the numeric parameters and the final byte.
+    // After stripping prefix chars, any space in params_raw is an intermediate.
+    if (std.mem.indexOfScalar(u8, params_raw, ' ') != null) {
+        has_intermediate_space = true;
     }
 
     var params_buf: [8]u32 = [_]u32{0} ** 8;
@@ -415,8 +423,17 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         apply_modify_other_keys(ctx, params);
         return;
     }
+    if (modify_other_keys and final == 'c') {
+        // CSI > c — DA2 secondary device attributes (reduced: no reply, just consume)
+        return;
+    }
     if (private and (final == 'h' or final == 'l')) {
         apply_private_modes(ctx, params, final == 'h');
+        return;
+    }
+    if (has_intermediate_space and final == 'q') {
+        // CSI Ps SP q — DECSCUSR set cursor style
+        apply_decscusr(ctx, params);
         return;
     }
 
@@ -511,6 +528,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         },
         's' => screen_write.save_cursor(ctx),
         'u' => screen_write.restore_cursor(ctx),
+        't' => apply_winops(ctx, params),
         'm' => apply_sgr(ctx, params),
         'h' => apply_sm(ctx, params, false),
         'l' => apply_rm(ctx, params, false),
@@ -629,6 +647,63 @@ fn apply_rm(ctx: *T.ScreenWriteCtx, params: []const u32, private: bool) void {
             else => {},
         }
     }
+}
+
+fn apply_decscusr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    // CSI Ps SP q — DECSCUSR set cursor style.
+    // 0 or 1 = blinking block, 2 = steady block,
+    // 3 = blinking underline, 4 = steady underline,
+    // 5 = blinking bar, 6 = steady bar.
+    const style = first_param(params, 0);
+    const s = ctx.s;
+    switch (style) {
+        0 => {
+            s.cstyle = .default;
+            s.mode &= ~T.MODE_CURSOR_BLINKING_SET;
+        },
+        1 => {
+            s.cstyle = .block;
+            s.mode |= T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        2 => {
+            s.cstyle = .block;
+            s.mode &= ~T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        3 => {
+            s.cstyle = .underline;
+            s.mode |= T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        4 => {
+            s.cstyle = .underline;
+            s.mode &= ~T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        5 => {
+            s.cstyle = .bar;
+            s.mode |= T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        6 => {
+            s.cstyle = .bar;
+            s.mode &= ~T.MODE_CURSOR_BLINKING;
+            s.mode |= T.MODE_CURSOR_BLINKING_SET;
+        },
+        else => {},
+    }
+}
+
+fn apply_winops(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    // CSI Ps t — Window operations (reduced: no reply path yet, just consume).
+    // The most common sub-commands:
+    //   CSI 14 t — report text area size in pixels
+    //   CSI 18 t — report text area size in chars
+    //   CSI 21 t — report window title
+    // All are silently consumed since zmux does not have a reply path yet.
+    _ = ctx;
+    _ = params;
 }
 
 fn apply_modify_other_keys(ctx: *T.ScreenWriteCtx, params: []const u32) void {
@@ -1122,6 +1197,67 @@ test "input handles ACS charset selection ESC ( 0 / ESC ( B / ESC ) 0 / ESC ) B"
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }
 
+test "input DECSCUSR sets cursor style and blinking mode" {
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    const s = screen_mod.screen_current(wp);
+
+    // CSI 1 SP q — blinking block
+    input_parse_screen(wp, "\x1b[1 q");
+    try std.testing.expect(s.cstyle == .block);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // CSI 2 SP q — steady block
+    input_parse_screen(wp, "\x1b[2 q");
+    try std.testing.expect(s.cstyle == .block);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING == 0);
+
+    // CSI 3 SP q — blinking underline
+    input_parse_screen(wp, "\x1b[3 q");
+    try std.testing.expect(s.cstyle == .underline);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // CSI 4 SP q — steady underline
+    input_parse_screen(wp, "\x1b[4 q");
+    try std.testing.expect(s.cstyle == .underline);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING == 0);
+
+    // CSI 5 SP q — blinking bar
+    input_parse_screen(wp, "\x1b[5 q");
+    try std.testing.expect(s.cstyle == .bar);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING != 0);
+
+    // CSI 6 SP q — steady bar
+    input_parse_screen(wp, "\x1b[6 q");
+    try std.testing.expect(s.cstyle == .bar);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING == 0);
+
+    // CSI 0 SP q — reset to default
+    input_parse_screen(wp, "\x1b[0 q");
+    try std.testing.expect(s.cstyle == .default);
+    try std.testing.expect(s.mode & T.MODE_CURSOR_BLINKING_SET == 0);
+}
+
 test "input handles ESC # 8 DECALN alignment test" {
     const win = @import("window.zig");
     const grid = @import("grid.zig");
@@ -1196,8 +1332,8 @@ test "input keeps incomplete ESC ( sequence pending" {
     // Complete the sequence
     input_parse_screen(wp, "0");
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
-    const s = screen_mod.screen_current(wp);
-    try std.testing.expectEqual(@as(u8, 1), s.g0set);
+    const s2 = screen_mod.screen_current(wp);
+    try std.testing.expectEqual(@as(u8, 1), s2.g0set);
 
     // Same for ESC # without third byte
     input_parse_screen(wp, "\x1b#");
@@ -1422,4 +1558,50 @@ test "input swallows OSC 133 semantic prompt markers" {
     input_parse_screen(wp, "EF");
     try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 0, 1));
+}
+
+test "input CSI t winops and CSI > c DA2 are consumed without error" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    // Write text, then send CSI t sequences — they should be consumed cleanly
+    input_parse_screen(wp, "AB\x1b[14tCD");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+
+    // CSI 18 t — report text area size in chars
+    input_parse_screen(wp, "\x1b[18t");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+
+    // CSI 21 t — report window title
+    input_parse_screen(wp, "\x1b[21t");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+
+    // CSI > c — DA2 secondary device attributes
+    input_parse_screen(wp, "\x1b[>c");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }

@@ -354,6 +354,7 @@ test {
     _ = @import("alerts.zig");
     _ = @import("colour.zig");
     _ = @import("grid.zig");
+    _ = @import("grid-test.zig");
     _ = @import("hyperlinks.zig");
     _ = @import("input.zig");
     _ = @import("key-string.zig");

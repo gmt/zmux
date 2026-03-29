@@ -193,6 +193,7 @@ pub fn main() !void {
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_ready = true;
 
     // Set default shell from $SHELL or /etc/passwd
     const default_shell = getshell();

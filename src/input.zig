@@ -27,6 +27,7 @@ const screen_mod = @import("screen.zig");
 const grid_mod = @import("grid.zig");
 const screen_write = @import("screen-write.zig");
 const alerts = @import("alerts.zig");
+const hyperlinks_mod = @import("hyperlinks.zig");
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len == 0) return;
@@ -252,25 +253,105 @@ fn parse_osc(wp: *T.WindowPane, bytes: []const u8) ?usize {
 }
 
 fn apply_osc(wp: *T.WindowPane, payload: []const u8) void {
+    // Parse the numeric OSC kind from the payload (everything before the first ';').
     const semi = std.mem.indexOfScalar(u8, payload, ';') orelse return;
-    const kind = payload[0..semi];
+    const kind_slice = payload[0..semi];
+    const kind = std.fmt.parseInt(u32, kind_slice, 10) catch return;
     const value = payload[semi + 1 ..];
     const current = screen_mod.screen_current(wp);
 
-    if (std.mem.eql(u8, kind, "0") or std.mem.eql(u8, kind, "1") or std.mem.eql(u8, kind, "2")) {
-        if (current.title) |old| xm.allocator.free(old);
-        current.title = if (value.len != 0) xm.xstrdup(value) else null;
+    switch (kind) {
+        0, 1, 2 => {
+            // OSC 0/1/2 – set window title
+            if (current.title) |old| xm.allocator.free(old);
+            current.title = if (value.len != 0) xm.xstrdup(value) else null;
+        },
+        4 => {
+            // OSC 4 ; index ; color — set palette colour (reduced: swallow)
+        },
+        7 => {
+            // OSC 7 ; path — set working directory
+            screen_mod.screen_set_path(current, value);
+        },
+        8 => {
+            // OSC 8 ; params ; uri — hyperlink open/close
+            apply_osc_8(current, value);
+        },
+        10 => {
+            // OSC 10 ; color — set foreground colour (reduced: swallow)
+        },
+        11 => {
+            // OSC 11 ; color — set background colour (reduced: swallow)
+        },
+        12 => {
+            // OSC 12 ; color — set cursor colour (reduced: swallow)
+        },
+        52 => {
+            // OSC 52 ; clipboard — clipboard access (reduced: swallow)
+        },
+        104 => {
+            // OSC 104 ; index — reset palette colour (reduced: swallow)
+        },
+        110 => {
+            // OSC 110 — reset foreground colour (reduced: swallow)
+        },
+        111 => {
+            // OSC 111 — reset background colour (reduced: swallow)
+        },
+        112 => {
+            // OSC 112 — reset cursor colour (reduced: swallow)
+        },
+        133 => {
+            // OSC 133 ; marker — semantic prompt markers A/B/C/D (reduced: swallow)
+        },
+        else => {
+            // Unknown OSC sequence — ignore
+        },
+    }
+}
+
+/// OSC 8 ; params ; uri — open or close a hyperlink.
+/// Params may contain key=value pairs separated by ':'.
+/// An empty URI closes the current hyperlink (sets link to 0).
+/// A non-empty URI stores the hyperlink via the screen's hyperlink table.
+fn apply_osc_8(s: *T.Screen, value: []const u8) void {
+    // Split into params and URI at the first ';'
+    const semi_idx = std.mem.indexOfScalar(u8, value, ';') orelse {
+        // No URI separator — invalid, swallow
+        return;
+    };
+    const params = value[0..semi_idx];
+    const uri = value[semi_idx + 1 ..];
+
+    // Close hyperlink when URI is empty
+    if (uri.len == 0) {
+        s.cell_attr &= ~T.GRID_ATTR_HIDDEN; // no special attr needed; link 0 = no link
+        s.saved_cell.link = 0;
         return;
     }
-    if (std.mem.eql(u8, kind, "7")) {
-        screen_mod.screen_set_path(current, value);
+
+    // Parse "id=<value>" from params if present
+    var id: ?[]const u8 = null;
+    if (params.len > 0) {
+        var pos: usize = 0;
+        while (pos < params.len) {
+            // Find next ':' or end
+            const next_colon = std.mem.indexOfScalarPos(u8, params, pos, ':') orelse params.len;
+            const segment = params[pos..next_colon];
+            if (segment.len > 3 and std.mem.startsWith(u8, segment, "id=")) {
+                id = segment[3..];
+            }
+            pos = next_colon + 1;
+        }
     }
-    // OSC 4 – palette set (reduced: swallow)
-    // OSC 8 – hyperlinks (reduced: swallow)
-    // OSC 10/11/12 – fg/bg/cursor color (reduced: swallow)
-    // OSC 52 – clipboard (reduced: swallow)
-    // OSC 104 – palette reset (reduced: swallow)
-    // OSC 133 – semantic prompts (reduced: swallow)
+
+    // Store the hyperlink if the screen has a hyperlink table
+    if (s.hyperlinks) |hl| {
+        const link_id = hyperlinks_mod.hyperlinks_put(hl, uri, id);
+        // Attach to the current cell state so future writes carry the link
+        s.saved_cell.link = link_id;
+    }
+    // If no hyperlink table exists, just swallow (reduced)
 }
 
 fn parse_dcs(bytes: []const u8) ?usize {
@@ -1123,4 +1204,222 @@ test "input keeps incomplete ESC ( sequence pending" {
     try std.testing.expectEqual(@as(usize, 2), wp.input_pending.items.len);
     input_parse_screen(wp, "8");
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+}
+
+test "input swallows OSC 4 palette set without crashing" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    // OSC 4 ; 1 ; #rrggbb — should be swallowed without crashing
+    input_parse_screen(wp, "\x1b]4;1;#ff0000\x07");
+    // Verify normal operation continues after
+    input_parse_screen(wp, "OK");
+    try std.testing.expectEqual(@as(u8, 'O'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'K'), grid.ascii_at(wp.base.grid, 0, 1));
+}
+
+test "input handles OSC 8 hyperlink open and close" {
+    const win = @import("window.zig");
+    const hl_mod = @import("hyperlinks.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    const s = screen_mod.screen_current(wp);
+
+    // Set up hyperlink table on the screen
+    s.hyperlinks = hl_mod.hyperlinks_init();
+    defer {
+        if (s.hyperlinks) |hl| hl_mod.hyperlinks_free(hl);
+    }
+
+    // Open a hyperlink with id and URI
+    input_parse_screen(wp, "\x1b]8;id=mylink;https://example.com\x07");
+    // The saved_cell.link should be set to a non-zero value
+    try std.testing.expect(s.saved_cell.link != 0);
+
+    // Close the hyperlink (empty URI)
+    input_parse_screen(wp, "\x1b]8;;\x07");
+    try std.testing.expectEqual(@as(u32, 0), s.saved_cell.link);
+}
+
+test "input swallows OSC 10/11/12 colour sequences" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    // OSC 10 — set foreground colour (swallow)
+    input_parse_screen(wp, "\x1b]10;#aabbcc\x07");
+    // OSC 11 — set background colour (swallow)
+    input_parse_screen(wp, "\x1b]11;#112233\x07");
+    // OSC 12 — set cursor colour (swallow)
+    input_parse_screen(wp, "\x1b]12;#ddeeff\x07");
+    // Verify normal operation continues
+    input_parse_screen(wp, "XY");
+    try std.testing.expectEqual(@as(u8, 'X'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'Y'), grid.ascii_at(wp.base.grid, 0, 1));
+}
+
+test "input swallows OSC 52 clipboard and OSC 104 palette reset" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    // OSC 52 — clipboard (swallow)
+    input_parse_screen(wp, "\x1b]52;c;SGVsbG8=\x07");
+    // OSC 104 — palette reset (swallow)
+    input_parse_screen(wp, "\x1b]104;1\x07");
+    // Verify normal operation continues
+    input_parse_screen(wp, "AB");
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
+}
+
+test "input swallows OSC 110/111/112 colour resets" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    // OSC 110 — reset foreground (swallow)
+    input_parse_screen(wp, "\x1b]110\x07");
+    // OSC 111 — reset background (swallow)
+    input_parse_screen(wp, "\x1b]111\x07");
+    // OSC 112 — reset cursor colour (swallow)
+    input_parse_screen(wp, "\x1b]112\x07");
+    // Verify normal operation continues
+    input_parse_screen(wp, "CD");
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 1));
+}
+
+test "input swallows OSC 133 semantic prompt markers" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+    // OSC 133 ; A — prompt start marker
+    input_parse_screen(wp, "\x1b]133;A\x07");
+    // OSC 133 ; B — command start marker
+    input_parse_screen(wp, "\x1b]133;B\x07");
+    // OSC 133 ; C — command output start marker
+    input_parse_screen(wp, "\x1b]133;C\x07");
+    // OSC 133 ; D — command output end marker
+    input_parse_screen(wp, "\x1b]133;D\x07");
+    // Verify normal operation continues
+    input_parse_screen(wp, "EF");
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 0, 1));
 }

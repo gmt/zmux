@@ -660,6 +660,8 @@ pub const Screen = struct {
     cell_fg: u32 = 8,
     cell_bg: u32 = 8,
     cell_attr: u16 = 0,
+    g0set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
+    g1set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────

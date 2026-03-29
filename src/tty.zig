@@ -77,6 +77,7 @@ pub fn tty_invalidate(tty: *T.Tty) void {
     tty.mode = 0;
     tty.fg = 8;
     tty.bg = 8;
+    tty.us = 8;
 }
 
 /// Context for pane-relative cursor positioning.
@@ -385,6 +386,664 @@ fn expand_tparm_impl(template: []const u8, pa: *u32, pb: ?*u32) ![]u8 {
                 const digits = std.fmt.allocPrint(xm.allocator, "{d}", .{val}) catch unreachable;
                 defer xm.allocator.free(digits);
                 try out.appendSlice(xm.allocator, digits);
+            },
+            else => {
+                idx += 1;
+            },
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
+// ── Colour helpers ──────────────────────────────────────────────────────────
+
+/// Split a colour value (without flags) into R, G, B components.
+fn colour_split_rgb(c: i32) struct { r: u8, g: u8, b: u8 } {
+    return .{
+        .r = @intCast((c >> 16) & 0xff),
+        .g = @intCast((c >> 8) & 0xff),
+        .b = @intCast(c & 0xff),
+    };
+}
+
+/// Force a colour value to RGB form. Returns -1 if not convertible.
+fn colour_force_rgb(c: i32) i32 {
+    if (c & T.COLOUR_FLAG_RGB != 0) return c;
+    if (c & T.COLOUR_FLAG_256 != 0) return colour_256_to_rgb(c);
+    if (c >= 0 and c <= 7) return colour_256_to_rgb(c);
+    if (c >= 90 and c <= 97) return colour_256_to_rgb(8 + c - 90);
+    return -1;
+}
+
+/// Convert a 256-colour index to the closest 16-colour index.
+fn colour_256_to_16(c: i32) i32 {
+    const table = [256]i8{
+         0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+         0,  4,  4,  4, 12, 12,  2,  6,  4,  4, 12, 12,  2,  2,  6,  4,
+        12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10,
+        10, 10, 10, 14,  1,  5,  4,  4, 12, 12,  3,  8,  4,  4, 12, 12,
+         2,  2,  6,  4, 12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10,
+        14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  5,  4, 12, 12,  1,  1,
+         5,  4, 12, 12,  3,  3,  8,  4, 12, 12,  2,  2,  2,  6, 12, 12,
+        10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  1,  5,
+        12, 12,  1,  1,  1,  5, 12, 12,  1,  1,  1,  5, 12, 12,  3,  3,
+         3,  7, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,
+         9,  9,  9,  9, 13, 12,  9,  9,  9,  9, 13, 12,  9,  9,  9,  9,
+        13, 12,  9,  9,  9,  9, 13, 12, 11, 11, 11, 11,  7, 12, 10, 10,
+        10, 10, 10, 14,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,
+         9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,
+         9, 13, 11, 11, 11, 11, 11, 15,  0,  0,  0,  0,  0,  0,  8,  8,
+         8,  8,  8,  8,  7,  7,  7,  7,  7,  7, 15, 15, 15, 15, 15, 15,
+    };
+    const idx: usize = @intCast(c & 0xff);
+    return table[idx];
+}
+
+/// Convert a 256-colour index (or standard 0-7) to RGB.
+fn colour_256_to_rgb(c: i32) i32 {
+    const table = [256]i32{
+        0x000000, 0x800000, 0x008000, 0x808000,
+        0x000080, 0x800080, 0x008080, 0xc0c0c0,
+        0x808080, 0xff0000, 0x00ff00, 0xffff00,
+        0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+        0x000000, 0x00005f, 0x000087, 0x0000af,
+        0x0000d7, 0x0000ff, 0x005f00, 0x005f5f,
+        0x005f87, 0x005faf, 0x005fd7, 0x005fff,
+        0x008700, 0x00875f, 0x008787, 0x0087af,
+        0x0087d7, 0x0087ff, 0x00af00, 0x00af5f,
+        0x00af87, 0x00afaf, 0x00afd7, 0x00afff,
+        0x00d700, 0x00d75f, 0x00d787, 0x00d7af,
+        0x00d7d7, 0x00d7ff, 0x00ff00, 0x00ff5f,
+        0x00ff87, 0x00ffaf, 0x00ffd7, 0x00ffff,
+        0x5f0000, 0x5f005f, 0x5f0087, 0x5f00af,
+        0x5f00d7, 0x5f00ff, 0x5f5f00, 0x5f5f5f,
+        0x5f5f87, 0x5f5faf, 0x5f5fd7, 0x5f5fff,
+        0x5f8700, 0x5f875f, 0x5f8787, 0x5f87af,
+        0x5f87d7, 0x5f87ff, 0x5faf00, 0x5faf5f,
+        0x5faf87, 0x5fafaf, 0x5fafd7, 0x5fafff,
+        0x5fd700, 0x5fd75f, 0x5fd787, 0x5fd7af,
+        0x5fd7d7, 0x5fd7ff, 0x5fff00, 0x5fff5f,
+        0x5fff87, 0x5fffaf, 0x5fffd7, 0x5fffff,
+        0x870000, 0x87005f, 0x870087, 0x8700af,
+        0x8700d7, 0x8700ff, 0x875f00, 0x875f5f,
+        0x875f87, 0x875faf, 0x875fd7, 0x875fff,
+        0x878700, 0x87875f, 0x878787, 0x8787af,
+        0x8787d7, 0x8787ff, 0x87af00, 0x87af5f,
+        0x87af87, 0x87afaf, 0x87afd7, 0x87afff,
+        0x87d700, 0x87d75f, 0x87d787, 0x87d7af,
+        0x87d7d7, 0x87d7ff, 0x87ff00, 0x87ff5f,
+        0x87ff87, 0x87ffaf, 0x87ffd7, 0x87ffff,
+        0xaf0000, 0xaf005f, 0xaf0087, 0xaf00af,
+        0xaf00d7, 0xaf00ff, 0xaf5f00, 0xaf5f5f,
+        0xaf5f87, 0xaf5faf, 0xaf5fd7, 0xaf5fff,
+        0xaf8700, 0xaf875f, 0xaf8787, 0xaf87af,
+        0xaf87d7, 0xaf87ff, 0xafaf00, 0xafaf5f,
+        0xafaf87, 0xafafaf, 0xafafd7, 0xafafff,
+        0xafd700, 0xafd75f, 0xafd787, 0xafd7af,
+        0xafd7d7, 0xafd7ff, 0xafff00, 0xafff5f,
+        0xafff87, 0xafffaf, 0xafffd7, 0xafffff,
+        0xd70000, 0xd7005f, 0xd70087, 0xd700af,
+        0xd700d7, 0xd700ff, 0xd75f00, 0xd75f5f,
+        0xd75f87, 0xd75faf, 0xd75fd7, 0xd75fff,
+        0xd78700, 0xd7875f, 0xd78787, 0xd787af,
+        0xd787d7, 0xd787ff, 0xd7af00, 0xd7af5f,
+        0xd7af87, 0xd7afaf, 0xd7afd7, 0xd7afff,
+        0xd7d700, 0xd7d75f, 0xd7d787, 0xd7d7af,
+        0xd7d7d7, 0xd7d7ff, 0xd7ff00, 0xd7ff5f,
+        0xd7ff87, 0xd7ffaf, 0xd7ffd7, 0xd7ffff,
+        0xff0000, 0xff005f, 0xff0087, 0xff00af,
+        0xff00d7, 0xff00ff, 0xff5f00, 0xff5f5f,
+        0xff5f87, 0xff5faf, 0xff5fd7, 0xff5fff,
+        0xff8700, 0xff875f, 0xff8787, 0xff87af,
+        0xff87d7, 0xff87ff, 0xffaf00, 0xffaf5f,
+        0xffaf87, 0xffafaf, 0xffafd7, 0xffafff,
+        0xffd700, 0xffd75f, 0xffd787, 0xffd7af,
+        0xffd7d7, 0xffd7ff, 0xffff00, 0xffff5f,
+        0xffff87, 0xffffaf, 0xffffd7, 0xffffff,
+        0x080808, 0x121212, 0x1c1c1c, 0x262626,
+        0x303030, 0x3a3a3a, 0x444444, 0x4e4e4e,
+        0x585858, 0x626262, 0x6c6c6c, 0x767676,
+        0x808080, 0x8a8a8a, 0x949494, 0x9e9e9e,
+        0xa8a8a8, 0xb2b2b2, 0xbcbcbc, 0xc6c6c6,
+        0xd0d0d0, 0xdadada, 0xe4e4e4, 0xeeeeee,
+    };
+    const idx: usize = @intCast(c & 0xff);
+    return table[idx] | @as(i32, T.COLOUR_FLAG_RGB);
+}
+
+/// Convert RGB to the closest 256-colour palette index (with COLOUR_FLAG_256 set).
+fn colour_find_rgb(r: u8, g: u8, b: u8) i32 {
+    const q2c = [6]i32{ 0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff };
+
+    const qr = colour_to_6cube(r);
+    const qg = colour_to_6cube(g);
+    const qb = colour_to_6cube(b);
+    const cr = q2c[qr];
+    const cg = q2c[qg];
+    const cb = q2c[qb];
+
+    // Exact match in 6x6x6 cube?
+    if (cr == r and cg == g and cb == b)
+        return (16 + 36 * qr + 6 * qg + qb) | @as(i32, T.COLOUR_FLAG_256);
+
+    // Closest grey.
+    const grey_avg = (@as(i32, r) + g + b) / 3;
+    const grey_idx: i32 = if (grey_avg > 238) 23 else (grey_avg - 3) / 10;
+    const grey = 8 + 10 * grey_idx;
+
+    // Pick closer of cube or grey.
+    const d_cube = colour_dist_sq(cr, cg, cb, r, g, b);
+    const d_grey = colour_dist_sq(grey, grey, grey, r, g, b);
+    const idx = if (d_grey < d_cube) 232 + grey_idx else 16 + 36 * qr + 6 * qg + qb;
+    return idx | @as(i32, T.COLOUR_FLAG_256);
+}
+
+fn colour_to_6cube(v: u8) i32 {
+    if (v < 48) return 0;
+    if (v < 114) return 1;
+    return (@as(i32, v) - 35) / 40;
+}
+
+fn colour_dist_sq(R: i32, G: i32, B: i32, r: u8, g: u8, b: u8) i32 {
+    return (R - r) * (R - r) + (G - g) * (G - g) + (B - b) * (B - b);
+}
+
+/// Check whether a colour value is the default colour (8 or 9).
+fn colour_default(c: i32) bool {
+    return c == 8 or c == 9;
+}
+
+/// Get a colour from a palette if available.
+fn colour_palette_get(palette: ?*T.ColourPalette, n: i32) i32 {
+    const p = palette orelse return -1;
+    var idx = n;
+    if (idx >= 90 and idx <= 97)
+        idx = 8 + idx - 90
+    else if (idx & T.COLOUR_FLAG_256 != 0)
+        idx &= ~@as(i32, T.COLOUR_FLAG_256)
+    else if (idx >= 8)
+        return -1;
+
+    if (idx < 0 or idx > 255) return -1;
+    const uidx: usize = @intCast(idx);
+
+    if (p.palette) |pal| {
+        if (pal[uidx] != -1) return pal[uidx];
+    }
+    if (p.default_palette) |dpal| {
+        if (dpal[uidx] != -1) return dpal[uidx];
+    }
+    return -1;
+}
+
+// ── TTY reset ───────────────────────────────────────────────────────────────
+
+/// Reset terminal to default attributes and colours.
+/// Ported from tmux tty_reset().
+pub fn tty_reset(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+
+    if (tty.fg != 8 or tty.bg != 8 or tty.us != 8) {
+        // Emit sgr0 (reset all attributes).
+        if (tty_term.stringCapability(tty, "sgr0")) |sgr0| {
+            if (sgr0.len > 0) tty_write(tty, sgr0);
+        }
+    }
+
+    tty.fg = 8;
+    tty.bg = 8;
+    tty.us = 8;
+}
+
+// ── Colour pipeline ─────────────────────────────────────────────────────────
+
+/// Set foreground and background colours for a grid cell.
+/// Ported from tmux tty_colours().
+pub fn tty_colours(tty: *T.Tty, gc: *const T.GridCell) void {
+    const tc_fg = tty.fg;
+    const tc_bg = tty.bg;
+    const tc_us = tty.us;
+
+    // No changes? Nothing is necessary.
+    if (gc.fg == tc_fg and gc.bg == tc_bg and gc.us == tc_us)
+        return;
+
+    // If either is the default colour, handle specially.
+    if (colour_default(gc.fg) or colour_default(gc.bg)) {
+        // If AX not available, do a full reset. Otherwise set defaults individually.
+        if (!tty_term.hasCapability(tty, "AX")) {
+            tty_reset(tty);
+        } else {
+            if (colour_default(gc.fg) and !colour_default(tc_fg)) {
+                tty_write(tty, "\x1b[39m");
+                tty.fg = gc.fg;
+            }
+            if (colour_default(gc.bg) and !colour_default(tc_bg)) {
+                tty_write(tty, "\x1b[49m");
+                tty.bg = gc.bg;
+            }
+        }
+    }
+
+    // Set the foreground colour.
+    if (!colour_default(gc.fg) and gc.fg != tty.fg)
+        tty_colours_fg(tty, gc);
+
+    // Set the background colour. Must come after fg because tty_colours_fg can
+    // call tty_reset.
+    if (!colour_default(gc.bg) and gc.bg != tty.bg)
+        tty_colours_bg(tty, gc);
+
+    // Set the underline colour.
+    if (gc.us != tty.us)
+        tty_colours_us(tty, gc);
+}
+
+/// Set foreground colour on the terminal.
+/// Ported from tmux tty_colours_fg().
+pub fn tty_colours_fg(tty: *T.Tty, gc: *const T.GridCell) void {
+    // If current is aixterm bright and new is not, reset (some terminals don't
+    // clear bright correctly).
+    if (tty.fg >= 90 and tty.fg <= 97 and (gc.fg < 90 or gc.fg > 97))
+        tty_reset(tty);
+
+    // Is this a 24-bit or 256-colour colour?
+    if (gc.fg & T.COLOUR_FLAG_RGB != 0 or gc.fg & T.COLOUR_FLAG_256 != 0) {
+        if (tty_try_colour(tty, gc.fg, "38") == 0) {
+            tty.fg = gc.fg;
+            return;
+        }
+        return;
+    }
+
+    // Is this an aixterm bright colour?
+    if (gc.fg >= 90 and gc.fg <= 97) {
+        if (tty_term.hasCapability(tty, "setaf")) {
+            tty_putcode_i(tty, "setaf", @intCast(gc.fg - 90 + 8));
+        } else {
+            // Fallback SGR.
+            const s = std.fmt.allocPrint(xm.allocator, "\x1b[{d}m", .{gc.fg}) catch unreachable;
+            defer xm.allocator.free(s);
+            tty_write(tty, s);
+        }
+        tty.fg = gc.fg;
+        return;
+    }
+
+    // Otherwise set the foreground colour.
+    tty_putcode_i(tty, "setaf", @intCast(gc.fg));
+    tty.fg = gc.fg;
+}
+
+/// Set background colour on the terminal.
+/// Ported from tmux tty_colours_bg().
+pub fn tty_colours_bg(tty: *T.Tty, gc: *const T.GridCell) void {
+    // Is this a 24-bit or 256-colour colour?
+    if (gc.bg & T.COLOUR_FLAG_RGB != 0 or gc.bg & T.COLOUR_FLAG_256 != 0) {
+        if (tty_try_colour(tty, gc.bg, "48") == 0) {
+            tty.bg = gc.bg;
+            return;
+        }
+        return;
+    }
+
+    // Is this an aixterm bright colour?
+    if (gc.bg >= 90 and gc.bg <= 97) {
+        if (tty_term.hasCapability(tty, "setab")) {
+            tty_putcode_i(tty, "setab", @intCast(gc.bg - 90 + 8));
+        } else {
+            // Fallback SGR.
+            const s = std.fmt.allocPrint(xm.allocator, "\x1b[{d}m", .{gc.bg + 10}) catch unreachable;
+            defer xm.allocator.free(s);
+            tty_write(tty, s);
+        }
+        tty.bg = gc.bg;
+        return;
+    }
+
+    // Otherwise set the background colour.
+    tty_putcode_i(tty, "setab", @intCast(gc.bg));
+    tty.bg = gc.bg;
+}
+
+/// Set underline colour on the terminal.
+/// Ported from tmux tty_colours_us().
+pub fn tty_colours_us(tty: *T.Tty, gc: *const T.GridCell) void {
+    // Clear underline colour.
+    if (colour_default(gc.us)) {
+        if (tty_term.stringCapability(tty, "ol")) |ol| {
+            if (ol.len > 0) tty_write(tty, ol);
+        }
+        tty.us = gc.us;
+        return;
+    }
+
+    // If not RGB, use Setulc1 if it exists.
+    if (gc.us & T.COLOUR_FLAG_RGB == 0) {
+        var c: i32 = gc.us;
+        if ((c & T.COLOUR_FLAG_256) == 0 and c >= 90 and c <= 97)
+            c -= 82;
+        tty_putcode_i(tty, "Setulc1", @intCast(c & ~@as(i32, T.COLOUR_FLAG_256)));
+        tty.us = gc.us;
+        return;
+    }
+
+    // Setulc / setal use ncurses one-argument "direct colour" format.
+    const rgb = colour_split_rgb(gc.us);
+    const c: u32 = 65536 * @as(u32, rgb.r) + 256 * @as(u32, rgb.g) + @as(u32, rgb.b);
+
+    if (tty_term.stringCapability(tty, "Setulc")) |setulc| {
+        if (setulc.len > 0) {
+            tty_putcode_i(tty, "Setulc", c);
+            tty.us = gc.us;
+            return;
+        }
+    }
+    if (tty_term.hasCapability(tty, "RGB") and tty_term.stringCapability(tty, "setal")) |setal| {
+        if (setal.len > 0) {
+            tty_putcode_i(tty, "setal", c);
+            tty.us = gc.us;
+            return;
+        }
+    }
+}
+
+/// Check if foreground colour needs updating (translation/downsampling).
+/// Ported from tmux tty_check_fg().
+pub fn tty_check_fg(tty: *T.Tty, palette: ?*T.ColourPalette, gc: *T.GridCell) void {
+    var c: i32 = gc.fg;
+
+    // Perform palette substitution.
+    if (gc.flags & T.GRID_FLAG_NOPALETTE == 0) {
+        c = gc.fg;
+        if (c < 8 and gc.attr & T.GRID_ATTR_BRIGHT != 0 and !tty_term.hasCapability(tty, "Nobr"))
+            c += 90;
+        const subst = colour_palette_get(palette, c);
+        if (subst != -1) gc.fg = subst;
+    }
+
+    // Is this a 24-bit colour?
+    if (gc.fg & T.COLOUR_FLAG_RGB != 0) {
+        // Not a 24-bit terminal? Translate to 256-colour palette.
+        if (!tty_term.hasCapability(tty, "RGB")) {
+            const rgb = colour_split_rgb(gc.fg);
+            gc.fg = colour_find_rgb(rgb.r, rgb.g, rgb.b);
+        }
+    }
+
+    // How many colours does this terminal have?
+    const colours: i32 = if (tty_term.hasCapability(tty, "RGB"))
+        256
+    else blk: {
+        if (tty_term.numberCapability(tty, "colors")) |n| break :blk n;
+        break :blk 8;
+    };
+
+    // Is this a 256-colour colour?
+    if (gc.fg & T.COLOUR_FLAG_256 != 0) {
+        if (colours >= 256) return;
+        gc.fg = colour_256_to_16(gc.fg);
+        if (gc.fg & 8 == 0) return;
+        gc.fg &= 7;
+        if (colours >= 16) {
+            gc.fg += 90;
+        } else {
+            // Avoid black-on-black or white-on-white.
+            if (gc.fg == 0 and gc.bg == 0)
+                gc.fg = 7
+            else if (gc.fg == 7 and gc.bg == 7)
+                gc.fg = 0;
+        }
+        return;
+    }
+
+    // Is this an aixterm colour?
+    if (gc.fg >= 90 and gc.fg <= 97 and colours < 16) {
+        gc.fg -= 90;
+        gc.attr |= T.GRID_ATTR_BRIGHT;
+    }
+}
+
+/// Check if background colour needs updating (translation/downsampling).
+/// Ported from tmux tty_check_bg().
+pub fn tty_check_bg(tty: *T.Tty, palette: ?*T.ColourPalette, gc: *T.GridCell) void {
+    // Perform palette substitution.
+    if (gc.flags & T.GRID_FLAG_NOPALETTE == 0) {
+        const subst = colour_palette_get(palette, gc.bg);
+        if (subst != -1) gc.bg = subst;
+    }
+
+    // Is this a 24-bit colour?
+    if (gc.bg & T.COLOUR_FLAG_RGB != 0) {
+        if (!tty_term.hasCapability(tty, "RGB")) {
+            const rgb = colour_split_rgb(gc.bg);
+            gc.bg = colour_find_rgb(rgb.r, rgb.g, rgb.b);
+        }
+    }
+
+    // How many colours does this terminal have?
+    const colours: i32 = if (tty_term.hasCapability(tty, "RGB"))
+        256
+    else blk: {
+        if (tty_term.numberCapability(tty, "colors")) |n| break :blk n;
+        break :blk 8;
+    };
+
+    // Is this a 256-colour colour?
+    if (gc.bg & T.COLOUR_FLAG_256 != 0) {
+        if (colours >= 256) return;
+        gc.bg = colour_256_to_16(gc.bg);
+        if (gc.bg & 8 == 0) return;
+        gc.bg &= 7;
+        if (colours >= 16)
+            gc.bg += 90;
+        return;
+    }
+
+    // Is this an aixterm colour?
+    if (gc.bg >= 90 and gc.bg <= 97 and colours < 16)
+        gc.bg -= 90;
+}
+
+/// Check if underline colour needs updating (translation).
+/// Ported from tmux tty_check_us().
+pub fn tty_check_us(tty: *T.Tty, palette: ?*T.ColourPalette, gc: *T.GridCell) void {
+    // Perform palette substitution.
+    if (gc.flags & T.GRID_FLAG_NOPALETTE == 0) {
+        const subst = colour_palette_get(palette, gc.us);
+        if (subst != -1) gc.us = subst;
+    }
+
+    // Convert underscore colour if only RGB can be supported.
+    if (!tty_term.hasCapability(tty, "Setulc1")) {
+        const c = colour_force_rgb(gc.us);
+        if (c == -1)
+            gc.us = 8
+        else
+            gc.us = c;
+    }
+}
+
+/// Try to apply a colour using terminfo capabilities.
+/// Ported from tmux tty_try_colour().
+/// Returns 0 on success, -1 if not handled.
+pub fn tty_try_colour(tty: *T.Tty, colour: i32, type_str: []const u8) i32 {
+    if (colour & T.COLOUR_FLAG_256 != 0) {
+        if (type_str[0] == '3' and tty_term.stringCapability(tty, "setaf")) |setaf| {
+            if (setaf.len > 0) {
+                tty_putcode_i(tty, "setaf", @intCast(colour & 0xff));
+                return 0;
+            }
+        }
+        if (tty_term.stringCapability(tty, "setab")) |setab| {
+            if (setab.len > 0) {
+                tty_putcode_i(tty, "setab", @intCast(colour & 0xff));
+                return 0;
+            }
+        }
+        return -1;
+    }
+
+    if (colour & T.COLOUR_FLAG_RGB != 0) {
+        const rgb = colour_split_rgb(colour);
+        if (type_str[0] == '3') {
+            if (tty_term.stringCapability(tty, "setrgbf")) |setrgbf| {
+                if (setrgbf.len > 0) {
+                    tty_putcode_iii(tty, "setrgbf", rgb.r, rgb.g, rgb.b);
+                    return 0;
+                }
+            }
+        }
+        if (tty_term.stringCapability(tty, "setrgbb")) |setrgbb| {
+            if (setrgbb.len > 0) {
+                tty_putcode_iii(tty, "setrgbb", rgb.r, rgb.g, rgb.b);
+                return 0;
+            }
+        }
+        return -1;
+    }
+
+    return -1;
+}
+
+/// Set the cursor colour via OSC 12.
+/// Ported from tmux tty_force_cursor_colour().
+pub fn tty_force_cursor_colour(tty: *T.Tty, c: i32) void {
+    var colour = c;
+    if (colour != -1)
+        colour = colour_force_rgb(colour);
+    if (colour == tty.ccolour) return;
+
+    if (colour == -1) {
+        // Reset cursor colour.
+        if (tty_term.stringCapability(tty, "Cr")) |cr| {
+            if (cr.len > 0) tty_write(tty, cr);
+        }
+    } else {
+        const rgb = colour_split_rgb(colour);
+        const s = std.fmt.allocPrint(xm.allocator, "rgb:{x:0>2}/{x:0>2}/{x:0>2}", .{ rgb.r, rgb.g, rgb.b }) catch unreachable;
+        defer xm.allocator.free(s);
+        // Use Cs capability (cursor colour set with string parameter).
+        if (tty_term.stringCapability(tty, "Cs")) |cs| {
+            if (cs.len > 0) {
+                // Replace %s or %p1%s in the capability with the colour string.
+                const expanded = expand_tparm_s(cs, s) catch return;
+                defer xm.allocator.free(expanded);
+                tty_write(tty, expanded);
+            }
+        } else {
+            // Fallback: OSC 12.
+            const seq = std.fmt.allocPrint(xm.allocator, "\x1b]12;rgb:{x:0>2}/{x:0>2}/{x:0>2}\x07", .{ rgb.r, rgb.g, rgb.b }) catch unreachable;
+            defer xm.allocator.free(seq);
+            tty_write(tty, seq);
+        }
+    }
+    tty.ccolour = colour;
+}
+
+/// Emit a terminfo string capability with three integer parameters.
+fn tty_putcode_iii(tty: *T.Tty, name: []const u8, a: u32, b: u32, c: u32) void {
+    const s = tty_term.stringCapability(tty, name) orelse return;
+    if (s.len == 0) return;
+    const expanded = expand_tparm_3(s, a, b, c) catch return;
+    defer xm.allocator.free(expanded);
+    tty_write(tty, expanded);
+}
+
+/// Expand a terminfo string with three integer parameters.
+fn expand_tparm_3(template: []const u8, a: u32, b: u32, c: u32) ![]u8 {
+    var pa = a;
+    var pb = b;
+    var pc = c;
+    return expand_tparm_impl3(template, &pa, &pb, &pc);
+}
+
+/// Core terminfo parameter expansion for up to 3 integer parameters.
+fn expand_tparm_impl3(template: []const u8, pa: *u32, pb: *u32, pc: *u32) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    var idx: usize = 0;
+    while (idx < template.len) {
+        if (template[idx] != '%') {
+            try out.append(xm.allocator, template[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        if (idx >= template.len) break;
+        switch (template[idx]) {
+            '%' => {
+                try out.append(xm.allocator, '%');
+                idx += 1;
+            },
+            'i' => {
+                pa.* += 1;
+                pb.* += 1;
+                pc.* += 1;
+                idx += 1;
+            },
+            'p' => {
+                idx += 1;
+                if (idx >= template.len) break;
+                const param_num = template[idx];
+                idx += 1;
+                // Skip format specifier (e.g. %d)
+                if (idx < template.len and template[idx] == 'd') {
+                    idx += 1;
+                }
+                const val: u32 = switch (param_num) {
+                    '1' => pa.*,
+                    '2' => pb.*,
+                    '3' => pc.*,
+                    else => 0,
+                };
+                const digits = std.fmt.allocPrint(xm.allocator, "{d}", .{val}) catch unreachable;
+                defer xm.allocator.free(digits);
+                try out.appendSlice(xm.allocator, digits);
+            },
+            else => {
+                idx += 1;
+            },
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator);
+}
+
+/// Expand a terminfo string with a string parameter (%s substitution).
+fn expand_tparm_s(template: []const u8, str_param: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+
+    var idx: usize = 0;
+    while (idx < template.len) {
+        if (template[idx] != '%') {
+            try out.append(xm.allocator, template[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        if (idx >= template.len) break;
+        switch (template[idx]) {
+            '%' => {
+                try out.append(xm.allocator, '%');
+                idx += 1;
+            },
+            's' => {
+                try out.appendSlice(xm.allocator, str_param);
+                idx += 1;
+            },
+            'p' => {
+                idx += 1;
+                if (idx >= template.len) break;
+                idx += 1; // skip param number
+                // If followed by %s, insert the string parameter.
+                if (idx + 1 < template.len and template[idx] == '%' and template[idx + 1] == 's') {
+                    try out.appendSlice(xm.allocator, str_param);
+                    idx += 2;
+                }
             },
             else => {
                 idx += 1;

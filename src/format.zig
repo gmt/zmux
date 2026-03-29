@@ -391,7 +391,10 @@ pub fn format_log_defaults(alloc: std.mem.Allocator, prefix: []const u8, ctx: *c
     }
 }
 
-pub fn format_tidy_jobs() void {}
+pub fn format_tidy_jobs() void {
+    const job_mod = @import("job.zig");
+    job_mod.job_tidy();
+}
 
 fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext, depth: u32) FormatExpandResult {
     if (depth >= FORMAT_LOOP_LIMIT) {

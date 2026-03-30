@@ -20,6 +20,15 @@
 const std = @import("std");
 const T = @import("types.zig");
 const env_mod = @import("environ.zig");
+const log = @import("log.zig");
+const tty_term_mod = @import("tty-term.zig");
+
+/// Mirrors tmux TERM_* flags merged by tty_apply_features.
+pub const TERM_256COLOURS: i32 = 0x1;
+pub const TERM_RGBCOLOURS: i32 = 0x10;
+pub const TERM_DECSLRM: i32 = 0x4;
+pub const TERM_DECFRA: i32 = 0x8;
+pub const TERM_SIXEL: i32 = 0x40;
 
 pub const Feature = enum(u5) {
     @"256",
@@ -114,10 +123,11 @@ const FeatureSpec = struct {
     name: []const u8,
     feature: Feature,
     capabilities: []const []const u8,
+    term_flags: i32 = 0,
 };
 
 const feature_specs = [_]FeatureSpec{
-    .{ .name = "256", .feature = .@"256", .capabilities = tty_feature_256_capabilities[0..] },
+    .{ .name = "256", .feature = .@"256", .capabilities = tty_feature_256_capabilities[0..], .term_flags = TERM_256COLOURS },
     .{ .name = "bpaste", .feature = .bpaste, .capabilities = tty_feature_bpaste_capabilities[0..] },
     .{ .name = "ccolour", .feature = .ccolour, .capabilities = tty_feature_ccolour_capabilities[0..] },
     .{ .name = "clipboard", .feature = .clipboard, .capabilities = tty_feature_clipboard_capabilities[0..] },
@@ -126,13 +136,13 @@ const feature_specs = [_]FeatureSpec{
     .{ .name = "extkeys", .feature = .extkeys, .capabilities = tty_feature_extkeys_capabilities[0..] },
     .{ .name = "focus", .feature = .focus, .capabilities = tty_feature_focus_capabilities[0..] },
     .{ .name = "ignorefkeys", .feature = .ignorefkeys, .capabilities = tty_feature_ignorefkeys_capabilities[0..] },
-    .{ .name = "margins", .feature = .margins, .capabilities = tty_feature_margins_capabilities[0..] },
+    .{ .name = "margins", .feature = .margins, .capabilities = tty_feature_margins_capabilities[0..], .term_flags = TERM_DECSLRM },
     .{ .name = "mouse", .feature = .mouse, .capabilities = tty_feature_mouse_capabilities[0..] },
     .{ .name = "osc7", .feature = .osc7, .capabilities = tty_feature_osc7_capabilities[0..] },
     .{ .name = "overline", .feature = .overline, .capabilities = tty_feature_overline_capabilities[0..] },
-    .{ .name = "rectfill", .feature = .rectfill, .capabilities = tty_feature_rectfill_capabilities[0..] },
-    .{ .name = "rgb", .feature = .rgb, .capabilities = tty_feature_rgb_capabilities[0..] },
-    .{ .name = "sixel", .feature = .sixel, .capabilities = tty_feature_sixel_capabilities[0..] },
+    .{ .name = "rectfill", .feature = .rectfill, .capabilities = tty_feature_rectfill_capabilities[0..], .term_flags = TERM_DECFRA },
+    .{ .name = "rgb", .feature = .rgb, .capabilities = tty_feature_rgb_capabilities[0..], .term_flags = TERM_256COLOURS | TERM_RGBCOLOURS },
+    .{ .name = "sixel", .feature = .sixel, .capabilities = tty_feature_sixel_capabilities[0..], .term_flags = TERM_SIXEL },
     .{ .name = "strikethrough", .feature = .strikethrough, .capabilities = tty_feature_strikethrough_capabilities[0..] },
     .{ .name = "sync", .feature = .sync, .capabilities = tty_feature_sync_capabilities[0..] },
     .{ .name = "title", .feature = .title, .capabilities = tty_feature_title_capabilities[0..] },
@@ -143,12 +153,77 @@ pub fn featureBit(feature: Feature) i32 {
     return @as(i32, 1) << @as(std.math.Log2Int(i32), @intCast(@intFromEnum(feature)));
 }
 
-pub fn addFeatures(bits: *i32, spec: []const u8, separators: []const u8) void {
+fn featureName(f: Feature) []const u8 {
+    for (feature_specs) |spec| {
+        if (spec.feature == f) return spec.name;
+    }
+    unreachable;
+}
+
+/// Parse a comma-/separator-delimited feature list into a feature bitset (tmux tty_add_features).
+pub fn tty_add_features(bits: *i32, spec: []const u8, separators: []const u8) void {
+    log.log_debug("adding terminal features {s}", .{spec});
     var it = std.mem.splitAny(u8, spec, separators);
     while (it.next()) |token| {
-        const feature = featureByName(token) orelse break;
-        bits.* |= featureBit(feature);
+        const feature = featureByName(token) orelse {
+            log.log_debug("unknown terminal feature: {s}", .{token});
+            break;
+        };
+        const bit = featureBit(feature);
+        if ((bits.* & bit) == 0) {
+            log.log_debug("adding terminal feature: {s}", .{featureName(feature)});
+            bits.* |= bit;
+        }
     }
+}
+
+pub fn addFeatures(bits: *i32, spec: []const u8, separators: []const u8) void {
+    tty_add_features(bits, spec, separators);
+}
+
+/// Comma-separated enabled feature names in tmux tty_features[] order (tmux tty_get_features).
+threadlocal var tty_get_features_buffer: [512]u8 = undefined;
+
+pub fn tty_get_features(feat: i32) [:0]const u8 {
+    var len: usize = 0;
+    for (feature_specs) |spec| {
+        if ((feat & featureBit(spec.feature)) == 0) continue;
+        if (len != 0) {
+            if (len + 1 >= tty_get_features_buffer.len) break;
+            tty_get_features_buffer[len] = ',';
+            len += 1;
+        }
+        if (len + spec.name.len >= tty_get_features_buffer.len) break;
+        @memcpy(tty_get_features_buffer[len .. len + spec.name.len], spec.name);
+        len += spec.name.len;
+    }
+    tty_get_features_buffer[len] = 0;
+    return tty_get_features_buffer[0..len :0];
+}
+
+/// Merge synthetic capabilities and term flags for requested features (tmux tty_apply_features).
+/// Returns 1 if `applied_features` changed, 0 if already satisfied.
+pub fn tty_apply_features(term: *tty_term_mod.TtyTerm, feat: i32) i32 {
+    if (feat == 0) return 0;
+    log.log_debug("applying terminal features: {s}", .{tty_get_features(feat)});
+
+    for (feature_specs) |spec| {
+        const bit = featureBit(spec.feature);
+        if ((term.applied_features & bit) != 0) continue;
+        if ((feat & bit) == 0) continue;
+
+        log.log_debug("applying terminal feature: {s}", .{spec.name});
+        for (spec.capabilities) |cap| {
+            log.log_debug("adding capability: {s}", .{cap});
+            term.tty_term_apply(cap, true);
+        }
+        term.term_flags |= spec.term_flags;
+    }
+
+    if ((term.applied_features | feat) == term.applied_features)
+        return 0;
+    term.applied_features |= feat;
+    return 1;
 }
 
 pub fn featureString(alloc: std.mem.Allocator, bits: i32) []u8 {
@@ -168,7 +243,7 @@ pub fn defaultFeatures(bits: *i32, name: []const u8, version: u32) void {
     for (default_terminals) |entry| {
         if (!std.mem.eql(u8, entry.name, name)) continue;
         if (version != 0 and version < entry.version) continue;
-        addFeatures(bits, entry.features, ",");
+        tty_add_features(bits, entry.features, ",");
     }
 }
 
@@ -306,6 +381,22 @@ test "tty_features renders enabled feature names in tmux order" {
     defer std.testing.allocator.free(rendered);
 
     try std.testing.expectEqualStrings("256,bpaste,title", rendered);
+}
+
+test "tty_get_features matches tty_features render order" {
+    const bits = mask(&.{ .@"256", .bpaste, .title });
+    try std.testing.expectEqualStrings("256,bpaste,title", tty_get_features(bits));
+}
+
+test "tty_apply_features merges capabilities and term flags" {
+    var term = tty_term_mod.TtyTerm.init();
+    defer term.deinit();
+
+    const rgb_feat = featureBit(.rgb);
+    try std.testing.expectEqual(@as(i32, 1), tty_apply_features(&term, rgb_feat));
+    try std.testing.expect(term.has(.AX));
+    try std.testing.expect((term.term_flags & (TERM_256COLOURS | TERM_RGBCOLOURS)) == (TERM_256COLOURS | TERM_RGBCOLOURS));
+    try std.testing.expectEqual(@as(i32, 0), tty_apply_features(&term, rgb_feat));
 }
 
 test "loaded reduced terminfo drives outer tty feature truth" {

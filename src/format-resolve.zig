@@ -570,7 +570,7 @@ fn grid_word_separator(gd: *T.Grid, row: u32, col: u32, separators: []const u8) 
     return gc.data.size == 1 and gc.data.data[0] == ' ';
 }
 
-fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y: u32, separators: []const u8) ?[]u8 {
+pub fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y: u32, separators: []const u8) ?[]u8 {
     if (start_y >= gd.linedata.len) return null;
 
     var x = start_x;
@@ -625,7 +625,7 @@ fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y
     return utf8.utf8_tocstr(cells.items);
 }
 
-fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
+pub fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
     if (row >= gd.linedata.len) return null;
 
     var cells: std.ArrayList(T.Utf8Data) = .{};
@@ -654,7 +654,7 @@ fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
     return utf8.utf8_tocstr(cells.items);
 }
 
-fn format_grid_hyperlink(screen: *const T.Screen, x_in: u32, row: u32) ?[]u8 {
+pub fn format_grid_hyperlink(screen: *const T.Screen, x_in: u32, row: u32) ?[]u8 {
     const hl = screen.hyperlinks orelse return null;
     var x = x_in;
     while (true) {

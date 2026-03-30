@@ -37,7 +37,8 @@ Each item describes what zmux does and what blocks completion.
 
 ## Server-Client
 
-- `window_update_focus` is not yet ported.
+- Overlay open/clear paths still do not refresh pane focus state via
+  `window_update_focus`.
 - Status line range queries for mouse-on-status classification use
   a simplified area test; `status_get_range` is not available.
 - Pane buffer management operates on `input_pending` instead of
@@ -89,8 +90,9 @@ All blocked on live PTY-backed popup job runtime.
 
 ## File I/O
 
-- Client file IPC stubs for `MSG_READ_*`/`MSG_WRITE_*` transport.
-- Synchronous client-side read instead of bufferevent runtime.
+- Detached-client file transport is message-driven, but the remaining
+  lifecycle still uses synchronous local reads instead of tmux's
+  bufferevent runtime.
 
 ## Job Runtime
 
@@ -99,12 +101,9 @@ All blocked on live PTY-backed popup job runtime.
 
 ## Commands
 
-- `cmdq_get_current`/`cmdq_get_target` are skeletal.
-- Readonly ACL enforcement is not wired through command dispatch.
-- `server_send_exit()` flush/sweep path has no Zig equivalent.
 - `display-panes` paints text badges instead of large digit art.
-- `display-message -a/-I/-v` surface is incomplete.
-- `capture-pane` lacks mode/pending capture.
+- `display-popup` still rejects environment overlays, close-on-exit,
+  argv-vector forms, and interactive popup shell paths.
 - `set-buffer -w`/`load-buffer -w` does not render `Ms` template.
 - Several commands reject flags pending layout infrastructure.
 

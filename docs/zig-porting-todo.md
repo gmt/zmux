@@ -102,7 +102,6 @@ All blocked on live PTY-backed popup job runtime.
 ## Commands
 
 - `display-panes` paints text badges instead of large digit art.
-- `choose-buffer` still rejects custom key-format and preview flags.
 - `display-popup` still rejects environment overlays, close-on-exit,
   argv-vector forms, and interactive popup shell paths.
 - `set-buffer -w`/`load-buffer -w` does not render `Ms` template.

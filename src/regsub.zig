@@ -54,13 +54,13 @@ pub fn regsub(
             &matches,
         );
         if (rc != 0) {
-            buf.appendSlice(alloc, text[last..end]) catch unreachable;
+            regsub_copy(alloc, &buf, text, start, end);
             break;
         }
 
         const match_start: usize = @intCast(matches[0].rm_so);
         const match_end: usize = @intCast(matches[0].rm_eo);
-        buf.appendSlice(alloc, text[last .. start + match_start]) catch unreachable;
+        regsub_copy(alloc, &buf, text, last, start + match_start);
 
         if (empty or start + match_start != last or match_start != match_end) {
             regsub_expand(alloc, &buf, with, text[start..], &matches);
@@ -74,12 +74,16 @@ pub fn regsub(
         }
 
         if (pattern.len > 0 and pattern[0] == '^') {
-            if (start <= end) buf.appendSlice(alloc, text[start..end]) catch unreachable;
+            regsub_copy(alloc, &buf, text, start, end);
             break;
         }
     }
 
     return buf.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn regsub_copy(alloc: std.mem.Allocator, buf: *std.ArrayList(u8), text: []const u8, start: usize, end: usize) void {
+    buf.appendSlice(alloc, text[start..end]) catch unreachable;
 }
 
 fn regsub_expand(
@@ -97,9 +101,9 @@ fn regsub_expand(
                 const idx: usize = next - '0';
                 const match = matches[idx];
                 if (match.rm_so >= 0 and match.rm_eo >= 0 and match.rm_so != match.rm_eo) {
-                    const start: usize = @intCast(match.rm_so);
-                    const end: usize = @intCast(match.rm_eo);
-                    buf.appendSlice(alloc, text[start..end]) catch unreachable;
+                    const mstart: usize = @intCast(match.rm_so);
+                    const mend: usize = @intCast(match.rm_eo);
+                    regsub_copy(alloc, buf, text, mstart, mend);
                     i += 1;
                     continue;
                 }

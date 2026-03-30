@@ -1169,6 +1169,502 @@ pub fn status_prompt_save_history() void {
     }
 }
 
+// ── Ported tmux functions ───────────────────────────────────────────────
+
+const options_table = @import("options-table.zig");
+const session_mod = @import("session.zig");
+const paste = @import("paste.zig");
+const menu_mod = @import("menu.zig");
+const resize_mod = @import("resize.zig");
+const format_draw = @import("format-draw.zig");
+
+/// Accept prompt immediately (port of tmux status_prompt_accept).
+/// Used as a cmdq callback when PROMPT_ACCEPT is set.
+pub fn status_prompt_accept(c: *T.Client) void {
+    const state = find_state(c) orelse return;
+    _ = state.inputcb(c, state.data, "y", true);
+    status_prompt_clear(c);
+}
+
+/// Paste into prompt from the paste buffer or saved yank
+/// (port of tmux status_prompt_paste).
+pub fn status_prompt_paste(c: *T.Client) bool {
+    const state = find_state(c) orelse return false;
+
+    if (state.saved_input.len() != 0)
+        return yank_saved_prompt(state);
+
+    const pb = paste.paste_get_top(null) orelse return false;
+    var bufsize: usize = 0;
+    const bufdata = paste.paste_buffer_data(pb, &bufsize);
+    if (bufsize == 0) return false;
+
+    var sanitized: std.ArrayList(u8) = .{};
+    defer sanitized.deinit(xm.allocator);
+
+    var i: usize = 0;
+    while (i < bufsize) {
+        const ch = bufdata[i];
+        if (ch <= 31 or ch >= 127) break;
+        sanitized.append(xm.allocator, ch) catch unreachable;
+        i += 1;
+    }
+
+    if (sanitized.items.len == 0) return false;
+    insert_prompt_bytes(state, sanitized.items);
+    return true;
+}
+
+/// Redraw a single prompt character with control-char rendering
+/// (port of tmux status_prompt_redraw_character).
+/// Returns true if drawing should continue.
+pub fn status_prompt_redraw_character(
+    out: *std.ArrayList(u8),
+    offset: u32,
+    pwidth: u32,
+    width: *u32,
+    ud: *const T.Utf8Data,
+) bool {
+    if (width.* < offset) {
+        width.* += ud.width;
+        return true;
+    }
+    if (width.* >= offset + pwidth)
+        return false;
+    width.* += ud.width;
+    if (width.* > offset + pwidth)
+        return false;
+
+    render_prompt_cell(out, ud);
+    return true;
+}
+
+/// Redraw quote indicator '^' if necessary
+/// (port of tmux status_prompt_redraw_quote).
+/// Returns true if drawing should continue.
+pub fn status_prompt_redraw_quote(
+    c: *T.Client,
+    pcursor: u32,
+    out: *std.ArrayList(u8),
+    offset: u32,
+    pwidth: u32,
+    width: *u32,
+) bool {
+    const state = find_state(c) orelse return true;
+    if (!state.quote_next) return true;
+    const cursor_col = rendered_cursor_width(state);
+    if (cursor_col != pcursor + 1) return true;
+    var ud = std.mem.zeroes(T.Utf8Data);
+    utf8.utf8_set(&ud, '^');
+    return status_prompt_redraw_character(out, offset, pwidth, width, &ud);
+}
+
+/// Check if a utf8 character is in a separator list
+/// (port of tmux status_prompt_in_list).
+pub fn status_prompt_in_list(ws: []const u8, ud: *const T.Utf8Data) bool {
+    if (ud.size != 1 or ud.width != 1) return false;
+    return std.mem.indexOfScalar(u8, ws, ud.data[0]) != null;
+}
+
+/// Check if a utf8 character is a space
+/// (port of tmux status_prompt_space).
+pub fn status_prompt_space(ud: *const T.Utf8Data) bool {
+    if (ud.size != 1 or ud.width != 1) return false;
+    return ud.data[0] == ' ';
+}
+
+/// Translate vi key to emacs equivalent
+/// (port of tmux status_prompt_translate_key).
+/// Returns 0 to drop, 1 to process as emacs key, 2 to append.
+pub fn status_prompt_translate_key(c: *T.Client, key: T.key_code, new_key: *T.key_code) i32 {
+    const state = find_state(c) orelse return 0;
+    if (state.mode == .entry) {
+        switch (key) {
+            'a' | T.KEYC_CTRL,
+            'c' | T.KEYC_CTRL,
+            'e' | T.KEYC_CTRL,
+            'g' | T.KEYC_CTRL,
+            'h' | T.KEYC_CTRL,
+            T.C0_HT,
+            'k' | T.KEYC_CTRL,
+            'n' | T.KEYC_CTRL,
+            'p' | T.KEYC_CTRL,
+            't' | T.KEYC_CTRL,
+            'u' | T.KEYC_CTRL,
+            'v' | T.KEYC_CTRL,
+            'w' | T.KEYC_CTRL,
+            'y' | T.KEYC_CTRL,
+            T.C0_CR,
+            T.C0_LF,
+            T.KEYC_LEFT | T.KEYC_CTRL,
+            T.KEYC_RIGHT | T.KEYC_CTRL,
+            T.KEYC_BSPACE,
+            T.KEYC_DC,
+            T.KEYC_DOWN,
+            T.KEYC_END,
+            T.KEYC_HOME,
+            T.KEYC_LEFT,
+            T.KEYC_RIGHT,
+            T.KEYC_UP,
+            => {
+                new_key.* = key;
+                return 1;
+            },
+            T.C0_ESC => {
+                enter_command_mode(c, state);
+                return 0;
+            },
+            else => {},
+        }
+        new_key.* = key;
+        return 2;
+    }
+    new_key.* = key;
+    return 0;
+}
+
+/// Forward word motion (port of tmux status_prompt_forward_word).
+pub fn status_prompt_forward_word(c: *T.Client) void {
+    const state = find_state(c) orelse return;
+    _ = prompt_forward_word(state, prompt_separators(c));
+}
+
+/// Backward word motion (port of tmux status_prompt_backward_word).
+pub fn status_prompt_backward_word(c: *T.Client) void {
+    const state = find_state(c) orelse return;
+    _ = prompt_backward_word(state, prompt_separators(c));
+}
+
+/// End-of-word motion (port of tmux status_prompt_end_word).
+pub fn status_prompt_end_word(c: *T.Client) void {
+    const state = find_state(c) orelse return;
+    _ = prompt_end_word(state, prompt_separators(c));
+}
+
+/// History up (port of tmux status_prompt_up_history).
+pub fn status_prompt_up_history(c: *T.Client) ?[]const u8 {
+    const state = find_state(c) orelse return null;
+    if (!history_up(state)) return null;
+    return state_current_input(state);
+}
+
+/// History down (port of tmux status_prompt_down_history).
+pub fn status_prompt_down_history(c: *T.Client) ?[]const u8 {
+    const state = find_state(c) orelse return null;
+    if (!history_down(state)) return null;
+    return state_current_input(state);
+}
+
+/// Add a line to history (port of tmux status_prompt_add_history).
+pub fn status_prompt_add_history(line: []const u8, prompt_type: PromptType) void {
+    status_prompt_history_add(line, prompt_type);
+}
+
+/// Add a typed history line from a file (port of tmux status_prompt_add_typed_history).
+pub fn status_prompt_add_typed_history(line: []const u8) void {
+    addTypedHistoryFromLine(line);
+}
+
+/// Find the history file path (port of tmux status_prompt_find_history_file).
+pub fn status_prompt_find_history_file() ?[]u8 {
+    return historyFilePath();
+}
+
+/// Data for the completion menu callback.
+const StatusPromptMenu = struct {
+    c: *T.Client,
+    start: u32,
+    size: u32,
+    list: [][]u8,
+    flag: u8,
+};
+
+/// Menu callback for prompt completion
+/// (port of tmux status_prompt_menu_callback).
+fn status_prompt_menu_callback(spm: *StatusPromptMenu, idx: u32) void {
+    const c = spm.c;
+    const state = find_state(c) orelse return;
+    if (idx >= spm.size) return;
+    const actual_idx = spm.start + idx;
+    if (actual_idx >= spm.list.len) return;
+
+    var s: []u8 = undefined;
+    if (spm.flag == 0) {
+        s = xm.xstrdup(spm.list[actual_idx]);
+    } else {
+        s = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ spm.flag, spm.list[actual_idx] }) catch unreachable;
+    }
+    defer xm.allocator.free(s);
+
+    if (state.prompt_type == .window_target) {
+        set_prompt_input(state, s);
+        request_status_redraw(c);
+    } else if (replace_prompt_complete(c, state, s)) {
+        request_status_redraw(c);
+    }
+}
+
+/// Free a StatusPromptMenu's list entries.
+fn status_prompt_menu_free(spm: *StatusPromptMenu) void {
+    for (spm.list) |item| xm.allocator.free(item);
+    xm.allocator.free(spm.list);
+    xm.allocator.destroy(spm);
+}
+
+/// Sort completion list (port of tmux status_prompt_complete_sort).
+pub fn status_prompt_complete_sort(list: *std.ArrayList([]const u8)) void {
+    if (list.items.len < 2) return;
+    std.mem.sort([]const u8, list.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+}
+
+/// Build completion list including commands, aliases, options, and layouts
+/// (port of tmux status_prompt_complete_list).
+pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayList([]const u8) {
+    var list = std.ArrayList([]const u8).init(xm.allocator);
+    const slen = word.len;
+
+    for (cmd_mod.cmd_entries()) |entry| {
+        if (entry.name.len >= slen and std.mem.eql(u8, entry.name[0..slen], word))
+            completionAddUnique(&list, entry.name);
+        if (entry.alias) |alias| {
+            if (alias.len >= slen and std.mem.eql(u8, alias[0..slen], word))
+                completionAddUnique(&list, alias);
+        }
+    }
+
+    if (opts.options_get_only(opts.global_options, "command-alias")) |v| {
+        var a = opts.options_array_first(v);
+        while (a) |item| {
+            const value = opts.options_array_item_value(item);
+            if (std.mem.indexOfScalar(u8, value, '=')) |eq_pos| {
+                const alias_name = value[0..eq_pos];
+                if (alias_name.len >= slen and std.mem.eql(u8, alias_name[0..slen], word))
+                    completionAddUnique(&list, alias_name);
+            }
+            a = opts.options_array_next(v, item);
+        }
+    }
+
+    if (at_start) return list;
+
+    for (options_table.options_table) |*oe| {
+        if (oe.name.len >= slen and std.mem.eql(u8, oe.name[0..slen], word))
+            completionAddUnique(&list, oe.name);
+    }
+
+    const layouts = [_][]const u8{
+        "even-horizontal",       "even-vertical",
+        "main-horizontal",       "main-horizontal-mirrored",
+        "main-vertical",         "main-vertical-mirrored",
+        "tiled",
+    };
+    for (&layouts) |layout| {
+        if (layout.len >= slen and std.mem.eql(u8, layout[0..slen], word))
+            completionAddUnique(&list, layout);
+    }
+
+    return list;
+}
+
+/// Complete a session name (port of tmux status_prompt_complete_session).
+pub fn status_prompt_complete_session(
+    list: *std.ArrayList([]const u8),
+    s: []const u8,
+    flag: u8,
+) ?[]u8 {
+    if (!@hasDecl(session_mod, "sessions")) return null;
+
+    var it = session_mod.sessions.valueIterator();
+    while (it.next()) |sess_ptr| {
+        const sess = sess_ptr.*;
+        if (s.len == 0 or
+            (sess.name.len >= s.len and std.mem.eql(u8, sess.name[0..s.len], s)))
+        {
+            const with_colon = std.fmt.allocPrint(xm.allocator, "{s}:", .{sess.name}) catch unreachable;
+            defer xm.allocator.free(with_colon);
+            completionAddUnique(list, with_colon);
+        } else if (s.len > 0 and s[0] == '$') {
+            const id_str = std.fmt.allocPrint(xm.allocator, "{d}", .{sess.id}) catch unreachable;
+            defer xm.allocator.free(id_str);
+            const rest = s[1..];
+            if (rest.len == 0 or
+                (id_str.len >= rest.len and std.mem.eql(u8, id_str[0..rest.len], rest)))
+            {
+                const with_dollar = std.fmt.allocPrint(xm.allocator, "${s}:", .{id_str}) catch unreachable;
+                defer xm.allocator.free(with_dollar);
+                completionAddUnique(list, with_dollar);
+            }
+        }
+    }
+
+    const out = completePrefix(list.items) orelse return null;
+    if (flag != 0) {
+        const tmp = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ flag, out }) catch unreachable;
+        xm.allocator.free(out);
+        return tmp;
+    }
+    return out;
+}
+
+/// Complete window targets from a session
+/// (port of tmux status_prompt_complete_window_menu).
+/// Returns the sole match if unique, otherwise null (menu display deferred).
+pub fn status_prompt_complete_window_menu(
+    c: *T.Client,
+    s: *T.Session,
+    word: []const u8,
+    flag: u8,
+) ?[]u8 {
+    const state = find_state(c) orelse return null;
+    var items = std.ArrayList([]u8).init(xm.allocator);
+    defer {
+        for (items.items) |item| xm.allocator.free(item);
+        items.deinit(xm.allocator);
+    }
+
+    var wl_it = s.windows.valueIterator();
+    while (wl_it.next()) |wl_ptr| {
+        const wl = wl_ptr.*;
+        if (word.len != 0) {
+            const idx_str = std.fmt.allocPrint(xm.allocator, "{d}", .{wl.idx}) catch unreachable;
+            defer xm.allocator.free(idx_str);
+            if (idx_str.len < word.len or !std.mem.eql(u8, idx_str[0..word.len], word)) continue;
+        }
+
+        if (state.prompt_type == .window_target) {
+            items.append(
+                xm.allocator,
+                std.fmt.allocPrint(xm.allocator, "{d}", .{wl.idx}) catch unreachable,
+            ) catch unreachable;
+        } else {
+            items.append(
+                xm.allocator,
+                std.fmt.allocPrint(xm.allocator, "{s}:{d}", .{ s.name, wl.idx }) catch unreachable,
+            ) catch unreachable;
+        }
+        if (items.items.len >= 10) break;
+    }
+
+    if (items.items.len == 0) return null;
+    if (items.items.len == 1) {
+        if (flag != 0) {
+            const tmp = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ flag, items.items[0] }) catch unreachable;
+            return tmp;
+        }
+        return xm.xstrdup(items.items[0]);
+    }
+
+    const const_items = @as([][]const u8, items.items);
+    return completePrefix(const_items);
+}
+
+/// Show the completion list as a popup menu
+/// (port of tmux status_prompt_complete_list_menu).
+/// Returns true if a menu was shown (currently a no-op placeholder since
+/// the zmux menu infrastructure does not yet support arbitrary callbacks).
+pub fn status_prompt_complete_list_menu(
+    c: *T.Client,
+    list: *std.ArrayList([]const u8),
+    _offset: u32,
+    _flag: u8,
+) bool {
+    _ = _offset;
+    _ = _flag;
+    if (list.items.len <= 1) return false;
+
+    const lines = resize_mod.status_line_size(c);
+    if (c.tty.sy <= lines + 2) return false;
+
+    return false;
+}
+
+/// Replace completion at cursor (port of tmux status_prompt_replace_complete).
+pub fn status_prompt_replace_complete_public(c: *T.Client, s: ?[]const u8) bool {
+    const state = find_state(c) orelse return false;
+    return replace_prompt_complete(c, state, s);
+}
+
+/// Full word completion dispatcher
+/// (port of tmux status_prompt_complete).
+/// Handles command, option, session, and window-target completion.
+pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) ?[]u8 {
+    const state = find_state(c) orelse return status_prompt_complete(word, offset == 0);
+
+    if (word.len == 0 and
+        state.prompt_type != .target and
+        state.prompt_type != .window_target)
+        return null;
+
+    if (state.prompt_type != .target and
+        state.prompt_type != .window_target and
+        !std.mem.startsWith(u8, word, "-t") and
+        !std.mem.startsWith(u8, word, "-s"))
+    {
+        var list = status_prompt_complete_list(word, offset == 0);
+        defer {
+            list.deinit(xm.allocator);
+        }
+
+        if (list.items.len == 0) return null;
+        if (list.items.len == 1)
+            return std.fmt.allocPrint(xm.allocator, "{s} ", .{list.items[0]}) catch unreachable;
+
+        status_prompt_complete_sort(&list);
+        const prefix = completePrefix(list.items);
+        if (prefix) |p| {
+            if (std.mem.eql(u8, word, p)) {
+                xm.allocator.free(p);
+                _ = status_prompt_complete_list_menu(c, &list, offset, 0);
+                return null;
+            }
+        }
+        return prefix;
+    }
+
+    var s: []const u8 = undefined;
+    var flag: u8 = 0;
+    if (state.prompt_type == .target or state.prompt_type == .window_target) {
+        s = word;
+        flag = 0;
+    } else {
+        if (word.len < 2) return null;
+        s = word[2..];
+        flag = word[1];
+    }
+
+    if (state.prompt_type == .window_target) {
+        const sess = c.session orelse return null;
+        const out = status_prompt_complete_window_menu(c, sess, s, 0);
+        return out;
+    }
+
+    const colon_pos = std.mem.indexOfScalar(u8, s, ':');
+    if (colon_pos == null) {
+        var list = std.ArrayList([]const u8).init(xm.allocator);
+        defer list.deinit(xm.allocator);
+        return status_prompt_complete_session(&list, s, flag);
+    }
+
+    const colon = colon_pos.?;
+    if (std.mem.indexOfScalar(u8, s[colon + 1 ..], '.') == null) {
+        const sess = blk: {
+            if (colon == 0) {
+                break :blk c.session;
+            } else {
+                const sess_name = s[0..colon];
+                break :blk session_mod.session_find(sess_name);
+            }
+        } orelse return null;
+        return status_prompt_complete_window_menu(c, sess, s[colon + 1 ..], flag);
+    }
+
+    return null;
+}
+
 // ── Prompt completion ───────────────────────────────────────────────────
 
 pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {

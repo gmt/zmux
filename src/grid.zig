@@ -1585,7 +1585,16 @@ pub fn grid_compare(ga: *const T.Grid, gb: *const T.Grid) i32 {
 
 pub fn grid_set_cells(_: *T.Grid, _: u32, _: u32, _: *const T.GridCell, _: []const u8) void {}
 
-pub fn grid_string_cells(_: *T.Grid, _: u32, _: u32, _: u32, _: StringCellsOptions) []u8 {
+/// tmux `grid_string_cells` (flags / lastgc / screen) — stub; use `string_cells` for Zig callers.
+pub fn grid_string_cells(
+    _: *T.Grid,
+    _: u32,
+    _: u32,
+    _: u32,
+    _: ?*?*T.GridCell,
+    _: i32,
+    _: ?*T.Screen,
+) []u8 {
     return xm.xstrdup("");
 }
 

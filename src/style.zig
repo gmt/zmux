@@ -42,6 +42,12 @@ const style_default = T.Style{
     .default_type = .base,
 };
 
+pub fn style_parse_is_valid(in: []const u8) bool {
+    var sy = style_default;
+    const base = T.GridCell{};
+    return style_parse(&sy, &base, in) == 0;
+}
+
 pub fn style_parse(sy: *T.Style, base: *const T.GridCell, in: []const u8) i32 {
     if (in.len == 0) return 0;
 

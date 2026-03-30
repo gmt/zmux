@@ -255,6 +255,7 @@ pub fn main() !void {
         flags |= T.CLIENT_DEFAULTSOCKET;
     }
     server_mod.socket_path = path.?;
+    env_mod.socket_path = path.?;
     if (label) |l| xm.allocator.free(l);
 
     if (!cfg_file_override) {

@@ -23,9 +23,9 @@
 
 const std = @import("std");
 const T = @import("types.zig");
-const tty_features = @import("tty-features.zig");
 const xm = @import("xmalloc.zig");
 const c = @import("c.zig");
+const log = @import("log.zig");
 
 // ── Capability types ──────────────────────────────────────────────────────
 
@@ -541,6 +541,10 @@ comptime {
 
 pub const TtyTerm = struct {
     codes: []CapabilityValue,
+    /// Bitset of terminal feature indices merged into this term (mirrors tmux tty_term.features).
+    applied_features: i32 = 0,
+    /// TERM_* flags from tty-features.c (256/RGB/DECSLRM/DECFRA/sixel).
+    term_flags: i32 = 0,
 
     pub fn init() TtyTerm {
         const codes = xm.allocator.alloc(CapabilityValue, TTYC.count()) catch unreachable;
@@ -586,6 +590,15 @@ pub const TtyTerm = struct {
                 }
                 break;
             }
+        }
+    }
+
+    /// Apply a colon-separated capability override string (tmux tty_term_apply).
+    pub fn tty_term_apply(self: *TtyTerm, capabilities: []const u8, quiet: bool) void {
+        var offset: usize = 0;
+        var chunk_buf: [8192]u8 = undefined;
+        while (tty_term_override_next(capabilities, &offset, &chunk_buf)) |chunk| {
+            apply_capability_chunk(self, chunk, quiet);
         }
     }
 
@@ -684,14 +697,17 @@ pub fn freeTermCaps(caps: [][]u8) void {
 // feature-fallback strings. They are the primary interface used by tty.zig.
 
 pub fn hasCapability(tty: *const T.Tty, name: []const u8) bool {
+    const tty_features = @import("tty-features.zig");
     return capabilityValue(tty.client, name) != null or tty_features.hasCapability(tty.client, name);
 }
 
 pub fn stringCapability(tty: *const T.Tty, name: []const u8) ?[]const u8 {
+    const tty_features = @import("tty-features.zig");
     return capabilityValue(tty.client, name) orelse tty_features.stringCapability(tty.client, name);
 }
 
 pub fn numberCapability(tty: *const T.Tty, name: []const u8) ?i32 {
+    const tty_features = @import("tty-features.zig");
     const value = capabilityValue(tty.client, name) orelse tty_features.stringCapability(tty.client, name) orelse return null;
     return std.fmt.parseInt(i32, value, 10) catch null;
 }
@@ -735,6 +751,91 @@ pub fn lookupCode(name: []const u8) ?TTYC {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
+
+fn capabilityNameForTable(raw: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, raw, "*:")) return raw[2..];
+    return raw;
+}
+
+/// Next colon-separated field; `::` is a literal colon (tmux tty_term_override_next).
+fn tty_term_override_next(s: []const u8, offset: *usize, out: *[8192]u8) ?[]const u8 {
+    var at = offset.*;
+    if (at >= s.len) return null;
+    var n: usize = 0;
+    while (at < s.len) {
+        if (s[at] == ':') {
+            if (at + 1 < s.len and s[at + 1] == ':') {
+                if (n >= out.len - 1) return null;
+                out[n] = ':';
+                n += 1;
+                at += 2;
+            } else break;
+        } else {
+            if (n >= out.len - 1) return null;
+            out[n] = s[at];
+            n += 1;
+            at += 1;
+        }
+    }
+    if (at < s.len and s[at] == ':') at += 1;
+    offset.* = at;
+    return out[0..n];
+}
+
+fn apply_capability_chunk(term: *TtyTerm, chunk: []const u8, quiet: bool) void {
+    if (chunk.len == 0) return;
+
+    var remove = false;
+    var name_part: []const u8 = chunk;
+    var value_slice: []const u8 = "";
+
+    if (std.mem.indexOfScalar(u8, chunk, '=')) |eq| {
+        name_part = chunk[0..eq];
+        value_slice = chunk[eq + 1 ..];
+    } else if (chunk.len >= 1 and chunk[chunk.len - 1] == '@') {
+        name_part = chunk[0 .. chunk.len - 1];
+        remove = true;
+    }
+
+    const lookup_name = capabilityNameForTable(name_part);
+    const code = TtyTerm.codeByName(lookup_name) orelse return;
+    const entry = TtyTerm.codeEntry(code);
+    const idx = @intFromEnum(code);
+
+    if (!quiet) {
+        if (remove) {
+            log.log_debug("override: {s}@", .{lookup_name});
+        } else if (value_slice.len == 0 and entry.cap_type == .flag) {
+            log.log_debug("override: {s}", .{lookup_name});
+        } else {
+            log.log_debug("override: {s}={s}", .{ lookup_name, value_slice });
+        }
+    }
+
+    if (remove) {
+        if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+        term.codes[idx] = .none;
+        return;
+    }
+
+    switch (entry.cap_type) {
+        .none => {},
+        .string => {
+            const owned = xm.xstrdup(value_slice);
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .string = owned };
+        },
+        .number => {
+            const n = std.fmt.parseInt(i32, value_slice, 10) catch return;
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .number = n };
+        },
+        .flag => {
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .flag = true };
+        },
+    }
+}
 
 fn capabilityValue(cl: *const T.Client, name: []const u8) ?[]const u8 {
     const caps = cl.term_caps orelse return null;
@@ -856,6 +957,7 @@ test "tty_term describes recorded reduced capabilities" {
 }
 
 test "tty_term falls back to feature-provided capability strings" {
+    const tty_features = @import("tty-features.zig");
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,

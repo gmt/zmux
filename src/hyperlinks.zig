@@ -169,6 +169,41 @@ fn make_dedupe_key(internal_id: []const u8, uri: []const u8) []u8 {
     return std.fmt.allocPrint(xm.allocator, "{s}\x1f{s}", .{ internal_id, uri }) catch unreachable;
 }
 
+/// Red-black tree order by inner id (tmux hyperlinks_by_inner_cmp).
+pub fn hyperlinks_by_inner_cmp(left_inner: u32, right_inner: u32) i32 {
+    if (left_inner < right_inner) return -1;
+    if (left_inner > right_inner) return 1;
+    return 0;
+}
+
+/// Red-black tree order by internal id then URI; anonymous links compare by inner (tmux hyperlinks_by_uri_cmp).
+pub fn hyperlinks_by_uri_cmp(
+    left_internal_id: []const u8,
+    left_uri: []const u8,
+    left_inner: u32,
+    right_internal_id: []const u8,
+    right_uri: []const u8,
+    right_inner: u32,
+) i32 {
+    const left_anon = left_internal_id.len == 0;
+    const right_anon = right_internal_id.len == 0;
+    if (left_anon or right_anon) {
+        if (!left_anon) return -1;
+        if (!right_anon) return 1;
+        return hyperlinks_by_inner_cmp(left_inner, right_inner);
+    }
+    switch (std.mem.order(u8, left_internal_id, right_internal_id)) {
+        .lt => return -1,
+        .gt => return 1,
+        .eq => {},
+    }
+    return switch (std.mem.order(u8, left_uri, right_uri)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
 fn reset_global_state_for_tests() void {
     if (global_hyperlinks_init) {
         for (global_hyperlinks.items) |hlu| {
@@ -261,4 +296,33 @@ test "hyperlinks reset removes all entries" {
     hyperlinks_reset(hl);
 
     try std.testing.expect(!hyperlinks_get(hl, inner, null, null, null));
+}
+
+test "hyperlinks_by_inner_cmp orders by inner id" {
+    try std.testing.expectEqual(@as(i32, -1), hyperlinks_by_inner_cmp(1, 9));
+    try std.testing.expectEqual(@as(i32, 1), hyperlinks_by_inner_cmp(9, 1));
+    try std.testing.expectEqual(@as(i32, 0), hyperlinks_by_inner_cmp(4, 4));
+}
+
+test "hyperlinks_by_uri_cmp matches tmux anonymous and id+uri rules" {
+    try std.testing.expectEqual(
+        @as(i32, -1),
+        hyperlinks_by_uri_cmp("a", "https://x", 2, "", "https://x", 3),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 1),
+        hyperlinks_by_uri_cmp("", "https://x", 3, "b", "https://x", 2),
+    );
+    try std.testing.expectEqual(
+        @as(i32, -1),
+        hyperlinks_by_uri_cmp("", "https://a", 9, "", "https://a", 10),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        hyperlinks_by_uri_cmp("id", "https://z", 1, "id", "https://z", 99),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 1),
+        hyperlinks_by_uri_cmp("id", "https://z", 1, "id", "https://a", 1),
+    );
 }

@@ -63,5 +63,5 @@ separate docs under `docs/`.
   local workarounds.
 - UTF-8, display-width, combine, and rendering code stays within
   the declared stack.
-- Functional gaps go in `docs/porting-todo.md`.
+- Functional gaps go in `docs/zig-porting-todo.md`.
 - Zig-idiom cleanup goes in `docs/zig-porting-debt.md`.

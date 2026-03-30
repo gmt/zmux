@@ -37,14 +37,13 @@ Each item describes what zmux does and what it lacks.
 
 ## Server-Client
 
-- `server_client_handle_key`/`server_client_key_callback` key
-  dispatch is stubbed.
-- `server_client_check_mouse`/`server_client_check_mouse_in_pane`
-  mouse classification is stubbed.
-- `server_client_set_overlay` overlay installation is stubbed.
-- `server_client_check_pane_resize`/`check_pane_buffer` are stubs.
-- Repeat/resize/redraw/click timer callbacks are stubs.
-- `server_client_unref`/`server_client_free` lifecycle is stubbed.
+- `window_update_focus` is not yet ported (called during overlay
+  install/clear).
+- Status line range queries for mouse-on-status classification use
+  a simplified area test; `status_get_range` is not available.
+- Pane buffer management operates on `input_pending` instead of
+  libevent bufferevents; backpressure is not wired.
+- `window_pane_paste` is a minimal stub.
 
 ## Window Copy Mode
 

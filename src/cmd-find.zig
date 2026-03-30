@@ -32,6 +32,7 @@ const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const env_mod = @import("environ.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
+const log = @import("log.zig");
 
 const ParsedTarget = struct {
     session: ?[]const u8 = null,
@@ -39,6 +40,34 @@ const ParsedTarget = struct {
     pane: ?[]const u8 = null,
     window_only: bool = false,
     pane_only: bool = false,
+};
+
+pub const MapEntry = struct { key: []const u8, value: []const u8 };
+
+pub const cmd_find_session_table: []const MapEntry = &.{};
+pub const cmd_find_window_table: []const MapEntry = &.{
+    .{ .key = "{start}", .value = "^" },
+    .{ .key = "{last}", .value = "!" },
+    .{ .key = "{end}", .value = "$" },
+    .{ .key = "{next}", .value = "+" },
+    .{ .key = "{previous}", .value = "-" },
+};
+pub const cmd_find_pane_table: []const MapEntry = &.{
+    .{ .key = "{last}", .value = "!" },
+    .{ .key = "{next}", .value = "+" },
+    .{ .key = "{previous}", .value = "-" },
+    .{ .key = "{top}", .value = "top" },
+    .{ .key = "{bottom}", .value = "bottom" },
+    .{ .key = "{left}", .value = "left" },
+    .{ .key = "{right}", .value = "right" },
+    .{ .key = "{top-left}", .value = "top-left" },
+    .{ .key = "{top-right}", .value = "top-right" },
+    .{ .key = "{bottom-left}", .value = "bottom-left" },
+    .{ .key = "{bottom-right}", .value = "bottom-right" },
+    .{ .key = "{up-of}", .value = "{up-of}" },
+    .{ .key = "{down-of}", .value = "{down-of}" },
+    .{ .key = "{left-of}", .value = "{left-of}" },
+    .{ .key = "{right-of}", .value = "{right-of}" },
 };
 
 /// Determine whether a cmd_find_state is valid.
@@ -516,6 +545,138 @@ pub fn cmd_find_client(item: ?*cmdq_mod.CmdqItem, target: ?[]const u8, quiet: bo
     return null;
 }
 
+/// Check if a find state is empty (all pointer fields null).
+pub fn cmd_find_empty_state(fs: *const T.CmdFindState) bool {
+    return fs.s == null and fs.wl == null and fs.w == null and fs.wp == null;
+}
+
+/// Populate state from a winlink and pane pair.
+pub fn cmd_find_from_winlink_pane(fs: *T.CmdFindState, wl: *T.Winlink, wp: *T.WindowPane, flags: u32) void {
+    cmd_find_clear_state(fs, flags);
+    fs.s = wl.session;
+    fs.wl = wl;
+    fs.idx = wl.idx;
+    fs.w = wl.window;
+    fs.wp = wp;
+    cmd_find_log_state("cmd_find_from_winlink_pane", fs);
+}
+
+/// Log the fields of a find state for debugging.
+pub fn cmd_find_log_state(prefix: []const u8, fs: *const T.CmdFindState) void {
+    if (fs.s) |s|
+        log.log_debug("{s}: s=${d} {s}", .{ prefix, s.id, s.name })
+    else
+        log.log_debug("{s}: s=none", .{prefix});
+
+    if (fs.wl) |wl| {
+        if (fs.w) |w| {
+            log.log_debug("{s}: wl={d} {d} w=@{d} {s}", .{
+                prefix, wl.idx, @intFromBool(wl.window == w), w.id, w.name,
+            });
+        } else {
+            log.log_debug("{s}: wl={d} w=none", .{ prefix, wl.idx });
+        }
+    } else {
+        log.log_debug("{s}: wl=none", .{prefix});
+    }
+
+    if (fs.wp) |wp|
+        log.log_debug("{s}: wp=%{d}", .{ prefix, wp.id })
+    else
+        log.log_debug("{s}: wp=none", .{prefix});
+
+    if (fs.idx != -1)
+        log.log_debug("{s}: idx={d}", .{ prefix, fs.idx })
+    else
+        log.log_debug("{s}: idx=none", .{prefix});
+}
+
+/// Find best session from a list, or all sessions if list is null.
+pub fn cmd_find_best_session(slist: ?[]const *T.Session, flags: u32) ?*T.Session {
+    if (slist) |list| {
+        var best: ?*T.Session = null;
+        for (list) |candidate| {
+            if (cmd_find_session_better(candidate, best, flags))
+                best = candidate;
+        }
+        return best;
+    }
+    return select_best_session(flags);
+}
+
+/// Find best session and winlink for window stored in fs.w.
+pub fn cmd_find_best_session_with_window(fs: *T.CmdFindState) bool {
+    const w = fs.w orelse return false;
+    fs.s = select_session_for_window(w, fs.flags) orelse return false;
+    return cmd_find_best_winlink_with_window(fs);
+}
+
+/// Find the best winlink for window fs.w in session fs.s.
+pub fn cmd_find_best_winlink_with_window(fs: *T.CmdFindState) bool {
+    const s = fs.s orelse return false;
+    const w = fs.w orelse return false;
+
+    if (s.curw) |curw| {
+        if (curw.window == w) {
+            fs.wl = curw;
+            fs.idx = curw.idx;
+            return true;
+        }
+    }
+
+    var it = s.windows.valueIterator();
+    while (it.next()) |entry| {
+        const wl = entry.*;
+        if (wl.window == w) {
+            fs.wl = wl;
+            fs.idx = wl.idx;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Find session from string. Fills in fs.s.
+pub fn cmd_find_get_session(fs: *T.CmdFindState, session: []const u8) bool {
+    return resolve_session_state(fs, session);
+}
+
+/// Find window from string. Fills in fs.s, fs.wl, fs.w.
+pub fn cmd_find_get_window(fs: *T.CmdFindState, window: []const u8, only: bool) bool {
+    const current = fs.current orelse return false;
+    return resolve_window_general(fs, current, window, only);
+}
+
+/// Find window in current session. Needs fs.s, fills in fs.wl and fs.w.
+pub fn cmd_find_get_window_with_session(fs: *T.CmdFindState, window: []const u8) bool {
+    return resolve_window_with_session(fs, window);
+}
+
+/// Find pane from string. Fills in fs.s, fs.wl, fs.w, fs.wp.
+pub fn cmd_find_get_pane(fs: *T.CmdFindState, pane: []const u8, only: bool) bool {
+    const current = fs.current orelse return false;
+    return resolve_pane_general(fs, current, pane, only);
+}
+
+/// Find pane in current session. Needs fs.s, fills in fs.wl, fs.w, fs.wp.
+pub fn cmd_find_get_pane_with_session(fs: *T.CmdFindState, pane: []const u8) bool {
+    return resolve_pane_with_session(fs, pane);
+}
+
+/// Find pane in current window. Needs fs.w, fills in fs.wp.
+pub fn cmd_find_get_pane_with_window(fs: *T.CmdFindState, pane: []const u8) bool {
+    return resolve_pane_with_window(fs, pane);
+}
+
+/// Map a string through a conversion table, returning the mapped value
+/// or the original string if no match is found.
+pub fn cmd_find_map_table(table: []const MapEntry, s: []const u8) []const u8 {
+    for (table) |entry| {
+        if (std.mem.eql(u8, s, entry.key)) return entry.value;
+    }
+    return s;
+}
+
 fn resolve_session_state(fs: *T.CmdFindState, target: []const u8) bool {
     const session = find_session(target, fs.flags) orelse return false;
     sess.session_repair_current(session);
@@ -899,25 +1060,18 @@ fn parse_target(target: []const u8, find_type: T.CmdFindType) ParsedTarget {
 }
 
 fn map_session_target(value: ?[]const u8) ?[]const u8 {
-    return value;
+    const target = value orelse return null;
+    return cmd_find_map_table(cmd_find_session_table, target);
 }
 
 fn map_window_target(value: ?[]const u8) ?[]const u8 {
     const target = value orelse return null;
-    if (std.mem.eql(u8, target, "{start}")) return "^";
-    if (std.mem.eql(u8, target, "{last}")) return "!";
-    if (std.mem.eql(u8, target, "{end}")) return "$";
-    if (std.mem.eql(u8, target, "{next}")) return "+";
-    if (std.mem.eql(u8, target, "{previous}")) return "-";
-    return target;
+    return cmd_find_map_table(cmd_find_window_table, target);
 }
 
 fn map_pane_target(value: ?[]const u8) ?[]const u8 {
     const target = value orelse return null;
-    if (std.mem.eql(u8, target, "{last}")) return "!";
-    if (std.mem.eql(u8, target, "{next}")) return "+";
-    if (std.mem.eql(u8, target, "{previous}")) return "-";
-    return target;
+    return cmd_find_map_table(cmd_find_pane_table, target);
 }
 
 fn parse_optional_positive(text: []const u8) ?usize {

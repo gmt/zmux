@@ -56,14 +56,6 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (cmd.entry == &entry_buffer) {
-        if (args.has('K')) {
-            cmdq.cmdq_error(item, "choose-buffer custom key format not supported yet", .{});
-            return .@"error";
-        }
-        if (args.has('N') or args.has('y')) {
-            cmdq.cmdq_error(item, "choose-buffer preview flags not supported yet", .{});
-            return .@"error";
-        }
         _ = window_buffer.enterMode(wp, &target, args);
         return .normal;
     }
@@ -276,8 +268,10 @@ test "choose-buffer enters the reduced buffer mode when paste buffers exist" {
     try std.testing.expectEqual(&window_buffer.window_buffer_mode, win.window_pane_mode(setup.pane).?.mode);
 }
 
-test "choose-buffer rejects unsupported custom key format" {
+test "choose-buffer accepts custom key format" {
     const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const window_buffer_mod = @import("window-buffer.zig");
 
     init_test_globals();
     defer deinit_test_globals();
@@ -306,12 +300,46 @@ test "choose-buffer rejects unsupported custom key format" {
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-buffer", "-K", "#{line}", "-t", target }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
-    defer if (client.message_string) |msg| xm.allocator.free(msg);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Choose-buffer custom key format not supported yet", client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    const wme = win.window_pane_mode(setup.pane).?;
+    try std.testing.expectEqual(&window_buffer_mod.window_buffer_mode, wme.mode);
+    try std.testing.expectEqualStrings(
+        "#{line}",
+        window_buffer_mod.window_buffer_data(wme).key_format,
+    );
+}
+
+test "choose-buffer preview flags flow into buffer mode" {
+    const sess = @import("session.zig");
+    const win = @import("window.zig");
+    const mode_tree = @import("mode-tree.zig");
+    const window_buffer_mod = @import("window-buffer.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+    paste_mod.paste_reset_for_tests();
+    paste_mod.paste_add(null, xm.xstrdup("buffer body"));
+
+    const setup = try test_setup("choose-buffer-preview");
+    defer if (sess.session_find("choose-buffer-preview") != null) sess.session_destroy(setup.session, false, "test");
+
+    const target = try test_target(xm.allocator, "choose-buffer-preview");
+    defer xm.allocator.free(target);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "choose-buffer", "-N", "-t", target }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const wme = win.window_pane_mode(setup.pane).?;
+    const data = window_buffer_mod.window_buffer_data(wme);
+    try std.testing.expectEqual(mode_tree.Preview.off, data.tree.preview);
 }
 
 test "choose-client is a no-op when there are no clients" {

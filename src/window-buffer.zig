@@ -67,6 +67,15 @@ const BufferModeData = struct {
     sort_crit: T.SortCriteria = .{},
 };
 
+fn previewModeFromArgs(args: *const args_mod.Arguments) mode_tree.Preview {
+    const count = if (args.entry('N')) |entry| entry.count else 0;
+    return switch (count) {
+        0 => .normal,
+        1 => .off,
+        else => .big,
+    };
+}
+
 const EditData = struct {
     wp_id: u32,
     name: []u8,
@@ -120,9 +129,13 @@ pub fn enterMode(
 
     data.tree = mode_tree.start(wp, .{
         .modedata = @ptrCast(data),
+        .preview = previewModeFromArgs(args),
         .zoom = args.has('Z'),
         .buildcb = buildTree,
         .searchcb = searchItem,
+        .menucb = modeTreeMenuCallback,
+        .keycb = modeTreeKeyCallback,
+        .helpcb = modeTreeHelpCallback,
     });
 
     const wme = window_mode_runtime.pushMode(wp, &window_buffer_mode, @ptrCast(data), null);
@@ -248,6 +261,10 @@ fn modeData(wme: *T.WindowModeEntry) *BufferModeData {
     return @ptrCast(@alignCast(wme.data.?));
 }
 
+pub fn window_buffer_data(wme: *T.WindowModeEntry) *BufferModeData {
+    return modeData(wme);
+}
+
 fn refreshFromArgs(wme: *T.WindowModeEntry, fs: *const T.CmdFindState, args: *const args_mod.Arguments) void {
     const data = modeData(wme);
     data.fs = fs.*;
@@ -272,6 +289,24 @@ fn rebuildAndDraw(wme: *T.WindowModeEntry) void {
     mode_tree.setFilter(data.tree, data.filter);
     mode_tree.build(data.tree);
     redraw(wme);
+}
+
+fn modeTreeMenuCallback(tree: *mode_tree.Data, client: ?*T.Client, key: T.key_code) void {
+    const wme = window.window_pane_mode(tree.wp) orelse return;
+    if (wme.mode != &window_buffer_mode) return;
+    window_buffer_menu(wme, client, key);
+}
+
+fn modeTreeKeyCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, line: u32) T.key_code {
+    const wme = window.window_pane_mode(tree.wp) orelse return T.KEYC_NONE;
+    if (wme.mode != &window_buffer_mode) return T.KEYC_NONE;
+    const item: *BufferItem = @ptrCast(@alignCast(itemdata orelse return T.KEYC_NONE));
+    return window_buffer_get_key(wme, item, line);
+}
+
+fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[*]const ?[*:0]const u8 {
+    const lines = window_buffer_help(width, item_name);
+    return @ptrCast(lines.ptr);
 }
 
 fn redraw(wme: *T.WindowModeEntry) void {

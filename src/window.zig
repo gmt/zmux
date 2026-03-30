@@ -638,6 +638,7 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
         w.winlinks.deinit(xm.allocator);
         opts.options_free(w.options);
         if (w.old_layout) |old_layout| xm.allocator.free(old_layout);
+        if (w.fill_character) |fc| xm.allocator.free(fc);
         xm.allocator.free(w.name);
         xm.allocator.destroy(w);
     }
@@ -1337,7 +1338,7 @@ pub fn window_pane_set_event(_: *T.WindowPane) void {
 
 /// Stub: start reading client input into a pane.
 /// Returns 0 on success, -1 on error, 1 if the client is not suitable.
-pub fn window_pane_start_input(_wp: *T.WindowPane, _cause: *?[]u8) i32 {
+pub fn window_pane_start_input(_: *T.WindowPane, _cause: *?[]u8) i32 {
     _cause.* = null;
     return 1;
 }
@@ -1524,12 +1525,18 @@ pub fn window_printable_flags(wl: *T.Winlink, escape: bool) []const u8 {
 
 /// Set a window's fill character from the "fill-character" option.
 pub fn window_set_fill_character(w: *T.Window) void {
-    const value = opts.options_get_string(w.options, "fill-character");
-    _ = value;
-    // The fill character feature requires utf8_fromcstr and single-width
-    // validation.  Store a sentinel for now; callers that render fill
-    // characters should fall back to ' '.
+    if (w.fill_character) |fc| xm.allocator.free(fc);
     w.fill_character = null;
+
+    const value = opts.options_get_string(w.options, "fill-character");
+    if (value.len == 0 or !utf8.utf8_isvalid(value)) return;
+
+    const ud = utf8.utf8_fromcstr(value);
+    if (ud.len > 0 and ud[0].width == 1) {
+        w.fill_character = ud;
+    } else {
+        xm.allocator.free(ud);
+    }
 }
 
 /// Handle a pane being "lost" from a window (removed from the pane list
@@ -1594,7 +1601,7 @@ pub fn winlink_clear_flags(wl: *T.Winlink) void {
 
 /// Step forward n winlinks in index order, wrapping around.
 pub fn winlink_next_by_number(s: *T.Session, wl: *T.Winlink, n: u32) *T.Winlink {
-    var sorted = sorted_winlinks(s);
+    const sorted = sorted_winlinks(s);
     defer xm.allocator.free(sorted);
     if (sorted.len == 0) return wl;
 
@@ -1615,7 +1622,7 @@ pub fn winlink_next_by_number(s: *T.Session, wl: *T.Winlink, n: u32) *T.Winlink 
 
 /// Step backward n winlinks in index order, wrapping around.
 pub fn winlink_previous_by_number(s: *T.Session, wl: *T.Winlink, n: u32) *T.Winlink {
-    var sorted = sorted_winlinks(s);
+    const sorted = sorted_winlinks(s);
     defer xm.allocator.free(sorted);
     if (sorted.len == 0) return wl;
 

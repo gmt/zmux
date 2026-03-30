@@ -26,9 +26,11 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_find = @import("cmd-find.zig");
 const client_registry = @import("client-registry.zig");
 const cfg_mod = @import("cfg.zig");
 const key_string = @import("key-string.zig");
+const opts = @import("options.zig");
 const server = @import("server.zig");
 const server_print = @import("server-print.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -96,12 +98,20 @@ const HookInfoOwned = struct {
     }
 };
 
+/// Flag descriptor for source/target resolution, mirrors tmux cmd_entry_flag.
+pub const CmdEntryFlag = struct {
+    flag: u8 = 0,
+    find_type: T.CmdFindType = .pane,
+    flags: u32 = 0,
+};
+
 pub const CmdqState = struct {
     references: u32 = 1,
     flags: u32 = 0,
     event: T.key_event = .{ .key = T.KEYC_NONE },
     current: T.CmdFindState = blankFindState(),
     hook_info: HookInfoOwned = .{},
+    formats: ?std.StringHashMap([]u8) = null,
 };
 
 var default_state: CmdqState = .{};
@@ -119,6 +129,8 @@ pub const CmdqItem = struct {
 
     item_type: CmdqType = .command,
     group: u32 = 0,
+    number: u32 = 0,
+    time: i64 = 0,
     flags: u32 = 0,
 
     state: *CmdqState = &default_state,
@@ -157,6 +169,17 @@ fn freeOptional(value: *?[]u8) void {
 fn setOptionalString(slot: *?[]u8, value: ?[]const u8) void {
     freeOptional(slot);
     if (value) |slice| slot.* = xm.xstrdup(slice);
+}
+
+fn freeFormats(map: *?std.StringHashMap([]u8)) void {
+    var m = map.* orelse return;
+    var it = m.iterator();
+    while (it.next()) |entry| {
+        xm.allocator.free(entry.key_ptr.*);
+        xm.allocator.free(entry.value_ptr.*);
+    }
+    m.deinit();
+    map.* = null;
 }
 
 fn copyFindState(src: *const T.CmdFindState) T.CmdFindState {
@@ -229,9 +252,26 @@ fn remove_group(item: *CmdqItem) void {
     }
 }
 
+var item_number_counter: u32 = 0;
+
 fn fire_command(item: *CmdqItem) T.CmdRetval {
     if (cfg_mod.cfg_finished) cmdq_add_message(item);
-    return cmd_mod.cmd_execute(item.cmd.?, item);
+
+    item.time = std.time.timestamp();
+    item_number_counter += 1;
+    item.number = item_number_counter;
+
+    const flags_arg: i32 = if (item.state.flags & T.CMDQ_STATE_CONTROL != 0) 1 else 0;
+    cmdq_guard(item, "begin", flags_arg);
+
+    const retval = cmd_mod.cmd_execute(item.cmd.?, item);
+
+    if (retval == .@"error")
+        cmdq_guard(item, "error", flags_arg)
+    else
+        cmdq_guard(item, "end", flags_arg);
+
+    return retval;
 }
 
 fn fire_callback(item: *CmdqItem) T.CmdRetval {
@@ -286,6 +326,7 @@ pub fn cmdq_free_state(state: *CmdqState) void {
     state.references -= 1;
     if (state.references == 0) {
         state.hook_info.deinit();
+        freeFormats(&state.formats);
         xm.allocator.destroy(state);
     }
 }
@@ -305,7 +346,11 @@ pub fn cmdq_lookup_hook(item_ptr: ?*anyopaque, key: []const u8) ?[]const u8 {
         @as(*CmdqItem, @ptrCast(@alignCast(raw)))
     else
         current_running_item orelse return null;
-    return item.state.hook_info.lookup(key);
+    if (item.state.hook_info.lookup(key)) |v| return v;
+    if (item.state.formats) |*fmts| {
+        if (fmts.get(key)) |v| return v;
+    }
+    return null;
 }
 
 pub fn cmdq_current_running() ?*CmdqItem {
@@ -679,6 +724,228 @@ pub fn cmdq_write_client_data(cl: ?*T.Client, stream: i32, data: []const u8) voi
     server_print.server_client_write_stream(cl, stream, data);
 }
 
+// ── Ported from tmux cmd-queue.c ──────────────────────────────────────────
+
+/// Get command queue name for a client (or "<global>" for the server queue).
+/// Mirrors tmux `cmdq_name`.
+pub fn cmdq_name(cl: ?*T.Client) []const u8 {
+    if (cl) |c| return c.name orelse "<unknown>";
+    return "<global>";
+}
+
+/// Add a format variable to a queue state's format store.
+/// Mirrors tmux `cmdq_add_format`.
+pub fn cmdq_add_format(state: *CmdqState, key: []const u8, value: []const u8) void {
+    if (state.formats == null)
+        state.formats = std.StringHashMap([]u8).init(xm.allocator);
+
+    const owned_key = xm.xstrdup(key);
+    const owned_val = xm.xstrdup(value);
+    if (state.formats.?.fetchPut(owned_key, owned_val) catch unreachable) |old| {
+        xm.allocator.free(old.key);
+        xm.allocator.free(old.value);
+    }
+}
+
+/// Merge format variables from another state's format store.
+/// Mirrors tmux `cmdq_add_formats`.
+pub fn cmdq_add_formats(state: *CmdqState, source: *const CmdqState) void {
+    const src = source.formats orelse return;
+    var it = src.iterator();
+    while (it.next()) |entry| {
+        cmdq_add_format(state, entry.key_ptr.*, entry.value_ptr.*);
+    }
+}
+
+/// Merge format variables from an item (command name + state formats)
+/// into a target state. Mirrors tmux `cmdq_merge_formats`.
+pub fn cmdq_merge_formats(item: *CmdqItem, target_state: *CmdqState) void {
+    if (item.cmd) |cmd| {
+        cmdq_add_format(target_state, "command", cmd.entry.name);
+    }
+    if (item.state.formats) |*fmts| {
+        var it = fmts.iterator();
+        while (it.next()) |entry| {
+            cmdq_add_format(target_state, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+}
+
+/// Empty command callback – returns CMD_RETURN_NORMAL.
+/// Mirrors tmux `cmdq_empty_command`.
+pub fn cmdq_empty_command(item: *CmdqItem, data: ?*anyopaque) T.CmdRetval {
+    return empty_callback(item, data);
+}
+
+/// Generic error callback – displays the error and frees it.
+/// Mirrors tmux `cmdq_error_callback`.
+fn cmdq_error_callback(item: *CmdqItem, data: ?*anyopaque) T.CmdRetval {
+    const err_ptr: *[]u8 = @ptrCast(@alignCast(data.?));
+    cmdq_error(item, "{s}", .{err_ptr.*});
+    xm.allocator.free(err_ptr.*);
+    xm.allocator.destroy(err_ptr);
+    return .normal;
+}
+
+/// Get an error callback item for the command queue.
+/// Mirrors tmux `cmdq_get_error`.
+pub fn cmdq_get_error(error_msg: []const u8) *CmdqItem {
+    const owned = xm.allocator.create([]u8) catch unreachable;
+    owned.* = xm.xstrdup(error_msg);
+    return cmdq_get_callback1("cmdq-error", cmdq_error_callback, @ptrCast(owned));
+}
+
+/// Fill in a find state from a command entry flag descriptor.
+/// Mirrors tmux `cmdq_find_flag`.
+pub fn cmdq_find_flag(item: *CmdqItem, fs: *T.CmdFindState, flag: *const CmdEntryFlag) T.CmdRetval {
+    if (flag.flag == 0) {
+        _ = cmd_find.cmd_find_from_client(fs, item.target_client, 0);
+        return .normal;
+    }
+
+    const value = if (item.cmd) |cmd|
+        cmd_mod.cmd_get_args(cmd).get(flag.flag)
+    else
+        null;
+
+    if (cmd_find.cmd_find_target(fs, item, value, flag.find_type, flag.flags) != 0) {
+        fs.* = blankFindState();
+        return .@"error";
+    }
+    return .normal;
+}
+
+/// Public wrapper: fire a callback-type queue item.
+/// Mirrors tmux `cmdq_fire_callback`.
+pub fn cmdq_fire_callback(item: *CmdqItem) T.CmdRetval {
+    return fire_callback(item);
+}
+
+/// Public wrapper: fire a command-type queue item.
+/// Mirrors tmux `cmdq_fire_command`.
+pub fn cmdq_fire_command(item: *CmdqItem) T.CmdRetval {
+    return fire_command(item);
+}
+
+/// Print a guard line for control-mode clients.
+/// Mirrors tmux `cmdq_guard`.
+pub fn cmdq_guard(item: *CmdqItem, guard: []const u8, flags: i32) void {
+    const cl = item.client orelse return;
+    if (cl.flags & T.CLIENT_CONTROL == 0) return;
+    const line = xm.xasprintf("%{s} {d} {d} {d}\n", .{ guard, item.time, item.number, flags });
+    defer xm.allocator.free(line);
+    server_print.server_client_write_stream(cl, 1, line);
+}
+
+/// Insert hook commands into the queue after the given item.
+/// Reduced implementation: resolves the hook option and enqueues any
+/// matching command lists. Mirrors tmux `cmdq_insert_hook`.
+pub fn cmdq_insert_hook(
+    s: ?*T.Session,
+    item: *CmdqItem,
+    current: ?*const T.CmdFindState,
+    name: []const u8,
+) void {
+    if (item.state.flags & T.CMDQ_STATE_NOHOOKS != 0) return;
+
+    const session_options = if (s) |sess| sess.options else opts.global_s_options;
+    const option_value = opts.options_get(session_options, name) orelse return;
+
+    log.log_debug("running hook {s}", .{name});
+
+    const new_state = cmdq_new_state(current, &item.state.event, T.CMDQ_STATE_NOHOOKS);
+    defer cmdq_free_state(new_state);
+    cmdq_add_format(new_state, "hook", name);
+
+    if (item.cmd) |cmd| {
+        const printed = args_mod.args_print(cmd_mod.cmd_get_args(cmd));
+        defer xm.allocator.free(printed);
+        cmdq_add_format(new_state, "hook_arguments", printed);
+    }
+
+    var tail: ?*CmdqItem = item;
+
+    switch (option_value.*) {
+        .array => |arr| {
+            for (arr.items) |entry| {
+                var pi: T.CmdParseInput = .{};
+                const pr = cmd_mod.cmd_parse_from_string(entry.value, &pi);
+                switch (pr.status) {
+                    .success => {
+                        if (pr.cmdlist) |raw| {
+                            const cmdlist: *T.CmdList = @ptrCast(@alignCast(raw));
+                            const new_item = cmdq_get_command(cmdlist, new_state);
+                            if (tail) |t|
+                                tail = cmdq_insert_after(t, new_item)
+                            else
+                                tail = cmdq_append_item(null, new_item);
+                        }
+                    },
+                    .@"error" => {
+                        if (pr.@"error") |err| {
+                            log.log_debug("hook {s}: parse error: {s}", .{ name, err });
+                            xm.allocator.free(err);
+                        }
+                    },
+                }
+            }
+        },
+        .string => |str| {
+            var pi: T.CmdParseInput = .{};
+            const pr = cmd_mod.cmd_parse_from_string(str, &pi);
+            switch (pr.status) {
+                .success => {
+                    if (pr.cmdlist) |raw| {
+                        const cmdlist: *T.CmdList = @ptrCast(@alignCast(raw));
+                        const new_item = cmdq_get_command(cmdlist, new_state);
+                        if (tail) |t|
+                            _ = cmdq_insert_after(t, new_item)
+                        else
+                            _ = cmdq_append_item(null, new_item);
+                    }
+                },
+                .@"error" => {
+                    if (pr.@"error") |err| {
+                        log.log_debug("hook {s}: parse error: {s}", .{ name, err });
+                        xm.allocator.free(err);
+                    }
+                },
+            }
+        },
+        else => {},
+    }
+}
+
+/// Remove a queue item. Public wrapper around internal cleanup.
+/// Mirrors tmux `cmdq_remove`.
+pub fn cmdq_remove(item: *CmdqItem) void {
+    if (item.queue) |queue| {
+        var prev: ?*CmdqItem = null;
+        var cur = queue.head;
+        while (cur) |c| {
+            if (c == item) {
+                if (prev) |p|
+                    p.next = item.next
+                else
+                    queue.head = item.next;
+                if (queue.tail == item) queue.tail = prev;
+                if (queue.item == item) queue.item = null;
+                break;
+            }
+            prev = c;
+            cur = c.next;
+        }
+    }
+    item.next = null;
+    destroy_item(item);
+}
+
+/// Remove all subsequent items that match this item's group.
+/// Mirrors tmux `cmdq_remove_group`.
+pub fn cmdq_remove_group(item: *CmdqItem) void {
+    remove_group(item);
+}
+
 test "cmdq_append_event preserves the triggering key for queued commands" {
     const env_mod = @import("environ.zig");
     cmdq_reset_for_tests();
@@ -728,7 +995,6 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
 
 test "cmdq_error routes control clients through the shared presenter seam" {
     const env_mod = @import("environ.zig");
-    const opts = @import("options.zig");
     const proc_mod = @import("proc.zig");
     const protocol = @import("zmux-protocol.zig");
     cmdq_reset_for_tests();
@@ -798,7 +1064,6 @@ test "cmdq_error routes control clients through the shared presenter seam" {
 
 test "cmdq_error keeps detached non-utf8 clients on the shared sanitized stderr path" {
     const env_mod = @import("environ.zig");
-    const opts = @import("options.zig");
     cmdq_reset_for_tests();
     defer cmdq_reset_for_tests();
 
@@ -892,7 +1157,6 @@ test "cmdq waiting items block later entries until continued" {
 }
 
 test "cmdq logs command execution into the shared message log once config is finished" {
-    const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
     cmdq_reset_for_tests();
     defer cmdq_reset_for_tests();

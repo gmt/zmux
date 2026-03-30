@@ -1630,7 +1630,7 @@ fn armClipboardTimer(tty: *T.Tty) void {
             base,
             -1,
             @intCast(c_zig.libevent.EV_TIMEOUT),
-            tty_clipboard_query_timeout_cb,
+            tty_clipboard_query_callback,
             tty,
         );
     }
@@ -1654,11 +1654,15 @@ fn freeClipboardTimer(tty: *T.Tty) void {
     }
 }
 
-export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+export fn tty_clipboard_query_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
     const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
     cancelClipboardQuery(tty);
+}
+
+export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    tty_clipboard_query_callback(_fd, _events, arg);
 }
 
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
@@ -1688,6 +1692,158 @@ threadlocal var tty_stub_overlay_storage: VisibleRanges = .{};
 
 /// tmux `tty_draw_line` — implementation lives in tty-draw.zig (stub body there).
 pub const tty_draw_line = tty_draw_mod.tty_draw_line;
+
+// ── C-name stubs: I/O, timers, offsets, pane clamp (tmux tty.c parity) ───────
+
+pub fn tty_create_log() void {}
+
+export fn tty_read_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+export fn tty_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+pub fn tty_block_maybe(_: *T.Tty) i32 {
+    return 0;
+}
+
+export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+export fn tty_start_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+pub fn tty_start_start_timer(_: *T.Tty) void {}
+
+pub fn tty_send_requests(_: *T.Tty) void {}
+
+pub fn tty_repeat_requests(_: *T.Tty, _: i32) void {}
+
+pub fn tty_update_features(tty: *T.Tty) void {
+    tty_invalidate(tty);
+}
+
+pub fn tty_raw(_: *T.Tty, _: ?[*:0]const u8) void {}
+
+pub fn tty_add(tty: *T.Tty, buf: [*]const u8, len: usize) void {
+    if (len == 0) return;
+    tty_write(tty, buf[0..len]);
+}
+
+pub fn tty_puts(tty: *T.Tty, s: [*:0]const u8) void {
+    const n = std.mem.len(s);
+    if (n == 0) return;
+    tty_write(tty, s[0..n]);
+}
+
+pub fn tty_set_path(_: *T.Tty, _: ?[*:0]const u8) void {}
+
+pub fn tty_emulate_repeat(_: *T.Tty, _: i32, _: i32, _: u32) void {}
+
+pub fn tty_window_bigger(_: *T.Tty) i32 {
+    return 0;
+}
+
+pub fn tty_window_offset(_: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
+    ox.* = 0;
+    oy.* = 0;
+    sx.* = 0;
+    sy.* = 0;
+    return 0;
+}
+
+pub fn tty_update_window_offset(_: *T.Window) void {}
+
+pub fn tty_update_client_offset(_: *T.Client) void {}
+
+pub fn tty_large_region(_: *T.Tty, _: *const anyopaque) i32 {
+    return 0;
+}
+
+pub fn tty_redraw_region(_: *T.Tty, _: *const anyopaque) void {}
+
+pub fn tty_is_visible(_: *T.Tty, _: *const anyopaque, _: u32, _: u32, _: u32, _: u32) i32 {
+    return 1;
+}
+
+pub fn tty_clamp_line(
+    _: *T.Tty,
+    _: *const anyopaque,
+    _: u32,
+    _: u32,
+    _: u32,
+    i: *u32,
+    x: *u32,
+    rx: *u32,
+    ry: *u32,
+) i32 {
+    i.* = 0;
+    x.* = 0;
+    rx.* = 0;
+    ry.* = 0;
+    return 0;
+}
+
+pub fn tty_clear_pane_line(_: *T.Tty, _: *const anyopaque, _: u32, _: u32, _: u32, _: u32) void {}
+
+pub fn tty_clamp_area(
+    _: *T.Tty,
+    _: *const anyopaque,
+    _: u32,
+    _: u32,
+    _: u32,
+    _: u32,
+    i: *u32,
+    j: *u32,
+    x: *u32,
+    y: *u32,
+    rx: *u32,
+    ry: *u32,
+) i32 {
+    i.* = 0;
+    j.* = 0;
+    x.* = 0;
+    y.* = 0;
+    rx.* = 0;
+    ry.* = 0;
+    return 0;
+}
+
+pub fn tty_clear_pane_area(_: *T.Tty, _: *const anyopaque, _: u32, _: u32, _: u32, _: u32, _: u32) void {}
+
+pub fn tty_check_codeset(_: *T.Tty, gc: *const T.GridCell) *const T.GridCell {
+    return gc;
+}
+
+pub fn tty_set_client_cb(_: ?*anyopaque, _: *T.Client) i32 {
+    return 0;
+}
+
+pub fn tty_draw_images(_: *T.Client, _: *T.WindowPane, _: *T.Screen) void {}
+
+pub fn tty_client_ready(_: *const anyopaque, _: *T.Client) i32 {
+    return 0;
+}
+
+pub fn tty_write_one(_: ?*anyopaque, _: *T.Client, _: ?*anyopaque) void {}
+
+pub fn tty_window_default_style(gc: *T.GridCell, wp: *T.WindowPane) void {
+    gc.* = T.grid_default_cell;
+    gc.fg = wp.palette.fg;
+    gc.bg = wp.palette.bg;
+}
 
 /// tmux `tty_draw_pane(tty, ctx, py)` — no live pane row dispatch in tty.zig.
 pub fn tty_draw_pane(_: *T.Tty, _: *const anyopaque, _: u32) void {}

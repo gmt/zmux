@@ -537,6 +537,32 @@ pub fn copyModeCommand(
         cmdPipe(wme, session, args, std.mem.eql(u8, command, "pipe-and-cancel"));
     } else if (std.mem.eql(u8, command, "pipe-no-clear")) {
         cmdPipeNoClear(wme, session, args);
+    } else if (std.mem.eql(u8, command, "previous-matching-bracket")) {
+        const cs = CmdState{
+            .wme = wme,
+            .args = args,
+            .wargs = args,
+            .mouse = null,
+            .client = client,
+            .session = session,
+            .wl = null,
+        };
+        _ = window_copy_cmd_previous_matching_bracket(&cs);
+    } else if (std.mem.eql(u8, command, "next-matching-bracket")) {
+        const cs = CmdState{
+            .wme = wme,
+            .args = args,
+            .wargs = args,
+            .mouse = null,
+            .client = client,
+            .session = session,
+            .wl = null,
+        };
+        _ = window_copy_cmd_next_matching_bracket(&cs);
+    } else if (std.mem.eql(u8, command, "next-prompt")) {
+        window_copy_cursor_prompt(wme, 1, false);
+    } else if (std.mem.eql(u8, command, "previous-prompt")) {
+        window_copy_cursor_prompt(wme, -1, false);
     } else {
         unsupportedCommand(client, command);
         wme.prefix = 1;
@@ -2385,10 +2411,12 @@ pub fn window_copy_clear_selection(wme: *T.WindowModeEntry) void {
     clearSelection(wme);
 }
 
-pub fn window_copy_update_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
-    _ = may_redraw;
-    _ = no_reset;
-    return updateSelection(wme);
+pub fn window_copy_update_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
+    _ = _may_redraw;
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    window_copy_synchronize_cursor(wme, no_reset);
+    return true;
 }
 
 pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) i32 {
@@ -2400,10 +2428,12 @@ pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *
     };
 }
 
-pub fn window_copy_set_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
-    _ = may_redraw;
-    _ = no_reset;
-    return updateSelection(wme);
+pub fn window_copy_set_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
+    _ = _may_redraw;
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    window_copy_synchronize_cursor(wme, no_reset);
+    return true;
 }
 
 pub fn window_copy_get_selection(wme: *T.WindowModeEntry, len: ?*usize) ?[]u8 {
@@ -2472,10 +2502,14 @@ pub fn window_copy_synchronize_cursor_end(wme: *T.WindowModeEntry, begin: bool, 
 
 // ── Copy / paste / pipe ────────────────────────────────────────────────────
 
-pub fn window_copy_copy_buffer(wme: *T.WindowModeEntry, prefix: ?[]const u8, buf: []u8, _len: usize, set_paste: bool, _set_clip: bool) void {
+pub fn window_copy_copy_buffer(wme: *T.WindowModeEntry, prefix: ?[]const u8, buf: []u8, _len: usize, set_paste: bool, set_clip: bool) void {
     _ = _len;
-    _ = _set_clip;
-    _ = wme;
+
+    if (set_clip) {
+        var ctx = T.ScreenWriteCtx{ .s = wme.wp.screen };
+        screen_write.setselection(&ctx, "", buf);
+    }
+
     if (set_paste) {
         const paste_mod = @import("paste.zig");
         paste_mod.paste_add(prefix, buf);
@@ -3182,11 +3216,31 @@ pub fn window_copy_scroll_down(wme: *T.WindowModeEntry, ny: u32) void {
     _ = scrollViewportDownLines(wme, ny, false);
 }
 
-pub fn window_copy_scroll_to(wme: *T.WindowModeEntry, px: u32, py: u32, _no_redraw: bool) void {
-    setAbsoluteCursorRow(wme, py);
-    modeData(wme).cx = px;
+pub fn window_copy_scroll_to(wme: *T.WindowModeEntry, px: u32, py: u32, no_redraw: bool) void {
+    const data = modeData(wme);
+
+    // If the target row is currently visible, just move the cursor
+    const view = viewRows(wme.wp);
+    if (py >= data.top and py < data.top + view) {
+        data.cy = py - data.top;
+    } else {
+        // Position with a gap from the edges (quarter-screen)
+        const gap = view / 4;
+        if (py < view) {
+            data.top = 0;
+            data.cy = py;
+        } else {
+            const max_top = maxTop(data.backing, wme.wp);
+            const desired_top = if (py + gap >= view) py + gap - view else 0;
+            data.top = @min(desired_top, max_top);
+            data.cy = py - data.top;
+        }
+    }
+
+    data.cx = px;
     clampCursorX(wme);
-    if (!_no_redraw) redraw(wme);
+    _ = window_copy_update_selection(wme, true, false);
+    if (!no_redraw) redraw(wme);
 }
 
 pub fn window_copy_goto_line(wme: *T.WindowModeEntry, linestr: []const u8) void {

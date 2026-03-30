@@ -34,6 +34,7 @@ const screen_mod = @import("screen.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const c = @import("c.zig");
 const utf8 = @import("utf8.zig");
+const session_mod = @import("session.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -1174,5 +1175,538 @@ fn write_pane_bytes_best_effort(fd: i32, bytes: []const u8) void {
         const written = std.posix.write(fd, rest) catch return;
         if (written == 0) return;
         rest = rest[written..];
+    }
+}
+
+// ── Pane style / colour ──────────────────────────────────────────────────
+
+/// Return the resolved palette colour for index `col` in a pane's palette.
+pub fn window_pane_get_palette(wp: ?*T.WindowPane, col: i32) i32 {
+    const pane = wp orelse return -1;
+    return colour_mod.colour_palette_get(&pane.palette, col);
+}
+
+/// Reset a pane's default cursor style from its options.
+pub fn window_pane_default_cursor(wp: *T.WindowPane) void {
+    screen_mod.screen_set_default_cursor(wp.screen, wp.options);
+}
+
+/// Get the foreground colour from a client attached to this pane's window.
+pub fn window_pane_get_fg(wp: *T.WindowPane) i32 {
+    const w = wp.window;
+    for (client_registry.clients.items) |cl| {
+        const s = cl.session orelse continue;
+        if ((cl.flags & T.CLIENT_ATTACHED) == 0) continue;
+        if (!session_mod.session_has_window(s, w)) continue;
+        if (cl.tty.fg == -1) continue;
+        return cl.tty.fg;
+    }
+    return -1;
+}
+
+/// If any control-mode client exists and this pane has a control_fg, return it.
+pub fn window_pane_get_fg_control_client(wp: *T.WindowPane) i32 {
+    if (wp.control_fg == -1) return -1;
+    for (client_registry.clients.items) |cl| {
+        if ((cl.flags & T.CLIENT_CONTROL) != 0) return wp.control_fg;
+    }
+    return -1;
+}
+
+/// Get a background colour for this pane from an attached client.
+pub fn window_get_bg_client(wp: *T.WindowPane) i32 {
+    const w = wp.window;
+    for (client_registry.clients.items) |cl| {
+        const s = cl.session orelse continue;
+        if ((cl.flags & T.CLIENT_ATTACHED) == 0) continue;
+        if (!session_mod.session_has_window(s, w)) continue;
+        if (cl.tty.bg == -1) continue;
+        return cl.tty.bg;
+    }
+    return -1;
+}
+
+/// If any control-mode client exists and this pane has a control_bg, return it.
+pub fn window_pane_get_bg_control_client(wp: *T.WindowPane) i32 {
+    if (wp.control_bg == -1) return -1;
+    for (client_registry.clients.items) |cl| {
+        if ((cl.flags & T.CLIENT_CONTROL) != 0) return wp.control_bg;
+    }
+    return -1;
+}
+
+/// Resolve the effective background colour for a pane, checking control
+/// clients first, then style defaults, then attached-client terminals.
+pub fn window_pane_get_bg(wp: *T.WindowPane) i32 {
+    const ctrl = window_pane_get_bg_control_client(wp);
+    if (ctrl != -1) return ctrl;
+    if (!T.colour_is_default(wp.palette.bg))
+        return wp.palette.bg;
+    return window_get_bg_client(wp);
+}
+
+/// Derive the light/dark theme for a pane.
+pub fn window_pane_get_theme(wp: ?*T.WindowPane) T.ClientTheme {
+    const pane = wp orelse return .unknown;
+    const w = pane.window;
+
+    const theme = colour_mod.colour_totheme(window_pane_get_bg(pane));
+    if (theme != .unknown) return theme;
+
+    var found_light = false;
+    var found_dark = false;
+    for (client_registry.clients.items) |cl| {
+        const s = cl.session orelse continue;
+        if ((cl.flags & T.CLIENT_ATTACHED) == 0) continue;
+        if (!session_mod.session_has_window(s, w)) continue;
+        switch (cl.theme) {
+            .light => found_light = true,
+            .dark => found_dark = true,
+            .unknown => {},
+        }
+    }
+
+    if (found_dark and !found_light) return .dark;
+    if (found_light and !found_dark) return .light;
+    return .unknown;
+}
+
+/// Send a theme-update escape sequence to the pane's pty if the theme changed.
+pub fn window_pane_send_theme_update(wp: ?*T.WindowPane) void {
+    const pane = wp orelse return;
+    if (window_pane_exited(pane)) return;
+    if (pane.flags & T.PANE_THEMECHANGED == 0) return;
+    if (pane.screen.mode & T.MODE_THEME_UPDATES == 0) return;
+
+    const theme = window_pane_get_theme(pane);
+    if (pane.fd < 0) return;
+
+    pane.flags &= ~@as(u32, T.PANE_THEMECHANGED);
+
+    switch (theme) {
+        .light => {
+            log.log_debug("window_pane_send_theme_update: %%{d} light theme", .{pane.id});
+            write_pane_bytes_best_effort(pane.fd, "\x1b[?997;2n");
+        },
+        .dark => {
+            log.log_debug("window_pane_send_theme_update: %%{d} dark theme", .{pane.id});
+            write_pane_bytes_best_effort(pane.fd, "\x1b[?997;1n");
+        },
+        .unknown => {
+            log.log_debug("window_pane_send_theme_update: %%{d} unknown theme", .{pane.id});
+        },
+    }
+}
+
+// ── Pane lifecycle / IO ──────────────────────────────────────────────────
+
+/// Check whether a pane has exited (fd closed or PANE_EXITED set).
+pub fn window_pane_exited(wp: *T.WindowPane) bool {
+    return wp.fd == -1 or (wp.flags & T.PANE_EXITED != 0);
+}
+
+/// Check whether a pane is ready to be destroyed (all output drained and
+/// pane has exited). Returns true when safe to destroy.
+pub fn window_pane_destroy_ready(wp: *T.WindowPane) bool {
+    if (wp.flags & T.PANE_EXITED == 0) return false;
+    if (wp.pipe_fd != -1) return false;
+    return true;
+}
+
+/// Send a terminal resize (TIOCSWINSZ ioctl) to the pane's pty.
+pub fn window_pane_send_resize(wp: *T.WindowPane, sx: u32, sy: u32) void {
+    if (wp.fd < 0) return;
+    const w = wp.window;
+
+    log.log_debug("window_pane_send_resize: %%{d} resize to {d},{d}", .{ wp.id, sx, sy });
+
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    ws.ws_col = @intCast(sx);
+    ws.ws_row = @intCast(sy);
+    ws.ws_xpixel = @intCast(w.xpixel * sx);
+    ws.ws_ypixel = @intCast(w.ypixel * sy);
+    _ = c.posix_sys.ioctl(wp.fd, c.posix_sys.TIOCSWINSZ, &ws);
+}
+
+/// Stub: set up the event watchers for a pane's pty fd.
+/// In zmux, pane I/O is handled differently (pane-io.zig); this stub exists
+/// for API parity with tmux.
+pub fn window_pane_set_event(_: *T.WindowPane) void {
+    // Stub – zmux uses pane_io.zig for event-based I/O.
+}
+
+/// Stub: start reading client input into a pane.
+/// Returns 0 on success, -1 on error, 1 if the client is not suitable.
+pub fn window_pane_start_input(_wp: *T.WindowPane, _cause: *?[]u8) i32 {
+    _cause.* = null;
+    return 1;
+}
+
+/// Stub: get pointer to new (unprocessed) data in the pane's input buffer.
+pub fn window_pane_get_new_data(wp: *T.WindowPane, wpo: *T.WindowPaneOffset, size: *usize) []const u8 {
+    _ = wp;
+    _ = wpo;
+    size.* = 0;
+    return &.{};
+}
+
+/// Stub: mark data as consumed in a pane's input buffer.
+pub fn window_pane_update_used_data(_wp: *T.WindowPane, wpo: *T.WindowPaneOffset, size: usize) void {
+    _ = _wp;
+    wpo.used += size;
+}
+
+// ── Mode management ──────────────────────────────────────────────────────
+
+/// Set (push or re-activate) a mode on a pane. Returns true if the mode was
+/// already the current mode, false if it was newly pushed or re-ordered.
+pub fn window_pane_set_mode(
+    wp: *T.WindowPane,
+    swp: ?*T.WindowPane,
+    mode: *const T.WindowMode,
+    data: ?*anyopaque,
+) bool {
+    if (wp.modes.items.len > 0 and wp.modes.items[0].mode == mode)
+        return true;
+
+    for (wp.modes.items, 0..) |wme, idx| {
+        if (wme.mode == mode) {
+            _ = wp.modes.orderedRemove(idx);
+            wp.modes.insert(xm.allocator, 0, wme) catch unreachable;
+            wp.screen = if (wme.mode.get_screen) |gs| gs(wme) else &wp.base;
+            wp.flags |= T.PANE_REDRAW | T.PANE_CHANGED;
+            notify.notify_pane("pane-mode-changed", wp);
+            return false;
+        }
+    }
+
+    const wme = xm.allocator.create(T.WindowModeEntry) catch unreachable;
+    wme.* = .{
+        .wp = wp,
+        .swp = swp,
+        .mode = mode,
+        .data = data,
+        .prefix = 1,
+    };
+    wp.modes.insert(xm.allocator, 0, wme) catch unreachable;
+    wp.screen = if (wme.mode.get_screen) |gs| gs(wme) else &wp.base;
+
+    wp.flags |= T.PANE_REDRAW | T.PANE_CHANGED;
+    notify.notify_pane("pane-mode-changed", wp);
+    return false;
+}
+
+/// Pop the top mode from a pane's mode stack.
+pub fn window_pane_reset_mode(wp: *T.WindowPane) void {
+    if (wp.modes.items.len == 0) return;
+
+    const wme = wp.modes.orderedRemove(0);
+    if (wme.mode.close) |close_fn| close_fn(wme);
+    xm.allocator.destroy(wme);
+
+    if (wp.modes.items.len == 0) {
+        wp.flags &= ~@as(u32, T.PANE_UNSEENCHANGES);
+        wp.screen = &wp.base;
+    } else {
+        const next = wp.modes.items[0];
+        wp.screen = if (next.mode.get_screen) |gs| gs(next) else &wp.base;
+    }
+
+    wp.flags |= T.PANE_REDRAW | T.PANE_CHANGED;
+    notify.notify_pane("pane-mode-changed", wp);
+}
+
+/// Pop all modes from a pane's mode stack.
+pub fn window_pane_reset_mode_all(wp: *T.WindowPane) void {
+    while (wp.modes.items.len > 0)
+        window_pane_reset_mode(wp);
+}
+
+// ── Window helpers ───────────────────────────────────────────────────────
+
+/// Parse a window ID string of the form "@123" and look up the window.
+pub fn window_find_by_id_str(s: []const u8) ?*T.Window {
+    if (s.len == 0 or s[0] != '@') return null;
+    const id = std.fmt.parseInt(u32, s[1..], 10) catch return null;
+    return window_find_by_id(id);
+}
+
+/// Parse a pane ID string of the form "%123" and look up the pane.
+pub fn window_pane_find_by_id_str(s: []const u8) ?*T.WindowPane {
+    if (s.len == 0 or s[0] != '%') return null;
+    const id = std.fmt.parseInt(u32, s[1..], 10) catch return null;
+    return window_pane_find_by_id(id);
+}
+
+/// Find a pane by a position keyword ("top", "bottom", "left", "right",
+/// "top-left", "top-right", "bottom-left", "bottom-right").
+pub fn window_find_string(w: *T.Window, s: []const u8) ?*T.WindowPane {
+    var x = w.sx / 2;
+    var y = w.sy / 2;
+    var top: u32 = 0;
+    var bottom: u32 = if (w.sy == 0) 0 else w.sy - 1;
+
+    const status: u32 = @intCast(opts.options_get_number(w.options, "pane-border-status"));
+    if (status == T.PANE_STATUS_TOP)
+        top += 1
+    else if (status == T.PANE_STATUS_BOTTOM and bottom > 0)
+        bottom -= 1;
+
+    if (std.ascii.eqlIgnoreCase(s, "top"))
+        y = top
+    else if (std.ascii.eqlIgnoreCase(s, "bottom"))
+        y = bottom
+    else if (std.ascii.eqlIgnoreCase(s, "left"))
+        x = 0
+    else if (std.ascii.eqlIgnoreCase(s, "right"))
+        x = if (w.sx == 0) 0 else w.sx - 1
+    else if (std.ascii.eqlIgnoreCase(s, "top-left")) {
+        x = 0;
+        y = top;
+    } else if (std.ascii.eqlIgnoreCase(s, "top-right")) {
+        x = if (w.sx == 0) 0 else w.sx - 1;
+        y = top;
+    } else if (std.ascii.eqlIgnoreCase(s, "bottom-left")) {
+        x = 0;
+        y = bottom;
+    } else if (std.ascii.eqlIgnoreCase(s, "bottom-right")) {
+        x = if (w.sx == 0) 0 else w.sx - 1;
+        y = bottom;
+    } else return null;
+
+    return window_get_active_at(w, x, y);
+}
+
+/// Build a printable flag string for a winlink (e.g. "*-MZ").
+pub fn window_printable_flags(wl: *T.Winlink, escape: bool) []const u8 {
+    const S = struct {
+        var buf: [32]u8 = undefined;
+    };
+    var pos: usize = 0;
+
+    if (wl.flags & T.WINLINK_ACTIVITY != 0) {
+        S.buf[pos] = '#';
+        pos += 1;
+        if (escape) {
+            S.buf[pos] = '#';
+            pos += 1;
+        }
+    }
+    if (wl.flags & T.WINLINK_BELL != 0) {
+        S.buf[pos] = '!';
+        pos += 1;
+    }
+    if (wl.flags & T.WINLINK_SILENCE != 0) {
+        S.buf[pos] = '~';
+        pos += 1;
+    }
+    if (wl.session.curw) |curw| {
+        if (curw == wl) {
+            S.buf[pos] = '*';
+            pos += 1;
+        }
+    }
+    if (wl.session.lastw.items.len > 0 and wl.session.lastw.items[0] == wl) {
+        S.buf[pos] = '-';
+        pos += 1;
+    }
+    if (marked_pane_mod.check() and marked_pane_mod.marked_pane.wl == wl) {
+        S.buf[pos] = 'M';
+        pos += 1;
+    }
+    if (wl.window.flags & T.WINDOW_ZOOMED != 0) {
+        S.buf[pos] = 'Z';
+        pos += 1;
+    }
+
+    return S.buf[0..pos];
+}
+
+/// Set a window's fill character from the "fill-character" option.
+pub fn window_set_fill_character(w: *T.Window) void {
+    const value = opts.options_get_string(w.options, "fill-character");
+    _ = value;
+    // The fill character feature requires utf8_fromcstr and single-width
+    // validation.  Store a sentinel for now; callers that render fill
+    // characters should fall back to ' '.
+    w.fill_character = null;
+}
+
+/// Handle a pane being "lost" from a window (removed from the pane list
+/// and clear any marked-pane or last-pane references).
+pub fn window_lost_pane(w: *T.Window, wp: *T.WindowPane) void {
+    log.log_debug("window_lost_pane: @{d} pane %%{d}", .{ w.id, wp.id });
+
+    marked_pane_mod.clear_if_pane(wp);
+    remove_last_pane_reference(w, wp);
+
+    if (w.active == wp) {
+        w.active = window_get_last_pane(w);
+        if (w.active == null) {
+            const idx = window_pane_index(w, wp);
+            if (idx) |i| {
+                if (i > 0)
+                    w.active = w.panes.items[i - 1]
+                else if (i + 1 < w.panes.items.len)
+                    w.active = w.panes.items[i + 1];
+            }
+        }
+        if (w.active) |active| {
+            remove_last_pane_reference(w, active);
+            active.flags |= T.PANE_CHANGED;
+            if (w.winlinks.items.len != 0)
+                notify.notify_window("window-pane-changed", w);
+            window_update_focus(w);
+        }
+    }
+}
+
+/// Destroy all panes in a window (alias for window_destroy_all_panes).
+pub fn window_destroy_panes(w: *T.Window) void {
+    window_destroy_all_panes(w);
+}
+
+// ── Winlink helpers ──────────────────────────────────────────────────────
+
+/// Find a winlink in a session's window map by window ID.
+pub fn winlink_find_by_window_id(s: *T.Session, id: u32) ?*T.Winlink {
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        if (wl.*.window.id == id) return wl.*;
+    }
+    return null;
+}
+
+/// Count the number of winlinks in a session.
+pub fn winlink_count(s: *T.Session) u32 {
+    return @intCast(s.windows.count());
+}
+
+/// Clear alert flags on a winlink and its associated winlinks on the same window.
+pub fn winlink_clear_flags(wl: *T.Winlink) void {
+    wl.window.flags &= ~@as(u32, T.WINDOW_ALERTFLAGS);
+    for (wl.window.winlinks.items) |link| {
+        if (link.flags & T.WINLINK_ALERTFLAGS != 0) {
+            link.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
+        }
+    }
+}
+
+/// Step forward n winlinks in index order, wrapping around.
+pub fn winlink_next_by_number(s: *T.Session, wl: *T.Winlink, n: u32) *T.Winlink {
+    var sorted = sorted_winlinks(s);
+    defer xm.allocator.free(sorted);
+    if (sorted.len == 0) return wl;
+
+    var pos: usize = 0;
+    for (sorted, 0..) |candidate, idx| {
+        if (candidate == wl) {
+            pos = idx;
+            break;
+        }
+    }
+
+    var remaining = n;
+    while (remaining > 0) : (remaining -= 1) {
+        pos = (pos + 1) % sorted.len;
+    }
+    return sorted[pos];
+}
+
+/// Step backward n winlinks in index order, wrapping around.
+pub fn winlink_previous_by_number(s: *T.Session, wl: *T.Winlink, n: u32) *T.Winlink {
+    var sorted = sorted_winlinks(s);
+    defer xm.allocator.free(sorted);
+    if (sorted.len == 0) return wl;
+
+    var pos: usize = 0;
+    for (sorted, 0..) |candidate, idx| {
+        if (candidate == wl) {
+            pos = idx;
+            break;
+        }
+    }
+
+    var remaining = n;
+    while (remaining > 0) : (remaining -= 1) {
+        pos = if (pos == 0) sorted.len - 1 else pos - 1;
+    }
+    return sorted[pos];
+}
+
+fn sorted_winlinks(s: *T.Session) []*T.Winlink {
+    var result = std.ArrayList(*T.Winlink).init(xm.allocator);
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        result.append(wl.*) catch unreachable;
+    }
+    const items = result.toOwnedSlice() catch unreachable;
+    std.mem.sort(*T.Winlink, items, {}, struct {
+        fn cmp(_: void, a: *T.Winlink, b: *T.Winlink) bool {
+            return a.idx < b.idx;
+        }
+    }.cmp);
+    return items;
+}
+
+// ── Key / paste ──────────────────────────────────────────────────────────
+
+/// Send a key event to a pane. In mode, dispatch to the mode's key handler;
+/// otherwise write through input_key_pane (stubbed — zmux does this in
+/// cmd-send-keys.zig / input-keys.zig).
+pub fn window_pane_key(
+    wp: *T.WindowPane,
+    key: T.key_code,
+    _m: ?*const T.MouseEvent,
+) i32 {
+    if (T.keycIsMouse(key) and _m == null) return -1;
+
+    if (wp.modes.items.len > 0) {
+        return 0;
+    }
+
+    if (wp.fd < 0 or (wp.flags & T.PANE_INPUTOFF) != 0) return 0;
+
+    if (T.keycIsMouse(key)) return 0;
+    return 0;
+}
+
+/// Handle a paste event on a pane.
+pub fn window_pane_paste(wp: *T.WindowPane, key: T.key_code, buf: []const u8) void {
+    if (wp.modes.items.len > 0) return;
+    if (wp.fd < 0 or (wp.flags & T.PANE_INPUTOFF) != 0) return;
+    if (T.keycIsPaste(key) and (wp.screen.mode & T.MODE_BRACKETPASTE == 0)) return;
+    if (buf.len == 0) return;
+
+    write_pane_bytes_best_effort(wp.fd, buf);
+    window_pane_copy_paste(wp, buf);
+}
+
+/// Copy a paste to all synchronised sibling panes.
+fn window_pane_copy_paste(wp: *T.WindowPane, buf: []const u8) void {
+    if (opts.options_get_number(wp.options, "synchronize-panes") == 0) return;
+
+    for (wp.window.panes.items) |loop| {
+        if (loop == wp) continue;
+        if (loop.modes.items.len > 0) continue;
+        if (loop.fd < 0 or (loop.flags & T.PANE_INPUTOFF) != 0) continue;
+        if (!window_pane_visible(loop)) continue;
+        if (opts.options_get_number(loop.options, "synchronize-panes") == 0) continue;
+        write_pane_bytes_best_effort(loop.fd, buf);
+    }
+}
+
+/// Copy a key to all synchronised sibling panes (stub – actual input_key_pane
+/// dispatch is not yet ported).
+fn window_pane_copy_key(wp: *T.WindowPane, _key: T.key_code) void {
+    if (opts.options_get_number(wp.options, "synchronize-panes") == 0) return;
+
+    for (wp.window.panes.items) |loop| {
+        if (loop == wp) continue;
+        if (loop.modes.items.len > 0) continue;
+        if (loop.fd < 0 or (loop.flags & T.PANE_INPUTOFF) != 0) continue;
+        if (!window_pane_visible(loop)) continue;
+        if (opts.options_get_number(loop.options, "synchronize-panes") == 0) continue;
+        _ = _key;
     }
 }

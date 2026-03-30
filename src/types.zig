@@ -887,6 +887,7 @@ pub const Window = struct {
 
     flags: u32 = 0,
     options: *Options,
+    fill_character: ?[]Utf8Data = null,
     references: u32 = 0,
     winlinks: std.ArrayList(*Winlink) = .{},
     alerts_timer: ?*c.libevent.event = null,

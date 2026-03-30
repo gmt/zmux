@@ -1695,7 +1695,6 @@ pub const tty_draw_line = tty_draw_mod.tty_draw_line;
 
 // ── C-name stubs: I/O, timers, offsets, pane clamp (tmux tty.c parity) ───────
 
-pub fn tty_create_log() void {}
 
 export fn tty_read_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     _ = _fd;
@@ -1725,17 +1724,13 @@ export fn tty_start_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaq
     _ = _arg;
 }
 
-pub fn tty_start_start_timer(_: *T.Tty) void {}
 
-pub fn tty_send_requests(_: *T.Tty) void {}
 
-pub fn tty_repeat_requests(_: *T.Tty, _: i32) void {}
 
 pub fn tty_update_features(tty: *T.Tty) void {
     tty_invalidate(tty);
 }
 
-pub fn tty_raw(_: *T.Tty, _: ?[*:0]const u8) void {}
 
 pub fn tty_add(tty: *T.Tty, buf: [*]const u8, len: usize) void {
     if (len == 0) return;
@@ -1748,7 +1743,6 @@ pub fn tty_puts(tty: *T.Tty, s: [*:0]const u8) void {
     tty_write(tty, s[0..n]);
 }
 
-pub fn tty_set_path(_: *T.Tty, _: ?[*:0]const u8) void {}
 
 pub fn tty_emulate_repeat(tty: *T.Tty, code: []const u8, code1: []const u8, n: u32) void {
     if (tty_term.hasCapability(tty, code)) {
@@ -1773,9 +1767,7 @@ pub fn tty_window_offset(_: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 
     return 0;
 }
 
-pub fn tty_update_window_offset(_: *T.Window) void {}
 
-pub fn tty_update_client_offset(_: *T.Client) void {}
 
 pub fn tty_large_region(_: *T.Tty, ctx: *const T.TtyCtx) i32 {
     return if (ctx.orlower -| ctx.orupper >= ctx.sy / 2) @as(i32, 1) else @as(i32, 0);
@@ -1936,13 +1928,11 @@ pub fn tty_set_client_cb(_: ?*anyopaque, _: *T.Client) i32 {
     return 0;
 }
 
-pub fn tty_draw_images(_: *T.Client, _: *T.WindowPane, _: *T.Screen) void {}
 
 pub fn tty_client_ready(_: *const T.TtyCtx, _: *T.Client) i32 {
     return 0;
 }
 
-pub fn tty_write_one(_: ?*anyopaque, _: *T.Client, _: ?*anyopaque) void {}
 
 pub fn tty_window_default_style(gc: *T.GridCell, wp: *T.WindowPane) void {
     gc.* = T.grid_default_cell;
@@ -2093,7 +2083,6 @@ pub fn tty_set_selection(tty: *T.Tty, clip: ?[*:0]const u8, buf: ?[*]const u8, l
     tty_putcode_ss(tty, "Ms", clip_str, b64_str);
 }
 
-pub fn tty_hyperlink(_: *T.Tty, _: *const T.GridCell, _: ?*hyperlinks_mod.Hyperlinks) void {}
 
 pub fn tty_cmd_insertcharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     if (ctx.bigger or

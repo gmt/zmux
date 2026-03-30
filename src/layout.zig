@@ -1741,10 +1741,6 @@ pub fn layout_set_size_check(_: *T.Window, _: *T.LayoutCell, _: T.LayoutType, _:
     return true;
 }
 
-pub fn layout_resize_child_cells(_: *T.Window, _: *T.LayoutCell) void {}
-
 pub fn layout_split_pane(_: *T.WindowPane, _: T.LayoutType, _: i32, _: i32, _: i32, _: i32) ?*T.LayoutCell {
     return null;
 }
-
-pub fn layout_print_cell(_: *const T.LayoutCell, _: []const u8, _: u32) void {}

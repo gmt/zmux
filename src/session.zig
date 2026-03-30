@@ -218,6 +218,50 @@ fn session_group_synchronize1(target: *T.Session, s: *T.Session) void {
     }
 }
 
+// ── Comparison ────────────────────────────────────────────────────────────
+
+/// Compare two sessions by name (mirrors tmux session_cmp for RB tree).
+pub fn session_cmp(s1: *T.Session, s2: *T.Session) std.math.Order {
+    return std.mem.order(u8, s1.name, s2.name);
+}
+
+/// Compare two session groups by name (mirrors tmux session_group_cmp).
+pub fn session_group_cmp(sg1: *T.SessionGroup, sg2: *T.SessionGroup) std.math.Order {
+    return std.mem.order(u8, sg1.name, sg2.name);
+}
+
+// ── Reference counting ───────────────────────────────────────────────────
+
+/// Add a reference to a session.
+pub fn session_add_ref(s: *T.Session, from: []const u8) void {
+    s.references += 1;
+    log.log_debug("session_add_ref: {s} {s}, now {d}", .{ s.name, from, s.references });
+}
+
+/// Remove a reference from a session.  When the count reaches zero the
+/// session is freed.  In tmux this schedules an event_once callback;
+/// here we call session_free directly.
+pub fn session_remove_ref(s: *T.Session, from: []const u8) void {
+    s.references -= 1;
+    log.log_debug("session_remove_ref: {s} {s}, now {d}", .{ s.name, from, s.references });
+
+    if (s.references == 0)
+        session_free(s);
+}
+
+/// Free a session whose reference count has reached zero.
+/// In tmux this is a static libevent callback triggered via event_once.
+fn session_free(s: *T.Session) void {
+    log.log_debug("session {s} freed ({d} references)", .{ s.name, s.references });
+
+    if (s.references == 0) {
+        env_mod.environ_free(s.environ);
+        opts.options_free(s.options);
+        xm.allocator.free(s.name);
+        xm.allocator.destroy(s);
+    }
+}
+
 // ── Creation / destruction ────────────────────────────────────────────────
 
 pub fn session_create(
@@ -275,6 +319,16 @@ pub fn session_update_activity(s: *T.Session, from: ?i64) void {
     s.activity_time = from orelse std.time.milliTimestamp();
 }
 
+/// Lock a session whose inactivity timer has fired.
+/// In tmux this is a libevent timer callback (session_lock_timer).
+/// Stubbed here because the Zig port does not yet use libevent timers.
+pub fn session_lock_timer(s: *T.Session) void {
+    if (s.attached == 0)
+        return;
+
+    log.log_debug("session_lock_timer: session {s} lock timer fired (stub)", .{s.name});
+}
+
 pub fn session_theme_changed(s: ?*T.Session) void {
     const session = s orelse return;
 
@@ -282,6 +336,24 @@ pub fn session_theme_changed(s: ?*T.Session) void {
     while (it.next()) |wl| {
         for (wl.*.window.panes.items) |wp|
             wp.flags |= T.PANE_THEMECHANGED;
+    }
+}
+
+/// Update history-limit for every pane in the session, trimming excess
+/// scrollback where necessary.  Mirrors tmux session_update_history.
+pub fn session_update_history(s: *T.Session) void {
+    const limit: u32 = @intCast(opts.options_get_number(s.options, "history-limit"));
+    var it = s.windows.valueIterator();
+    while (it.next()) |wl| {
+        for (wl.*.window.panes.items) |wp| {
+            const gd = wp.base.grid;
+            const osize = gd.hsize;
+            gd.hlimit = limit;
+            // grid_collect_history is not yet ported; log instead.
+            log.log_debug("session_update_history: %%{d} hlimit set to {d} (hsize {d})", .{
+                wp.id, limit, osize,
+            });
+        }
     }
 }
 
@@ -495,6 +567,15 @@ pub fn session_detach_index(s: *T.Session, idx: i32, from: []const u8) bool {
 
 pub fn session_has_window(s: *T.Session, w: *T.Window) bool {
     return winlink_find_by_window(&s.windows, w) != null;
+}
+
+/// Return true if a window is linked outside this session (not including
+/// session groups).  The window must belong to this session.
+pub fn session_is_linked(s: *T.Session, w: *T.Window) bool {
+    if (session_group_contains(s)) |sg| {
+        return w.references != session_group_count(sg);
+    }
+    return w.references != 1;
 }
 
 pub fn session_window_link_count(w: *T.Window) u32 {

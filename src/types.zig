@@ -863,6 +863,10 @@ pub const WindowPane = struct {
     pipe_event: ?*c.libevent.event = null,
     pipe_flags: u8 = 0,
     pipe_offset: WindowPaneOffset = .{},
+
+    // Resize queue (ported from tmux's TAILQ-based resize_queue)
+    resize_queue: std.ArrayListUnmanaged(WindowPaneResize) = .{},
+    resize_timer: ?*c.libevent.event = null,
 };
 
 // ── Window ────────────────────────────────────────────────────────────────
@@ -1090,6 +1094,7 @@ pub const CLIENT_CONTROL_WAITEXIT: u64 = 0x200000000;
 pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
 pub const CLIENT_NO_DETACH_ON_DESTROY: u64 = 0x8000000000;
 pub const CLIENT_DEAD: u64 = 0x10000000000;
+pub const CLIENT_REPEAT: u64 = 0x20000000000;
 
 pub const CLIENT_UNATTACHEDFLAGS: u64 = CLIENT_DEAD | CLIENT_SUSPENDED | CLIENT_EXIT;
 
@@ -1180,6 +1185,13 @@ pub const WindowPaneOffset = struct {
     used: usize = 0,
 };
 
+pub const WindowPaneResize = struct {
+    osx: u32,
+    osy: u32,
+    sx: u32,
+    sy: u32,
+};
+
 pub const CONTROL_PANE_OFF: u8 = 0x1;
 pub const CONTROL_PANE_PAUSED: u8 = 0x2;
 
@@ -1243,6 +1255,13 @@ pub const key_event = struct {
     m: MouseEvent = .{},
 };
 
+pub const OverlayCheckCb = *const fn (*Client, ?*anyopaque, u32, u32) bool;
+pub const OverlayModeCb = *const fn (*Client, ?*anyopaque, *u32, *u32) ?*anyopaque;
+pub const OverlayDrawCb = *const fn (*Client, ?*anyopaque, *anyopaque) void;
+pub const OverlayKeyCb = *const fn (*Client, ?*anyopaque, *key_event) i32;
+pub const OverlayFreeCb = *const fn (*Client, ?*anyopaque) void;
+pub const OverlayResizeCb = *const fn (*Client, ?*anyopaque) void;
+
 pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
@@ -1282,6 +1301,18 @@ pub const Client = struct {
     display_panes_data: ?*anyopaque = null,
     menu_data: ?*anyopaque = null,
     popup_data: ?*anyopaque = null,
+
+    overlay_check: ?OverlayCheckCb = null,
+    overlay_mode: ?OverlayModeCb = null,
+    overlay_draw: ?OverlayDrawCb = null,
+    overlay_key: ?OverlayKeyCb = null,
+    overlay_free: ?OverlayFreeCb = null,
+    overlay_resize: ?OverlayResizeCb = null,
+    overlay_data: ?*anyopaque = null,
+    overlay_timer: ?*c.libevent.event = null,
+
+    repeat_timer: ?*c.libevent.event = null,
+    last_key: key_code = KEYC_NONE,
 
     flags: u64 = 0,
     session: ?*Session = null,

@@ -351,6 +351,8 @@ pub const SortOrder = enum {
 pub const SortCriteria = struct {
     order: SortOrder = .end,
     reversed: bool = false,
+    /// When non-null, `sort_next_order` cycles through this sequence (tmux `order_seq`).
+    order_seq: ?[]const SortOrder = null,
 };
 
 // ── UTF-8 ─────────────────────────────────────────────────────────────────

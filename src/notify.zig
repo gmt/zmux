@@ -283,6 +283,8 @@ pub fn notify_window(name: []const u8, w: *T.Window) void {
 
     if (std.mem.eql(u8, name, "window-layout-changed"))
         control_notify.control_notify_window_layout_changed(w)
+    else if (std.mem.eql(u8, name, "window-pane-changed"))
+        control_notify.control_notify_window_pane_changed(w)
     else if (std.mem.eql(u8, name, "window-renamed"))
         control_notify.control_notify_window_renamed(w);
 

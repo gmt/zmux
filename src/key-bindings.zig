@@ -334,9 +334,40 @@ fn reset_clients_for_removed_table(name: []const u8) void {
 }
 
 fn free_binding(binding: *T.KeyBinding) void {
+    key_bindings_free(binding);
+}
+
+/// Free a single key binding, releasing its command list and note.
+/// Zig port of tmux key_bindings_free().
+pub fn key_bindings_free(binding: *T.KeyBinding) void {
     if (binding.cmdlist) |list| cmd_mod.cmd_list_unref(list);
     if (binding.note) |note| xm.allocator.free(note);
     xm.allocator.destroy(binding);
+}
+
+/// Snapshot all current explicit bindings into default_key_bindings
+/// for every table, so user changes can later be distinguished from
+/// built-in defaults.  Zig port of tmux key_bindings_init_done().
+pub fn key_bindings_init_done() void {
+    ensure_ready();
+    for (key_table_order.items) |table| {
+        for (table.order.items) |bd| {
+            if (table.default_key_bindings.get(bd.key) != null) continue;
+            clone_default_from_explicit(table, bd);
+        }
+    }
+}
+
+/// Compare two key bindings by key code, returning standard ordering.
+/// Zig port of tmux key_bindings_cmp().
+pub fn key_bindings_cmp(a: *const T.KeyBinding, b: *const T.KeyBinding) std.math.Order {
+    return std.math.order(a.key, b.key);
+}
+
+/// Compare two key tables by name, returning standard ordering.
+/// Zig port of tmux key_table_cmp().
+pub fn key_table_cmp(a: *const T.KeyTable, b: *const T.KeyTable) std.math.Order {
+    return std.mem.order(u8, a.name, b.name);
 }
 
 const key_bindings_data = @import("key-bindings-data.zig");

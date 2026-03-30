@@ -1162,6 +1162,166 @@ pub const screen_write_clearhistory = clearhistory;
 pub const screen_write_rawstring = rawstring;
 pub const screen_write_setselection = setselection;
 
+// ── Remaining tmux C-name API (stubs / thin wrappers) ───────────────────
+
+pub fn screen_write_init(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
+    screen_write_start(ctx, s);
+}
+
+pub fn screen_write_start(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
+    const preserve_wp = ctx.wp;
+    ctx.* = .{ .s = s, .wp = preserve_wp };
+}
+
+pub const ScreenWriteInitCtxCb = *const fn (*T.ScreenWriteCtx, *anyopaque) void;
+
+pub fn screen_write_start_callback(
+    ctx: *T.ScreenWriteCtx,
+    s: *T.Screen,
+    cb: ?ScreenWriteInitCtxCb,
+    arg: ?*anyopaque,
+) void {
+    _ = cb;
+    _ = arg;
+    screen_write_start(ctx, s);
+}
+
+pub fn screen_write_start_pane(ctx: *T.ScreenWriteCtx, wp: *T.WindowPane, s: ?*T.Screen) void {
+    ctx.* = .{ .wp = wp, .s = s orelse wp.screen };
+}
+
+pub fn screen_write_stop(_: *T.ScreenWriteCtx) void {}
+
+pub fn screen_write_set_cursor(ctx: *T.ScreenWriteCtx, cx: i32, cy: i32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (cx >= 0 and gd.sx > 0)
+        s.cx = @min(@as(u32, @intCast(cx)), gd.sx - 1);
+    if (cy >= 0 and gd.sy > 0)
+        s.cy = @min(@as(u32, @intCast(cy)), gd.sy - 1);
+}
+
+pub fn screen_write_strlen(_: [*:0]const u8) usize {
+    return 0;
+}
+
+pub fn screen_write_text(
+    ctx: *T.ScreenWriteCtx,
+    cx: u32,
+    width: u32,
+    lines: u32,
+    more: i32,
+    gcp: *const T.GridCell,
+    fmt: [*:0]const u8,
+) i32 {
+    _ = .{ ctx, cx, width, lines, more, gcp, fmt };
+    return 0;
+}
+
+pub fn screen_write_puts(ctx: *T.ScreenWriteCtx, gcp: *const T.GridCell, fmt: [*:0]const u8) void {
+    _ = .{ ctx, gcp, fmt };
+}
+
+pub fn screen_write_alternateon(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, cursor: i32) void {
+    _ = gc;
+    if (ctx.wp) |wp|
+        screen_mod.screen_enter_alternate(wp, cursor != 0);
+}
+
+pub fn screen_write_alternateoff(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, cursor: i32) void {
+    _ = gc;
+    if (ctx.wp) |wp|
+        screen_mod.screen_leave_alternate(wp, cursor != 0);
+}
+
+pub fn screen_write_menu(
+    ctx: *T.ScreenWriteCtx,
+    menu: ?*anyopaque,
+    choice: i32,
+    lines: i32,
+    menu_gc: ?*const T.GridCell,
+    border_gc: ?*const T.GridCell,
+    choice_gc: ?*const T.GridCell,
+) void {
+    _ = .{ ctx, menu, choice, lines, menu_gc, border_gc, choice_gc };
+}
+
+pub fn screen_write_box_border_set(lines: i32, cell_type: i32, gc: *T.GridCell) void {
+    _ = lines;
+    _ = cell_type;
+    _ = gc;
+}
+
+pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si: ?*anyopaque, bg: u32) void {
+    _ = .{ ctx, si, bg };
+}
+
+pub fn screen_write_make_list(_: *T.Screen) void {}
+pub fn screen_write_free_list(_: *T.Screen) void {}
+
+pub fn screen_write_get_citem() ?*anyopaque {
+    return null;
+}
+
+pub fn screen_write_free_citem(ci: ?*anyopaque) void {
+    _ = ci;
+}
+
+pub fn screen_write_collect_add(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
+    putCell(ctx, gc);
+}
+
+pub fn screen_write_collect_end(_: *T.ScreenWriteCtx) void {}
+pub fn screen_write_collect_clear(_: *T.ScreenWriteCtx, _: u32, _: u32) void {}
+pub fn screen_write_collect_scroll(_: *T.ScreenWriteCtx, _: u32) void {}
+
+pub fn screen_write_collect_flush(_: *T.ScreenWriteCtx, _: i32, _: [*:0]const u8) void {}
+
+pub fn screen_write_collect_insert(_: *T.ScreenWriteCtx, _: ?*anyopaque) void {}
+
+pub fn screen_write_collect_trim(
+    ctx: *T.ScreenWriteCtx,
+    y: u32,
+    x: u32,
+    used: u32,
+    wrapped: ?*i32,
+) ?*anyopaque {
+    _ = .{ ctx, y, x, used, wrapped };
+    return null;
+}
+
+pub fn screen_write_combine(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) i32 {
+    _ = .{ ctx, gc };
+    return 0;
+}
+
+pub fn screen_write_overwrite(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, width: u32) i32 {
+    _ = .{ ctx, gc, width };
+    return 0;
+}
+
+pub fn screen_write_initctx(_: *T.ScreenWriteCtx, _: *anyopaque, _: i32) void {}
+
+pub fn screen_write_redraw_cb(_: *const anyopaque) void {}
+
+pub fn screen_write_set_client_cb(_: *anyopaque, _: ?*T.Client) i32 {
+    return 0;
+}
+
+pub fn screen_write_offset_timer(_: i32, _: i32, _: ?*anyopaque) void {}
+
+pub fn screen_write_sync_callback(_: i32, _: i32, wp: ?*T.WindowPane) void {
+    if (wp) |w| w.base.mode &= ~T.MODE_SYNC;
+}
+
+pub fn screen_write_start_sync(wp: ?*T.WindowPane) void {
+    if (wp) |w| w.base.mode |= T.MODE_SYNC;
+}
+
+pub fn screen_write_stop_sync(wp: ?*T.WindowPane) void {
+    if (wp) |w| w.base.mode &= ~T.MODE_SYNC;
+}
+
 test "screen-write handles cursor movement and erase" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(4, 2, 100);

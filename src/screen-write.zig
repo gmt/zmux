@@ -1770,13 +1770,11 @@ pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si: ?*anyopaque, bg: u32)
     _ = .{ ctx, si, bg };
 }
 
-pub fn screen_write_redraw_cb(_: *const T.TtyCtx) void {}
 
 pub fn screen_write_set_client_cb(_: *T.TtyCtx, _: ?*T.Client) i32 {
     return 0;
 }
 
-pub fn screen_write_offset_timer(_: i32, _: i32, _: ?*anyopaque) void {}
 
 pub fn screen_write_sync_callback(_: i32, _: i32, wp: ?*T.WindowPane) void {
     if (wp) |w| w.base.mode &= ~T.MODE_SYNC;

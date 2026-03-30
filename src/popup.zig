@@ -31,6 +31,8 @@ const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
 pub const POPUP_CLOSEANYKEY: i32 = 0x1;
+pub const POPUP_CLOSEEXIT: i32 = 0x2;
+pub const POPUP_CLOSEEXITZERO: i32 = 0x4;
 
 /// Matches tmux `BOX_LINES_NONE` / zmux display-popup `-B` (see cmd-display-menu.zig).
 pub const POPUP_BORDER_NONE: u32 = 6;
@@ -92,6 +94,7 @@ pub const PopupData = struct {
     border_lines: u32 = 1,
     screen: ?*T.Screen = null,
     content: std.ArrayList(u8) = .{},
+    command_status: i32 = 0,
     px: u32 = 0,
     py: u32 = 0,
     sx: u32 = 0,

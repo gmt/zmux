@@ -2090,43 +2090,77 @@ pub fn window_copy_get_screen(wme: *T.WindowModeEntry) *T.Screen {
     return copyModeGetScreen(wme);
 }
 
-pub fn window_copy_clone_screen(src: *T.Screen, _hint: ?*T.Screen, _cx: ?*u32, _cy: ?*u32, _trim: bool) *T.Screen {
-    _ = _hint;
-    _ = _cx;
-    _ = _cy;
-    _ = _trim;
-    const dst = screen.screen_init(src.grid.sx, src.grid.sy, 0);
+pub fn window_copy_clone_screen(src: *T.Screen, hint: ?*T.Screen, cx_out: ?*u32, cy_out: ?*u32, trim: bool) *T.Screen {
+    _ = hint;
+    var sy = src.grid.sy;
+
+    // If trimming, remove empty trailing lines
+    if (trim) {
+        while (sy > 0) {
+            const gl = grid.grid_peek_line(@constCast(src.grid), sy - 1);
+            if (gl == null or gl.?.cellused != 0) break;
+            sy -= 1;
+        }
+        if (sy == 0) sy = 1;
+    }
+
+    const dst = screen.screen_init(src.grid.sx, sy, 0);
     cloneScreen(dst, src);
+
+    if (cx_out) |cx| cx.* = if (dst.grid.sx != 0) @min(src.cx, dst.grid.sx - 1) else 0;
+    if (cy_out) |cy| cy.* = if (dst.grid.sy != 0) @min(src.cy, dst.grid.sy - 1) else 0;
+
     return dst;
 }
 
 // ── Timer / Callbacks ──────────────────────────────────────────────────────
 
 pub fn window_copy_scroll_timer(_fd: i32, _events: i16, _arg: ?*anyopaque) void {
+    // Timer callback for scroll speed management.
+    // In tmux, this fires periodically while the mouse is dragging
+    // near the edge to auto-scroll. Not yet needed in zmux.
     _ = _fd;
     _ = _events;
     _ = _arg;
 }
 
 pub fn window_copy_init_ctx_cb(_ctx: ?*anyopaque, _cell: ?*T.GridCell) void {
+    // Context init callback for screen_write operations in view mode.
+    // Sets defaults on the tty context. Minimal implementation since
+    // zmux's screen_write doesn't use the same callback pattern.
+    if (_cell) |cell| {
+        cell.* = T.grid_default_cell;
+    }
     _ = _ctx;
-    _ = _cell;
 }
 
 // ── Text add (view-mode output) ────────────────────────────────────────────
 
 pub fn window_copy_add(wp: *T.WindowPane, parse: bool, text: []const u8) void {
-    _ = wp;
-    _ = parse;
-    _ = text;
-    // stub – view-mode line insertion not yet wired
+    // View-mode add: write text to the backing screen.
+    // The parse parameter is for ANSI escape parsing, which requires
+    // input_parse_screen (not yet ported). For now, write raw text.
+    window_copy_vadd(wp, parse, text);
 }
 
-pub fn window_copy_vadd(wp: *T.WindowPane, parse: bool, text: []const u8) void {
-    _ = wp;
-    _ = parse;
-    _ = text;
-    // stub – view-mode va_list line insertion
+pub fn window_copy_vadd(wp: *T.WindowPane, _parse: bool, text: []const u8) void {
+    _ = _parse;
+    const wme = window.window_pane_mode(wp) orelse return;
+    if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
+    const data = modeData(wme);
+    const backing = data.backing;
+
+    // Write a newline if not the first line
+    var ctx = T.ScreenWriteCtx{ .s = backing };
+    screen_write.carriage_return(&ctx);
+    screen_write.newline(&ctx);
+
+    // Write the text characters
+    for (text) |ch| {
+        screen_write.putc(&ctx, ch);
+    }
+
+    redraw(wme);
 }
 
 // ── Getters for format callbacks ───────────────────────────────────────────
@@ -2249,23 +2283,52 @@ pub fn window_copy_style_changed(wme: *T.WindowModeEntry) void {
     redraw(wme);
 }
 
-pub fn window_copy_write_line(wme: *T.WindowModeEntry, _ctx: ?*anyopaque, _py: u32) void {
-    _ = _ctx;
-    _ = _py;
-    _ = wme;
+pub fn window_copy_write_line(wme: *T.WindowModeEntry, raw_ctx: ?*anyopaque, py: u32) void {
+    const ctx: ?*T.ScreenWriteCtx = if (raw_ctx) |p| @ptrCast(@alignCast(p)) else null;
+    const data = modeData(wme);
+    const backing = data.backing;
+    const gd = backing.grid;
+
+    // Write the backing row into the screen_write context
+    const backing_row = data.top + py;
+    if (backing_row >= gd.sy) return;
+
+    const sw = ctx orelse return;
+    screen_write.cursor_to(sw, py, 0);
+
+    const width = @min(gd.sx, sw.s.grid.sx);
+    var col: u32 = 0;
+    while (col < width) : (col += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(gd, backing_row, col, &gc);
+        screen_write.putCell(sw, &gc);
+    }
+
+    // Draw position format on the first line
+    if (py == 0 and !data.hide_position and gd.sx > 0) {
+        if (opts.options_ready) {
+            const pos_fmt = opts.options_get_string(wme.wp.window.options, "copy-mode-position-format");
+            if (pos_fmt.len > 0) {
+                const expanded = format_mod.format_single(null, pos_fmt, null, null, null, wme.wp);
+                if (expanded.len > 0) {
+                    screen_write.cursor_to(sw, 0, 0);
+                    format_draw.format_draw(sw, &T.grid_default_cell, sw.s.grid.sx, expanded);
+                }
+                xm.allocator.free(expanded);
+            }
+        }
+    }
 }
 
-pub fn window_copy_write_lines(wme: *T.WindowModeEntry, _ctx: ?*anyopaque, _py: u32, _ny: u32) void {
-    _ = _ctx;
-    _ = _py;
-    _ = _ny;
-    _ = wme;
+pub fn window_copy_write_lines(wme: *T.WindowModeEntry, raw_ctx: ?*anyopaque, py: u32, ny: u32) void {
+    var yy: u32 = py;
+    while (yy < py + ny) : (yy += 1) {
+        window_copy_write_line(wme, raw_ctx, yy);
+    }
 }
 
-pub fn window_copy_write_one(wme: *T.WindowModeEntry, _ctx: ?*anyopaque, _py: u32) void {
-    _ = _ctx;
-    _ = _py;
-    _ = wme;
+pub fn window_copy_write_one(wme: *T.WindowModeEntry, raw_ctx: ?*anyopaque, py: u32) void {
+    window_copy_write_line(wme, raw_ctx, py);
 }
 
 pub fn window_copy_update_style(wme: *T.WindowModeEntry, fx: u32, fy: u32, gc: ?*T.GridCell, _mgc: ?*const T.GridCell, _cgc: ?*const T.GridCell, mkgc: ?*const T.GridCell) void {
@@ -2350,16 +2413,61 @@ pub fn window_copy_get_selection(wme: *T.WindowModeEntry, len: ?*usize) ?[]u8 {
 }
 
 pub fn window_copy_synchronize_cursor(wme: *T.WindowModeEntry, no_reset: bool) void {
-    _ = no_reset;
-    clampCursorX(wme);
-    _ = updateSelection(wme);
-    redraw(wme);
+    const data = modeData(wme);
+    switch (data.cursordrag) {
+        .endsel => window_copy_synchronize_cursor_end(wme, false, no_reset),
+        .sel => window_copy_synchronize_cursor_end(wme, true, no_reset),
+        .none => {},
+    }
 }
 
 pub fn window_copy_synchronize_cursor_end(wme: *T.WindowModeEntry, begin: bool, no_reset: bool) void {
-    _ = begin;
-    _ = no_reset;
-    clampCursorX(wme);
+    const data = modeData(wme);
+    var xx = data.cx;
+    var yy = absoluteCursorRow(wme);
+
+    switch (data.selflag) {
+        .word => {
+            if (!no_reset) {
+                if (data.dy > yy or (data.dy == yy and data.dx > xx)) {
+                    window_copy_cursor_previous_word_pos(wme, word_whitespace, &xx, &yy);
+                    data.endselx = data.endselrx;
+                    data.endsely = data.endselry;
+                } else {
+                    if (xx >= backingLineLength(wme, yy) or
+                        grid.grid_in_set(data.backing.grid, yy, xx + 1, word_whitespace) == 0)
+                    {
+                        window_copy_cursor_next_word_end_pos(wme, word_whitespace, &xx, &yy);
+                    }
+                    data.selx = data.selrx;
+                    data.sely = data.selry;
+                }
+            }
+        },
+        .line => {
+            if (!no_reset) {
+                if (data.dy > yy) {
+                    data.endselx = data.endselrx;
+                    data.endsely = data.endselry;
+                    xx = 0;
+                    yy = absoluteCursorRow(wme);
+                } else {
+                    data.selx = data.selrx;
+                    data.sely = data.selry;
+                    xx = backingLineLength(wme, yy);
+                }
+            }
+        },
+        .char => {},
+    }
+
+    if (begin) {
+        data.selx = xx;
+        data.sely = yy;
+    } else {
+        data.endselx = xx;
+        data.endsely = yy;
+    }
 }
 
 // ── Copy / paste / pipe ────────────────────────────────────────────────────
@@ -3132,6 +3240,7 @@ pub fn window_copy_acquire_cursor_up(wme: *T.WindowModeEntry, _hsize: u32, _oy: 
     setAbsoluteCursorRow(wme, py);
     modeData(wme).cx = px;
     clampCursorX(wme);
+    _ = updateSelection(wme);
 }
 
 pub fn window_copy_acquire_cursor_down(wme: *T.WindowModeEntry, _hsize: u32, _sy: u32, _oy: u32, _oldy: u32, px: u32, py: u32, _no_reset: bool) void {
@@ -3143,6 +3252,7 @@ pub fn window_copy_acquire_cursor_down(wme: *T.WindowModeEntry, _hsize: u32, _sy
     setAbsoluteCursorRow(wme, py);
     modeData(wme).cx = px;
     clampCursorX(wme);
+    _ = updateSelection(wme);
 }
 
 // ── Expand search string helper ────────────────────────────────────────────

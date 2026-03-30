@@ -1122,7 +1122,6 @@ pub fn scrollregion(ctx: *T.ScreenWriteCtx, rupper: u32, rlower: u32) void {
 
 // ── tmux C-name wrappers ─────────────────────────────────────────────────
 pub const screen_write_putc = putc_styled;
-pub const screen_write_cell = putCell;
 pub const screen_write_nputs = nputs;
 pub const screen_write_vnputs = nputs;
 pub const screen_write_fast_copy = fast_copy;
@@ -1162,43 +1161,556 @@ pub const screen_write_clearhistory = clearhistory;
 pub const screen_write_rawstring = rawstring;
 pub const screen_write_setselection = setselection;
 
-// ── Remaining tmux C-name API (stubs / thin wrappers) ───────────────────
+// ── Citem doubly-linked list helpers ─────────────────────────────────────
 
-pub fn screen_write_init(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
-    screen_write_start(ctx, s);
+fn cline_is_empty(cl: *const T.ScreenWriteCline) bool {
+    return cl.first == null;
 }
 
-pub fn screen_write_start(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
-    const preserve_wp = ctx.wp;
-    ctx.* = .{ .s = s, .wp = preserve_wp };
+fn cline_insert_tail(cl: *T.ScreenWriteCline, ci: *T.ScreenWriteCitem) void {
+    ci.next = null;
+    ci.prev = cl.last;
+    if (cl.last) |last| {
+        last.next = ci;
+    } else {
+        cl.first = ci;
+    }
+    cl.last = ci;
 }
 
-pub const ScreenWriteInitCtxCb = *const fn (*T.ScreenWriteCtx, *anyopaque) void;
+fn cline_insert_before(cl: *T.ScreenWriteCline, before: *T.ScreenWriteCitem, ci: *T.ScreenWriteCitem) void {
+    ci.next = before;
+    ci.prev = before.prev;
+    if (before.prev) |prev| {
+        prev.next = ci;
+    } else {
+        cl.first = ci;
+    }
+    before.prev = ci;
+}
+
+fn cline_insert_after(cl: *T.ScreenWriteCline, after: *T.ScreenWriteCitem, ci: *T.ScreenWriteCitem) void {
+    ci.prev = after;
+    ci.next = after.next;
+    if (after.next) |next_node| {
+        next_node.prev = ci;
+    } else {
+        cl.last = ci;
+    }
+    after.next = ci;
+}
+
+fn cline_remove(cl: *T.ScreenWriteCline, ci: *T.ScreenWriteCitem) void {
+    if (ci.prev) |prev| {
+        prev.next = ci.next;
+    } else {
+        cl.first = ci.next;
+    }
+    if (ci.next) |next_node| {
+        next_node.prev = ci.prev;
+    } else {
+        cl.last = ci.prev;
+    }
+    ci.prev = null;
+    ci.next = null;
+}
+
+fn cline_concat(dst: *T.ScreenWriteCline, src: *T.ScreenWriteCline) void {
+    if (src.first == null) return;
+    if (dst.last) |last| {
+        last.next = src.first;
+        src.first.?.prev = last;
+    } else {
+        dst.first = src.first;
+    }
+    dst.last = src.last;
+    src.first = null;
+    src.last = null;
+}
+
+// ── Citem freelist (pool allocator for efficiency) ───────────────────────
+
+var citem_freelist_head: ?*T.ScreenWriteCitem = null;
+
+fn get_citem() *T.ScreenWriteCitem {
+    if (citem_freelist_head) |ci| {
+        citem_freelist_head = ci.next;
+        ci.* = .{};
+        return ci;
+    }
+    return xm.allocator.create(T.ScreenWriteCitem) catch unreachable;
+}
+
+fn free_citem(ci: *T.ScreenWriteCitem) void {
+    ci.* = .{};
+    ci.next = citem_freelist_head;
+    citem_freelist_head = ci;
+}
+
+// ── Collect/flush real implementations ported from tmux screen-write.c ──
+
+pub fn screen_write_make_list(s: *T.Screen) void {
+    const sy = s.grid.sy;
+    if (sy == 0) return;
+    const wl = xm.allocator.alloc(T.ScreenWriteCline, sy) catch unreachable;
+    for (wl) |*cl| cl.* = .{};
+    s.write_list = wl;
+}
+
+pub fn screen_write_free_list(s: *T.Screen) void {
+    const wl = s.write_list orelse return;
+    for (wl) |*cl| {
+        if (cl.data) |d| xm.allocator.free(d);
+        var ci = cl.first;
+        while (ci) |item| {
+            ci = item.next;
+            free_citem(item);
+        }
+        cl.* = .{};
+    }
+    xm.allocator.free(wl);
+    s.write_list = null;
+}
+
+fn screen_write_init_internal(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
+    ctx.* = .{ .s = s };
+    if (s.write_list == null)
+        screen_write_make_list(s);
+    ctx.item = get_citem();
+    ctx.scrolled = 0;
+    ctx.bg = 8;
+}
+
+pub fn screen_write_start_pane(ctx: *T.ScreenWriteCtx, wp: *T.WindowPane, s_opt: ?*T.Screen) void {
+    const s = s_opt orelse wp.screen;
+    screen_write_init_internal(ctx, s);
+    ctx.wp = wp;
+}
 
 pub fn screen_write_start_callback(
     ctx: *T.ScreenWriteCtx,
     s: *T.Screen,
-    cb: ?ScreenWriteInitCtxCb,
+    cb: ?T.ScreenWriteInitCtxCb,
     arg: ?*anyopaque,
 ) void {
-    _ = cb;
-    _ = arg;
-    screen_write_start(ctx, s);
+    screen_write_init_internal(ctx, s);
+    ctx.init_ctx_cb = cb;
+    ctx.arg = arg;
 }
 
-pub fn screen_write_start_pane(ctx: *T.ScreenWriteCtx, wp: *T.WindowPane, s: ?*T.Screen) void {
-    ctx.* = .{ .wp = wp, .s = s orelse wp.screen };
+pub fn screen_write_start(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
+    screen_write_init_internal(ctx, s);
 }
 
-pub fn screen_write_stop(_: *T.ScreenWriteCtx) void {}
+pub fn screen_write_init(ctx: *T.ScreenWriteCtx, s: *T.Screen) void {
+    screen_write_init_internal(ctx, s);
+}
+
+pub fn screen_write_stop(ctx: *T.ScreenWriteCtx) void {
+    screen_write_collect_end(ctx);
+    screen_write_collect_flush(ctx, 0, "screen_write_stop");
+    if (ctx.item) |item| free_citem(item);
+    ctx.item = null;
+}
+
+pub fn screen_write_initctx(ctx: *T.ScreenWriteCtx, ttyctx: *T.TtyCtx, sync: i32) void {
+    const s = ctx.s;
+    ttyctx.* = .{};
+
+    ttyctx.s = s;
+    ttyctx.sx = s.grid.sx;
+    ttyctx.sy = s.grid.sy;
+    ttyctx.ocx = s.cx;
+    ttyctx.ocy = s.cy;
+    ttyctx.orlower = s.rlower;
+    ttyctx.orupper = s.rupper;
+    ttyctx.defaults = T.grid_default_cell;
+
+    if (ctx.init_ctx_cb) |cb| {
+        cb(ctx, ttyctx);
+    }
+
+    if (ctx.flags & T.SCREEN_WRITE_SYNC == 0) {
+        ttyctx.num = @intCast(@as(i32, sync));
+        ctx.flags |= T.SCREEN_WRITE_SYNC;
+    }
+}
 
 pub fn screen_write_set_cursor(ctx: *T.ScreenWriteCtx, cx: i32, cy: i32) void {
     const s = ctx.s;
     const gd = s.grid;
-    if (cx >= 0 and gd.sx > 0)
-        s.cx = @min(@as(u32, @intCast(cx)), gd.sx - 1);
-    if (cy >= 0 and gd.sy > 0)
-        s.cy = @min(@as(u32, @intCast(cy)), gd.sy - 1);
+
+    if (cx != -1) {
+        if (gd.sx > 0) {
+            const ucx: u32 = @intCast(cx);
+            if (ucx > gd.sx)
+                s.cx = gd.sx - 1
+            else
+                s.cx = ucx;
+        }
+    }
+    if (cy != -1) {
+        if (gd.sy > 0)
+            s.cy = @min(@as(u32, @intCast(cy)), gd.sy - 1);
+    }
+}
+
+pub fn screen_write_collect_trim(
+    ctx: *T.ScreenWriteCtx,
+    y: u32,
+    x: u32,
+    used: u32,
+    wrapped: ?*bool,
+) ?*T.ScreenWriteCitem {
+    const wl = ctx.s.write_list orelse return null;
+    if (y >= wl.len) return null;
+    const cl = &wl[y];
+    if (used == 0) return null;
+
+    const sx = x;
+    const ex = x + used - 1;
+    var before: ?*T.ScreenWriteCitem = null;
+
+    var ci = cl.first;
+    while (ci) |item| {
+        const next = item.next;
+        const csx = item.x;
+        const cex = item.x + item.used -| 1;
+
+        if (cex < sx) {
+            ci = next;
+            continue;
+        }
+
+        if (csx > ex) {
+            before = item;
+            break;
+        }
+
+        if (csx >= sx and cex <= ex) {
+            cline_remove(cl, item);
+            if (csx == 0 and item.wrapped and wrapped != null)
+                wrapped.?.* = true;
+            free_citem(item);
+            ci = next;
+            continue;
+        }
+
+        if (csx < sx and cex >= sx and cex <= ex) {
+            item.used = sx - csx;
+            ci = next;
+            continue;
+        }
+
+        if (cex > ex and csx >= sx and csx <= ex) {
+            item.x = ex + 1;
+            item.used = cex - ex;
+            before = item;
+            break;
+        }
+
+        const ci2 = get_citem();
+        ci2.ctype = item.ctype;
+        ci2.bg = item.bg;
+        ci2.gc = item.gc;
+        cline_insert_after(cl, item, ci2);
+
+        item.used = sx - csx;
+        ci2.x = ex + 1;
+        ci2.used = cex - ex;
+
+        before = ci2;
+        break;
+    }
+    return before;
+}
+
+pub fn screen_write_collect_clear(ctx: *T.ScreenWriteCtx, y: u32, n: u32) void {
+    const wl = ctx.s.write_list orelse return;
+    var i = y;
+    while (i < y + n and i < wl.len) : (i += 1) {
+        const cl = &wl[i];
+        var ci = cl.first;
+        while (ci) |item| {
+            ci = item.next;
+            free_citem(item);
+        }
+        cl.first = null;
+        cl.last = null;
+    }
+}
+
+pub fn screen_write_collect_scroll(ctx: *T.ScreenWriteCtx, bg: u32) void {
+    const s = ctx.s;
+    const wl = s.write_list orelse return;
+    if (s.rupper >= wl.len) return;
+    if (s.rlower >= wl.len) return;
+
+    screen_write_collect_clear(ctx, s.rupper, 1);
+    const saved = wl[s.rupper].data;
+
+    var y = s.rupper;
+    while (y < s.rlower) : (y += 1) {
+        cline_concat(&wl[y], &wl[y + 1]);
+        wl[y].data = wl[y + 1].data;
+    }
+    wl[s.rlower].data = saved;
+
+    const ci = get_citem();
+    ci.x = 0;
+    ci.used = s.grid.sx;
+    ci.ctype = .CLEAR;
+    ci.bg = bg;
+    cline_insert_tail(&wl[s.rlower], ci);
+}
+
+pub fn screen_write_collect_flush(ctx: *T.ScreenWriteCtx, scroll_only: i32, _: [*:0]const u8) void {
+    const s = ctx.s;
+    const wl = s.write_list orelse {
+        ctx.scrolled = 0;
+        ctx.bg = 8;
+        return;
+    };
+
+    if (s.mode & T.MODE_SYNC != 0) {
+        var y: u32 = 0;
+        while (y < @min(s.grid.sy, @as(u32, @intCast(wl.len)))) : (y += 1) {
+            const cl = &wl[y];
+            var ci = cl.first;
+            while (ci) |item| {
+                ci = item.next;
+                free_citem(item);
+            }
+            cl.first = null;
+            cl.last = null;
+        }
+        return;
+    }
+
+    ctx.scrolled = 0;
+    ctx.bg = 8;
+
+    if (scroll_only != 0) return;
+
+    const save_cx = s.cx;
+    const save_cy = s.cy;
+
+    var y: u32 = 0;
+    while (y < @min(s.grid.sy, @as(u32, @intCast(wl.len)))) : (y += 1) {
+        const cl = &wl[y];
+        var ci = cl.first;
+        while (ci) |item| {
+            ci = item.next;
+            cline_remove(cl, item);
+            free_citem(item);
+        }
+    }
+
+    s.cx = save_cx;
+    s.cy = save_cy;
+}
+
+pub fn screen_write_collect_insert(ctx: *T.ScreenWriteCtx, ci: *T.ScreenWriteCitem) void {
+    const s = ctx.s;
+    const wl = s.write_list orelse return;
+    if (s.cy >= wl.len) return;
+    const cl = &wl[s.cy];
+
+    var wrapped_flag: bool = false;
+    const before = screen_write_collect_trim(ctx, s.cy, ci.x, ci.used, &wrapped_flag);
+    if (wrapped_flag) ci.wrapped = true;
+    if (before) |b| {
+        cline_insert_before(cl, b, ci);
+    } else {
+        cline_insert_tail(cl, ci);
+    }
+    ctx.item = get_citem();
+}
+
+pub fn screen_write_collect_end(ctx: *T.ScreenWriteCtx) void {
+    const s = ctx.s;
+    const ci = ctx.item orelse return;
+    if (ci.used == 0) return;
+
+    ci.x = s.cx;
+    screen_write_collect_insert(ctx, ci);
+
+    if (s.cx != 0) {
+        var xx = s.cx;
+        while (xx > 0) : (xx -= 1) {
+            var gc: T.GridCell = undefined;
+            grid.get_cell(s.grid, s.cy, xx, &gc);
+            if (gc.flags & T.GRID_FLAG_PADDING == 0) break;
+            grid.set_cell(s.grid, s.cy, xx, &T.grid_default_cell);
+        }
+        if (xx != s.cx) {
+            if (xx == 0) {
+                var gc: T.GridCell = undefined;
+                grid.get_cell(s.grid, s.cy, 0, &gc);
+                if (gc.data.width > 1 or (gc.flags & T.GRID_FLAG_PADDING != 0))
+                    grid.set_cell(s.grid, s.cy, 0, &T.grid_default_cell);
+            } else {
+                var gc: T.GridCell = undefined;
+                grid.get_cell(s.grid, s.cy, xx, &gc);
+                if (gc.data.width > 1 or (gc.flags & T.GRID_FLAG_PADDING != 0))
+                    grid.set_cell(s.grid, s.cy, xx, &T.grid_default_cell);
+            }
+        }
+    }
+
+    const wl = s.write_list orelse return;
+    if (s.cy < wl.len) {
+        const cl = &wl[s.cy];
+        if (cl.data) |data| {
+            var i: u32 = 0;
+            while (i < ci.used) : (i += 1) {
+                if (ci.x + i < data.len) {
+                    var cell = ci.gc;
+                    cell.data.data[0] = data[ci.x + i];
+                    cell.data.size = 1;
+                    cell.data.width = 1;
+                    cell.data.have = 1;
+                    grid.set_cell(s.grid, s.cy, s.cx + i, &cell);
+                }
+            }
+        }
+    }
+
+    screen_write_set_cursor(ctx, @intCast(s.cx + ci.used), -1);
+
+    var xx = s.cx;
+    while (xx < s.grid.sx) : (xx += 1) {
+        var gc: T.GridCell = undefined;
+        grid.get_cell(s.grid, s.cy, xx, &gc);
+        if (gc.flags & T.GRID_FLAG_PADDING == 0) break;
+        grid.set_cell(s.grid, s.cy, xx, &T.grid_default_cell);
+    }
+}
+
+pub fn screen_write_collect_add(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
+    const s = ctx.s;
+    const sx = s.grid.sx;
+    if (sx == 0) return;
+
+    var collect = true;
+    if (gc.data.width != 1 or gc.data.size != 1 or gc.data.data[0] >= 0x7f)
+        collect = false
+    else if (gc.flags & T.GRID_FLAG_TAB != 0)
+        collect = false
+    else if (gc.attr & T.GRID_ATTR_CHARSET != 0)
+        collect = false
+    else if (s.mode & T.MODE_WRAP == 0)
+        collect = false
+    else if (s.mode & T.MODE_INSERT != 0)
+        collect = false
+    else if (s.sel != null)
+        collect = false;
+
+    if (!collect) {
+        screen_write_collect_end(ctx);
+        screen_write_collect_flush(ctx, 0, "screen_write_collect_add");
+        screen_write_cell(ctx, gc);
+        return;
+    }
+
+    const ci_used = if (ctx.item) |ci| ci.used else 0;
+    if (s.cx > sx - 1 or ci_used > sx - 1 - s.cx)
+        screen_write_collect_end(ctx);
+
+    const ci = ctx.item orelse return;
+
+    if (s.cx > sx - 1) {
+        ci.wrapped = true;
+        linefeed(ctx, true);
+        screen_write_set_cursor(ctx, 0, -1);
+    }
+
+    if (ci.used == 0)
+        ci.gc = gc.*;
+
+    const wl = s.write_list orelse return;
+    if (s.cy >= wl.len) return;
+    const cl = &wl[s.cy];
+    if (cl.data == null)
+        cl.data = xm.allocator.alloc(u8, sx) catch unreachable;
+    if (s.cx + ci.used < sx)
+        cl.data.?[s.cx + ci.used] = gc.data.data[0];
+    ci.used += 1;
+}
+
+pub fn screen_write_cell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+    const ud = &gc.data;
+    const sx = gd.sx;
+    const sy = gd.sy;
+    const width: u32 = ud.width;
+
+    if (gc.flags & T.GRID_FLAG_PADDING != 0) return;
+
+    if (combineCell(ctx, gc)) return;
+
+    screen_write_collect_flush(ctx, 1, "screen_write_cell");
+
+    if ((s.mode & T.MODE_WRAP == 0) and
+        width > 1 and
+        (width > sx or (s.cx != sx and s.cx > sx - width)))
+        return;
+
+    if ((s.mode & T.MODE_INSERT) != 0) {
+        var dest = sx;
+        while (dest > s.cx + width) {
+            dest -= 1;
+            var from: T.GridCell = undefined;
+            grid.get_cell(gd, s.cy, dest - width, &from);
+            grid.set_cell(gd, s.cy, dest, &from);
+        }
+        var col: u32 = 0;
+        while (col < width) : (col += 1)
+            grid.set_cell(gd, s.cy, s.cx + col, &T.grid_default_cell);
+    }
+
+    if ((s.mode & T.MODE_WRAP) != 0 and s.cx > sx - width) {
+        linefeed(ctx, true);
+        screen_write_set_cursor(ctx, 0, -1);
+        screen_write_collect_flush(ctx, 0, "screen_write_cell");
+    }
+
+    if (s.cx > sx - width or s.cy > sy - 1) return;
+
+    var now_gc: T.GridCell = undefined;
+    grid.get_cell(gd, s.cy, s.cx, &now_gc);
+    _ = overwriteCells(ctx, &now_gc, width);
+
+    var xx = s.cx + 1;
+    while (xx < s.cx + width) : (xx += 1) {
+        grid.set_padding(gd, s.cy, xx);
+    }
+
+    grid.set_cell(gd, s.cy, s.cx, gc);
+
+    const not_wrap: u32 = if (s.mode & T.MODE_WRAP == 0) @as(u32, 1) else 0;
+    if (s.cx <= sx - not_wrap - width)
+        screen_write_set_cursor(ctx, @intCast(s.cx + width), -1)
+    else
+        screen_write_set_cursor(ctx, @intCast(sx - not_wrap), -1);
+}
+
+pub fn screen_write_combine(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) i32 {
+    return if (combineCell(ctx, gc)) 1 else 0;
+}
+
+pub fn screen_write_overwrite(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, width: u32) i32 {
+    return if (overwriteCells(ctx, gc, width)) 1 else 0;
+}
+
+pub fn screen_write_get_citem() *T.ScreenWriteCitem {
+    return get_citem();
+}
+
+pub fn screen_write_free_citem(ci: *T.ScreenWriteCitem) void {
+    free_citem(ci);
 }
 
 pub fn screen_write_strlen(_: [*:0]const u8) usize {
@@ -1256,55 +1768,9 @@ pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si: ?*anyopaque, bg: u32)
     _ = .{ ctx, si, bg };
 }
 
-pub fn screen_write_make_list(_: *T.Screen) void {}
-pub fn screen_write_free_list(_: *T.Screen) void {}
+pub fn screen_write_redraw_cb(_: *const T.TtyCtx) void {}
 
-pub fn screen_write_get_citem() ?*anyopaque {
-    return null;
-}
-
-pub fn screen_write_free_citem(ci: ?*anyopaque) void {
-    _ = ci;
-}
-
-pub fn screen_write_collect_add(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
-    putCell(ctx, gc);
-}
-
-pub fn screen_write_collect_end(_: *T.ScreenWriteCtx) void {}
-pub fn screen_write_collect_clear(_: *T.ScreenWriteCtx, _: u32, _: u32) void {}
-pub fn screen_write_collect_scroll(_: *T.ScreenWriteCtx, _: u32) void {}
-
-pub fn screen_write_collect_flush(_: *T.ScreenWriteCtx, _: i32, _: [*:0]const u8) void {}
-
-pub fn screen_write_collect_insert(_: *T.ScreenWriteCtx, _: ?*anyopaque) void {}
-
-pub fn screen_write_collect_trim(
-    ctx: *T.ScreenWriteCtx,
-    y: u32,
-    x: u32,
-    used: u32,
-    wrapped: ?*i32,
-) ?*anyopaque {
-    _ = .{ ctx, y, x, used, wrapped };
-    return null;
-}
-
-pub fn screen_write_combine(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) i32 {
-    _ = .{ ctx, gc };
-    return 0;
-}
-
-pub fn screen_write_overwrite(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, width: u32) i32 {
-    _ = .{ ctx, gc, width };
-    return 0;
-}
-
-pub fn screen_write_initctx(_: *T.ScreenWriteCtx, _: *anyopaque, _: i32) void {}
-
-pub fn screen_write_redraw_cb(_: *const anyopaque) void {}
-
-pub fn screen_write_set_client_cb(_: *anyopaque, _: ?*T.Client) i32 {
+pub fn screen_write_set_client_cb(_: *T.TtyCtx, _: ?*T.Client) i32 {
     return 0;
 }
 
@@ -1791,4 +2257,154 @@ test "screen-write scrollregion resets cursor to top-left" {
     try std.testing.expectEqual(@as(u32, 0), s.cy);
     try std.testing.expectEqual(@as(u32, 2), s.rupper);
     try std.testing.expectEqual(@as(u32, 7), s.rlower);
+}
+
+test "screen-write collect lifecycle: start, add, end, flush, stop" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 4, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    try std.testing.expect(ctx.item != null);
+    try std.testing.expect(s.write_list != null);
+    try std.testing.expectEqual(@as(u32, 0), ctx.scrolled);
+    try std.testing.expectEqual(@as(u32, 8), ctx.bg);
+
+    var gc = T.grid_default_cell;
+    utf8.utf8_set(&gc.data, 'A');
+    screen_write_collect_add(&ctx, &gc);
+    utf8.utf8_set(&gc.data, 'B');
+    screen_write_collect_add(&ctx, &gc);
+    utf8.utf8_set(&gc.data, 'C');
+    screen_write_collect_add(&ctx, &gc);
+
+    try std.testing.expectEqual(@as(u32, 3), ctx.item.?.used);
+
+    screen_write_collect_end(&ctx);
+
+    try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(s.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(s.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(s.grid, 0, 2));
+    try std.testing.expectEqual(@as(u32, 3), s.cx);
+}
+
+test "screen-write collect_scroll moves items between lines" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 4, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    s.rupper = 0;
+    s.rlower = 3;
+
+    screen_write_collect_scroll(&ctx, 8);
+    const wl = s.write_list.?;
+
+    try std.testing.expect(!cline_is_empty(&wl[3]));
+    const ci = wl[3].first.?;
+    try std.testing.expectEqual(T.ScreenWriteCitemType.CLEAR, ci.ctype);
+    try std.testing.expectEqual(@as(u32, 6), ci.used);
+}
+
+test "screen-write collect_clear frees items from a line" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 3, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    const ci = get_citem();
+    ci.x = 0;
+    ci.used = 3;
+    ci.ctype = .TEXT;
+    const wl = s.write_list.?;
+    cline_insert_tail(&wl[0], ci);
+
+    try std.testing.expect(!cline_is_empty(&wl[0]));
+    screen_write_collect_clear(&ctx, 0, 1);
+    try std.testing.expect(cline_is_empty(&wl[0]));
+}
+
+test "screen-write collect_trim splits overlapping items" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(20, 3, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    const ci = get_citem();
+    ci.x = 2;
+    ci.used = 10;
+    ci.ctype = .TEXT;
+    const wl = s.write_list.?;
+    cline_insert_tail(&wl[0], ci);
+
+    _ = screen_write_collect_trim(&ctx, 0, 5, 3, null);
+
+    const first_item = wl[0].first.?;
+    try std.testing.expectEqual(@as(u32, 2), first_item.x);
+    try std.testing.expectEqual(@as(u32, 3), first_item.used);
+
+    const second_item = first_item.next.?;
+    try std.testing.expectEqual(@as(u32, 8), second_item.x);
+    try std.testing.expectEqual(@as(u32, 4), second_item.used);
+}
+
+test "screen-write screen_write_cell writes cell to grid with collect tracking" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 3, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    var gc = T.grid_default_cell;
+    utf8.utf8_set(&gc.data, 'X');
+    screen_write_cell(&ctx, &gc);
+
+    try std.testing.expectEqual(@as(u8, 'X'), grid.ascii_at(s.grid, 0, 0));
+    try std.testing.expectEqual(@as(u32, 1), s.cx);
+}
+
+test "screen-write make_list and free_list manage write_list lifecycle" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(5, 3, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(s.write_list == null);
+    screen_write_make_list(s);
+    try std.testing.expect(s.write_list != null);
+    try std.testing.expectEqual(@as(usize, 3), s.write_list.?.len);
+
+    screen_write_free_list(s);
+    try std.testing.expect(s.write_list == null);
 }

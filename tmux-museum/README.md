@@ -25,21 +25,21 @@ Convenience symlinks for editor navigation:
 Use:
 
 ```bash
-bin/refresh-labs.sh
+bin/refresh-museum.sh
 ```
 
 Or specific stages:
 
 ```bash
-bin/refresh-labs.sh xref
-bin/refresh-labs.sh gdb
-bin/refresh-labs.sh pp
-bin/refresh-labs.sh link
+bin/refresh-museum.sh xref
+bin/refresh-museum.sh gdb
+bin/refresh-museum.sh pp
+bin/refresh-museum.sh link
 ```
 
 Default `pp` output is intentionally curated to a small shortlist of hot files.
 Pass explicit sources if you want more:
 
 ```bash
-bin/refresh-labs.sh pp cmd-split-window.c grid.c
+bin/refresh-museum.sh pp cmd-split-window.c grid.c
 ```

@@ -1080,6 +1080,9 @@ pub const CLIENT_CONTROL_PAUSEAFTER: u64 = 0x100000000;
 pub const CLIENT_CONTROL_WAITEXIT: u64 = 0x200000000;
 pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
 pub const CLIENT_NO_DETACH_ON_DESTROY: u64 = 0x8000000000;
+pub const CLIENT_DEAD: u64 = 0x10000000000;
+
+pub const CLIENT_UNATTACHEDFLAGS: u64 = CLIENT_DEAD | CLIENT_SUSPENDED | CLIENT_EXIT;
 
 pub const ClientExitReason = enum {
     none,
@@ -1171,11 +1174,20 @@ pub const WindowPaneOffset = struct {
 pub const CONTROL_PANE_OFF: u8 = 0x1;
 pub const CONTROL_PANE_PAUSED: u8 = 0x2;
 
+pub const ControlBlock = struct {
+    size: usize = 0,
+    line: ?[]u8 = null,
+    t: i64 = 0,
+    pane_id: ?u32 = null,
+};
+
 pub const ControlPane = struct {
     pane: u32,
     offset: WindowPaneOffset = .{},
     queued: WindowPaneOffset = .{},
     flags: u8 = 0,
+    pending_flag: bool = false,
+    blocks: std.ArrayListUnmanaged(*ControlBlock) = .{},
 };
 
 pub const ClientPaneCache = struct {
@@ -1269,6 +1281,9 @@ pub const Client = struct {
     control_panes: std.ArrayListUnmanaged(ControlPane) = .{},
     control_subscriptions: std.ArrayListUnmanaged(ControlSubscription) = .{},
     control_subs_timer: ?*c.libevent.event = null,
+    control_all_blocks: std.ArrayListUnmanaged(*ControlBlock) = .{},
+    control_pending_count: u32 = 0,
+    control_ready_flag: bool = false,
     pan_window: ?*Window = null,
     pan_ox: u32 = 0,
     pan_oy: u32 = 0,

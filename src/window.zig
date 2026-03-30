@@ -35,6 +35,7 @@ const marked_pane_mod = @import("marked-pane.zig");
 const c = @import("c.zig");
 const utf8 = @import("utf8.zig");
 const session_mod = @import("session.zig");
+const alerts = @import("alerts.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -1722,4 +1723,288 @@ fn window_pane_copy_key(wp: *T.WindowPane, _key: T.key_code) void {
         if (opts.options_get_number(loop.options, "synchronize-panes") == 0) continue;
         _ = _key;
     }
+}
+
+// ── Ported window.c functions ─────────────────────────────────────────────
+
+/// Choose the best (most-recently-used) pane from a list, determined by
+/// highest active_point. Faithfully ports window_pane_choose_best().
+pub fn window_pane_choose_best(list: []const *T.WindowPane) ?*T.WindowPane {
+    if (list.len == 0) return null;
+    var best: *T.WindowPane = list[0];
+    for (list[1..]) |next| {
+        if (next.active_point > best.active_point)
+            best = next;
+    }
+    return best;
+}
+
+/// Stub: pane error callback (libevent bufferevent error handler).
+/// In tmux this sets PANE_EXITED and conditionally destroys the pane.
+/// zmux handles pane I/O differently via pane-io.zig.
+pub fn window_pane_error_callback(wp: *T.WindowPane) void {
+    log.log_debug("window_pane_error_callback: %%{d} error", .{wp.id});
+    wp.flags |= T.PANE_EXITED;
+    if (window_pane_destroy_ready(wp)) {
+        const w = wp.window;
+        window_remove_pane(w, wp);
+    }
+}
+
+/// Compute the full size and offset of a pane including scrollbar area.
+/// Faithfully ports window_pane_full_size_offset().
+pub fn window_pane_full_size_offset(wp: *T.WindowPane) PaneGeometry {
+    const w = wp.window;
+    const sb_pos: u32 = @intCast(opts.options_get_number(w.options, "pane-scrollbars-position"));
+
+    const sb_w: u32 = if (window_pane_show_scrollbar(wp))
+        @intCast(@max(@as(i32, @intCast(wp.scrollbar_style.width)) + @as(i32, @intCast(wp.scrollbar_style.pad)), 0))
+    else
+        0;
+
+    var result = PaneGeometry{
+        .xoff = wp.xoff,
+        .yoff = wp.yoff,
+        .sx = wp.sx + sb_w,
+        .sy = wp.sy,
+    };
+    if (sb_pos == T.PANE_SCROLLBARS_LEFT) {
+        result.xoff = wp.xoff -| sb_w;
+    }
+    return result;
+}
+
+/// Stub: pane input callback (libevent client file read handler).
+/// In tmux this processes piped client input into a pane.
+/// zmux handles this differently; this stub exists for API parity.
+pub fn window_pane_input_callback(_wp: *T.WindowPane) void {
+    _ = _wp;
+}
+
+/// Get the next pane by number, cycling forward n times through the
+/// window's pane list. Faithfully ports window_pane_next_by_number().
+pub fn window_pane_next_by_number(w: *T.Window, wp: *T.WindowPane, n: u32) *T.WindowPane {
+    if (w.panes.items.len == 0) return wp;
+    var current = wp;
+    var remaining = n;
+    while (remaining > 0) : (remaining -= 1) {
+        var found_next = false;
+        for (w.panes.items, 0..) |pane, idx| {
+            if (pane == current) {
+                if (idx + 1 < w.panes.items.len) {
+                    current = w.panes.items[idx + 1];
+                } else {
+                    current = w.panes.items[0];
+                }
+                found_next = true;
+                break;
+            }
+        }
+        if (!found_next) {
+            current = w.panes.items[0];
+        }
+    }
+    return current;
+}
+
+/// Get the previous pane by number, cycling backward n times through the
+/// window's pane list. Faithfully ports window_pane_previous_by_number().
+pub fn window_pane_previous_by_number(w: *T.Window, wp: *T.WindowPane, n: u32) *T.WindowPane {
+    if (w.panes.items.len == 0) return wp;
+    var current = wp;
+    var remaining = n;
+    while (remaining > 0) : (remaining -= 1) {
+        var found_prev = false;
+        for (w.panes.items, 0..) |pane, idx| {
+            if (pane == current) {
+                if (idx > 0) {
+                    current = w.panes.items[idx - 1];
+                } else {
+                    current = w.panes.items[w.panes.items.len - 1];
+                }
+                found_prev = true;
+                break;
+            }
+        }
+        if (!found_prev) {
+            current = w.panes.items[w.panes.items.len - 1];
+        }
+    }
+    return current;
+}
+
+/// Stub: pane read callback (libevent bufferevent read handler).
+/// In tmux this processes data from the pty into the pane's screen.
+/// zmux handles pane I/O differently via pane-io.zig.
+pub fn window_pane_read_callback(_wp: *T.WindowPane) void {
+    _ = _wp;
+}
+
+/// Push a pane onto a pane stack (e.g. window's last_panes).
+/// Removes it first if already present, then inserts at the head.
+/// Faithfully ports window_pane_stack_push().
+pub fn window_pane_stack_push(stack: *std.ArrayList(*T.WindowPane), wp: ?*T.WindowPane) void {
+    const pane = wp orelse return;
+    window_pane_stack_remove(stack, pane);
+    stack.insert(xm.allocator, 0, pane) catch unreachable;
+    pane.flags |= T.PANE_VISITED;
+}
+
+/// Remove a pane from a pane stack if it is present (has PANE_VISITED set).
+/// Faithfully ports window_pane_stack_remove().
+pub fn window_pane_stack_remove(stack: *std.ArrayList(*T.WindowPane), wp: ?*T.WindowPane) void {
+    const pane = wp orelse return;
+    if (pane.flags & T.PANE_VISITED == 0) return;
+    var i: usize = 0;
+    while (i < stack.items.len) {
+        if (stack.items[i] == pane) {
+            _ = stack.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    pane.flags &= ~@as(u32, T.PANE_VISITED);
+}
+
+/// Update the activity time on a window and queue an activity alert.
+/// Faithfully ports window_update_activity().
+pub fn window_update_activity(w: *T.Window) void {
+    w.activity_time = std.time.milliTimestamp();
+    alerts.alerts_queue(w, T.WINDOW_ACTIVITY);
+}
+
+/// Find a winlink in a session's window map by index.
+/// Faithfully ports winlink_find_by_index().
+pub fn winlink_find_by_index(s: *T.Session, idx: i32) ?*T.Winlink {
+    if (idx < 0) @panic("winlink_find_by_index: bad index");
+    return s.windows.get(idx);
+}
+
+/// Find the next unused winlink index starting from idx, wrapping at
+/// maxInt(i32). Returns -1 if no free index exists.
+/// Faithfully ports winlink_next_index().
+fn winlink_next_index(s: *T.Session, idx: i32) i32 {
+    var i = idx;
+    const start = idx;
+    while (true) {
+        if (winlink_find_by_index(s, i) == null)
+            return i;
+        if (i == std.math.maxInt(i32))
+            i = 0
+        else
+            i += 1;
+        if (i == start) break;
+    }
+    return -1;
+}
+
+/// Add a new winlink to a session at the given index. If idx < 0, the next
+/// free index starting at (-idx - 1) is used. Returns null if no free
+/// index is available or if the index is already occupied.
+/// Zig adaptation: requires window parameter since Winlink fields are non-optional.
+/// Faithfully ports winlink_add().
+pub fn winlink_add(s: *T.Session, idx: i32, w: *T.Window) ?*T.Winlink {
+    var real_idx = idx;
+    if (real_idx < 0) {
+        real_idx = winlink_next_index(s, -real_idx - 1);
+        if (real_idx == -1) return null;
+    } else {
+        if (winlink_find_by_index(s, real_idx) != null) return null;
+    }
+
+    const wl = xm.allocator.create(T.Winlink) catch unreachable;
+    wl.* = .{
+        .idx = real_idx,
+        .session = s,
+        .window = w,
+    };
+    s.windows.put(real_idx, wl) catch unreachable;
+    return wl;
+}
+
+/// Set (or change) the window associated with a winlink. Manages the
+/// window's winlink back-reference list and reference counts.
+/// Faithfully ports winlink_set_window().
+pub fn winlink_set_window(wl: *T.Winlink, w: *T.Window) void {
+    const old_w = wl.window;
+    if (old_w == w) return;
+
+    var i: usize = 0;
+    while (i < old_w.winlinks.items.len) {
+        if (old_w.winlinks.items[i] == wl) {
+            _ = old_w.winlinks.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    window_remove_ref(old_w, "winlink_set_window");
+
+    w.winlinks.append(xm.allocator, wl) catch unreachable;
+    wl.window = w;
+    window_add_ref(w, "winlink_set_window");
+}
+
+/// Remove a winlink from its session's window map and from the window's
+/// winlink list. Frees the winlink. Faithfully ports winlink_remove().
+pub fn winlink_remove(s: *T.Session, wl: *T.Winlink) void {
+    var i: usize = 0;
+    while (i < wl.window.winlinks.items.len) {
+        if (wl.window.winlinks.items[i] == wl) {
+            _ = wl.window.winlinks.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    window_remove_ref(wl.window, "winlink_remove");
+    _ = s.windows.remove(wl.idx);
+    xm.allocator.destroy(wl);
+}
+
+/// Shuffle (renumber) winlinks upward to open a gap at a specific index.
+/// If before is true, the gap is opened at wl.idx; otherwise at wl.idx+1.
+/// Faithfully ports winlink_shuffle_up().
+pub fn winlink_shuffle_up(s: *T.Session, wl: ?*T.Winlink, before: bool) i32 {
+    const link = wl orelse return -1;
+    const idx: i32 = if (before) link.idx else link.idx + 1;
+
+    var last = idx;
+    while (last < std.math.maxInt(i32)) : (last += 1) {
+        if (winlink_find_by_index(s, last) == null) break;
+    }
+    if (last == std.math.maxInt(i32)) return -1;
+
+    while (last > idx) : (last -= 1) {
+        const target = winlink_find_by_index(s, last - 1).?;
+        _ = s.windows.remove(target.idx);
+        target.idx += 1;
+        s.windows.put(target.idx, target) catch unreachable;
+    }
+
+    return idx;
+}
+
+/// Push a winlink onto a winlink stack (e.g. session's lastw).
+/// Removes it first if already present, then inserts at the head.
+/// Faithfully ports winlink_stack_push().
+pub fn winlink_stack_push(stack: *std.ArrayList(*T.Winlink), wl: ?*T.Winlink) void {
+    const link = wl orelse return;
+    winlink_stack_remove(stack, link);
+    stack.insert(xm.allocator, 0, link) catch unreachable;
+    link.flags |= T.WINLINK_VISITED;
+}
+
+/// Remove a winlink from a winlink stack if it is present (has
+/// WINLINK_VISITED set). Faithfully ports winlink_stack_remove().
+pub fn winlink_stack_remove(stack: *std.ArrayList(*T.Winlink), wl: ?*T.Winlink) void {
+    const link = wl orelse return;
+    if (link.flags & T.WINLINK_VISITED == 0) return;
+    var i: usize = 0;
+    while (i < stack.items.len) {
+        if (stack.items[i] == link) {
+            _ = stack.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+    link.flags &= ~@as(u32, T.WINLINK_VISITED);
 }

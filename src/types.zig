@@ -634,6 +634,27 @@ pub const ScreenCursorStyle = enum {
     bar,
 };
 
+/// Selection state for a screen (mirrors tmux's struct screen_sel).
+pub const ScreenSel = struct {
+    hidden: bool = false,
+    rectangle: bool = false,
+    modekeys: u32 = MODEKEY_EMACS,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    ex: u32 = 0,
+    ey: u32 = 0,
+    cell: GridCell = std.mem.zeroes(GridCell),
+};
+
+/// Title stack entry (mirrors tmux's struct screen_title_entry).
+pub const ScreenTitleEntry = struct {
+    text: []u8,
+};
+
+pub fn colour_is_default(colour: i32) bool {
+    return colour == 8 or colour == 9;
+}
+
 pub const Screen = struct {
     title: ?[]u8 = null,
     path: ?[]u8 = null,
@@ -657,6 +678,8 @@ pub const Screen = struct {
     saved_cell: GridCell = std.mem.zeroes(GridCell),
     saved_flags: i32 = 0,
     tabs: ?[]u8 = null,
+    sel: ?*ScreenSel = null,
+    titles: std.ArrayList(ScreenTitleEntry) = .{},
     cell_fg: u32 = 8,
     cell_bg: u32 = 8,
     cell_attr: u16 = 0,

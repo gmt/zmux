@@ -328,6 +328,72 @@ pub fn string_cells(gd: *T.Grid, row: u32, width: u32, options: StringCellsOptio
     return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
+/// Public wrapper for resize_linedata (used by screen_resize_y).
+pub fn resize_linedata_pub(gd: *T.Grid, new_len: u32) void {
+    resize_linedata(gd, @intCast(new_len));
+}
+
+/// Duplicate lines from one grid to another (grid_duplicate_lines).
+pub fn duplicate_lines(dst: *T.Grid, dst_start: u32, src: *T.Grid, src_start: u32, count: u32) void {
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const dst_row = dst_start + i;
+        const src_row = src_start + i;
+        if (dst_row >= dst.linedata.len or src_row >= src.linedata.len) break;
+
+        // Free old destination line storage.
+        free_line_storage(&dst.linedata[dst_row]);
+
+        const src_line = &src.linedata[src_row];
+        var dst_line = &dst.linedata[dst_row];
+
+        // Copy metadata.
+        dst_line.cellused = src_line.cellused;
+        dst_line.flags = src_line.flags;
+        dst_line.time = src_line.time;
+
+        // Copy cell data.
+        if (src_line.celldata.len > 0) {
+            dst_line.celldata = xm.allocator.alloc(T.GridCellEntry, src_line.celldata.len) catch unreachable;
+            @memcpy(dst_line.celldata, src_line.celldata);
+        } else {
+            dst_line.celldata = &.{};
+        }
+
+        // Copy extended data.
+        if (src_line.extddata.len > 0) {
+            dst_line.extddata = xm.allocator.alloc(T.GridExtdEntry, src_line.extddata.len) catch unreachable;
+            @memcpy(dst_line.extddata, src_line.extddata);
+        } else {
+            dst_line.extddata = &.{};
+        }
+    }
+}
+
+/// Clear an area of the grid (grid_view_clear / grid_clear).
+pub fn clear_area(gd: *T.Grid, row_start: u32, col_start: u32, nx: u32, ny: u32) void {
+    var y: u32 = 0;
+    while (y < ny) : (y += 1) {
+        const row = row_start + y;
+        if (row >= gd.linedata.len) break;
+
+        const line = &gd.linedata[row];
+        if (col_start == 0 and nx >= gd.sx) {
+            // Clear entire line.
+            clear_line(line);
+        } else {
+            // Clear specific columns.
+            expand_line(gd, row, col_start + nx, 8);
+            var x: u32 = col_start;
+            while (x < col_start + nx and x < line.celldata.len) : (x += 1) {
+                line.celldata[x] = cleared_entry();
+            }
+            if (col_start + nx >= line.cellused)
+                line.cellused = col_start;
+        }
+    }
+}
+
 pub fn grid_in_set(gd: *T.Grid, row: u32, col: u32, set: []const u8) u32 {
     if (row >= gd.linedata.len or col >= gd.sx) return 0;
 

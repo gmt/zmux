@@ -1624,22 +1624,317 @@ pub fn grid_string_cells_code(
     _: *bool,
 ) void {}
 
-pub fn grid_reflow_dead(_: *T.GridLine) void {}
+// ── Grid reflow (ported from tmux grid.c lines 1220-1612) ─────────────────
+//
+// The zmux grid stores linedata as [visible | history] while tmux C uses
+// [history | visible].  grid_reflow temporarily rearranges to C layout so
+// that contiguous-index arithmetic in the join/split helpers works
+// unchanged, then rearranges back.  grid_wrap_position / grid_unwrap_position
+// translate absolute (C-style) row indices to storage indices on the fly.
 
-pub fn grid_reflow_add(_: *T.Grid, _: u32) ?*T.GridLine {
-    return null;
+fn reflow_abs_to_storage(gd: *const T.Grid, abs: u32) usize {
+    if (abs < gd.hsize) return @as(usize, gd.sy) + @as(usize, abs);
+    return @as(usize, abs - gd.hsize);
 }
 
-pub fn grid_reflow_move(_: *T.Grid, _: *T.GridLine) ?*T.GridLine {
-    return null;
+fn rearrange_to_c_layout(gd: *T.Grid) void {
+    const sy: usize = gd.sy;
+    const hsize: usize = gd.hsize;
+    if (hsize == 0 or sy == 0) return;
+    const total = sy + hsize;
+    if (gd.linedata.len < total) return;
+    const tmp = xm.allocator.alloc(T.GridLine, total) catch unreachable;
+    @memcpy(tmp[0..hsize], gd.linedata[sy .. sy + hsize]);
+    @memcpy(tmp[hsize..total], gd.linedata[0..sy]);
+    @memcpy(gd.linedata[0..total], tmp[0..total]);
+    xm.allocator.free(tmp);
 }
 
-pub fn grid_reflow_join(_: *T.Grid, _: *T.Grid, _: u32, _: u32, _: u32, _: bool) void {}
+fn rearrange_to_zmux_layout(gd: *T.Grid) void {
+    const sy: usize = gd.sy;
+    const hsize: usize = gd.hsize;
+    if (hsize == 0 or sy == 0) return;
+    const total = sy + hsize;
+    if (gd.linedata.len < total) return;
+    const tmp = xm.allocator.alloc(T.GridLine, total) catch unreachable;
+    @memcpy(tmp[0..sy], gd.linedata[hsize .. hsize + sy]);
+    @memcpy(tmp[sy..total], gd.linedata[0..hsize]);
+    @memcpy(gd.linedata[0..total], tmp[0..total]);
+    xm.allocator.free(tmp);
+}
 
-pub fn grid_reflow_split(_: *T.Grid, _: *T.Grid, _: u32, _: u32, _: u32) void {}
+pub fn grid_reflow_dead(gl: *T.GridLine) void {
+    gl.* = .{};
+    gl.flags = T.GRID_LINE_DEAD;
+}
 
-pub fn grid_reflow(_: *T.Grid, _: u32) void {}
+pub fn grid_reflow_add(gd: *T.Grid, n: u32) *T.GridLine {
+    const old_sy = gd.sy;
+    const new_sy = old_sy + n;
+    resize_linedata(gd, new_sy);
+    gd.sy = new_sy;
+    return &gd.linedata[old_sy];
+}
 
-pub fn grid_wrap_position(_: *T.Grid, _: u32, _: u32, _: *u32, _: *u32) void {}
+pub fn grid_reflow_move(gd: *T.Grid, from: *T.GridLine) *T.GridLine {
+    const to = grid_reflow_add(gd, 1);
+    to.* = from.*;
+    grid_reflow_dead(from);
+    return to;
+}
 
-pub fn grid_unwrap_position(_: *T.Grid, _: *u32, _: *u32, _: u32, _: u32) void {}
+pub fn grid_reflow_join(target: *T.Grid, gd: *T.Grid, sx: u32, yy: u32, width_in: u32, already: bool) void {
+    var from: ?*T.GridLine = null;
+    var gc: T.GridCell = undefined;
+    var lines: u32 = 0;
+    var width = width_in;
+    var to: u32 = undefined;
+    var at: u32 = undefined;
+    var want: u32 = 0;
+    var wrapped: bool = true;
+    var gl: *T.GridLine = undefined;
+
+    if (!already) {
+        to = target.sy;
+        gl = grid_reflow_move(target, &gd.linedata[yy]);
+    } else {
+        to = target.sy - 1;
+        gl = &target.linedata[to];
+    }
+    at = gl.cellused;
+
+    while (true) {
+        if (yy + 1 + lines == gd.hsize + gd.sy)
+            break;
+        const line = yy + 1 + lines;
+
+        if ((gd.linedata[line].flags & T.GRID_LINE_WRAPPED) == 0)
+            wrapped = false;
+        if (gd.linedata[line].cellused == 0) {
+            if (!wrapped) break;
+            lines += 1;
+            continue;
+        }
+
+        grid_get_cell1(&gd.linedata[line], 0, &gc);
+        if (width + gc.data.width > sx)
+            break;
+        width += gc.data.width;
+        grid_set_cell(target, at, to, &gc);
+        at += 1;
+
+        from = &gd.linedata[line];
+        want = 1;
+        while (want < from.?.cellused) : (want += 1) {
+            grid_get_cell1(from.?, want, &gc);
+            if (width + gc.data.width > sx)
+                break;
+            width += gc.data.width;
+            grid_set_cell(target, at, to, &gc);
+            at += 1;
+        }
+        lines += 1;
+
+        if (!wrapped or want != from.?.cellused or width == sx)
+            break;
+    }
+
+    if (lines == 0 or from == null) return;
+
+    const left = from.?.cellused - want;
+    if (left != 0) {
+        grid_move_cells(gd, 0, want, yy + lines, left, 8);
+        from.?.cellused = left;
+        lines -= 1;
+    } else if (!wrapped) {
+        gl.flags &= ~T.GRID_LINE_WRAPPED;
+    }
+
+    var i = yy + 1;
+    while (i < yy + 1 + lines) : (i += 1) {
+        if (gd.linedata[i].celldata.len > 0)
+            xm.allocator.free(gd.linedata[i].celldata);
+        if (gd.linedata[i].extddata.len > 0)
+            xm.allocator.free(gd.linedata[i].extddata);
+        grid_reflow_dead(&gd.linedata[i]);
+    }
+
+    if (gd.hscrolled > to + lines)
+        gd.hscrolled -= lines
+    else if (gd.hscrolled > to)
+        gd.hscrolled = to;
+}
+
+pub fn grid_reflow_split(target: *T.Grid, gd: *T.Grid, sx: u32, yy: u32, at: u32) void {
+    const gl = &gd.linedata[yy];
+    var gc: T.GridCell = undefined;
+    var lines: u32 = undefined;
+    const used = gl.cellused;
+    const flags = gl.flags;
+
+    if ((gl.flags & T.GRID_LINE_EXTENDED) == 0) {
+        lines = 1 + (gl.cellused - 1) / sx;
+    } else {
+        lines = 2;
+        var count_w: u32 = 0;
+        var j = at;
+        while (j < used) : (j += 1) {
+            grid_get_cell1(gl, j, &gc);
+            if (count_w + gc.data.width > sx) {
+                lines += 1;
+                count_w = 0;
+            }
+            count_w += gc.data.width;
+        }
+    }
+
+    var line = target.sy + 1;
+    const first = grid_reflow_add(target, lines);
+
+    var w: u32 = 0;
+    var xx: u32 = 0;
+    {
+        var j = at;
+        while (j < used) : (j += 1) {
+            grid_get_cell1(gl, j, &gc);
+            if (w + gc.data.width > sx) {
+                target.linedata[line].flags |= T.GRID_LINE_WRAPPED;
+                line += 1;
+                w = 0;
+                xx = 0;
+            }
+            w += gc.data.width;
+            grid_set_cell(target, xx, line, &gc);
+            xx += 1;
+        }
+    }
+    if ((flags & T.GRID_LINE_WRAPPED) != 0)
+        target.linedata[line].flags |= T.GRID_LINE_WRAPPED;
+
+    gl.cellused = at;
+    gl.flags |= T.GRID_LINE_WRAPPED;
+    first.* = gl.*;
+    grid_reflow_dead(gl);
+
+    if (yy <= gd.hscrolled)
+        gd.hscrolled += lines - 1;
+
+    if (w < sx and (flags & T.GRID_LINE_WRAPPED) != 0)
+        grid_reflow_join(target, gd, sx, yy, w, true);
+}
+
+pub fn grid_reflow(gd: *T.Grid, sx: u32) void {
+    rearrange_to_c_layout(gd);
+
+    const target = grid_create(gd.sx, 0, 0);
+
+    var yy: u32 = 0;
+    while (yy < gd.hsize + gd.sy) : (yy += 1) {
+        const gl = &gd.linedata[yy];
+        if ((gl.flags & T.GRID_LINE_DEAD) != 0)
+            continue;
+
+        var at_val: u32 = 0;
+        var width: u32 = 0;
+        if ((gl.flags & T.GRID_LINE_EXTENDED) == 0) {
+            width = gl.cellused;
+            if (width > sx)
+                at_val = sx
+            else
+                at_val = width;
+        } else {
+            var i: u32 = 0;
+            while (i < gl.cellused) : (i += 1) {
+                var gc: T.GridCell = undefined;
+                grid_get_cell1(gl, i, &gc);
+                if (at_val == 0 and width + gc.data.width > sx)
+                    at_val = i;
+                width += gc.data.width;
+            }
+        }
+
+        if (width == sx) {
+            _ = grid_reflow_move(target, gl);
+            continue;
+        }
+        if (width > sx) {
+            grid_reflow_split(target, gd, sx, yy, at_val);
+            continue;
+        }
+        if ((gl.flags & T.GRID_LINE_WRAPPED) != 0)
+            grid_reflow_join(target, gd, sx, yy, width, false)
+        else
+            _ = grid_reflow_move(target, gl);
+    }
+
+    if (target.sy < gd.sy)
+        _ = grid_reflow_add(target, gd.sy - target.sy);
+    gd.hsize = target.sy - gd.sy;
+    if (gd.hscrolled > gd.hsize)
+        gd.hscrolled = gd.hsize;
+    xm.allocator.free(gd.linedata);
+    gd.linedata = target.linedata;
+
+    rearrange_to_zmux_layout(gd);
+
+    xm.allocator.destroy(target);
+}
+
+pub fn grid_wrap_position(gd: *T.Grid, px: u32, py: u32, wx: *u32, wy: *u32) void {
+    var ax: u32 = 0;
+    var ay: u32 = 0;
+
+    var yy: u32 = 0;
+    while (yy < py) : (yy += 1) {
+        const si = reflow_abs_to_storage(gd, yy);
+        if ((gd.linedata[si].flags & T.GRID_LINE_WRAPPED) != 0)
+            ax += gd.linedata[si].cellused
+        else {
+            ax = 0;
+            ay += 1;
+        }
+    }
+
+    const si = reflow_abs_to_storage(gd, yy);
+    if (si >= gd.linedata.len or px >= gd.linedata[si].cellused)
+        ax = std.math.maxInt(u32)
+    else
+        ax += px;
+    wx.* = ax;
+    wy.* = ay;
+}
+
+pub fn grid_unwrap_position(gd: *T.Grid, px: *u32, py: *u32, wx: u32, wy: u32) void {
+    var yy: u32 = 0;
+    var ay: u32 = 0;
+    const total = gd.hsize + gd.sy;
+
+    while (yy < total -| 1) : (yy += 1) {
+        if (ay == wy) break;
+        const si = reflow_abs_to_storage(gd, yy);
+        if ((gd.linedata[si].flags & T.GRID_LINE_WRAPPED) == 0)
+            ay += 1;
+    }
+
+    var local_wx = wx;
+    if (local_wx == std.math.maxInt(u32)) {
+        while (true) {
+            const si = reflow_abs_to_storage(gd, yy);
+            if ((gd.linedata[si].flags & T.GRID_LINE_WRAPPED) == 0) break;
+            yy += 1;
+        }
+        const si_final = reflow_abs_to_storage(gd, yy);
+        local_wx = gd.linedata[si_final].cellused;
+    } else {
+        while (true) {
+            const si = reflow_abs_to_storage(gd, yy);
+            if ((gd.linedata[si].flags & T.GRID_LINE_WRAPPED) == 0) break;
+            if (local_wx < gd.linedata[si].cellused) break;
+            local_wx -= gd.linedata[si].cellused;
+            yy += 1;
+        }
+    }
+
+    px.* = local_wx;
+    py.* = yy;
+}

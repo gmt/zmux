@@ -697,6 +697,7 @@ pub const Screen = struct {
     saved_mode: i32 = 0,
     input_last_valid: bool = false,
     last_glyph: Utf8Data = std.mem.zeroes(Utf8Data),
+    write_list: ?[]ScreenWriteCline = null,
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────
@@ -1532,10 +1533,73 @@ pub const PANE_STATUS_OFF: u32 = 0;
 pub const PANE_STATUS_TOP: u32 = 1;
 pub const PANE_STATUS_BOTTOM: u32 = 2;
 
-// ── Screen write context (forward-compat stub) ────────────────────────────
+// ── Screen write collect types ────────────────────────────────────────────
+
+pub const SCREEN_WRITE_SYNC: u32 = 0x4;
+
+pub const ScreenWriteCitemType = enum(u8) {
+    TEXT = 0,
+    CLEAR = 1,
+};
+
+pub const ScreenWriteCitem = struct {
+    x: u32 = 0,
+    wrapped: bool = false,
+    ctype: ScreenWriteCitemType = .TEXT,
+    used: u32 = 0,
+    bg: u32 = 8,
+    gc: GridCell = grid_default_cell,
+    prev: ?*ScreenWriteCitem = null,
+    next: ?*ScreenWriteCitem = null,
+};
+
+pub const ScreenWriteCline = struct {
+    data: ?[]u8 = null,
+    first: ?*ScreenWriteCitem = null,
+    last: ?*ScreenWriteCitem = null,
+};
+
+pub const ScreenWriteInitCtxCb = *const fn (*ScreenWriteCtx, *TtyCtx) void;
+
+pub const TtyCtx = struct {
+    s: ?*Screen = null,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    ocx: u32 = 0,
+    ocy: u32 = 0,
+    orlower: u32 = 0,
+    orupper: u32 = 0,
+    num: u32 = 0,
+    bg: u32 = 8,
+    cell: ?*const GridCell = null,
+    wrapped: bool = false,
+    ptr: ?[*]const u8 = null,
+    defaults: GridCell = grid_default_cell,
+    bigger: bool = false,
+    wox: u32 = 0,
+    woy: u32 = 0,
+    wsx: u32 = 0,
+    wsy: u32 = 0,
+    xoff: u32 = 0,
+    yoff: u32 = 0,
+    rxoff: u32 = 0,
+    ryoff: u32 = 0,
+    palette: ?*ColourPalette = null,
+    redraw_cb: ?*const fn (*const TtyCtx) void = null,
+    set_client_cb: ?*const fn (*TtyCtx, *Client) i32 = null,
+    arg: ?*anyopaque = null,
+    allow_invisible_panes: bool = false,
+};
+
+// ── Screen write context ──────────────────────────────────────────────────
 
 pub const ScreenWriteCtx = struct {
     wp: ?*WindowPane = null,
     s: *Screen,
     flags: u32 = 0,
+    item: ?*ScreenWriteCitem = null,
+    scrolled: u32 = 0,
+    bg: u32 = 8,
+    init_ctx_cb: ?ScreenWriteInitCtxCb = null,
+    arg: ?*anyopaque = null,
 };

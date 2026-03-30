@@ -777,6 +777,7 @@ pub const LayoutCell = struct {
 
 pub const PANE_REDRAW: u32 = 0x0001;
 pub const PANE_FOCUSED: u32 = 0x0004;
+pub const PANE_VISITED: u32 = 0x0008;
 pub const PANE_INPUTOFF: u32 = 0x0040;
 pub const PANE_CHANGED: u32 = 0x0080;
 pub const PANE_EXITED: u32 = 0x0100;
@@ -904,6 +905,8 @@ pub const Window = struct {
     name_event: ?*c.libevent.event = null,
     name_time: std.posix.timeval = .{ .sec = 0, .usec = 0 },
     alerts_queued: bool = false,
+    activity_time: i64 = 0,
+    creation_time: i64 = 0,
 };
 
 // ── Winlink ───────────────────────────────────────────────────────────────

@@ -20,6 +20,8 @@
 const std = @import("std");
 const T = @import("types.zig");
 const c = @import("c.zig");
+const args_mod = @import("arguments.zig");
+const grid_mod = @import("grid.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const screen_mod = @import("screen.zig");
@@ -28,12 +30,15 @@ const window_mod = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
+/// Mirrors tmux `window_clock_mode_data`: dedicated mode screen, last-render time, timer.
 const ClockModeData = struct {
+    mode_screen: *T.Screen,
+    tim: c.posix_sys.time_t,
     timer_event: ?*c.libevent.event = null,
-    rendered_second: i64 = -1,
 };
 
-const clock_table = [14][5][5]u8{
+/// Same layout as tmux `window_clock_table` (digit / colon / A / P / M glyphs).
+pub const window_clock_table = [14][5][5]u8{
     .{ .{ 1, 1, 1, 1, 1 }, .{ 1, 0, 0, 0, 1 }, .{ 1, 0, 0, 0, 1 }, .{ 1, 0, 0, 0, 1 }, .{ 1, 1, 1, 1, 1 } },
     .{ .{ 0, 0, 0, 0, 1 }, .{ 0, 0, 0, 0, 1 }, .{ 0, 0, 0, 0, 1 }, .{ 0, 0, 0, 0, 1 }, .{ 0, 0, 0, 0, 1 } },
     .{ .{ 1, 1, 1, 1, 1 }, .{ 0, 0, 0, 0, 1 }, .{ 1, 1, 1, 1, 1 }, .{ 1, 0, 0, 0, 0 }, .{ 1, 1, 1, 1, 1 } },
@@ -52,9 +57,9 @@ const clock_table = [14][5][5]u8{
 
 pub const window_clock_mode = T.WindowMode{
     .name = "clock-mode",
-    .key = clock_mode_key,
-    .close = clock_mode_close,
-    .get_screen = clock_mode_get_screen,
+    .key = window_clock_key,
+    .close = window_clock_free,
+    .get_screen = window_clock_get_screen,
 };
 
 pub fn enter_mode(wp: *T.WindowPane) void {
@@ -64,15 +69,106 @@ pub fn enter_mode(wp: *T.WindowPane) void {
 
     screen_mod.screen_enter_alternate(wp, true);
 
-    const data = xm.allocator.create(ClockModeData) catch unreachable;
-    data.* = .{};
-    const wme = window_mode_runtime.pushMode(wp, &window_clock_mode, @ptrCast(data), null);
-    draw_screen(wme, std.time.timestamp());
-    schedule_timer(wme);
+    const wme = window_mode_runtime.pushMode(wp, &window_clock_mode, null, null);
+    _ = window_clock_init(wme, null, null);
 }
 
-fn schedule_timer(wme: *T.WindowModeEntry) void {
-    const data = mode_data(wme);
+/// tmux `window_clock_init` – allocate mode data, mode screen, timer, initial draw.
+pub fn window_clock_init(
+    wme: *T.WindowModeEntry,
+    fs: ?*const T.CmdFindState,
+    args: ?*const args_mod.Arguments,
+) *T.Screen {
+    _ = fs;
+    _ = args;
+    const wp = wme.wp;
+    const sx = wp.base.grid.sx;
+    const sy = wp.base.grid.sy;
+
+    const mode_screen = screen_mod.screen_init(sx, sy, 0);
+    mode_screen.mode &= ~@as(i32, T.MODE_CURSOR);
+    mode_screen.cursor_visible = false;
+
+    const data_ptr = xm.allocator.create(ClockModeData) catch unreachable;
+    data_ptr.* = .{
+        .mode_screen = mode_screen,
+        .tim = c.posix_sys.time(null),
+        .timer_event = null,
+    };
+    wme.data = @ptrCast(data_ptr);
+
+    window_clock_start_timer(wme);
+    window_clock_draw_screen(wme);
+    return mode_screen;
+}
+
+/// tmux `window_clock_free` – tear down timer, mode screen, and heap data.
+pub fn window_clock_free(wme: *T.WindowModeEntry) void {
+    const data = window_clock_mode_data(wme);
+    if (data.timer_event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+    }
+    screen_mod.screen_free(data.mode_screen);
+    xm.allocator.destroy(data.mode_screen);
+    xm.allocator.destroy(data);
+
+    if (wme.wp.modes.items.len <= 1) {
+        screen_mod.screen_leave_alternate(wme.wp, true);
+    }
+}
+
+/// tmux `window_clock_key` – any key exits the mode.
+pub fn window_clock_key(
+    wme: *T.WindowModeEntry,
+    _client: ?*T.Client,
+    _session: *T.Session,
+    _wl: *T.Winlink,
+    _key: T.key_code,
+    _mouse: ?*const T.MouseEvent,
+) void {
+    _ = _client;
+    _ = _session;
+    _ = _wl;
+    _ = _key;
+    _ = _mouse;
+    _ = window_mode_runtime.resetMode(wme.wp);
+}
+
+/// tmux `window_clock_resize` – resize the mode screen and redraw.
+pub fn window_clock_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
+    const data = window_clock_mode_data(wme);
+    screen_mod.screen_resize_cursor(data.mode_screen, sx, sy, false, true, true);
+    window_clock_draw_screen(wme);
+}
+
+/// tmux `window_clock_draw_screen` – format time, draw large digits or compact text, sync to pane.
+pub fn window_clock_draw_screen(wme: *T.WindowModeEntry) void {
+    const wp = wme.wp;
+    const data = window_clock_mode_data(wme);
+    const screen = data.mode_screen;
+    const colour: i32 = @intCast(opts.options_get_number(wp.window.options, "clock-mode-colour"));
+    const style = opts.options_get_number(wp.window.options, "clock-mode-style");
+
+    screen_mod.screen_reset_active(screen);
+    screen.mode &= ~@as(i32, T.MODE_CURSOR);
+    screen.cursor_visible = false;
+
+    var time_buf: [64]u8 = undefined;
+    const text = format_time_now(&time_buf, style) orelse return;
+
+    if (screen.grid.sx < 6 * text.len or screen.grid.sy < 6) {
+        draw_compact(screen, text, colour);
+    } else {
+        draw_large(screen, text, colour);
+    }
+
+    sync_mode_screen_to_pane(wp, screen);
+}
+
+/// tmux `window_clock_start_timer` – libevent one-shot aligned to the next second (stub if no base).
+pub fn window_clock_start_timer(wme: *T.WindowModeEntry) void {
+    const data = window_clock_mode_data(wme);
     const base = proc_mod.libevent orelse return;
 
     if (data.timer_event == null) {
@@ -80,7 +176,7 @@ fn schedule_timer(wme: *T.WindowModeEntry) void {
             base,
             -1,
             @intCast(c.libevent.EV_TIMEOUT),
-            clock_mode_timer_cb,
+            window_clock_timer_callback,
             wme,
         );
     }
@@ -99,89 +195,56 @@ fn schedule_timer(wme: *T.WindowModeEntry) void {
         .sec = @intCast(@divTrunc(delay_us, 1_000_000)),
         .usec = @intCast(@mod(delay_us, 1_000_000)),
     };
-    if (tv.sec == 0 and tv.usec == 0) tv.sec = 1;
+    if (tv.sec < 0 or (tv.sec == 0 and tv.usec <= 0)) {
+        tv.sec = 1;
+        tv.usec = 0;
+    }
     _ = c.libevent.event_add(ev, @ptrCast(&tv));
 }
 
-export fn clock_mode_timer_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+/// Libevent callback (tmux `window_clock_timer_callback`). C ABI stub forwards here.
+export fn window_clock_timer_callback(_fd: i32, _events: i16, arg: ?*anyopaque) void {
+    window_clock_timer_callback_inner(_fd, _events, arg);
+}
+
+fn window_clock_timer_callback_inner(_fd: i32, _events: i16, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
     const wme: *T.WindowModeEntry = @ptrCast(@alignCast(arg orelse return));
-    const data = mode_data(wme);
+    const wp = wme.wp;
+    const data = window_clock_mode_data(wme);
     if (data.timer_event) |ev| _ = c.libevent.event_del(ev);
 
-    const now = std.time.timestamp();
-    if (now != data.rendered_second) {
-        draw_screen(wme, now);
-        window_mode_runtime.noteModeRedraw(wme.wp);
+    var now_tm: c.posix_sys.struct_tm = undefined;
+    var then_tm: c.posix_sys.struct_tm = undefined;
+    const t = c.posix_sys.time(null);
+    var t_mut = t;
+    var tim_mut = data.tim;
+    _ = c.posix_sys.gmtime_r(&t_mut, &now_tm);
+    _ = c.posix_sys.gmtime_r(&tim_mut, &then_tm);
+
+    if (now_tm.tm_sec != then_tm.tm_sec) {
+        data.tim = t;
+        window_clock_draw_screen(wme);
+        window_mode_runtime.noteModeRedraw(wp);
     }
 
-    schedule_timer(wme);
+    window_clock_start_timer(wme);
 }
 
-fn clock_mode_key(
-    wme: *T.WindowModeEntry,
-    _client: ?*T.Client,
-    _session: *T.Session,
-    _wl: *T.Winlink,
-    _key: T.key_code,
-    _mouse: ?*const T.MouseEvent,
-) void {
-    _ = _client;
-    _ = _session;
-    _ = _wl;
-    _ = _key;
-    _ = _mouse;
-    _ = window_mode_runtime.resetMode(wme.wp);
+fn window_clock_get_screen(wme: *T.WindowModeEntry) *T.Screen {
+    return window_clock_mode_data(wme).mode_screen;
 }
 
-fn clock_mode_close(wme: *T.WindowModeEntry) void {
-    const data = mode_data(wme);
-    if (data.timer_event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-    }
-    xm.allocator.destroy(data);
-
-    if (wme.wp.modes.items.len <= 1) {
-        screen_mod.screen_leave_alternate(wme.wp, true);
-    }
-}
-
-fn clock_mode_get_screen(wme: *T.WindowModeEntry) *T.Screen {
-    return wme.wp.screen;
-}
-
-fn mode_data(wme: *T.WindowModeEntry) *ClockModeData {
+fn window_clock_mode_data(wme: *T.WindowModeEntry) *ClockModeData {
     return @ptrCast(@alignCast(wme.data.?));
 }
 
-fn draw_screen(wme: *T.WindowModeEntry, when: i64) void {
-    const wp = wme.wp;
-    const screen = wp.screen;
-    const colour: i32 = @intCast(opts.options_get_number(wp.window.options, "clock-mode-colour"));
-    const style = opts.options_get_number(wp.window.options, "clock-mode-style");
-    const data = mode_data(wme);
-
-    screen_mod.screen_reset_active(screen);
-    screen.mode &= ~@as(i32, T.MODE_CURSOR);
-    screen.cursor_visible = false;
-    data.rendered_second = when;
-
-    var time_buf: [64]u8 = undefined;
-    const text = format_time(&time_buf, style, when) orelse return;
-    if (screen.grid.sx < 6 * text.len or screen.grid.sy < 6) {
-        draw_compact(screen, text, colour);
-        return;
-    }
-
-    draw_large(screen, text, colour);
-}
-
-fn format_time(buf: *[64]u8, style: i64, when: i64) ?[]const u8 {
-    var when_time: c.posix_sys.time_t = @intCast(when);
+fn format_time_now(buf: *[64]u8, style: i64) ?[]const u8 {
+    const t = c.posix_sys.time(null);
+    var t_mut = t;
     var tm_value: c.posix_sys.struct_tm = undefined;
-    if (c.posix_sys.localtime_r(&when_time, &tm_value) == null) return null;
+    if (c.posix_sys.localtime_r(&t_mut, &tm_value) == null) return null;
 
     const fmt = switch (style) {
         0 => "%l:%M \x00",
@@ -227,14 +290,14 @@ fn draw_large(screen: *T.Screen, text: []const u8, colour: i32) void {
     const y = screen.grid.sy / 2 - 3;
 
     for (text) |ch| {
-        const idx = clock_index(ch) orelse {
+        const idx = clock_glyph_index(ch) orelse {
             x += 6;
             continue;
         };
 
         for (0..5) |row| {
             for (0..5) |col| {
-                if (clock_table[idx][row][col] == 0) continue;
+                if (window_clock_table[idx][row][col] == 0) continue;
                 screen_write.cursor_to(&ctx, y + @as(u32, @intCast(row)), x + @as(u32, @intCast(col)));
                 screen_write.putCell(&ctx, &gc);
             }
@@ -252,7 +315,7 @@ fn put_ascii_string(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell, text: []const
     }
 }
 
-fn clock_index(ch: u8) ?usize {
+fn clock_glyph_index(ch: u8) ?usize {
     return switch (ch) {
         '0'...'9' => ch - '0',
         ':' => 10,
@@ -261,6 +324,25 @@ fn clock_index(ch: u8) ?usize {
         'M' => 13,
         else => null,
     };
+}
+
+/// Copy the mode screen into `wp.screen` so tty drawing (`screen_current`) shows the clock.
+fn sync_mode_screen_to_pane(wp: *T.WindowPane, src: *T.Screen) void {
+    const view = wp.screen;
+    screen_mod.screen_reset_active(view);
+    view.mode = src.mode;
+    view.cursor_visible = src.cursor_visible;
+
+    var row: u32 = 0;
+    while (row < @min(src.grid.sy, view.grid.sy)) : (row += 1) {
+        const w = @min(src.grid.sx, view.grid.sx);
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            var cell: T.GridCell = undefined;
+            grid_mod.get_cell(src.grid, row, col, &cell);
+            grid_mod.set_cell(view.grid, row, col, &cell);
+        }
+    }
 }
 
 fn init_test_globals() void {
@@ -329,12 +411,60 @@ fn local_timestamp(year: c_int, month: c_int, day: c_int, hour: c_int, minute: c
 }
 
 fn screen_row(screen: *T.Screen, row: u32, alloc: std.mem.Allocator) []u8 {
-    const grid_mod = @import("grid.zig");
     const out = alloc.alloc(u8, screen.grid.sx) catch unreachable;
     for (out, 0..) |*slot, col| {
         slot.* = grid_mod.ascii_at(screen.grid, row, @intCast(col));
     }
     return out;
+}
+
+/// Test helper: draw as if `when` were the current wall clock (init path uses real time).
+fn window_clock_draw_screen_at(wme: *T.WindowModeEntry, when: i64) void {
+    const wp = wme.wp;
+    const data = window_clock_mode_data(wme);
+    const screen = data.mode_screen;
+    const colour: i32 = @intCast(opts.options_get_number(wp.window.options, "clock-mode-colour"));
+    const style = opts.options_get_number(wp.window.options, "clock-mode-style");
+
+    screen_mod.screen_reset_active(screen);
+    screen.mode &= ~@as(i32, T.MODE_CURSOR);
+    screen.cursor_visible = false;
+
+    var time_buf: [64]u8 = undefined;
+    const text = format_time_at(&time_buf, style, when) orelse return;
+
+    if (screen.grid.sx < 6 * text.len or screen.grid.sy < 6) {
+        draw_compact(screen, text, colour);
+    } else {
+        draw_large(screen, text, colour);
+    }
+
+    sync_mode_screen_to_pane(wp, screen);
+}
+
+fn format_time_at(buf: *[64]u8, style: i64, when: i64) ?[]const u8 {
+    var when_time: c.posix_sys.time_t = @intCast(when);
+    var tm_value: c.posix_sys.struct_tm = undefined;
+    if (c.posix_sys.localtime_r(&when_time, &tm_value) == null) return null;
+
+    const fmt = switch (style) {
+        0 => "%l:%M \x00",
+        2 => "%l:%M:%S \x00",
+        3 => "%H:%M:%S\x00",
+        else => "%H:%M\x00",
+    };
+
+    const written = c.posix_sys.strftime(buf.ptr, buf.len, fmt.ptr, &tm_value);
+    if (written == 0) return null;
+
+    var len: usize = written;
+    if (style == 0 or style == 2) {
+        const suffix = if (tm_value.tm_hour >= 12) "PM" else "AM";
+        if (len + suffix.len > buf.len) return null;
+        @memcpy(buf[len .. len + suffix.len], suffix);
+        len += suffix.len;
+    }
+    return buf[0..len];
 }
 
 test "window clock draws compact centred time with configured style" {
@@ -350,7 +480,7 @@ test "window clock draws compact centred time with configured style" {
     enter_mode(setup.pane);
     const wme = window_mod.window_pane_mode(setup.pane).?;
     opts_mod.options_set_number(setup.pane.window.options, "clock-mode-style", 3);
-    draw_screen(wme, local_timestamp(2024, 4, 5, 13, 45, 7));
+    window_clock_draw_screen_at(wme, local_timestamp(2024, 4, 5, 13, 45, 7));
 
     const row = screen_row(setup.pane.screen, 0, xm.allocator);
     defer xm.allocator.free(row);
@@ -358,7 +488,6 @@ test "window clock draws compact centred time with configured style" {
 }
 
 test "window clock draws large blocks with configured colour" {
-    const grid_mod = @import("grid.zig");
     const opts_mod = @import("options.zig");
     const sess = @import("session.zig");
 
@@ -372,7 +501,7 @@ test "window clock draws large blocks with configured colour" {
     const wme = window_mod.window_pane_mode(setup.pane).?;
     opts_mod.options_set_number(setup.pane.window.options, "clock-mode-style", 1);
     opts_mod.options_set_number(setup.pane.window.options, "clock-mode-colour", 6);
-    draw_screen(wme, local_timestamp(2024, 4, 5, 13, 45, 7));
+    window_clock_draw_screen_at(wme, local_timestamp(2024, 4, 5, 13, 45, 7));
 
     var cell: T.GridCell = undefined;
     grid_mod.get_cell(setup.pane.screen.grid, 1, 9, &cell);
@@ -411,12 +540,12 @@ test "window clock timer callback redraws when the second changes" {
 
     enter_mode(setup.pane);
     const wme = window_mod.window_pane_mode(setup.pane).?;
-    const data = mode_data(wme);
-    data.rendered_second = 0;
+    const data = window_clock_mode_data(wme);
+    data.tim = 0;
     setup.pane.flags = 0;
 
-    clock_mode_timer_cb(-1, 0, wme);
+    window_clock_timer_callback_inner(-1, 0, wme);
 
     try std.testing.expect(setup.pane.flags & T.PANE_REDRAW != 0);
-    try std.testing.expect(data.rendered_second != 0);
+    try std.testing.expect(data.tim != 0);
 }

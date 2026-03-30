@@ -1288,6 +1288,30 @@ pub const Client = struct {
     pause_age: u32 = 0,
 };
 
+// ── Client file IPC ───────────────────────────────────────────────────────
+
+pub const ClientFileCb = ?*const fn (?*Client, ?[]const u8, c_int, i32, ?[]const u8, ?*anyopaque) void;
+
+pub const ClientFile = struct {
+    client: ?*Client = null,
+    peer: ?*ZmuxPeer = null,
+    tree: ?*ClientFiles = null,
+
+    references: u32 = 1,
+    stream: i32 = 0,
+    path: ?[]u8 = null,
+
+    buffer: std.ArrayList(u8) = .{},
+    cb: ClientFileCb = null,
+    data: ?*anyopaque = null,
+
+    fd: i32 = -1,
+    @"error": c_int = 0,
+    closed: bool = false,
+};
+
+pub const ClientFiles = std.AutoHashMap(i32, *ClientFile);
+
 // ── IPC proc layer ────────────────────────────────────────────────────────
 
 pub const PEER_BAD: u32 = 0x1;

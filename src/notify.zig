@@ -26,6 +26,7 @@ const control_notify = @import("control-notify.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
+const win_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
 const OwnedHookInfo = struct {
@@ -90,8 +91,14 @@ const OwnedHookInfo = struct {
 const NotifyEntry = struct {
     fs: T.CmdFindState = .{ .idx = -1 },
     hook_info: OwnedHookInfo = .{},
+    client: ?*T.Client = null,
+    session: ?*T.Session = null,
+    window: ?*T.Window = null,
+    pane: ?*T.WindowPane = null,
+    pbname: ?[]u8 = null,
 
     fn deinit(self: *NotifyEntry) void {
+        freeOwned(&self.pbname);
         self.hook_info.deinit();
     }
 };
@@ -112,221 +119,263 @@ fn notificationsSuppressed() bool {
     return (cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_NOHOOKS) != 0;
 }
 
-fn canonicalHookState(source: *const T.CmdFindState) T.CmdFindState {
-    if (cmd_find.cmd_find_valid_state(source)) return source.*;
-
-    var fallback: T.CmdFindState = .{ .idx = -1 };
-    if (cmd_find.cmd_find_from_nothing(&fallback, 0)) return fallback;
-    return fallback;
-}
-
-fn hookOptionValue(name: []const u8, fs: *const T.CmdFindState) ?*const T.OptionsValue {
+fn hookOptionContext(name: []const u8, fs: *const T.CmdFindState) ?struct { oo: *T.Options, value: *const T.OptionsValue } {
     const session_options = if (fs.s) |s| s.options else opts.global_s_options;
-    if (opts.options_get(session_options, name)) |value| return value;
+    if (opts.options_get(session_options, name)) |value|
+        return .{ .oo = session_options, .value = value };
     if (fs.wp) |wp| {
-        if (opts.options_get(wp.options, name)) |value| return value;
+        if (opts.options_get(wp.options, name)) |value|
+            return .{ .oo = wp.options, .value = value };
     }
     if (fs.wl) |wl| {
-        if (opts.options_get(wl.window.options, name)) |value| return value;
+        if (opts.options_get(wl.window.options, name)) |value|
+            return .{ .oo = wl.window.options, .value = value };
     }
     return null;
 }
 
-fn enqueueHookCommand(
+/// Insert a parsed hook command list after `after` (or onto the server queue if `after` is null).
+/// Mirrors tmux `notify_insert_one_hook`.
+fn notify_insert_one_hook(
     after: ?*cmdq.CmdqItem,
-    hook_name: []const u8,
-    command: []const u8,
+    ne: *const NotifyEntry,
+    cmdlist: *T.CmdList,
     state: *cmdq.CmdqState,
 ) ?*cmdq.CmdqItem {
     if (log.log_get_level() != 0)
-        log.log_debug("notify hook {s}: {s}", .{ hook_name, command });
+        log.log_debug("notify_insert_one_hook: hook {s}", .{ne.hook_info.hook orelse "?"});
 
-    var pi: T.CmdParseInput = .{};
-    const parsed = cmd_mod.cmd_parse_from_string(command, &pi);
-    switch (parsed.status) {
-        .success => {
-            const cmdlist_ptr = parsed.cmdlist orelse return after;
-            const cmdlist: *T.CmdList = @ptrCast(@alignCast(cmdlist_ptr));
-            const new_item = cmdq.cmdq_get_command(cmdlist, state);
-            if (after) |item|
-                return cmdq.cmdq_insert_after(item, new_item);
-            return cmdq.cmdq_append_item(null, new_item);
-        },
-        .@"error" => {
-            if (parsed.@"error") |err| {
-                log.log_debug("notify hook {s}: {s}", .{ hook_name, err });
-                xm.allocator.free(err);
+    const new_first = cmdq.cmdq_get_command(cmdlist, state);
+    if (after) |item|
+        return cmdq.cmdq_insert_after(item, new_first);
+    return cmdq.cmdq_append_item(null, new_first);
+}
+
+/// Resolve hook option, parse hook bodies, and enqueue commands. Mirrors tmux `notify_insert_hook`.
+fn notify_insert_hook(after: ?*cmdq.CmdqItem, ne: *const NotifyEntry) void {
+    const hook_name = ne.hook_info.hook orelse return;
+    log.log_debug("notify_insert_hook: inserting hook {s}", .{hook_name});
+
+    var fs: T.CmdFindState = .{ .idx = -1 };
+    if (cmd_find.cmd_find_valid_state(&ne.fs))
+        fs = ne.fs
+    else
+        _ = cmd_find.cmd_find_from_nothing(&fs, 0);
+
+    const ctx = hookOptionContext(hook_name, &fs) orelse {
+        log.log_debug("notify_insert_hook: hook {s} not found", .{hook_name});
+        return;
+    };
+
+    const state = cmdq.cmdq_new_state(if (cmd_find.cmd_find_valid_state(&fs)) &fs else null, null, T.CMDQ_STATE_NOHOOKS);
+    defer cmdq.cmdq_free_state(state);
+    cmdq.cmdq_set_hook_info(state, ne.hook_info.borrow());
+
+    var tail: ?*cmdq.CmdqItem = after;
+
+    if (hook_name.len != 0 and hook_name[0] == '@') {
+        const value = opts.options_get_string(ctx.oo, hook_name);
+        var pi: T.CmdParseInput = .{};
+        const pr = cmd_mod.cmd_parse_from_string(value, &pi);
+        switch (pr.status) {
+            .success => {
+                if (pr.cmdlist) |raw| {
+                    const cmdlist: *T.CmdList = @ptrCast(@alignCast(raw));
+                    tail = notify_insert_one_hook(tail, ne, cmdlist, state);
+                }
+            },
+            .@"error" => {
+                if (pr.@"error") |err| {
+                    log.log_debug("notify_insert_hook: cannot parse hook {s}: {s}", .{ hook_name, err });
+                    xm.allocator.free(err);
+                }
+            },
+        }
+        return;
+    }
+
+    switch (ctx.value.*) {
+        .array => |arr| {
+            for (arr.items) |entry| {
+                var pi: T.CmdParseInput = .{};
+                const pr = cmd_mod.cmd_parse_from_string(entry.value, &pi);
+                switch (pr.status) {
+                    .success => {
+                        if (pr.cmdlist) |raw| {
+                            const cmdlist: *T.CmdList = @ptrCast(@alignCast(raw));
+                            tail = notify_insert_one_hook(tail, ne, cmdlist, state);
+                        }
+                    },
+                    .@"error" => {
+                        if (pr.@"error") |err| {
+                            log.log_debug("notify_insert_hook: cannot parse hook {s}: {s}", .{ hook_name, err });
+                            xm.allocator.free(err);
+                        }
+                    },
+                }
             }
-            return after;
         },
+        else => {},
     }
 }
 
-fn insertHookCommands(
-    after: ?*cmdq.CmdqItem,
-    name: []const u8,
-    fs: *const T.CmdFindState,
-    hook_info: cmdq.HookInfo,
-) void {
-    var hook_state = canonicalHookState(fs);
-    const state = cmdq.cmdq_new_state(if (cmd_find.cmd_find_valid_state(&hook_state)) &hook_state else null, null, T.CMDQ_STATE_NOHOOKS);
-    defer cmdq.cmdq_free_state(state);
-    cmdq.cmdq_set_hook_info(state, hook_info);
-
-    const value = hookOptionValue(name, &hook_state) orelse return;
-
-    var tail = after;
-    switch (value.*) {
-        .array => |arr| {
-            for (arr.items) |command|
-                tail = enqueueHookCommand(tail, name, command.value, state);
-        },
-        .string => |command| {
-            if (name.len != 0 and name[0] == '@')
-                _ = enqueueHookCommand(tail, name, command, state);
-        },
-        else => {},
+fn dispatchControlNotifications(entry: *const NotifyEntry) void {
+    const name = entry.hook_info.hook orelse return;
+    if (std.mem.eql(u8, name, "pane-mode-changed")) {
+        if (entry.pane) |wp| control_notify.control_notify_pane_mode_changed(wp);
+    } else if (std.mem.eql(u8, name, "window-layout-changed")) {
+        if (entry.window) |w| control_notify.control_notify_window_layout_changed(w);
+    } else if (std.mem.eql(u8, name, "window-pane-changed")) {
+        if (entry.window) |w| control_notify.control_notify_window_pane_changed(w);
+    } else if (std.mem.eql(u8, name, "window-unlinked")) {
+        if (entry.session) |s| if (entry.window) |w|
+            control_notify.control_notify_window_unlinked(s, w);
+    } else if (std.mem.eql(u8, name, "window-linked")) {
+        if (entry.session) |s| if (entry.window) |w|
+            control_notify.control_notify_window_linked(s, w);
+    } else if (std.mem.eql(u8, name, "window-renamed")) {
+        if (entry.window) |w| control_notify.control_notify_window_renamed(w);
+    } else if (std.mem.eql(u8, name, "client-session-changed")) {
+        if (entry.client) |cl| control_notify.control_notify_client_session_changed(cl);
+    } else if (std.mem.eql(u8, name, "client-detached")) {
+        if (entry.client) |cl| control_notify.control_notify_client_detached(cl);
+    } else if (std.mem.eql(u8, name, "session-renamed")) {
+        if (entry.session) |s| control_notify.control_notify_session_renamed(s);
+    } else if (std.mem.eql(u8, name, "session-created")) {
+        if (entry.session) |s| control_notify.control_notify_session_created(s);
+    } else if (std.mem.eql(u8, name, "session-closed")) {
+        if (entry.session) |s| control_notify.control_notify_session_closed(s);
+    } else if (std.mem.eql(u8, name, "session-window-changed")) {
+        if (entry.session) |s| control_notify.control_notify_session_window_changed(s);
+    } else if (std.mem.eql(u8, name, "paste-buffer-changed")) {
+        if (entry.pbname) |pb| control_notify.control_notify_paste_buffer_changed(pb);
+    } else if (std.mem.eql(u8, name, "paste-buffer-deleted")) {
+        if (entry.pbname) |pb| control_notify.control_notify_paste_buffer_deleted(pb);
     }
 }
 
 fn notifyCallback(item: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const entry: *NotifyEntry = @ptrCast(@alignCast(data orelse return .normal));
     defer {
+        if (entry.session) |s| sess.session_remove_ref(s, "notify_callback");
+        if (entry.window) |w| win_mod.window_remove_ref(w, "notify_callback");
+        if (entry.fs.s) |s| sess.session_remove_ref(s, "notify_callback");
         entry.deinit();
         xm.allocator.destroy(entry);
     }
 
-    const name = entry.hook_info.hook orelse return .normal;
-    insertHookCommands(item, name, &entry.fs, entry.hook_info.borrow());
+    dispatchControlNotifications(entry);
+    notify_insert_hook(item, entry);
     return .normal;
 }
 
-fn queueNotify(fs: *const T.CmdFindState, hook_info: OwnedHookInfo) void {
+/// Core notification dispatcher: queues a callback that runs control-mode output and hook commands
+/// (mirrors tmux `notify_add`).
+pub fn notify_add(
+    name: []const u8,
+    fs: *const T.CmdFindState,
+    client: ?*T.Client,
+    session: ?*T.Session,
+    window: ?*T.Window,
+    pane: ?*T.WindowPane,
+    pbname: ?[]const u8,
+) void {
+    if (notificationsSuppressed()) return;
+
     const entry = xm.allocator.create(NotifyEntry) catch unreachable;
     entry.* = .{
         .fs = fs.*,
-        .hook_info = hook_info,
+        .hook_info = OwnedHookInfo.fromEvent(name, client, session, window, pane),
+        .client = client,
+        .session = session,
+        .window = window,
+        .pane = pane,
+        .pbname = if (pbname) |p| xm.xstrdup(p) else null,
     };
-    _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback1("notify-hook", notifyCallback, entry));
+
+    if (session) |s| sess.session_add_ref(s, "notify_add");
+    if (window) |w| win_mod.window_add_ref(w, "notify_add");
+    if (entry.fs.s) |s| sess.session_add_ref(s, "notify_add");
+
+    _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback1("notify", notifyCallback, entry));
 }
 
 pub fn notify_hook(item: *cmdq.CmdqItem, name: []const u8, current: ?*const T.CmdFindState) void {
-    var info = OwnedHookInfo.fromName(name);
-    defer info.deinit();
-
-    var fs: T.CmdFindState = .{ .idx = -1 };
-    if (current) |state| fs = state.*;
+    var ne: NotifyEntry = .{
+        .hook_info = OwnedHookInfo.fromName(name),
+        .fs = blk: {
+            var fs: T.CmdFindState = .{ .idx = -1 };
+            if (current) |state| fs = state.*;
+            break :blk fs;
+        },
+    };
+    defer ne.deinit();
 
     if (item.queue != null) {
-        insertHookCommands(item, name, &fs, info.borrow());
+        notify_insert_hook(item, &ne);
         return;
     }
-
-    insertHookCommands(null, name, &fs, info.borrow());
+    notify_insert_hook(null, &ne);
     _ = cmdq.cmdq_next(null);
 }
 
 pub fn notify_client(name: []const u8, cl: *T.Client) void {
-    if (notificationsSuppressed()) return;
-
-    if (std.mem.eql(u8, name, "client-session-changed"))
-        control_notify.control_notify_client_session_changed(cl)
-    else if (std.mem.eql(u8, name, "client-detached"))
-        control_notify.control_notify_client_detached(cl);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (!cmd_find.cmd_find_from_client(&fs, cl, 0))
         _ = cmd_find.cmd_find_from_nothing(&fs, 0);
-    queueNotify(&fs, OwnedHookInfo.fromEvent(name, cl, null, null, null));
+    notify_add(name, &fs, cl, null, null, null, null);
 }
 
 pub fn notify_session(name: []const u8, s: *T.Session) void {
-    if (notificationsSuppressed()) return;
-
-    if (std.mem.eql(u8, name, "session-renamed"))
-        control_notify.control_notify_session_renamed(s)
-    else if (std.mem.eql(u8, name, "session-created"))
-        control_notify.control_notify_session_created(s)
-    else if (std.mem.eql(u8, name, "session-closed"))
-        control_notify.control_notify_session_closed(s)
-    else if (std.mem.eql(u8, name, "session-window-changed"))
-        control_notify.control_notify_session_window_changed(s);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (sess.session_alive(s))
         cmd_find.cmd_find_from_session(&fs, s, 0)
     else
         _ = cmd_find.cmd_find_from_nothing(&fs, 0);
-    queueNotify(&fs, OwnedHookInfo.fromEvent(name, null, s, null, null));
+    notify_add(name, &fs, null, s, null, null, null);
 }
 
 pub fn notify_winlink(name: []const u8, wl: *T.Winlink) void {
-    notify_session_window(name, wl.session, wl.window);
+    var fs: T.CmdFindState = .{ .idx = -1 };
+    if (!cmd_find.cmd_find_from_winlink(&fs, wl, 0))
+        _ = cmd_find.cmd_find_from_nothing(&fs, 0);
+    notify_add(name, &fs, null, wl.session, wl.window, null, null);
 }
 
 pub fn notify_session_window(name: []const u8, s: *T.Session, w: *T.Window) void {
-    if (notificationsSuppressed()) return;
-
-    if (std.mem.eql(u8, name, "window-unlinked"))
-        control_notify.control_notify_window_unlinked(s, w)
-    else if (std.mem.eql(u8, name, "window-linked"))
-        control_notify.control_notify_window_linked(s, w);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (!cmd_find.cmd_find_from_session_window(&fs, s, w, 0))
         _ = cmd_find.cmd_find_from_nothing(&fs, 0);
-    queueNotify(&fs, OwnedHookInfo.fromEvent(name, null, s, w, null));
+    notify_add(name, &fs, null, s, w, null, null);
 }
 
 pub fn notify_window(name: []const u8, w: *T.Window) void {
-    if (notificationsSuppressed()) return;
-
-    if (std.mem.eql(u8, name, "window-layout-changed"))
-        control_notify.control_notify_window_layout_changed(w)
-    else if (std.mem.eql(u8, name, "window-pane-changed"))
-        control_notify.control_notify_window_pane_changed(w)
-    else if (std.mem.eql(u8, name, "window-renamed"))
-        control_notify.control_notify_window_renamed(w);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (!cmd_find.cmd_find_from_window(&fs, w, 0))
         _ = cmd_find.cmd_find_from_nothing(&fs, 0);
-    queueNotify(&fs, OwnedHookInfo.fromEvent(name, null, null, w, null));
+    notify_add(name, &fs, null, null, w, null, null);
 }
 
 pub fn notify_pane(name: []const u8, wp: *T.WindowPane) void {
-    if (notificationsSuppressed()) return;
-
-    if (std.mem.eql(u8, name, "pane-mode-changed"))
-        control_notify.control_notify_pane_mode_changed(wp);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
     if (!cmd_find.cmd_find_from_pane(&fs, wp, 0))
         _ = cmd_find.cmd_find_from_nothing(&fs, 0);
-    queueNotify(&fs, OwnedHookInfo.fromEvent(name, null, null, wp.window, wp));
+    notify_add(name, &fs, null, null, wp.window, wp, null);
 }
 
 pub fn notify_paste_buffer(pbname: []const u8, deleted: bool) void {
-    if (notificationsSuppressed()) return;
-
     const name = if (deleted) "paste-buffer-deleted" else "paste-buffer-changed";
-    if (deleted)
-        control_notify.control_notify_paste_buffer_deleted(pbname)
-    else
-        control_notify.control_notify_paste_buffer_changed(pbname);
-
     var fs: T.CmdFindState = .{ .idx = -1 };
-    queueNotify(&fs, OwnedHookInfo.fromName(name));
+    notify_add(name, &fs, null, null, null, null, pbname);
 }
 
 test "notify_window queues hook commands with window metadata" {
     const env_mod = @import("environ.zig");
-    const win = @import("window.zig");
     cmdq.cmdq_reset_for_tests();
     defer cmdq.cmdq_reset_for_tests();
 
     sess.session_init_globals(xm.allocator);
-    win.window_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -346,10 +395,10 @@ test "notify_window queues hook commands with window metadata" {
 
     const session = sess.session_create(null, "notify-window-hook", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     defer sess.session_destroy(session, false, "test");
-    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     xm.allocator.free(window.name);
     window.name = xm.xstrdup("hooked-window");
-    const pane = win.window_add_pane(window, null, 80, 24);
+    const pane = win_mod.window_add_pane(window, null, 80, 24);
     window.active = pane;
     var cause: ?[]u8 = null;
     _ = sess.session_attach(session, window, -1, &cause).?;
@@ -362,7 +411,6 @@ test "notify_window queues hook commands with window metadata" {
 
 test "notify hooks from client queue run after the client tail" {
     const env_mod = @import("environ.zig");
-    const win = @import("window.zig");
     cmdq.cmdq_reset_for_tests();
     defer cmdq.cmdq_reset_for_tests();
 
@@ -381,7 +429,7 @@ test "notify hooks from client queue run after the client tail" {
     };
 
     sess.session_init_globals(xm.allocator);
-    win.window_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -401,10 +449,10 @@ test "notify hooks from client queue run after the client tail" {
 
     const session = sess.session_create(null, "notify-client-order", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     defer sess.session_destroy(session, false, "test");
-    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     xm.allocator.free(window.name);
     window.name = xm.xstrdup("ordered-window");
-    const pane = win.window_add_pane(window, null, 80, 24);
+    const pane = win_mod.window_add_pane(window, null, 80, 24);
     window.active = pane;
     var cause: ?[]u8 = null;
     _ = sess.session_attach(session, window, -1, &cause).?;
@@ -435,7 +483,6 @@ test "notify_window emits %layout-change to matching control clients" {
     const layout_mod = @import("layout.zig");
     const proc_mod = @import("proc.zig");
     const protocol = @import("zmux-protocol.zig");
-    const win = @import("window.zig");
     const registry = @import("client-registry.zig");
 
     const helpers = struct {
@@ -446,7 +493,7 @@ test "notify_window emits %layout-change to matching control clients" {
     defer cmdq.cmdq_reset_for_tests();
 
     sess.session_init_globals(xm.allocator);
-    win.window_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -463,8 +510,8 @@ test "notify_window emits %layout-change to matching control clients" {
 
     const session = sess.session_create(null, "notify-layout-control", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     defer sess.session_destroy(session, false, "test");
-    const window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    const pane = win.window_add_pane(window, null, 80, 24);
+    const window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const pane = win_mod.window_add_pane(window, null, 80, 24);
     window.active = pane;
     var cause: ?[]u8 = null;
     const wl = sess.session_attach(session, window, -1, &cause).?;
@@ -509,6 +556,7 @@ test "notify_window emits %layout-change to matching control clients" {
     }
 
     notify_window("window-layout-changed", window);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
 
@@ -536,7 +584,6 @@ test "session_set_current emits %session-window-changed to control clients" {
     const env_mod = @import("environ.zig");
     const proc_mod = @import("proc.zig");
     const protocol = @import("zmux-protocol.zig");
-    const win = @import("window.zig");
     const registry = @import("client-registry.zig");
 
     const helpers = struct {
@@ -549,7 +596,7 @@ test "session_set_current emits %session-window-changed to control clients" {
     defer registry.clients.clearRetainingCapacity();
 
     sess.session_init_globals(xm.allocator);
-    win.window_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -567,12 +614,12 @@ test "session_set_current emits %session-window-changed to control clients" {
     const session = sess.session_create(null, "notify-session-window-control", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     defer if (sess.session_find("notify-session-window-control") != null) sess.session_destroy(session, false, "test");
 
-    const first = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    const first_pane = win.window_add_pane(first, null, 80, 24);
+    const first = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const first_pane = win_mod.window_add_pane(first, null, 80, 24);
     first.active = first_pane;
 
-    const second = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    const second_pane = win.window_add_pane(second, null, 80, 24);
+    const second = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const second_pane = win_mod.window_add_pane(second, null, 80, 24);
     second.active = second_pane;
 
     var cause: ?[]u8 = null;
@@ -617,6 +664,7 @@ test "session_set_current emits %session-window-changed to control clients" {
 
     try std.testing.expect(sess.session_set_current(session, second_wl));
     try std.testing.expectEqual(second_wl, session.curw.?);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
 

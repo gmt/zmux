@@ -47,10 +47,40 @@ extern fn openpty(
 extern fn setsid() c_int;
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
+// ── spawn_log ─────────────────────────────────────────────────────────────
+
+/// Debug logging for spawn operations (mirrors tmux spawn_log).
+pub fn spawn_log(from: []const u8, sc: *const T.SpawnContext) void {
+    const name = if (sc.item) |item| cmdq.cmdq_get_name(@ptrCast(@alignCast(item))) else "(no item)";
+    log.log_debug("{s}: {s}, flags={x}", .{ from, name, sc.flags });
+
+    const wl = sc.wl;
+    const wp0 = sc.wp0;
+
+    if (wl != null and wp0 != null) {
+        log.log_debug("{s}: wl={d} wp0=%%{d}", .{ from, wl.?.idx, wp0.?.id });
+    } else if (wl != null) {
+        log.log_debug("{s}: wl={d} wp0=none", .{ from, wl.?.idx });
+    } else if (wp0 != null) {
+        log.log_debug("{s}: wl=none wp0=%%{d}", .{ from, wp0.?.id });
+    } else {
+        log.log_debug("{s}: wl=none wp0=none", .{from});
+    }
+
+    if (sc.s) |s| {
+        log.log_debug("{s}: s=${d} idx={d}", .{ from, s.id, sc.idx });
+    } else {
+        log.log_debug("{s}: s=none idx={d}", .{ from, sc.idx });
+    }
+
+    log.log_debug("{s}: name={s}", .{ from, sc.name orelse "none" });
+}
+
 // ── spawn_window ──────────────────────────────────────────────────────────
 
 /// Create a new window (and initial pane) in session sc.s.
 pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
+    spawn_log("spawn_window", sc);
     var select_new_window = false;
 
     if (sc.flags & T.SPAWN_RESPAWN != 0) {
@@ -144,6 +174,7 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
 
 /// Create a new pane in an existing window.
 pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
+    spawn_log("spawn_pane", sc);
     if (sc.flags & T.SPAWN_RESPAWN != 0) return respawn_pane(sc, cause);
     const wl = sc.wl orelse return null;
     const w = wl.window;

@@ -99,7 +99,10 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "client_uid", .func = resolve_client_uid },
     .{ .name = "client_user", .func = resolve_client_user },
     .{ .name = "client_utf8", .func = resolve_client_utf8 },
+    .{ .name = "client_utf", .func = resolve_client_utf },
+    .{ .name = "client_mode_format", .func = resolve_client_mode_format },
     .{ .name = "client_width", .func = resolve_client_width },
+    .{ .name = "client_written", .func = resolve_client_written },
 
     .{ .name = "command_alias", .func = resolve_command_alias },
     .{ .name = "command_name", .func = resolve_command_name },
@@ -127,6 +130,7 @@ pub const resolver_table = [_]Resolver{
 
     .{ .name = "host", .func = resolve_host },
     .{ .name = "host_short", .func = resolve_host_short },
+    .{ .name = "config_files", .func = resolve_config_files },
     .{ .name = "line", .func = resolve_line },
 
     .{ .name = "pid", .func = resolve_pid },
@@ -144,6 +148,8 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "buffer_name", .func = resolve_buffer_name },
     .{ .name = "buffer_sample", .func = resolve_buffer_sample },
     .{ .name = "buffer_size", .func = resolve_buffer_size },
+    .{ .name = "bracket_paste_flag", .func = resolve_bracket_paste_flag },
+    .{ .name = "buffer_mode_format", .func = resolve_buffer_mode_format },
     .{ .name = "cursor_blinking", .func = resolve_cursor_blinking },
     .{ .name = "cursor_character", .func = resolve_cursor_character },
     .{ .name = "cursor_colour", .func = resolve_cursor_colour },
@@ -170,6 +176,7 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "mouse_status_line", .func = resolve_mouse_status_line },
     .{ .name = "mouse_status_range", .func = resolve_mouse_status_range },
     .{ .name = "mouse_utf8_flag", .func = resolve_mouse_utf8_flag },
+    .{ .name = "mouse_utf", .func = resolve_mouse_utf },
     .{ .name = "mouse_word", .func = resolve_mouse_word },
     .{ .name = "mouse_x", .func = resolve_mouse_x },
     .{ .name = "mouse_y", .func = resolve_mouse_y },
@@ -214,6 +221,11 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "pane_unseen_changes", .func = resolve_pane_unseen_changes },
     .{ .name = "pane_title", .func = resolve_pane_title },
     .{ .name = "pane_width", .func = resolve_pane_width },
+    .{ .name = "pane_format", .func = resolve_pane_format },
+    .{ .name = "current_command", .func = resolve_current_command },
+    .{ .name = "current_path", .func = resolve_current_path },
+    .{ .name = "start_command", .func = resolve_start_command },
+    .{ .name = "start_path", .func = resolve_start_path },
 
     .{ .name = "scroll_region_lower", .func = resolve_scroll_region_lower },
     .{ .name = "scroll_region_upper", .func = resolve_scroll_region_upper },
@@ -236,6 +248,14 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "session_last_attached", .func = resolve_session_last_attached },
     .{ .name = "session_name", .func = resolve_session_name },
     .{ .name = "session_windows", .func = resolve_session_windows },
+    .{ .name = "session_activity_flag", .func = resolve_session_activity_flag },
+    .{ .name = "session_bell_flag", .func = resolve_session_bell_flag },
+    .{ .name = "session_format", .func = resolve_session_format },
+    .{ .name = "session_many_attached", .func = resolve_session_many_attached },
+    .{ .name = "session_marked", .func = resolve_session_marked },
+    .{ .name = "session_path", .func = resolve_session_path },
+    .{ .name = "session_silence_flag", .func = resolve_session_silence_flag },
+    .{ .name = "session_stack", .func = resolve_session_stack },
 
     .{ .name = "active_window_index", .func = resolve_active_window_index },
     .{ .name = "last_window_index", .func = resolve_last_window_index },
@@ -259,8 +279,27 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "window_visible_layout", .func = resolve_window_visible_layout },
     .{ .name = "window_zoomed_flag", .func = resolve_window_zoomed_flag },
     .{ .name = "window_width", .func = resolve_window_width },
+    .{ .name = "window_active_clients", .func = resolve_window_active_clients },
+    .{ .name = "window_active_clients_list", .func = resolve_window_active_clients_list },
+    .{ .name = "window_active_sessions", .func = resolve_window_active_sessions },
+    .{ .name = "window_active_sessions_list", .func = resolve_window_active_sessions_list },
+    .{ .name = "window_activity", .func = resolve_window_activity },
+    .{ .name = "window_cell_height", .func = resolve_window_cell_height },
+    .{ .name = "window_cell_width", .func = resolve_window_cell_width },
+    .{ .name = "window_end_flag", .func = resolve_window_end_flag },
+    .{ .name = "window_format", .func = resolve_window_format },
+    .{ .name = "window_linked_sessions", .func = resolve_window_linked_sessions },
+    .{ .name = "window_linked_sessions_list", .func = resolve_window_linked_sessions_list },
+    .{ .name = "window_marked_flag", .func = resolve_window_marked_flag },
+    .{ .name = "window_stack_index", .func = resolve_window_stack_index },
+    .{ .name = "window_start_flag", .func = resolve_window_start_flag },
     .{ .name = "synchronized_output_flag", .func = resolve_synchronized_output_flag },
     .{ .name = "version", .func = resolve_version },
+    .{ .name = "sixel_support", .func = resolve_sixel_support },
+    .{ .name = "tree_mode_format", .func = resolve_tree_mode_format },
+    .{ .name = "uid", .func = resolve_uid },
+    .{ .name = "user", .func = resolve_user },
+    .{ .name = "wrap_flag", .func = resolve_wrap_flag },
 
     // Copy-mode format resolvers
     .{ .name = "scroll_position", .func = resolve_scroll_position },
@@ -531,7 +570,7 @@ fn grid_word_separator(gd: *T.Grid, row: u32, col: u32, separators: []const u8) 
     return gc.data.size == 1 and gc.data.data[0] == ' ';
 }
 
-fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y: u32, separators: []const u8) ?[]u8 {
+pub fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y: u32, separators: []const u8) ?[]u8 {
     if (start_y >= gd.linedata.len) return null;
 
     var x = start_x;
@@ -586,7 +625,7 @@ fn format_grid_word(alloc: std.mem.Allocator, gd: *T.Grid, start_x: u32, start_y
     return utf8.utf8_tocstr(cells.items);
 }
 
-fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
+pub fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
     if (row >= gd.linedata.len) return null;
 
     var cells: std.ArrayList(T.Utf8Data) = .{};
@@ -615,7 +654,7 @@ fn format_grid_line(alloc: std.mem.Allocator, gd: *T.Grid, row: u32) ?[]u8 {
     return utf8.utf8_tocstr(cells.items);
 }
 
-fn format_grid_hyperlink(screen: *const T.Screen, x_in: u32, row: u32) ?[]u8 {
+pub fn format_grid_hyperlink(screen: *const T.Screen, x_in: u32, row: u32) ?[]u8 {
     const hl = screen.hyperlinks orelse return null;
     var x = x_in;
     while (true) {
@@ -2201,5 +2240,304 @@ fn resolve_selection_mode(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
         .word => alloc.dupe(u8, "word") catch unreachable,
         .line => alloc.dupe(u8, "line") catch unreachable,
     };
+}
+
+// ── New format resolvers (tmux parity) ────────────────────────────────────
+
+fn resolve_bracket_paste_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_state_screen(wp);
+    return alloc.dupe(u8, if ((screen.mode & T.MODE_BRACKETPASTE) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_buffer_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    return alloc.dupe(u8, "#{t/p:buffer_created}: #{buffer_sample}") catch unreachable;
+}
+
+fn resolve_client_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    return alloc.dupe(u8, "#{client_tty}: session #{client_session_name}") catch unreachable;
+}
+
+fn resolve_client_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_client_utf8(alloc, ctx);
+}
+
+fn resolve_client_written(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux tracks cumulative bytes written to the client tty in c->written.
+    // zmux does not yet have a Client.written counter; returns 0 until that
+    // accounting is wired up.
+    _ = ctx.client orelse return null;
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_config_files(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    const cfg = @import("cfg.zig");
+    const paths = cfg.cfg_file_paths.items;
+    if (paths.len == 0) return alloc.dupe(u8, "") catch unreachable;
+    var out: std.ArrayList(u8) = .{};
+    for (paths, 0..) |path, idx| {
+        if (idx != 0) out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, path) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_current_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_pane_current_command(alloc, ctx);
+}
+
+fn resolve_current_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_pane_current_path(alloc, ctx);
+}
+
+fn resolve_mouse_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_mouse_utf8_flag(alloc, ctx);
+}
+
+fn resolve_pane_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when the format tree's type is FORMAT_TYPE_PANE
+    // (set by format_defaults_pane). zmux's FormatContext does not carry a
+    // format-type tag; callers that need this should set it on the context.
+    _ = ctx;
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_session_activity_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx_session(ctx) orelse return null;
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_ACTIVITY != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_session_bell_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx_session(ctx) orelse return null;
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_BELL != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_session_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when format tree type is FORMAT_TYPE_SESSION.
+    // zmux FormatContext lacks a format-type discriminator; always "0".
+    _ = ctx;
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_session_many_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    return alloc.dupe(u8, if (s.attached > 1) "1" else "0") catch unreachable;
+}
+
+fn resolve_session_marked(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    const value: []const u8 = if (marked_pane_mod.check() and marked_pane_mod.marked_pane.s == s) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_session_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    return alloc.dupe(u8, s.cwd) catch unreachable;
+}
+
+fn resolve_session_silence_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx_session(ctx) orelse return null;
+    const wl = ctx_winlink(ctx) orelse return null;
+    return alloc.dupe(u8, if (wl.flags & T.WINLINK_SILENCE != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_session_stack(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const s = ctx_session(ctx) orelse return null;
+    const curw = s.curw orelse return null;
+    var out: std.ArrayList(u8) = .{};
+    out.writer(alloc).print("{d}", .{curw.idx}) catch unreachable;
+    for (s.lastw.items) |wl| {
+        out.append(alloc, ',') catch unreachable;
+        out.writer(alloc).print("{d}", .{wl.idx}) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_sixel_support(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // zmux does not implement sixel graphics; always report unsupported.
+    _ = ctx;
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_start_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_pane_start_command(alloc, ctx);
+}
+
+fn resolve_start_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_pane_start_path(alloc, ctx);
+}
+
+fn resolve_tree_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    return alloc.dupe(u8,
+        "#{?pane_format," ++
+        "#{?pane_marked,#[reverse],}" ++
+        "#{pane_current_command}#{?pane_active,*,}#{?pane_marked,M,}" ++
+        "#{?#{&&:#{pane_title},#{!=:#{pane_title},#{host_short}}},: \"#{pane_title}\",}" ++
+        ",#{?window_format," ++
+        "#{?window_marked_flag,#[reverse],}" ++
+        "#{window_name}#{window_flags}" ++
+        "#{?#{&&:#{==:#{window_panes},1},#{&&:#{pane_title},#{!=:#{pane_title},#{host_short}}}},: \"#{pane_title}\",}" ++
+        "," ++
+        "#{session_windows} windows" ++
+        "#{?session_grouped, (group #{session_group}: #{session_group_list}),}" ++
+        "#{?session_attached, (attached),}" ++
+        "}}"
+    ) catch unreachable;
+}
+
+fn resolve_uid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    return std.fmt.allocPrint(alloc, "{d}", .{std.os.linux.getuid()}) catch unreachable;
+}
+
+fn resolve_user(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    const pw = c.posix_sys.getpwuid(std.os.linux.getuid()) orelse return null;
+    return alloc.dupe(u8, std.mem.span(@as([*:0]const u8, @ptrCast(pw.*.pw_name)))) catch unreachable;
+}
+
+fn resolve_wrap_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wp = ctx_pane(ctx) orelse return null;
+    const screen = pane_state_screen(wp);
+    return alloc.dupe(u8, if ((screen.mode & T.MODE_WRAP) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_window_active_clients(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    var n: u32 = 0;
+    for (client_registry.clients.items) |cl| {
+        const cs = cl.session orelse continue;
+        const cw = cs.curw orelse continue;
+        if (cw.window == w) n += 1;
+    }
+    return xm.xasprintf("{d}", .{n});
+}
+
+fn resolve_window_active_clients_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const w = ctx_window(ctx) orelse return null;
+    var out: std.ArrayList(u8) = .{};
+    for (client_registry.clients.items) |cl| {
+        const cs = cl.session orelse continue;
+        const cw = cs.curw orelse continue;
+        if (cw.window == w) {
+            const name = cl.name orelse continue;
+            if (out.items.len != 0) out.append(alloc, ',') catch unreachable;
+            out.appendSlice(alloc, name) catch unreachable;
+        }
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_window_active_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    var n: u32 = 0;
+    for (w.winlinks.items) |wl| {
+        if (wl.session.curw == wl) n += 1;
+    }
+    return xm.xasprintf("{d}", .{n});
+}
+
+fn resolve_window_active_sessions_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const w = ctx_window(ctx) orelse return null;
+    var out: std.ArrayList(u8) = .{};
+    for (w.winlinks.items) |wl| {
+        if (wl.session.curw == wl) {
+            if (out.items.len != 0) out.append(alloc, ',') catch unreachable;
+            out.appendSlice(alloc, wl.session.name) catch unreachable;
+        }
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_window_activity(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(w.activity_time)});
+}
+
+fn resolve_window_cell_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{w.ypixel});
+}
+
+fn resolve_window_cell_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{w.xpixel});
+}
+
+fn resolve_window_end_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    const s = ctx_session(ctx) orelse return null;
+    var max_idx: ?i32 = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |w| {
+        if (max_idx == null or w.*.idx > max_idx.?)
+            max_idx = w.*.idx;
+    }
+    const value: []const u8 = if (max_idx != null and wl.idx == max_idx.?) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_window_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when format tree type is FORMAT_TYPE_WINDOW.
+    // zmux FormatContext lacks a format-type discriminator; always "0".
+    _ = ctx;
+    return alloc.dupe(u8, "0") catch unreachable;
+}
+
+fn resolve_window_linked_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const w = ctx_window(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{w.winlinks.items.len});
+}
+
+fn resolve_window_linked_sessions_list(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const w = ctx_window(ctx) orelse return null;
+    var out: std.ArrayList(u8) = .{};
+    for (w.winlinks.items) |wl| {
+        if (out.items.len != 0) out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, wl.session.name) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
+}
+
+fn resolve_window_marked_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    const value: []const u8 = if (marked_pane_mod.check() and marked_pane_mod.marked_pane.wl == wl) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
+}
+
+fn resolve_window_stack_index(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = alloc;
+    const wl = ctx_winlink(ctx) orelse return null;
+    const s = wl.session;
+    for (s.lastw.items, 0..) |entry, idx| {
+        if (entry == wl)
+            return xm.xasprintf("{d}", .{idx + 1});
+    }
+    return xm.xasprintf("{d}", .{@as(u32, 0)});
+}
+
+fn resolve_window_start_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const wl = ctx_winlink(ctx) orelse return null;
+    const s = ctx_session(ctx) orelse return null;
+    var min_idx: ?i32 = null;
+    var it = s.windows.valueIterator();
+    while (it.next()) |w| {
+        if (min_idx == null or w.*.idx < min_idx.?)
+            min_idx = w.*.idx;
+    }
+    const value: []const u8 = if (min_idx != null and wl.idx == min_idx.?) "1" else "0";
+    return alloc.dupe(u8, value) catch unreachable;
 }
 

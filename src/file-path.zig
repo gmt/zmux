@@ -42,3 +42,24 @@ pub fn resolve_path(client: ?*T.Client, raw_path: []const u8) ResolvedPath {
     const cwd = server_client_mod.server_client_get_cwd(client, null);
     return .{ .path = xm.xasprintf("{s}/{s}", .{ cwd, raw_path }), .owned = true };
 }
+
+/// Get path for file, either as given or from working directory.
+/// (tmux: file_get_path)
+///
+/// Always returns a caller-owned allocation.  Expands leading "~/" with
+/// $HOME, and prepends the client's cwd for relative paths.
+pub fn file_get_path(client: ?*T.Client, file: []const u8) []u8 {
+    var path: []u8 = undefined;
+    if (std.mem.startsWith(u8, file, "~/")) {
+        const home = std.posix.getenv("HOME") orelse "";
+        path = xm.xasprintf("{s}{s}", .{ home, file[1..] });
+    } else {
+        path = xm.xstrdup(file);
+    }
+    if (path.len > 0 and path[0] == '/') return path;
+
+    const cwd = server_client_mod.server_client_get_cwd(client, null);
+    const full = xm.xasprintf("{s}/{s}", .{ cwd, path });
+    xm.allocator.free(path);
+    return full;
+}

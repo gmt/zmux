@@ -688,6 +688,136 @@ fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
     status_runtime.status_message_set_owned(cl, -1, true, false, false, text);
 }
 
+// ── tmux-compatible public API (window-client) ─────────────────────────
+
+const window_client_order_seq = [_]T.SortOrder{ .name, .size, .creation, .activity, .end };
+
+const window_client_help_lines = [_][]const u8{
+    "\r\x1b[1m      Enter \x1b[0m\x0ex\x0f \x1b[0mChoose selected %1\n",
+    "\r\x1b[1m          d \x1b[0m\x0ex\x0f \x1b[0mDetach selected %1\n",
+    "\r\x1b[1m          D \x1b[0m\x0ex\x0f \x1b[0mDetach tagged %1s\n",
+    "\r\x1b[1m          x \x1b[0m\x0ex\x0f \x1b[0mDetach selected %1\n",
+    "\r\x1b[1m          X \x1b[0m\x0ex\x0f \x1b[0mDetach tagged %1s\n",
+    "\r\x1b[1m          z \x1b[0m\x0ex\x0f \x1b[0mSuspend selected %1\n",
+    "\r\x1b[1m          Z \x1b[0m\x0ex\x0f \x1b[0mSuspend tagged %1s\n",
+    "\r\x1b[1m          f \x1b[0m\x0ex\x0f \x1b[0mEnter a filter\n",
+};
+
+pub fn window_client_init(
+    wp: *T.WindowPane,
+    args: *const args_mod.Arguments,
+) *T.Screen {
+    const wme = enterMode(wp, args);
+    return clientModeGetScreen(wme);
+}
+
+pub fn window_client_free(wme: *T.WindowModeEntry) void {
+    clientModeClose(wme);
+}
+
+pub fn window_client_resize(wme: *T.WindowModeEntry, _: u32, _: u32) void {
+    redraw(wme);
+}
+
+pub fn window_client_update(wme: *T.WindowModeEntry) void {
+    rebuildAndDraw(wme);
+}
+
+pub fn window_client_key(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: *T.Session,
+    wl: *T.Winlink,
+    key: T.key_code,
+    mouse: ?*const T.MouseEvent,
+) void {
+    clientModeKey(wme, client, session, wl, key, mouse);
+}
+
+pub fn window_client_add_item(data: *ClientModeData, cl: *T.Client) void {
+    const text = format_mod.format_require_complete(
+        xm.allocator,
+        data.format,
+        &clientFormatContext(cl),
+    ) orelse fallbackText(cl);
+    const target_name = clientTargetName(cl);
+    const line_number: u32 = @intCast(data.items.items.len);
+    const item_key = keyForLine(data, cl, line_number);
+    const item_keystr = if (item_key != T.KEYC_NONE)
+        xm.xstrdup(key_string.key_string_lookup_key(item_key, 0))
+    else
+        null;
+    data.items.append(xm.allocator, .{
+        .client = cl,
+        .target_name = target_name,
+        .text = text,
+        .key = item_key,
+        .keystr = item_keystr,
+    }) catch unreachable;
+    if (item_keystr) |keystr|
+        data.max_key_label_width = @max(data.max_key_label_width, keystr.len);
+}
+
+pub fn window_client_free_item(item: *ClientItem) void {
+    xm.allocator.free(item.target_name);
+    xm.allocator.free(item.text);
+    if (item.keystr) |keystr| xm.allocator.free(keystr);
+}
+
+pub fn window_client_build(wme: *T.WindowModeEntry) void {
+    rebuildData(modeData(wme));
+}
+
+pub fn window_client_draw(wme: *T.WindowModeEntry) void {
+    redraw(wme);
+}
+
+pub fn window_client_do_detach(
+    data: *ClientModeData,
+    item: *ClientItem,
+    key: T.key_code,
+) void {
+    if (item == currentItem(data))
+        moveDown(data, 1);
+    if (key == 'd' or key == 'D')
+        server_client.server_client_detach(item.client, .detach)
+    else if (key == 'x' or key == 'X')
+        server_client.server_client_detach(item.client, .detachkill)
+    else if (key == 'z' or key == 'Z')
+        server_client.server_client_suspend(item.client);
+}
+
+pub fn window_client_menu(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: *T.Session,
+    wl: *T.Winlink,
+    key: T.key_code,
+) void {
+    if (wme.mode != &window_client_mode) return;
+    clientModeKey(wme, client, session, wl, key, null);
+}
+
+pub fn window_client_get_key(
+    data: *const ClientModeData,
+    cl: *T.Client,
+    line: u32,
+) T.key_code {
+    return keyForLine(data, cl, line);
+}
+
+pub fn window_client_sort(sort_crit: *T.SortCriteria) void {
+    sort_crit.order_seq = &window_client_order_seq;
+    if (sort_crit.order == .end)
+        sort_crit.order = window_client_order_seq[0];
+}
+
+pub fn window_client_help(width: *u32, item_name: *[]const u8) []const []const u8 {
+    width.* = 0;
+    item_name.* = "client";
+    return &window_client_help_lines;
+}
+
 fn initTestGlobals() void {
     const cmdq_mod = @import("cmd-queue.zig");
     const env_mod = @import("environ.zig");

@@ -28,6 +28,8 @@ const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
+const tty_draw_mod = @import("tty-draw.zig");
+const hyperlinks_mod = @import("hyperlinks.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -1628,7 +1630,7 @@ fn armClipboardTimer(tty: *T.Tty) void {
             base,
             -1,
             @intCast(c_zig.libevent.EV_TIMEOUT),
-            tty_clipboard_query_timeout_cb,
+            tty_clipboard_query_callback,
             tty,
         );
     }
@@ -1652,11 +1654,15 @@ fn freeClipboardTimer(tty: *T.Tty) void {
     }
 }
 
-export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+export fn tty_clipboard_query_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
     const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
     cancelClipboardQuery(tty);
+}
+
+export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    tty_clipboard_query_callback(_fd, _events, arg);
 }
 
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
@@ -1664,6 +1670,811 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
 
     _ = file_mod.sendPeerStream(peer, 1, payload);
+}
+
+// ── C-name stubs: tmux screen-write / overlay API ─────────────────────────
+// zmux redraws via tty-draw.zig; these symbols match tmux names for porting
+// and cross-reference. `tty_ctx` is represented as opaque until a full port
+// wires screen-write → tty.
+
+/// Stub stand-in for tmux `visible_range` / `visible_ranges`.
+pub const VisibleRange = struct {
+    px: u32 = 0,
+    nx: u32 = 0,
+};
+
+pub const VisibleRanges = struct {
+    ranges: [1]VisibleRange = .{.{ .px = 0, .nx = 0 }},
+    used: u32 = 0,
+};
+
+threadlocal var tty_stub_overlay_storage: VisibleRanges = .{};
+
+/// tmux `tty_draw_line` — implementation lives in tty-draw.zig (stub body there).
+pub const tty_draw_line = tty_draw_mod.tty_draw_line;
+
+// ── C-name stubs: I/O, timers, offsets, pane clamp (tmux tty.c parity) ───────
+
+
+export fn tty_read_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+export fn tty_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+pub fn tty_block_maybe(_: *T.Tty) i32 {
+    return 0;
+}
+
+export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+export fn tty_start_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
+
+
+
+
+pub fn tty_update_features(tty: *T.Tty) void {
+    tty_invalidate(tty);
+}
+
+
+pub fn tty_add(tty: *T.Tty, buf: [*]const u8, len: usize) void {
+    if (len == 0) return;
+    tty_write(tty, buf[0..len]);
+}
+
+pub fn tty_puts(tty: *T.Tty, s: [*:0]const u8) void {
+    const n = std.mem.len(s);
+    if (n == 0) return;
+    tty_write(tty, s[0..n]);
+}
+
+
+pub fn tty_emulate_repeat(tty: *T.Tty, code: []const u8, code1: []const u8, n: u32) void {
+    if (tty_term.hasCapability(tty, code)) {
+        tty_putcode_i(tty, code, n);
+    } else {
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            tty_putcode(tty, code1);
+        }
+    }
+}
+
+pub fn tty_window_bigger(_: *T.Tty) i32 {
+    return 0;
+}
+
+pub fn tty_window_offset(_: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
+    ox.* = 0;
+    oy.* = 0;
+    sx.* = 0;
+    sy.* = 0;
+    return 0;
+}
+
+
+
+pub fn tty_large_region(_: *T.Tty, ctx: *const T.TtyCtx) i32 {
+    return if (ctx.orlower -| ctx.orupper >= ctx.sy / 2) @as(i32, 1) else @as(i32, 0);
+}
+
+pub fn tty_redraw_region(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (tty_large_region(tty, ctx) != 0) {
+        if (ctx.redraw_cb) |cb| cb(ctx);
+        return;
+    }
+    var i: u32 = ctx.orupper;
+    while (i <= ctx.orlower) : (i += 1) {
+        tty_draw_pane(tty, ctx, i);
+    }
+}
+
+pub fn tty_is_visible(_: *T.Tty, ctx: *const T.TtyCtx, px: u32, py: u32, nx: u32, ny: u32) i32 {
+    const xoff = ctx.rxoff + px;
+    const yoff = ctx.ryoff + py;
+
+    if (ctx.bigger) {
+        if (xoff + nx <= ctx.wox or xoff >= ctx.wox + ctx.wsx)
+            return 0;
+        if (yoff + ny <= ctx.woy or yoff >= ctx.woy + ctx.wsy)
+            return 0;
+    }
+    return 1;
+}
+
+pub fn tty_clamp_line(
+    _: *T.Tty,
+    ctx: *const T.TtyCtx,
+    px: u32,
+    py: u32,
+    nx: u32,
+    i: *u32,
+    x: *u32,
+    rx: *u32,
+    ry: *u32,
+) i32 {
+    const xoff = ctx.rxoff + px;
+    const yoff = ctx.ryoff + py;
+
+    if (tty_is_visible_inline(ctx, px, py, nx, 1) == 0) return 0;
+
+    if (ctx.bigger) {
+        if (xoff < ctx.wox) {
+            i.* = ctx.wox - xoff;
+            x.* = ctx.wox;
+            rx.* = nx -| i.*;
+        } else {
+            i.* = 0;
+            x.* = xoff;
+            rx.* = nx;
+        }
+        if (xoff + nx > ctx.wox + ctx.wsx)
+            rx.* = (ctx.wox + ctx.wsx) -| x.*;
+    } else {
+        i.* = 0;
+        x.* = xoff;
+        rx.* = nx;
+    }
+    ry.* = yoff - ctx.woy;
+    return 1;
+}
+
+fn tty_is_visible_inline(ctx: *const T.TtyCtx, px: u32, py: u32, nx: u32, ny: u32) i32 {
+    const xoff = ctx.rxoff + px;
+    const yoff = ctx.ryoff + py;
+    if (ctx.bigger) {
+        if (xoff + nx <= ctx.wox or xoff >= ctx.wox + ctx.wsx) return 0;
+        if (yoff + ny <= ctx.woy or yoff >= ctx.woy + ctx.wsy) return 0;
+    }
+    return 1;
+}
+
+pub fn tty_clear_pane_line(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32, px: u32, nx: u32, bg: u32) void {
+    var i: u32 = 0;
+    var x: u32 = 0;
+    var rx: u32 = 0;
+    var ry: u32 = 0;
+    if (tty_clamp_line(tty, ctx, px, py, nx, &i, &x, &rx, &ry) != 0) {
+        tty_clear_line(tty, &ctx.defaults, ry, x, rx, bg);
+    }
+}
+
+pub fn tty_clamp_area(
+    tty: *T.Tty,
+    ctx: *const T.TtyCtx,
+    px: u32,
+    py: u32,
+    nx: u32,
+    ny: u32,
+    i: *u32,
+    j: *u32,
+    x: *u32,
+    y: *u32,
+    rx: *u32,
+    ry: *u32,
+) i32 {
+    const xoff = ctx.rxoff + px;
+    const yoff = ctx.ryoff + py;
+
+    if (tty_is_visible(tty, ctx, px, py, nx, ny) == 0) return 0;
+
+    if (ctx.bigger) {
+        if (xoff < ctx.wox) {
+            i.* = ctx.wox - xoff;
+            x.* = ctx.wox;
+            rx.* = nx -| i.*;
+        } else {
+            i.* = 0;
+            x.* = xoff;
+            rx.* = nx;
+        }
+        if (xoff + nx > ctx.wox + ctx.wsx)
+            rx.* = (ctx.wox + ctx.wsx) -| x.*;
+
+        if (yoff < ctx.woy) {
+            j.* = ctx.woy - yoff;
+            y.* = ctx.woy;
+            ry.* = ny -| j.*;
+        } else {
+            j.* = 0;
+            y.* = yoff;
+            ry.* = ny;
+        }
+        if (yoff + ny > ctx.woy + ctx.wsy)
+            ry.* = (ctx.woy + ctx.wsy) -| y.*;
+    } else {
+        i.* = 0;
+        x.* = xoff;
+        rx.* = nx;
+        j.* = 0;
+        y.* = yoff;
+        ry.* = ny;
+    }
+    return 1;
+}
+
+pub fn tty_clear_pane_area(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32, ny: u32, px: u32, nx: u32, bg: u32) void {
+    var i: u32 = 0;
+    var j: u32 = 0;
+    var x: u32 = 0;
+    var y: u32 = 0;
+    var rx: u32 = 0;
+    var ry: u32 = 0;
+    if (tty_clamp_area(tty, ctx, px, py, nx, ny, &i, &j, &x, &y, &rx, &ry) != 0) {
+        tty_clear_area(tty, &ctx.defaults, y, ry, x, rx, bg);
+    }
+}
+
+pub fn tty_check_codeset(_: *T.Tty, gc: *const T.GridCell) *const T.GridCell {
+    return gc;
+}
+
+pub fn tty_set_client_cb(_: ?*anyopaque, _: *T.Client) i32 {
+    return 0;
+}
+
+
+pub fn tty_client_ready(_: *const T.TtyCtx, _: *T.Client) i32 {
+    return 0;
+}
+
+
+pub fn tty_window_default_style(gc: *T.GridCell, wp: *T.WindowPane) void {
+    gc.* = T.grid_default_cell;
+    gc.fg = wp.palette.fg;
+    gc.bg = wp.palette.bg;
+}
+
+/// tmux `tty_draw_pane(tty, ctx, py)` — redraws a single line of a pane.
+/// Uses overlay range checks and delegates to tty_draw_line.
+pub fn tty_draw_pane(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32) void {
+    const s = ctx.s orelse return;
+    const nx = ctx.sx;
+
+    if (!ctx.bigger) {
+        const r = tty_check_overlay_range(tty, ctx.xoff, ctx.yoff + py, nx);
+        var j: u32 = 0;
+        while (j < r.used) : (j += 1) {
+            const rr = &r.ranges[j];
+            if (rr.nx != 0) {
+                tty_draw_line(tty, s, rr.px - ctx.xoff, py, rr.nx, rr.px, ctx.yoff + py, &ctx.defaults, ctx.palette orelse &default_palette);
+            }
+        }
+        return;
+    }
+
+    var i: u32 = 0;
+    var x: u32 = 0;
+    var rx: u32 = 0;
+    var ry: u32 = 0;
+    if (tty_clamp_line(tty, ctx, 0, py, nx, &i, &x, &rx, &ry) != 0) {
+        const r = tty_check_overlay_range(tty, x, ry, rx);
+        var j: u32 = 0;
+        while (j < r.used) : (j += 1) {
+            const rr = &r.ranges[j];
+            if (rr.nx != 0) {
+                tty_draw_line(tty, s, i + (rr.px - x), py, rr.nx, rr.px, ry, &ctx.defaults, ctx.palette orelse &default_palette);
+            }
+        }
+    }
+}
+
+const default_palette = T.ColourPalette{};
+
+pub fn tty_check_overlay(_: *T.Tty, _: u32, _: u32) i32 {
+    return 1;
+}
+
+pub fn tty_check_overlay_range(tty: *T.Tty, px: u32, py: u32, nx: u32) *VisibleRanges {
+    _ = tty;
+    _ = py;
+    tty_stub_overlay_storage.ranges[0] = .{ .px = px, .nx = nx };
+    tty_stub_overlay_storage.used = 1;
+    return &tty_stub_overlay_storage;
+}
+
+pub fn tty_update_cursor(_: *T.Tty, mode: i32, _: ?*T.Screen) i32 {
+    return mode;
+}
+
+pub fn tty_update_mode(tty: *T.Tty, mode: i32, s: ?*T.Screen) void {
+    var actual = mode;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_NOCURSOR))) != 0)
+        actual &= ~@as(i32, T.MODE_CURSOR);
+
+    const changed = actual ^ tty.mode;
+    _ = changed;
+    _ = s;
+
+    tty.mode = actual;
+}
+
+pub fn tty_sync_start(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_BLOCK))) != 0) return;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_SYNCING))) != 0) return;
+    tty.flags |= @intCast(T.TTY_SYNCING);
+
+    if (tty_term.hasCapability(tty, "Sync"))
+        tty_putcode_i(tty, "Sync", 1);
+}
+
+pub fn tty_sync_end(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_BLOCK))) != 0) return;
+    if ((tty.flags & @as(i32, @intCast(T.TTY_SYNCING))) == 0) return;
+    tty.flags &= ~@as(i32, @intCast(T.TTY_SYNCING));
+
+    if (tty_term.hasCapability(tty, "Sync"))
+        tty_putcode_i(tty, "Sync", 2);
+}
+
+pub fn tty_default_colours(gc: *T.GridCell, wp: *T.WindowPane) void {
+    gc.* = T.grid_default_cell;
+    gc.fg = wp.palette.fg;
+    gc.bg = wp.palette.bg;
+}
+
+pub fn tty_default_attributes(
+    tty: *T.Tty,
+    defaults: *const T.GridCell,
+    _: ?*T.ColourPalette,
+    bg: u32,
+    _: ?*hyperlinks_mod.Hyperlinks,
+) void {
+    var gc = T.grid_default_cell;
+    gc.bg = @intCast(bg);
+    tty_attributes(tty, &gc, defaults);
+}
+
+pub fn tty_set_selection(tty: *T.Tty, clip: ?[*:0]const u8, buf: ?[*]const u8, len: usize) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+    if (!tty_term.hasCapability(tty, "Ms")) return;
+    if (buf == null or len == 0) return;
+
+    const src = buf.?[0..len];
+    const b64_size = 4 * ((len + 2) / 3) + 1;
+    const encoded = xm.allocator.alloc(u8, b64_size) catch return;
+    defer xm.allocator.free(encoded);
+
+    const b64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    var out_idx: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        const b0: u32 = src[i];
+        const b1: u32 = if (i + 1 < src.len) src[i + 1] else 0;
+        const b2: u32 = if (i + 2 < src.len) src[i + 2] else 0;
+        const triple = (b0 << 16) | (b1 << 8) | b2;
+        if (out_idx < encoded.len) encoded[out_idx] = b64_alphabet[(triple >> 18) & 0x3F];
+        out_idx += 1;
+        if (out_idx < encoded.len) encoded[out_idx] = b64_alphabet[(triple >> 12) & 0x3F];
+        out_idx += 1;
+        if (i + 1 < src.len) {
+            if (out_idx < encoded.len) encoded[out_idx] = b64_alphabet[(triple >> 6) & 0x3F];
+        } else {
+            if (out_idx < encoded.len) encoded[out_idx] = '=';
+        }
+        out_idx += 1;
+        if (i + 2 < src.len) {
+            if (out_idx < encoded.len) encoded[out_idx] = b64_alphabet[triple & 0x3F];
+        } else {
+            if (out_idx < encoded.len) encoded[out_idx] = '=';
+        }
+        out_idx += 1;
+        i += 3;
+    }
+
+    const clip_str = if (clip) |c| std.mem.span(c) else "";
+    const b64_str = encoded[0..out_idx];
+    tty.flags |= @intCast(T.TTY_NOBLOCK);
+    tty_putcode_ss(tty, "Ms", clip_str, b64_str);
+}
+
+
+pub fn tty_cmd_insertcharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        !tty_full_width(tty, ctx) or
+        tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
+        (!tty_term.hasCapability(tty, "ich") and
+        !tty_term.hasCapability(tty, "ich1")))
+    {
+        tty_draw_pane(tty, ctx, ctx.ocy);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    tty_emulate_repeat(tty, "ich", "ich1", ctx.num);
+}
+
+pub fn tty_cmd_deletecharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        !tty_full_width(tty, ctx) or
+        tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
+        (!tty_term.hasCapability(tty, "dch") and
+        !tty_term.hasCapability(tty, "dch1")))
+    {
+        tty_draw_pane(tty, ctx, ctx.ocy);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    tty_emulate_repeat(tty, "dch", "dch1", ctx.num);
+}
+
+pub fn tty_cmd_clearcharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_clear_pane_line(tty, ctx, ctx.ocy, ctx.ocx, ctx.num, ctx.bg);
+}
+
+pub fn tty_cmd_insertline(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        !tty_full_width(tty, ctx) or
+        tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
+        !tty_term.hasCapability(tty, "csr") or
+        !tty_term.hasCapability(tty, "il1") or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_off(tty);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    tty_emulate_repeat(tty, "il", "il1", ctx.num);
+    tty.cx = std.math.maxInt(u32);
+    tty.cy = std.math.maxInt(u32);
+}
+
+pub fn tty_cmd_deleteline(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        !tty_full_width(tty, ctx) or
+        tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
+        !tty_term.hasCapability(tty, "csr") or
+        !tty_term.hasCapability(tty, "dl1") or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_off(tty);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    tty_emulate_repeat(tty, "dl", "dl1", ctx.num);
+    tty.cx = std.math.maxInt(u32);
+    tty.cy = std.math.maxInt(u32);
+}
+
+pub fn tty_cmd_clearline(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_clear_pane_line(tty, ctx, ctx.ocy, 0, ctx.sx, ctx.bg);
+}
+
+pub fn tty_cmd_clearendofline(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    const nx = ctx.sx -| ctx.ocx;
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_clear_pane_line(tty, ctx, ctx.ocy, ctx.ocx, nx, ctx.bg);
+}
+
+pub fn tty_cmd_clearstartofline(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_clear_pane_line(tty, ctx, ctx.ocy, 0, ctx.ocx + 1, ctx.bg);
+}
+
+pub fn tty_cmd_reverseindex(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.ocy != ctx.orupper) return;
+
+    if (ctx.bigger or
+        (!tty_full_width(tty, ctx) and !tty_use_margin(tty)) or
+        tty_fake_bce(tty, &ctx.defaults, 8) or
+        !tty_term.hasCapability(tty, "csr") or
+        (!tty_term.hasCapability(tty, "ri") and
+        !tty_term.hasCapability(tty, "rin")) or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_pane_ctx(tty, ctx);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.orupper);
+
+    if (tty_term.hasCapability(tty, "ri"))
+        tty_putcode(tty, "ri")
+    else
+        tty_putcode_i(tty, "rin", 1);
+}
+
+pub fn tty_cmd_linefeed(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.ocy != ctx.orlower) return;
+
+    if (ctx.bigger or
+        (!tty_full_width(tty, ctx) and !tty_use_margin(tty)) or
+        tty_fake_bce(tty, &ctx.defaults, 8) or
+        !tty_term.hasCapability(tty, "csr") or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_pane_ctx(tty, ctx);
+
+    if (ctx.xoff + ctx.ocx > tty.rright) {
+        if (!tty_use_margin(tty))
+            tty_cursor(tty, 0, ctx.yoff + ctx.ocy)
+        else
+            tty_cursor(tty, tty.rright, ctx.yoff + ctx.ocy);
+    } else {
+        tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    }
+
+    tty_putc(tty, '\n');
+}
+
+pub fn tty_cmd_scrollup(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        (!tty_full_width(tty, ctx) and !tty_use_margin(tty)) or
+        tty_fake_bce(tty, &ctx.defaults, 8) or
+        !tty_term.hasCapability(tty, "csr") or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_pane_ctx(tty, ctx);
+
+    if (ctx.num == 1 or !tty_term.hasCapability(tty, "indn")) {
+        if (!tty_use_margin(tty))
+            tty_cursor(tty, 0, tty.rlower)
+        else
+            tty_cursor(tty, tty.rright, tty.rlower);
+        var i: u32 = 0;
+        while (i < ctx.num) : (i += 1)
+            tty_putc(tty, '\n');
+    } else {
+        if (tty.cy == std.math.maxInt(u32))
+            tty_cursor(tty, 0, 0)
+        else
+            tty_cursor(tty, 0, tty.cy);
+        tty_putcode_i(tty, "indn", ctx.num);
+    }
+}
+
+pub fn tty_cmd_scrolldown(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger or
+        (!tty_full_width(tty, ctx) and !tty_use_margin(tty)) or
+        tty_fake_bce(tty, &ctx.defaults, 8) or
+        !tty_term.hasCapability(tty, "csr") or
+        (!tty_term.hasCapability(tty, "ri") and
+        !tty_term.hasCapability(tty, "rin")) or
+        ctx.sx == 1 or
+        ctx.sy == 1)
+    {
+        tty_redraw_region(tty, ctx);
+        return;
+    }
+
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    tty_margin_pane_ctx(tty, ctx);
+    tty_cursor_pane_ctx(tty, ctx, ctx.ocx, ctx.orupper);
+
+    if (tty_term.hasCapability(tty, "rin")) {
+        tty_putcode_i(tty, "rin", ctx.num);
+    } else {
+        var i: u32 = 0;
+        while (i < ctx.num) : (i += 1)
+            tty_putcode(tty, "ri");
+    }
+}
+
+pub fn tty_cmd_clearendofscreen(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, 0, ctx.sy -| 1);
+    tty_margin_off(tty);
+
+    var py = ctx.ocy + 1;
+    const ny = ctx.sy -| ctx.ocy -| 1;
+    tty_clear_pane_area(tty, ctx, py, ny, 0, ctx.sx, ctx.bg);
+
+    py = ctx.ocy;
+    const nx = ctx.sx -| ctx.ocx;
+    tty_clear_pane_line(tty, ctx, py, ctx.ocx, nx, ctx.bg);
+}
+
+pub fn tty_cmd_clearstartofscreen(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, 0, ctx.sy -| 1);
+    tty_margin_off(tty);
+
+    tty_clear_pane_area(tty, ctx, 0, ctx.ocy, 0, ctx.sx, ctx.bg);
+    tty_clear_pane_line(tty, ctx, ctx.ocy, 0, ctx.ocx + 1, ctx.bg);
+}
+
+pub fn tty_cmd_clearscreen(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_default_attributes(tty, &ctx.defaults, ctx.palette, ctx.bg, if (ctx.s) |s| s.hyperlinks else null);
+    tty_region_pane_ctx(tty, ctx, 0, ctx.sy -| 1);
+    tty_margin_off(tty);
+    tty_clear_pane_area(tty, ctx, 0, ctx.sy, 0, ctx.sx, ctx.bg);
+}
+
+pub fn tty_cmd_alignmenttest(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.bigger) {
+        if (ctx.redraw_cb) |cb| cb(ctx);
+        return;
+    }
+
+    tty_attributes(tty, &T.grid_default_cell, &ctx.defaults);
+    tty_region_pane_ctx(tty, ctx, 0, ctx.sy -| 1);
+    tty_margin_off(tty);
+
+    var j: u32 = 0;
+    while (j < ctx.sy) : (j += 1) {
+        tty_cursor_pane_ctx(tty, ctx, 0, j);
+        var i: u32 = 0;
+        while (i < ctx.sx) : (i += 1)
+            tty_putc(tty, 'E');
+    }
+}
+
+pub fn tty_cmd_cell(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    const gcp = ctx.cell orelse return;
+    const s = ctx.s orelse return;
+    _ = s;
+
+    const px = ctx.xoff + ctx.ocx -| ctx.wox;
+    const py = ctx.yoff + ctx.ocy -| ctx.woy;
+    if (tty_is_visible(tty, ctx, ctx.ocx, ctx.ocy, 1, 1) == 0 or
+        (gcp.data.width == 1 and tty_check_overlay(tty, px, py) == 0))
+        return;
+
+    if (ctx.xoff + ctx.ocx -| ctx.wox > tty.sx -| 1 and
+        ctx.ocy == ctx.orlower and
+        tty_full_width(tty, ctx))
+    {
+        tty_region_pane_ctx(tty, ctx, ctx.orupper, ctx.orlower);
+    }
+
+    tty_margin_off(tty);
+    tty_cursor_pane_unless_wrap_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    tty_cell(tty, gcp, &ctx.defaults);
+
+    if (ctx.num == 1) tty_invalidate(tty);
+}
+
+pub fn tty_cmd_cells(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    const cp = ctx.ptr orelse return;
+
+    if (tty_is_visible(tty, ctx, ctx.ocx, ctx.ocy, ctx.num, 1) == 0) return;
+
+    if (ctx.bigger and
+        (ctx.xoff + ctx.ocx < ctx.wox or
+        ctx.xoff + ctx.ocx + ctx.num > ctx.wox + ctx.wsx))
+    {
+        if (!ctx.wrapped or
+            !tty_full_width(tty, ctx) or
+            ctx.xoff + ctx.ocx != 0 or
+            ctx.yoff + ctx.ocy != tty.cy +% 1 or
+            tty.cx < tty.sx or
+            tty.cy == tty.rlower)
+        {
+            tty_draw_pane(tty, ctx, ctx.ocy);
+        } else {
+            if (ctx.redraw_cb) |cb| cb(ctx);
+        }
+        return;
+    }
+
+    tty_margin_off(tty);
+    tty_cursor_pane_unless_wrap_ctx(tty, ctx, ctx.ocx, ctx.ocy);
+    if (ctx.cell) |gc| {
+        tty_attributes(tty, gc, &ctx.defaults);
+    }
+
+    const px = ctx.xoff + ctx.ocx -| ctx.wox;
+    const r = tty_check_overlay_range(tty, px, ctx.yoff + ctx.ocy -| ctx.woy, ctx.num);
+    var i: u32 = 0;
+    while (i < r.used) : (i += 1) {
+        const rr = &r.ranges[i];
+        if (rr.nx != 0) {
+            const cx = rr.px -| ctx.xoff +| ctx.wox;
+            tty_cursor_pane_unless_wrap_ctx(tty, ctx, cx, ctx.ocy);
+            const start = rr.px -| px;
+            if (start + rr.nx <= ctx.num) {
+                tty_putn(tty, cp[start .. start + rr.nx], rr.nx);
+            }
+        }
+    }
+}
+
+pub fn tty_cmd_setselection(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_set_selection(tty, ctx.ptr2, if (ctx.ptr) |p| @ptrCast(p) else null, ctx.num);
+}
+
+pub fn tty_cmd_rawstring(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty.flags |= @intCast(T.TTY_NOBLOCK);
+    if (ctx.ptr) |p| {
+        tty_add(tty, p, ctx.num);
+    }
+    tty_invalidate(tty);
+}
+
+pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    _ = tty;
+    _ = ctx;
+}
+
+pub fn tty_cmd_syncstart(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    if (ctx.num == 0x11) {
+        tty_sync_start(tty);
+    } else if ((ctx.num & 0x10) == 0) {
+        if (ctx.num != 0 or tty.client.popup_data != null)
+            tty_sync_start(tty);
+    }
+}
+
+/// Check if pane spans full terminal width.
+fn tty_full_width(tty: *const T.Tty, ctx: *const T.TtyCtx) bool {
+    return ctx.xoff == 0 and ctx.sx >= tty.sx;
+}
+
+/// Move cursor inside a pane using a TtyCtx.
+fn tty_cursor_pane_ctx(tty: *T.Tty, ctx: *const T.TtyCtx, px: u32, py: u32) void {
+    tty_cursor(tty, ctx.xoff + px -| ctx.wox, ctx.yoff + py -| ctx.woy);
+}
+
+/// Same as tty_cursor_pane_ctx but skips if the cursor is already at the right
+/// position (optimization for wrap-at-margin case).
+fn tty_cursor_pane_unless_wrap_ctx(tty: *T.Tty, ctx: *const T.TtyCtx, px: u32, py: u32) void {
+    if (!ctx.wrapped or
+        !(ctx.xoff == 0 and ctx.sx >= tty.sx) or
+        ctx.xoff + px != 0 or
+        ctx.yoff + py != tty.cy +% 1 or
+        tty.cx < tty.sx)
+    {
+        tty_cursor_pane_ctx(tty, ctx, px, py);
+    }
+}
+
+/// Set the scrolling region inside a pane using a TtyCtx.
+fn tty_region_pane_ctx(tty: *T.Tty, ctx: *const T.TtyCtx, rupper: u32, rlower: u32) void {
+    tty_region(tty, ctx.yoff + rupper -| ctx.woy, ctx.yoff + rlower -| ctx.woy);
+}
+
+/// Set margins inside a pane using a TtyCtx.
+fn tty_margin_pane_ctx(tty: *T.Tty, ctx: *const T.TtyCtx) void {
+    tty_margin(tty, ctx.xoff -| ctx.wox, ctx.xoff + ctx.sx -| 1 -| ctx.wox);
 }
 
 test "tty_open starts reduced tty lifecycle" {

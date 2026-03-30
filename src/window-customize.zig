@@ -942,6 +942,337 @@ fn freeItems(data: *CustomizeModeData) void {
     data.items.clearRetainingCapacity();
 }
 
+// ── Public API: wrappers matching tmux C function names ─────────────────
+//
+// Each wrapper below corresponds to a static function in tmux
+// window-customize.c.  Where the logic already exists under a
+// Zig-idiomatic name the wrapper simply delegates; where the tmux
+// function has no equivalent yet a minimal stub is provided.
+
+/// tmux: `window_customize_get_key` — resolve key table + binding for a customize item.
+pub fn window_customize_get_key(
+    item: *OptionItem,
+    ktp: ?**T.KeyTable,
+    bdp: ?**T.KeyBinding,
+) bool {
+    _ = item;
+    _ = ktp;
+    _ = bdp;
+    // Options-only customize mode in zmux has no per-item key/table; key UI is unported.
+    return false;
+}
+
+/// tmux: window_customize_init – enter options/customize mode.
+pub const window_customize_init = enterMode;
+
+/// tmux: window_customize_free – release mode resources.
+pub const window_customize_free = windowCustomizeClose;
+
+/// tmux: window_customize_resize – resize the mode-tree display area.
+pub fn window_customize_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
+    mode_tree.resize(modeData(wme).tree, sx, sy);
+}
+
+/// tmux: window_customize_key – low-level key dispatch.
+pub const window_customize_key = windowCustomizeKey;
+
+/// tmux: window_customize_build – mode_tree build callback.
+pub const window_customize_build = buildTree;
+
+/// tmux: window_customize_draw – draw option/key preview.
+///
+/// The Zig port uses a text-only view without a separate preview pane,
+/// so this is a no-op stub matching the tmux callback signature.
+pub fn window_customize_draw(
+    data: *CustomizeModeData,
+    item: ?*OptionItem,
+    ctx: *T.ScreenWriteCtx,
+    sx: u32,
+    sy: u32,
+) void {
+    _ = data;
+    _ = item;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
+}
+
+/// tmux: window_customize_draw_key – draw a key binding preview.
+pub fn window_customize_draw_key(
+    data: *CustomizeModeData,
+    item: ?*OptionItem,
+    ctx: *T.ScreenWriteCtx,
+    sx: u32,
+    sy: u32,
+) void {
+    _ = data;
+    _ = item;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
+}
+
+/// tmux: window_customize_draw_option – draw an option value preview.
+pub fn window_customize_draw_option(
+    data: *CustomizeModeData,
+    item: ?*OptionItem,
+    ctx: *T.ScreenWriteCtx,
+    sx: u32,
+    sy: u32,
+) void {
+    _ = data;
+    _ = item;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
+}
+
+/// tmux: window_customize_menu – forward a menu key to the key handler.
+pub fn window_customize_menu(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    key_code: T.key_code,
+) void {
+    if (wme.mode != &window_customize_mode) return;
+    const data = modeData(wme);
+    const session = data.fs.s orelse return;
+    const wl = data.fs.wl orelse return;
+    windowCustomizeKey(wme, client, session, wl, key_code, null);
+}
+
+/// tmux: window_customize_height – minimum preview area height.
+pub fn window_customize_height() u32 {
+    return 12;
+}
+
+/// tmux: window_customize_help – return help line data.
+pub const window_customize_help_lines = [_][]const u8{
+    "   Enter, s  Set option value",
+    "          S  Set global option value",
+    "          w  Set window option value",
+    "          d  Set to default value",
+    "          D  Set tagged options to default value",
+    "          u  Unset an option",
+    "          U  Unset tagged options",
+    "          f  Enter a filter",
+    "          v  Toggle information",
+};
+
+pub fn window_customize_help() struct { width: u32, item_noun: []const u8 } {
+    return .{ .width = 52, .item_noun = "option" };
+}
+
+/// tmux: window_customize_get_tag – compute a unique tag for an option.
+pub const window_customize_get_tag = optionTag;
+
+/// tmux: window_customize_get_tree – resolve scope to its options tree.
+///
+/// In the Zig port, this is handled by targetForScope; this wrapper
+/// returns just the options pointer for a given scope and find-state.
+pub fn window_customize_get_tree(scope: cmd_options.ScopeKind, fs: *const T.CmdFindState) ?*T.Options {
+    return switch (scope) {
+        .server => opts.global_options,
+        .session => if (fs.s) |s| s.options else null,
+        .window => if (fs.w) |w| w.options else null,
+        .pane => if (fs.wp) |wp| wp.options else null,
+    };
+}
+
+/// tmux: window_customize_check_item – verify an item is still valid.
+pub fn window_customize_check_item(
+    data: *CustomizeModeData,
+    item: *const OptionItem,
+) bool {
+    const oo = window_customize_get_tree(item.target.kind, &data.fs);
+    return oo == item.target.options;
+}
+
+/// tmux: window_customize_scope_text – human-readable scope label.
+pub const window_customize_scope_text = scopeText;
+
+/// tmux: window_customize_add_item – allocate a new option item.
+pub fn window_customize_add_item(
+    data: *CustomizeModeData,
+    target: cmd_options.ResolvedTarget,
+    name: []const u8,
+    idx: ?u32,
+) *OptionItem {
+    const item = xm.allocator.create(OptionItem) catch unreachable;
+    item.* = .{
+        .target = target,
+        .name = xm.xstrdup(name),
+        .idx = idx,
+    };
+    data.items.append(xm.allocator, item) catch unreachable;
+    return item;
+}
+
+/// tmux: window_customize_free_item – free a single option item.
+pub fn window_customize_free_item(item: *OptionItem) void {
+    xm.allocator.free(item.name);
+    xm.allocator.destroy(item);
+}
+
+/// tmux: window_customize_find_user_options – collect @-prefixed option names.
+pub const window_customize_find_user_options = collectCustomNames;
+
+/// tmux: window_customize_build_options – build one scope section.
+pub const window_customize_build_options = buildScope;
+
+/// tmux: window_customize_build_option – add a single option to the tree.
+pub const window_customize_build_option = appendOption;
+
+/// tmux: window_customize_build_array – expand array option items.
+///
+/// In the Zig port, array expansion is integrated into appendOption;
+/// this is a compatibility alias.
+pub const window_customize_build_array = appendOption;
+
+/// tmux: window_customize_build_keys – build key binding tree section.
+///
+/// Key binding editing is not yet ported; this is a no-op stub.
+pub fn window_customize_build_keys(
+    data: *CustomizeModeData,
+    tree: *mode_tree.Data,
+) void {
+    _ = data;
+    _ = tree;
+}
+
+/// tmux: window_customize_destroy – reference-counted destroy.
+///
+/// The Zig port handles teardown through windowCustomizeClose; this
+/// is a compatibility shim.
+pub fn window_customize_destroy(data: *CustomizeModeData) void {
+    _ = data;
+}
+
+/// tmux: window_customize_free_callback – release reference from prompt.
+pub fn window_customize_free_callback(data: *CustomizeModeData) void {
+    _ = data;
+}
+
+/// tmux: window_customize_free_item_callback – free prompt item + release ref.
+pub fn window_customize_free_item_callback(item: *OptionItem) void {
+    window_customize_free_item(item);
+}
+
+/// tmux: window_customize_set_option_callback – prompt callback for editing.
+pub const window_customize_set_option_callback = optionPromptCallback;
+
+/// tmux: window_customize_set_option – begin editing an option value.
+pub fn window_customize_set_option(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    item: *OptionItem,
+) void {
+    editCurrentItem(wme, client, item);
+}
+
+/// tmux: window_customize_unset_option – remove/reset an option.
+pub fn window_customize_unset_option(
+    state: *OptionPromptState,
+    client: *T.Client,
+) void {
+    applyUnset(state, client);
+}
+
+/// tmux: window_customize_reset_option – reset option to default.
+pub fn window_customize_reset_option(
+    state: *OptionPromptState,
+    client: *T.Client,
+) void {
+    applyReset(state, client);
+}
+
+/// tmux: window_customize_set_command_callback – set key command (stub).
+pub fn window_customize_set_command_callback(
+    client: ?*T.Client,
+    item: ?*anyopaque,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = item;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_customize_set_note_callback – set key note (stub).
+pub fn window_customize_set_note_callback(
+    client: ?*T.Client,
+    item: ?*anyopaque,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = item;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_customize_set_key – begin editing a key binding (stub).
+pub fn window_customize_set_key(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
+) void {
+    _ = client;
+    _ = data;
+    _ = item;
+}
+
+/// tmux: window_customize_unset_key – remove a key binding (stub).
+pub fn window_customize_unset_key(
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
+) void {
+    _ = data;
+    _ = item;
+}
+
+/// tmux: window_customize_reset_key – reset a key binding (stub).
+pub fn window_customize_reset_key(
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
+) void {
+    _ = data;
+    _ = item;
+}
+
+/// tmux: window_customize_change_each – apply change to each tagged item.
+pub fn window_customize_change_each(
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
+    client: ?*T.Client,
+) void {
+    _ = data;
+    _ = item;
+    _ = client;
+}
+
+/// tmux: window_customize_change_current_callback – prompt callback (stub).
+pub fn window_customize_change_current_callback(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_customize_change_tagged_callback – prompt callback (stub).
+pub fn window_customize_change_tagged_callback(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
+
 fn initTestGlobals() void {
     const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");

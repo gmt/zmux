@@ -33,7 +33,7 @@ pub const CfgFlags = packed struct {
 
 const SOURCE_DEPTH_LIMIT: u32 = 50;
 
-var cfg_file_paths: std.ArrayList([]const u8) = .{};
+pub var cfg_file_paths: std.ArrayList([]const u8) = .{};
 var cfg_causes: std.ArrayList([]const u8) = .{};
 pub var cfg_nfiles: usize = 0;
 pub var cfg_quiet: bool = true;

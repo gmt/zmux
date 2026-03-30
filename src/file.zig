@@ -357,15 +357,20 @@ pub fn canPrint(client: ?*T.Client) bool {
     return true;
 }
 
-/// Print formatted text to a client's stdout stream. (tmux: file_print)
+/// Print formatted text to a client's stdout stream (tmux `file_vprint` / `file_print`).
 ///
 /// Uses stream 1 (stdout).  Sends MSG_WRITE_OPEN on first use; subsequent
 /// calls push buffered data.
-pub fn filePrint(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
+pub fn file_vprint(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
     if (!canPrint(client)) return;
     const text = std.fmt.allocPrint(xm.allocator, fmt, args) catch return;
     defer xm.allocator.free(text);
     printToStream(client.?, 1, text, std.posix.STDOUT_FILENO);
+}
+
+/// Print formatted text to a client's stdout stream. (tmux: file_print)
+pub fn filePrint(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
+    file_vprint(client, fmt, args);
 }
 
 /// Print a raw buffer to a client's stdout stream. (tmux: file_print_buffer)
@@ -561,6 +566,76 @@ pub fn fileReadErrorCallback(cf: *ClientFile) void {
 /// bufferevent input and sends MSG_READ chunks to the peer.
 pub fn fileReadCallback(cf: *ClientFile) void {
     log.log_debug("read callback file {d} (stub)", .{cf.stream});
+}
+
+// ── tmux `file.c` entry-point names (server/client imsg dispatch) ─────────
+
+/// Server: append read payload to the pending client file (tmux `file_read_data`).
+pub fn file_read_data(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleReadData(imsg_msg);
+}
+
+/// Server: finish a remote read (tmux `file_read_done`).
+pub fn file_read_done(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleReadDone(imsg_msg);
+}
+
+/// Server: write-ready notification from client (tmux `file_write_ready`).
+pub fn file_write_ready(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleWriteReady(imsg_msg);
+}
+
+/// Client: open a read stream (tmux `file_read_open`).
+pub fn file_read_open(
+    files: *ClientFiles,
+    peer: *T.ZmuxPeer,
+    imsg_msg: *c.imsg.imsg,
+    allow_streams: bool,
+    close_received: bool,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) void {
+    _ = files;
+    _ = cb;
+    _ = cbdata;
+    file_read_mod.client_handle_read_open(peer, imsg_msg, allow_streams, close_received);
+}
+
+/// Client: cancel a read (tmux `file_read_cancel`).
+pub fn file_read_cancel(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_read_mod.client_handle_read_cancel(imsg_msg);
+}
+
+/// Client: open a write stream (tmux `file_write_open`).
+pub fn file_write_open(
+    files: *ClientFiles,
+    peer: *T.ZmuxPeer,
+    imsg_msg: *c.imsg.imsg,
+    allow_streams: bool,
+    close_received: bool,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) void {
+    _ = files;
+    _ = cb;
+    _ = cbdata;
+    file_write_mod.client_handle_write_open(peer, imsg_msg, allow_streams, close_received);
+}
+
+/// Client: write payload to an open stream (tmux `file_write_data`).
+pub fn file_write_data(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_write_mod.client_handle_write_data(imsg_msg);
+}
+
+/// Client: close a write stream (tmux `file_write_close`).
+pub fn file_write_close(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_write_mod.client_handle_write_close(imsg_msg);
 }
 
 /// Allocate the next stream id. (helper for file_write / file_read)

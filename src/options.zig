@@ -1115,6 +1115,43 @@ pub fn options_default_to_string(oe: *const T.OptionsTableEntry) []u8 {
 
 // ── Public array API ──────────────────────────────────────────────────────
 
+/// Red-black tree order for array items (tmux `options_array_cmp`).
+pub fn options_array_cmp(a1: *const T.OptionsArrayItem, a2: *const T.OptionsArrayItem) i32 {
+    if (a1.index < a2.index) return -1;
+    if (a1.index > a2.index) return 1;
+    return 0;
+}
+
+/// Insert a new empty array element at `idx` (tmux `options_array_new`).
+/// If an item with that index already exists, returns the existing entry.
+pub fn options_array_new(ov: *T.OptionsValue, idx: u32) *T.OptionsArrayItem {
+    const arr = switch (ov.*) {
+        .array => |*a| a,
+        else => unreachable,
+    };
+    const pos = array_find_position(arr.items, idx);
+    if (pos < arr.items.len and arr.items[pos].index == idx)
+        return &arr.items[pos];
+    const empty = xm.xstrdup("");
+    arr.insert(xm.allocator, pos, .{ .index = idx, .value = empty }) catch unreachable;
+    return &arr.items[pos];
+}
+
+/// Remove one array element and free its value (tmux `options_array_free`).
+pub fn options_array_free(ov: *T.OptionsValue, item: *T.OptionsArrayItem) void {
+    const arr = switch (ov.*) {
+        .array => |*a| a,
+        else => unreachable,
+    };
+    for (arr.items, 0..) |*it, i| {
+        if (it == item) {
+            xm.allocator.free(it.value);
+            _ = arr.orderedRemove(i);
+            return;
+        }
+    }
+}
+
 /// Clear all elements from an array option.
 pub fn options_array_clear_value(v: *T.OptionsValue) void {
     switch (v.*) {

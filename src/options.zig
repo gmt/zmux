@@ -39,6 +39,8 @@ const server_fn = @import("server-fn.zig");
 const status_mod = @import("status.zig");
 const utf8_mod = @import("utf8.zig");
 const resize_mod = @import("resize.zig");
+const format_mod = @import("format.zig");
+const cmd_mod = @import("cmd.zig");
 
 /// Global option tables (see options-table.zig for entries).
 /// Set at startup before any session is created.
@@ -121,9 +123,14 @@ pub fn options_get(oo: *T.Options, name: []const u8) ?*T.OptionsValue {
     return null;
 }
 
-/// Look up an option that must exist (panics if not found).
+/// Look up an option in this scope only (no parent walk). Tries the exact
+/// name, then [`options_map_name`] (tmux `options_get_only`).
 pub fn options_get_only(oo: *T.Options, name: []const u8) ?*T.OptionsValue {
-    return oo.entries.getPtr(name);
+    if (oo.entries.getPtr(name)) |v| return v;
+    const mapped = options_map_name(name);
+    if (!std.mem.eql(u8, name, mapped))
+        return oo.entries.getPtr(mapped);
+    return null;
 }
 
 pub fn options_map_name(name: []const u8) []const u8 {
@@ -694,6 +701,12 @@ pub fn options_to_string(
 
 // ── options_from_string_check ─────────────────────────────────────────────
 
+fn checkshell_path(shell: []const u8) bool {
+    if (shell.len == 0 or shell[0] != '/') return false;
+    std.fs.accessAbsolute(shell, .{}) catch return false;
+    return true;
+}
+
 /// Validate a string value against the table entry constraints (pattern,
 /// style validity, etc.).  Returns true on success; on failure sets cause.
 pub fn options_from_string_check(
@@ -702,6 +715,10 @@ pub fn options_from_string_check(
     cause: *?[]u8,
 ) bool {
     const entry = oe orelse return true;
+    if (std.mem.eql(u8, entry.name, "default-shell") and !checkshell_path(value)) {
+        cause.* = xm.xasprintf("not a suitable shell: {s}", .{value});
+        return false;
+    }
     if (entry.type == .style) {
         if (std.mem.indexOf(u8, value, "#{") == null) {
             var sy = T.Style{};
@@ -773,6 +790,300 @@ pub fn options_get_parent(oo: *T.Options) ?*T.Options {
 
 pub fn options_set_parent(oo: *T.Options, parent: ?*T.Options) void {
     oo.parent = parent;
+}
+
+// ── C API parity: entry handles, iteration, and string parsing ───────────
+
+/// Handle to one local option (tmux `struct options_entry`). `name` must
+/// remain valid while in use — it points at storage inside `oo.entries`.
+pub const OptionsEntry = struct {
+    oo: *T.Options,
+    name: []const u8,
+
+    pub fn valuePtr(self: OptionsEntry) *T.OptionsValue {
+        return self.oo.entries.getPtr(self.name).?;
+    }
+};
+
+/// Lexicographic comparison of two local entries (tmux `options_cmp`).
+pub fn options_cmp(lhs: OptionsEntry, rhs: OptionsEntry) std.math.Order {
+    return std.mem.order(u8, lhs.name, rhs.name);
+}
+
+pub fn options_name(entry: OptionsEntry) []const u8 {
+    return entry.name;
+}
+
+pub fn options_owner(entry: OptionsEntry) *T.Options {
+    return entry.oo;
+}
+
+/// First local option in lexicographic name order (tmux `options_first`).
+pub fn options_first(oo: *T.Options) ?OptionsEntry {
+    var it = oo.entries.iterator();
+    var best_key: ?[]const u8 = null;
+    while (it.next()) |kv| {
+        if (best_key == null or std.mem.order(u8, kv.key_ptr.*, best_key.?) == .lt)
+            best_key = kv.key_ptr.*;
+    }
+    return if (best_key) |k| .{ .oo = oo, .name = k } else null;
+}
+
+/// Next local option after `entry` in lexicographic order (tmux `options_next`).
+pub fn options_next(entry: OptionsEntry) ?OptionsEntry {
+    var it = entry.oo.entries.iterator();
+    var best_key: ?[]const u8 = null;
+    while (it.next()) |kv| {
+        if (std.mem.order(u8, kv.key_ptr.*, entry.name) != .gt) continue;
+        if (best_key == null or std.mem.order(u8, kv.key_ptr.*, best_key.?) == .lt)
+            best_key = kv.key_ptr.*;
+    }
+    return if (best_key) |k| .{ .oo = entry.oo, .name = k } else null;
+}
+
+/// Remove any existing value for `name` and insert a zero-initialised slot
+/// (tmux `options_add`). The stored tag is `.number` until replaced.
+pub fn options_add(oo: *T.Options, name: []const u8) void {
+    options_remove(oo, name);
+    put_value(oo, name, .{ .number = 0 });
+}
+
+/// Create an empty table-backed option (tmux `options_empty`).
+pub fn options_empty(oo: *T.Options, oe: *const T.OptionsTableEntry) void {
+    options_remove(oo, oe.name);
+    switch (oe.type) {
+        .array => put_value(oo, oe.name, .{ .array = .{} }),
+        .string => put_value(oo, oe.name, .{ .string = xm.xstrdup("") }),
+        .style => put_value(oo, oe.name, .{ .string = xm.xstrdup("") }),
+        .command => put_value(oo, oe.name, .{ .command = xm.xstrdup("") }),
+        .number, .colour => put_value(oo, oe.name, .{ .number = 0 }),
+        .choice => put_value(oo, oe.name, .{ .choice = 0 }),
+        .flag => put_value(oo, oe.name, .{ .flag = false }),
+        .bool => put_value(oo, oe.name, .{ .bool = false }),
+    }
+}
+
+/// Free dynamic parts of one option value (tmux `options_value_free`). The
+/// value is reset to `.number = 0` afterward.
+pub fn options_value_free(oe: ?*const T.OptionsTableEntry, ov: *T.OptionsValue) void {
+    _ = oe;
+    free_value(ov);
+    ov.* = .{ .number = 0 };
+}
+
+/// Resolve the table entry for `s` from the parent scope (tmux
+/// `options_parent_table_entry`). Returns null if there is no parent or the
+/// name is not present upstream.
+pub fn options_parent_table_entry(oo: *T.Options, s: []const u8) ?*const T.OptionsTableEntry {
+    const p = oo.parent orelse return null;
+    if (options_get(p, s) == null) return null;
+    return options_table_entry(options_map_name(s));
+}
+
+/// Clear every element of an array option by name (tmux `options_array_clear`).
+pub fn options_array_clear(oo: *T.Options, name: []const u8) void {
+    const v = options_get_only(oo, name) orelse return;
+    options_array_clear_value(v);
+}
+
+/// Command option as stored text (tmux `options_get_command` / `cmd_list` analogue).
+pub fn options_get_command(oo: *T.Options, name: []const u8) []const u8 {
+    return options_get_command_string(oo, name);
+}
+
+fn parse_i64_bounded(oe: *const T.OptionsTableEntry, text: []const u8, cause: *?[]u8) ?i64 {
+    const n = std.fmt.parseInt(i64, text, 10) catch {
+        cause.* = xm.xasprintf("invalid number: {s}", .{text});
+        return null;
+    };
+    if (oe.minimum) |lo| {
+        if (n < lo) {
+            cause.* = xm.xasprintf("value is too small: {s}", .{text});
+            return null;
+        }
+    }
+    if (oe.maximum) |hi| {
+        if (n > hi) {
+            cause.* = xm.xasprintf("value is too large: {s}", .{text});
+            return null;
+        }
+    }
+    return n;
+}
+
+/// Toggle / set a flag option from a string (tmux `options_from_string_flag`).
+pub fn options_from_string_flag(oo: *T.Options, name: []const u8, value: ?[]const u8, cause: *?[]u8) bool {
+    const flag: i64 = if (value == null or value.?.len == 0)
+        if (options_get_number(oo, name) != 0) 0 else 1
+    else if (options_parse_boolish(value)) |b|
+        if (b) 1 else 0
+    else {
+        cause.* = xm.xasprintf("bad value: {s}", .{value.?});
+        return false;
+    };
+    options_set_number(oo, name, flag);
+    return true;
+}
+
+/// Set a choice option from a string or toggle when value is null (tmux
+/// `options_from_string_choice`).
+pub fn options_from_string_choice(
+    oe: *const T.OptionsTableEntry,
+    oo: *T.Options,
+    name: []const u8,
+    value: ?[]const u8,
+    cause: *?[]u8,
+) bool {
+    const choice: i64 = if (value == null or value.?.len == 0) blk: {
+        var cur = options_get_number(oo, name);
+        if (cur < 2)
+            cur = if (cur != 0) 0 else 1;
+        break :blk cur;
+    } else blk: {
+        const idx = options_find_choice(oe, value.?, cause) orelse return false;
+        break :blk @intCast(idx);
+    };
+    options_set_number(oo, name, choice);
+    return true;
+}
+
+/// Parse and assign an option from a string (tmux `options_from_string`).
+pub fn options_from_string(
+    oo: *T.Options,
+    oe: ?*const T.OptionsTableEntry,
+    name: []const u8,
+    value: ?[]const u8,
+    append: bool,
+    cause: *?[]u8,
+) bool {
+    if (oe == null) {
+        if (name.len == 0 or name[0] != '@') {
+            cause.* = xm.xstrdup("bad option name");
+            return false;
+        }
+        if (value == null) {
+            cause.* = xm.xstrdup("empty value");
+            return false;
+        }
+        const old = xm.xstrdup(options_get_string(oo, name));
+        defer xm.allocator.free(old);
+        if (append) {
+            const cur = options_get_string(oo, name);
+            const combined = xm.xasprintf("{s}{s}", .{ cur, value.? });
+            defer xm.allocator.free(combined);
+            options_set_string(oo, false, name, combined);
+        } else {
+            options_set_string(oo, false, name, value.?);
+        }
+        const new = options_get_string(oo, name);
+        if (!options_from_string_check(null, new, cause)) {
+            options_set_string(oo, false, name, old);
+            return false;
+        }
+        return true;
+    }
+
+    if (value == null and oe.?.type != .flag and oe.?.type != .bool and oe.?.type != .choice) {
+        cause.* = xm.xstrdup("empty value");
+        return false;
+    }
+
+    switch (oe.?.type) {
+        .string, .style => {
+            const v = value orelse {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            };
+            const old = xm.xstrdup(options_get_string(oo, name));
+            defer xm.allocator.free(old);
+            if (append) {
+                const cur = options_get_string(oo, name);
+                const combined = xm.xasprintf("{s}{s}", .{ cur, v });
+                defer xm.allocator.free(combined);
+                options_set_string(oo, false, name, combined);
+            } else {
+                options_set_string(oo, false, name, v);
+            }
+            const new = options_get_string(oo, name);
+            if (!options_from_string_check(oe, new, cause)) {
+                options_set_string(oo, false, name, old);
+                return false;
+            }
+            return true;
+        },
+        .number => {
+            const v = value orelse {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            };
+            const n = parse_i64_bounded(oe.?, v, cause) orelse return false;
+            options_set_number(oo, name, n);
+            return true;
+        },
+        .colour => {
+            const v = value orelse {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            };
+            const parsed = colour_mod.colour_fromstring(v);
+            if (parsed == -1) {
+                cause.* = xm.xasprintf("bad colour: {s}", .{v});
+                return false;
+            }
+            options_set_colour(oo, name, parsed);
+            return true;
+        },
+        .flag, .bool => return options_from_string_flag(oo, name, value, cause),
+        .choice => return options_from_string_choice(oe.?, oo, name, value, cause),
+        .command => {
+            const raw = value orelse {
+                cause.* = xm.xstrdup("empty value");
+                return false;
+            };
+            var parse_input = T.CmdParseInput{};
+            const pr = cmd_mod.cmd_parse_from_string(raw, &parse_input);
+            switch (pr.status) {
+                .@"error" => {
+                    cause.* = pr.@"error".?;
+                    return false;
+                },
+                .success => {
+                    const cl: *cmd_mod.CmdList = @ptrCast(pr.cmdlist.?);
+                    cmd_mod.cmd_list_free(cl);
+                    options_set_command(oo, name, raw);
+                    return true;
+                },
+            }
+        },
+        .array => {
+            cause.* = xm.xstrdup("wrong option type");
+            return false;
+        },
+    }
+}
+
+/// Parse a string option into a style (tmux `options_string_to_style`). Fills
+/// `out`; returns false if the option is missing, not a string, or parsing fails.
+/// There is no per-entry cache yet; callers should treat `out` as scratch.
+pub fn options_string_to_style(
+    oo: *T.Options,
+    name: []const u8,
+    ft: ?*const format_mod.FormatContext,
+    out: *T.Style,
+) bool {
+    const v = options_get(oo, name) orelse return false;
+    const s = switch (v.*) {
+        .string => |str| str,
+        else => return false,
+    };
+    style_mod.style_set(out, &T.grid_default_cell);
+    const needs_expand = std.mem.indexOf(u8, s, "#{") != null;
+    if (ft != null and needs_expand) {
+        const expanded = format_mod.format_expand(xm.allocator, s, ft.?);
+        defer xm.allocator.free(expanded.text);
+        return style_mod.style_parse(out, &T.grid_default_cell, expanded.text) == 0;
+    }
+    return style_mod.style_parse(out, &T.grid_default_cell, s) == 0;
 }
 
 // ── Iterator helpers ──────────────────────────────────────────────────────

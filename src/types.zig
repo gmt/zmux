@@ -704,10 +704,15 @@ pub const Screen = struct {
 
 pub const TTY_NOCURSOR: u32 = 0x0001;
 pub const TTY_FREEZE: u32 = 0x0002;
+pub const TTY_TIMER: u32 = 0x0004;
+pub const TTY_NOBLOCK: u32 = 0x0008;
 pub const TTY_STARTED: u32 = 0x0010;
 pub const TTY_OPENED: u32 = 0x0020;
 pub const TTY_OSC52QUERY: u32 = 0x0040;
 pub const TTY_BLOCK: u32 = 0x0080;
+pub const TTY_HAVEDA: u32 = 0x0100;
+pub const TTY_HAVEXDA: u32 = 0x0200;
+pub const TTY_SYNCING: u32 = 0x0400;
 
 pub const Tty = struct {
     client: *Client,
@@ -1574,6 +1579,7 @@ pub const TtyCtx = struct {
     cell: ?*const GridCell = null,
     wrapped: bool = false,
     ptr: ?[*]const u8 = null,
+    ptr2: ?[*:0]const u8 = null,
     defaults: GridCell = grid_default_cell,
     bigger: bool = false,
     wox: u32 = 0,

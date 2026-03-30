@@ -25,6 +25,7 @@ const grid = @import("grid.zig");
 const hyperlinks = @import("hyperlinks.zig");
 const xm = @import("xmalloc.zig");
 const utf8 = @import("utf8.zig");
+const tty_acs_mod = @import("tty-acs.zig");
 
 pub fn screen_init(sx: u32, sy: u32, hlimit: u32) *T.Screen {
     const g = grid.grid_create(sx, sy, hlimit);
@@ -567,6 +568,70 @@ pub fn screen_alternate_off(s: *T.Screen, gc: ?*T.GridCell, cursor: bool) void {
 
     if (s.grid.sx > 0 and s.cx >= s.grid.sx) s.cx = s.grid.sx - 1;
     if (s.grid.sy > 0 and s.cy >= s.grid.sy) s.cy = s.grid.sy - 1;
+}
+
+// ── Diagnostic dump ─────────────────────────────────────────────────────
+
+var screen_print_buf: [16384]u8 = undefined;
+
+/// Render screen contents to a static buffer for debugging (tmux `screen_print`).
+/// The returned slice is NUL-terminated and valid until the next call.
+pub fn screen_print(s: *T.Screen) [:0]const u8 {
+    var last: usize = 0;
+    const h = s.grid.hsize;
+    const sy = s.grid.sy;
+    var y: u32 = 0;
+    outer: while (y < h + sy) : (y += 1) {
+        if (y >= s.grid.linedata.len) break;
+        const hdr = std.fmt.bufPrint(screen_print_buf[last..], "{d:0>4} \"", .{y}) catch break :outer;
+        if (last + hdr.len >= screen_print_buf.len) break;
+        last += hdr.len;
+
+        const gl = &s.grid.linedata[y];
+        var x: u32 = 0;
+        while (x < gl.cellused) : (x += 1) {
+            if (x >= gl.celldata.len) break;
+            const gce = gl.celldata[x];
+            if ((gce.flags & T.GRID_FLAG_PADDING) != 0) continue;
+
+            if ((gce.flags & T.GRID_FLAG_EXTENDED) == 0) {
+                if (last + 2 > screen_print_buf.len) break :outer;
+                screen_print_buf[last] = gce.offset_or_data.data.data;
+                last += 1;
+            } else if ((gce.flags & T.GRID_FLAG_TAB) != 0) {
+                if (last + 2 > screen_print_buf.len) break :outer;
+                screen_print_buf[last] = '\t';
+                last += 1;
+            } else if ((gce.flags & @as(u8, @truncate(T.GRID_ATTR_CHARSET))) != 0) {
+                const ch = gce.offset_or_data.data.data;
+                var one: [1]u8 = .{ch};
+                const acs = tty_acs_mod.tty_acs_get(null, ch) orelse one[0..1];
+                if (last + acs.len + 1 > screen_print_buf.len) break :outer;
+                @memcpy(screen_print_buf[last..][0..acs.len], acs);
+                last += acs.len;
+            } else {
+                const off = gce.offset_or_data.offset;
+                if (off >= gl.extddata.len) continue;
+                var ud: T.Utf8Data = undefined;
+                utf8.utf8_to_data(gl.extddata[off].data, &ud);
+                if (ud.size > 0) {
+                    if (last + ud.size + 1 > screen_print_buf.len) break :outer;
+                    @memcpy(screen_print_buf[last..][0..ud.size], ud.data[0..ud.size]);
+                    last += ud.size;
+                }
+            }
+        }
+
+        if (last + 3 > screen_print_buf.len) break;
+        screen_print_buf[last] = '"';
+        last += 1;
+        screen_print_buf[last] = '\n';
+        last += 1;
+    }
+
+    if (last >= screen_print_buf.len) last = screen_print_buf.len - 1;
+    screen_print_buf[last] = 0;
+    return screen_print_buf[0..last :0];
 }
 
 // ── Mode String ───────────────────────────────────────────────────────────

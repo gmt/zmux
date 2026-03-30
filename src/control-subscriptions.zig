@@ -263,3 +263,48 @@ fn write_window_subscription(
     defer xm.allocator.free(line);
     server_print.server_client_write_stream(client, 1, line);
 }
+
+// ── tmux `control.c` subscription entry points ─────────────────────────────
+
+pub fn control_check_subs_session(client: *T.Client, sub: *T.ControlSubscription) void {
+    const session = client.session orelse return;
+    check_session_subscription(client, session, sub);
+}
+
+pub fn control_check_subs_pane(client: *T.Client, sub: *T.ControlSubscription) void {
+    const session = client.session orelse return;
+    check_pane_subscription(client, session, sub);
+}
+
+pub fn control_check_subs_window(client: *T.Client, sub: *T.ControlSubscription) void {
+    const session = client.session orelse return;
+    check_window_subscription(client, session, sub);
+}
+
+pub fn control_check_subs_all_panes_one(
+    client: *T.Client,
+    sub: *T.ControlSubscription,
+    wl: *T.Winlink,
+    wp: *T.WindowPane,
+) void {
+    const session = client.session orelse return;
+    const window = wl.window;
+    const value = subscription_format_value(client, session, wl, wp, sub.format);
+    const pane_state = get_or_create_pane_state(sub, wp.id, wl.idx);
+    if (!replace_value_if_changed(&pane_state.last, value)) return;
+    write_pane_subscription(client, sub.name, session.id, window.id, wl.idx, wp.id, pane_state.last.?);
+}
+
+pub fn control_check_subs_all_windows_one(client: *T.Client, sub: *T.ControlSubscription, wl: *T.Winlink) void {
+    const session = client.session orelse return;
+    const window = wl.window;
+    const value = subscription_format_value(client, session, wl, null, sub.format);
+    const window_state = get_or_create_window_state(sub, window.id, wl.idx);
+    if (!replace_value_if_changed(&window_state.last, value)) return;
+    write_window_subscription(client, sub.name, session.id, window.id, wl.idx, window_state.last.?);
+}
+
+/// Body of tmux `control_check_subs_timer` after the timer is re-armed.
+pub fn control_check_subs_timer_fire(client: *T.Client) void {
+    control_check_subscriptions(client);
+}

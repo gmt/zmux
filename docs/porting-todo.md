@@ -1,30 +1,30 @@
 # Porting TODO
 
 Functional gaps where zmux does not yet match tmux behavior.
-Each item describes what zmux does and what it lacks.
+Each item describes what zmux does and what blocks completion.
 
 ## Grid and Screen
 
-- `screen_write_collect_*` batching system feeds the tty callback
-  path. When no callback is set (off-screen renders), the collect
-  path tracks state but skips the callback.
 - Scrollback storage uses visible-rows-first ordering instead of
   tmux's history-first layout.
 
 ## Input Parser
 
 - Request/reply machinery (DA, clipboard, colour, palette) requires
-  a PTY write-back path that does not exist yet.
+  a PTY write-back path.
 - Ground timer requires libevent `evtimer` or Zig async timer.
 - Theme reporting requires PTY write-back plus
   `window_pane_get_theme`.
 
 ## TTY
 
-- `tty.c` request/buffer/query/path machinery is absent. Capability
-  capture is a selected subset, not tmux's full terminal registry.
+- `tty.c` request/buffer/query/path machinery is absent.
 - Local raw-mode/alternate-screen takeover is split into
   `client.zig` instead of being capability-driven from `tty.zig`.
+- `tty_block_maybe` (output throttling), `tty_window_bigger`
+  (client-vs-window size), `tty_set_client_cb`/`tty_client_ready`
+  (per-client dispatch), and `tty_cmd_sixelimage` are stubs pending
+  their respective runtime infrastructure.
 
 ## Format
 
@@ -37,112 +37,101 @@ Each item describes what zmux does and what it lacks.
 
 ## Server-Client
 
-- `window_update_focus` is not yet ported (called during overlay
-  install/clear).
+- `window_update_focus` is not yet ported.
 - Status line range queries for mouse-on-status classification use
   a simplified area test; `status_get_range` is not available.
 - Pane buffer management operates on `input_pending` instead of
   libevent bufferevents; backpressure is not wired.
-- `window_pane_paste` is a minimal stub.
 
 ## Window Copy Mode
 
-- Core helpers, cursor movement, selection, scroll, and draw layers
-  have real implementations.
-- 14 functions remain blocked:
-  - `cursor_hyperlink_cb`, `cursor_word_cb`, `cursor_line_cb`,
-    `search_match_cb` — need `format_get_pane`
-  - `window_copy_formats` — needs `format_add`
-  - Regex search functions — need POSIX `regex_t` bridge
-  - Search mark management — `searchmark[]` array not in
-    `CopyModeData` struct
+- 14 functions blocked on specific infrastructure:
+  - Format callbacks need `format_get_pane`
+  - Regex search needs POSIX `regex_t` bridge
+  - Search mark management needs `searchmark[]` in `CopyModeData`
 
-## Window Modes (tree, buffer, client, customize)
+## Window Modes
 
-- Window mode wrapper functions delegate to existing Zig helpers
-  where possible, but many (`kill`, `swap`, `command` callbacks,
-  key-binding editing) are stubs.
-- Mode-tree `draw()` and `handleKey()` have real implementations.
-  `runCommand()`, `displayMenu()`, `displayHelp()` are stubs.
+### window-customize (14 stubs)
+- `draw`, `draw_key`, `draw_option` — rendering customize items
+- `build_keys` — building key-binding items
+- `destroy`, `free_callback` — cleanup with command state
+- `set_command_callback`, `set_note_callback` — prompt callbacks
+- `set_key`, `unset_key`, `reset_key` — key-binding editing
+- `change_each`, `change_current_callback`,
+  `change_tagged_callback` — bulk change operations
+All blocked on mode-tree `runCommand` and prompt infrastructure.
 
-## Control Mode
-
-- `control_read_callback`/`control_error_callback` I/O callbacks
-  are stubs.
-- Subscription checking (`control_check_subs_*`) has thin wrappers
-  but the timer-driven polling path is stubbed.
-- `control_append_data` output encoding exists but the full
-  write/pending/flush pipeline has stub edges.
-
-## File I/O
-
-- `file_read_open`/`file_read_cancel`/`file_write_open`/
-  `file_write_close`/`file_write_data` are client IPC stubs.
-- The port lacks `MSG_READ_*` transport, tmux's shared
-  `client_file` ownership/backpressure model, and callback-time
-  write-error completion.
-- `file_read.zig` uses a synchronous client-side read loop instead
-  of tmux's bufferevent-driven runtime.
+### window-tree (8 stubs)
+- `swap`, `destroy` — tree operations
+- `command_done`, `command_callback`, `command_free` — command
+  dispatch within tree mode
+- `kill_each`, `kill_current_callback`, `kill_tagged_callback` —
+  kill operations
+Blocked on mode-tree `runCommand` and window/session destruction
+hooks.
 
 ## Popup
 
-- `popup_draw_cb`/`popup_free_cb`/`popup_make_pane` are stubs.
-  The overlay does not draw popup content.
-- `popup_editor` returns -1.
-- `popup_job_update_cb`/`popup_job_complete_cb` are stubs.
+- `popup_draw_cb` — drawing popup content to the overlay
+- `popup_free_cb` — cleanup with job state
+- `popup_make_pane` — creating a PTY-backed popup pane
+- `popup_menu_done` — menu completion within popup
+- `popup_job_update_cb`/`popup_job_complete_cb` — job lifecycle
+- `popup_editor` — editor popup
+All blocked on live PTY-backed popup job runtime.
+
+## Control Mode
+
+- `control_read_callback` requires libevent bufferevent read
+  integration.
+- Timer-driven subscription polling path is a thin wrapper.
+
+## File I/O
+
+- Client file IPC stubs for `MSG_READ_*`/`MSG_WRITE_*` transport.
+- Synchronous client-side read instead of bufferevent runtime.
 
 ## Job Runtime
 
 - `job.zig` uses a thread/pipe bridge instead of tmux's shared
-  bufferevent-backed `job.c` runtime. This affects `if-shell`,
-  `run-shell`, `pipe-pane`, and format jobs.
+  bufferevent-backed `job.c` runtime.
 
 ## Commands
 
-- `cmd-queue.zig` `cmdq_get_current`/`cmdq_get_target` are
-  skeletal. Queued current/target state is not fully wired.
+- `cmdq_get_current`/`cmdq_get_target` are skeletal.
 - Readonly ACL enforcement is not wired through command dispatch.
 - `server_send_exit()` flush/sweep path has no Zig equivalent.
-- `display-panes` paints text badges instead of tmux's large digit
-  art.
+- `display-panes` paints text badges instead of large digit art.
 - `display-message -a/-I/-v` surface is incomplete.
-- `capture-pane` lacks mode/pending capture and tmux-grade
-  escape/input handling.
-- `set-buffer -w`/`load-buffer -w` clipboard export does not
-  render tmux's `Ms` capability template.
-- Several commands reject flags (`-a`, `-b`) that tmux supports,
-  pending grouped-session/shuffle/layout infrastructure.
+- `capture-pane` lacks mode/pending capture.
+- `set-buffer -w`/`load-buffer -w` does not render `Ms` template.
+- Several commands reject flags pending layout infrastructure.
 
 ## Layout
 
-- Layout uses transient geometry reconstruction, not persistent
-  `layout_root`/`layout_cell` ownership.
+- Transient geometry reconstruction, not persistent ownership.
 - `layout_split_pane`, `layout_close_pane`,
   `layout_new_pane_size` are stubs.
-- Multi-pane zoom, mouse-border resize, and layout-cell redraw
-  semantics are absent.
+- Multi-pane zoom and layout-cell redraw are absent.
 
 ## Status and Prompt
 
-- Status row caching, multiline status, and the full
-  per-pane/status/overlay redraw matrix are incomplete.
+- Status row caching and multiline status are incomplete.
 - Prompt mouse consumers are missing.
-- `display-menu` and completion popup depend on unported menu
-  infrastructure.
+- Menu infrastructure is not ported.
 
 ## Miscellaneous
 
-- `check_window_name` is a stub (timer/event/redraw/status-update
-  pieces belong on top of a real runtime).
-- `colour.zig` lacks the full X11 colour-name table.
-- `style.zig` skips dynamic `#{...}` expansion and style-range
-  consumers.
-- `key-bindings.zig` defers broader default tables, repeat timing,
-  and richer dispatch semantics.
-- Pane output uses synchronous writes, not tmux's bufferevent
-  runtime.
-- Lock/unlock uses `client_leave_attached_mode`/
-  `client_enter_attached_mode` instead of capability-driven lock
+- `check_window_name` stub (needs runtime).
+- `colour.zig` lacks X11 colour-name table.
+- `style.zig` skips `#{...}` expansion and style-range consumers.
+- Pane output uses synchronous writes.
+- Lock/unlock uses local mode swap instead of capability-driven
   handoff.
-- `tty-acs.zig` leftover `Tty.acs`/`u8_cap_present`/`u8_cap`
-  fields should fold under `tty-term` ownership.
+- `tty-acs.zig` leftover fields should fold under `tty-term`.
+
+## Window Pane I/O
+
+- `window_pane_input_callback` and `window_pane_read_callback`
+  require libevent bufferevent integration for PTY I/O.

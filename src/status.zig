@@ -186,6 +186,77 @@ pub fn status_get_range(c: *T.Client, x: u32, y: u32) ?*const T.StyleRange {
     return null;
 }
 
+/// Free all style ranges in a range list (port of tmux status_free_ranges).
+pub fn status_free_ranges(srs: *T.StyleRanges) void {
+    srs.clearAndFree(xm.allocator);
+}
+
+/// Dismiss the status-line message (port of tmux status_message_callback).
+/// Delegates to `status_runtime.status_message_clear`.
+pub fn status_message_callback(c: *T.Client) void {
+    status_runtime.status_message_clear(c);
+}
+
+/// Redraw the client message overlay (port of tmux status_message_redraw).
+/// Returns true when the screen content changed.
+pub fn status_message_redraw(c: *T.Client) bool {
+    if (c.tty.sx == 0 or c.tty.sy == 0) return false;
+    if (c.message_string == null) return false;
+    const rows = overlay_rows(c);
+    if (rows == 0) return false;
+
+    const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
+    defer {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+    }
+    draw_base(screen, c, rows);
+    render_message(screen, c, rows, c.message_string.?);
+    return true;
+}
+
+/// Push a new screen reference for overlay rendering (port of tmux status_push_screen).
+pub fn status_push_screen(c: *T.Client) void {
+    status_runtime.status_push_screen(c);
+}
+
+/// Pop a screen reference after overlay rendering (port of tmux status_pop_screen).
+pub fn status_pop_screen(c: *T.Client) void {
+    status_runtime.status_pop_screen(c);
+}
+
+/// Redraw the prompt overlay (port of tmux status_prompt_redraw).
+/// Returns true when the screen content changed.
+pub fn status_prompt_redraw(c: *T.Client) bool {
+    if (c.tty.sx == 0 or c.tty.sy == 0) return false;
+    if (!status_prompt.status_prompt_active(c)) return false;
+    const rows = overlay_rows(c);
+    if (rows == 0) return false;
+
+    const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
+    defer {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+    }
+    draw_base(screen, c, rows);
+    var result = RenderResult{};
+    render_prompt(screen, c, rows, &result);
+    return true;
+}
+
+/// Area geometry for the prompt/message region (port of tmux status_prompt_area).
+pub fn status_prompt_area(c: *T.Client, area_x: *u32, area_w: *u32) void {
+    const area = message_area(c, overlay_rows(c));
+    area_x.* = area.x;
+    area_w.* = area.width;
+}
+
+/// Escape '#' characters so `format_draw` treats them as literal text
+/// (port of tmux status_prompt_escape).
+pub fn status_prompt_escape(s: []const u8) []u8 {
+    return escape_message_hashes(s);
+}
+
 pub fn status_free(c: *T.Client) void {
     if (c.status.timer) |ev| {
         _ = c_import.libevent.event_del(ev);

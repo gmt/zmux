@@ -39,6 +39,7 @@ const log = @import("log.zig");
 const session_mod = @import("session.zig");
 const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
+const control_subscriptions = @import("control-subscriptions.zig");
 
 const CONTROL_BUFFER_LOW: usize = 512;
 const CONTROL_BUFFER_HIGH: usize = 8192;
@@ -143,6 +144,16 @@ fn write_control_line(cl: *T.Client, comptime fmt: []const u8, args: anytype) vo
     write_to_peer(cl, line);
 }
 
+/// Write one control line immediately (tmux `control_vwrite`).
+pub fn control_vwrite(cl: *T.Client, comptime fmt: []const u8, args: anytype) void {
+    const s = std.fmt.allocPrint(xm.allocator, fmt, args) catch unreachable;
+    defer xm.allocator.free(s);
+    log.log_debug("control_vwrite: {s}: writing line: {s}", .{ cl.name orelse "<anon>", s });
+    const line = std.fmt.allocPrint(xm.allocator, "{s}\n", .{s}) catch unreachable;
+    defer xm.allocator.free(line);
+    write_to_peer(cl, line);
+}
+
 /// Write a notification line to the control client.  If no %output blocks
 /// are pending the line is written directly; otherwise it is queued as a
 /// block (size == 0, line != null) behind the pending output so ordering
@@ -150,7 +161,7 @@ fn write_control_line(cl: *T.Client, comptime fmt: []const u8, args: anytype) vo
 pub fn control_write(cl: *T.Client, comptime fmt: []const u8, args: anytype) void {
     if (cl.control_all_blocks.items.len == 0) {
         log.log_debug("control_write: {s}: writing line directly", .{cl.name orelse "<anon>"});
-        write_control_line(cl, fmt, args);
+        control_vwrite(cl, fmt, args);
         return;
     }
 
@@ -374,6 +385,53 @@ fn control_encode_output(cl: *T.Client, cp: *T.ControlPane, wp: *T.WindowPane, s
     return buf.toOwnedSlice() catch unreachable;
 }
 
+/// Append escaped pane bytes to a buffer (tmux `control_append_data`).
+/// If `message` is empty, writes the `%output` / `%extended-output` prefix first.
+pub fn control_append_data(
+    cl: *T.Client,
+    cp: *T.ControlPane,
+    age: u64,
+    message: *std.ArrayList(u8),
+    wp: *T.WindowPane,
+    size: usize,
+) void {
+    if (message.items.len == 0) {
+        if ((cl.flags & T.CLIENT_CONTROL_PAUSEAFTER) != 0) {
+            const hdr = std.fmt.allocPrint(xm.allocator, "%extended-output %{d} {d} : ", .{ wp.id, age }) catch unreachable;
+            defer xm.allocator.free(hdr);
+            message.appendSlice(xm.allocator, hdr) catch unreachable;
+        } else {
+            const hdr = std.fmt.allocPrint(xm.allocator, "%output %{d} ", .{wp.id}) catch unreachable;
+            defer xm.allocator.free(hdr);
+            message.appendSlice(xm.allocator, hdr) catch unreachable;
+        }
+    }
+
+    var new_size: usize = 0;
+    const new_data = window_mod.window_pane_get_new_data(wp, &cp.offset, &new_size);
+    if (new_size < size) {
+        log.log_debug("control_append_data: not enough data: {d} < {d}", .{ new_size, size });
+        window_mod.window_pane_update_used_data(wp, &cp.offset, new_size);
+        return;
+    }
+
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        const byte = new_data[i];
+        if (byte < ' ' or byte == '\\') {
+            const esc = std.fmt.allocPrint(xm.allocator, "\\{o:0>3}", .{byte}) catch unreachable;
+            defer xm.allocator.free(esc);
+            message.appendSlice(xm.allocator, esc) catch unreachable;
+        } else {
+            const start = i;
+            while (i + 1 < size and new_data[i + 1] >= ' ' and new_data[i + 1] != '\\')
+                i += 1;
+            message.appendSlice(xm.allocator, new_data[start .. i + 1]) catch unreachable;
+        }
+    }
+    window_mod.window_pane_update_used_data(wp, &cp.offset, size);
+}
+
 // ---------------------------------------------------------------------------
 // Control client write callback (stub + logic)
 // ---------------------------------------------------------------------------
@@ -571,4 +629,82 @@ pub fn control_read_callback(cl: *T.Client) void {
 /// through the proc dispatch layer.
 pub fn control_error_callback(cl: *T.Client) void {
     cl.flags |= T.CLIENT_EXIT;
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions and RB comparators (tmux `control.c` names)
+// ---------------------------------------------------------------------------
+
+pub fn control_add_sub(cl: *T.Client, name: []const u8, sub_type: T.ControlSubType, id: u32, format: []const u8) void {
+    control_subscriptions.control_add_sub(cl, name, sub_type, id, format);
+}
+
+pub fn control_remove_sub(cl: *T.Client, name: []const u8) void {
+    control_subscriptions.control_remove_sub(cl, name);
+}
+
+/// Remove and free one subscription by pointer (tmux `control_free_sub`).
+pub fn control_free_sub(cl: *T.Client, sub: *T.ControlSubscription) void {
+    for (cl.control_subscriptions.items, 0..) |*s, i| {
+        if (s == sub) {
+            var removed = cl.control_subscriptions.orderedRemove(i);
+            removed.deinit(xm.allocator);
+            return;
+        }
+    }
+}
+
+pub fn control_pane_cmp(cp1: *const T.ControlPane, cp2: *const T.ControlPane) i32 {
+    if (cp1.pane < cp2.pane) return -1;
+    if (cp1.pane > cp2.pane) return 1;
+    return 0;
+}
+
+pub fn control_sub_cmp(csub1: *const T.ControlSubscription, csub2: *const T.ControlSubscription) i32 {
+    return switch (std.mem.order(u8, csub1.name, csub2.name)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+pub fn control_sub_pane_cmp(csp1: *const T.ControlSubscriptionPane, csp2: *const T.ControlSubscriptionPane) i32 {
+    if (csp1.pane < csp2.pane) return -1;
+    if (csp1.pane > csp2.pane) return 1;
+    if (csp1.idx < csp2.idx) return -1;
+    if (csp1.idx > csp2.idx) return 1;
+    return 0;
+}
+
+pub fn control_sub_window_cmp(csw1: *const T.ControlSubscriptionWindow, csw2: *const T.ControlSubscriptionWindow) i32 {
+    if (csw1.window < csw2.window) return -1;
+    if (csw1.window > csw2.window) return 1;
+    if (csw1.idx < csw2.idx) return -1;
+    if (csw1.idx > csw2.idx) return 1;
+    return 0;
+}
+
+pub fn control_check_subs_session(cl: *T.Client, sub: *T.ControlSubscription) void {
+    control_subscriptions.control_check_subs_session(cl, sub);
+}
+
+pub fn control_check_subs_pane(cl: *T.Client, sub: *T.ControlSubscription) void {
+    control_subscriptions.control_check_subs_pane(cl, sub);
+}
+
+pub fn control_check_subs_window(cl: *T.Client, sub: *T.ControlSubscription) void {
+    control_subscriptions.control_check_subs_window(cl, sub);
+}
+
+pub fn control_check_subs_all_panes_one(cl: *T.Client, sub: *T.ControlSubscription, wl: *T.Winlink, wp: *T.WindowPane) void {
+    control_subscriptions.control_check_subs_all_panes_one(cl, sub, wl, wp);
+}
+
+pub fn control_check_subs_all_windows_one(cl: *T.Client, sub: *T.ControlSubscription, wl: *T.Winlink) void {
+    control_subscriptions.control_check_subs_all_windows_one(cl, sub, wl);
+}
+
+/// Run subscription checks for one client (tmux `control_check_subs_timer` core).
+pub fn control_check_subs_timer(cl: *T.Client) void {
+    control_subscriptions.control_check_subs_timer_fire(cl);
 }

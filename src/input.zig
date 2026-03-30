@@ -114,9 +114,7 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
         }
         if (next == 'c') {
             // RIS – full reset
-            ctx.s.cell_fg = 8;
-            ctx.s.cell_bg = 8;
-            ctx.s.cell_attr = 0;
+            input_reset_cell(ctx.s);
             screen_write.erase_screen(&ctx);
             i += 2;
             continue;
@@ -547,7 +545,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         has_intermediate_space = true;
     }
 
-    var params_buf: [8]u32 = [_]u32{0} ** 8;
+    var params_buf: [24]u32 = [_]u32{0} ** 24;
     const parsed = parse_csi_params(params_raw, &params_buf);
     const params = params_buf[0..parsed.count];
 
@@ -670,7 +668,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         's' => screen_write.save_cursor(ctx),
         'u' => screen_write.restore_cursor(ctx),
         't' => apply_winops(ctx, params),
-        'm' => apply_sgr(ctx, params),
+        'm' => apply_sgr_raw(ctx, params_raw),
         'h' => apply_sm(ctx, params, false),
         'l' => apply_rm(ctx, params, false),
         else => {},
@@ -695,11 +693,11 @@ fn apply_rep(ctx: *T.ScreenWriteCtx, n: u32) void {
 }
 
 fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
-    // SGR – Select Graphic Rendition (CSI Ps ; ... m)
     const s = ctx.s;
     if (params.len == 0) {
-        s.cell_fg = 8; // default
-        s.cell_bg = 8; // default
+        s.cell_fg = 8;
+        s.cell_bg = 8;
+        s.cell_us = 8;
         s.cell_attr = 0;
         return;
     }
@@ -710,6 +708,7 @@ fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
             0 => {
                 s.cell_fg = 8;
                 s.cell_bg = 8;
+                s.cell_us = 8;
                 s.cell_attr = 0;
             },
             1 => s.cell_attr |= T.GRID_ATTR_BRIGHT,
@@ -735,41 +734,25 @@ fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
             28 => s.cell_attr &= ~T.GRID_ATTR_HIDDEN,
             29 => s.cell_attr &= ~T.GRID_ATTR_STRIKETHROUGH,
             30...37 => s.cell_fg = n - 30,
-            39 => s.cell_fg = 8, // default fg
+            39 => s.cell_fg = 8,
             40...47 => s.cell_bg = n - 40,
-            49 => s.cell_bg = 8, // default bg
+            49 => s.cell_bg = 8,
             53 => s.cell_attr |= T.GRID_ATTR_OVERLINE,
             55 => s.cell_attr &= ~T.GRID_ATTR_OVERLINE,
-            90...97 => s.cell_fg = n, // bright fg
-            100...107 => s.cell_bg = n - 10, // bright bg
-            38 => {
-                // 256-color or RGB fg
+            59 => s.cell_us = 8,
+            90...97 => s.cell_fg = n,
+            100...107 => s.cell_bg = n - 10,
+            38, 48, 58 => {
                 if (i + 1 < params.len) {
                     i += 1;
                     if (params[i] == 5 and i + 1 < params.len) {
                         i += 1;
-                        s.cell_fg = params[i] | T.COLOUR_FLAG_256;
+                        sgr_set_colour_256(s, n, params[i]);
                     } else if (params[i] == 2 and i + 3 < params.len) {
                         const r = params[i + 1];
                         const g = params[i + 2];
                         const b = params[i + 3];
-                        s.cell_fg = T.COLOUR_FLAG_RGB | (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
-                        i += 3;
-                    }
-                }
-            },
-            48 => {
-                // 256-color or RGB bg
-                if (i + 1 < params.len) {
-                    i += 1;
-                    if (params[i] == 5 and i + 1 < params.len) {
-                        i += 1;
-                        s.cell_bg = params[i] | T.COLOUR_FLAG_256;
-                    } else if (params[i] == 2 and i + 3 < params.len) {
-                        const r = params[i + 1];
-                        const g = params[i + 2];
-                        const b = params[i + 3];
-                        s.cell_bg = T.COLOUR_FLAG_RGB | (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+                        sgr_set_colour_rgb(s, n, r, g, b);
                         i += 3;
                     }
                 }
@@ -777,6 +760,147 @@ fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
             else => {},
         }
     }
+}
+
+/// SGR entry point that works on the raw CSI parameter bytes.
+/// Handles both semicolon-separated and colon-separated (ISO 8613-6) forms.
+fn apply_sgr_raw(ctx: *T.ScreenWriteCtx, raw: []const u8) void {
+    if (raw.len == 0) {
+        apply_sgr(ctx, &[_]u32{});
+        return;
+    }
+
+    // Split by semicolons into segments; each segment may itself be
+    // colon-separated (ISO 8613-6 sub-parameters).
+    var start: usize = 0;
+    while (start <= raw.len) {
+        const end = std.mem.indexOfScalarPos(u8, raw, start, ';') orelse raw.len;
+        const seg = raw[start..end];
+
+        if (std.mem.indexOfScalar(u8, seg, ':') != null) {
+            apply_sgr_colon(ctx, seg);
+        } else {
+            var buf: [24]u32 = [_]u32{0} ** 24;
+            const parsed = parse_csi_params(seg, &buf);
+            apply_sgr(ctx, buf[0..parsed.count]);
+        }
+
+        if (end >= raw.len) break;
+        start = end + 1;
+    }
+}
+
+/// Handle a single colon-separated SGR segment (ISO 8613-6).
+/// e.g. "4:3" for curly underline, "38:2::255:128:0" for RGB fg,
+/// "58:5:196" for underline colour 256.
+fn apply_sgr_colon(ctx: *T.ScreenWriteCtx, seg: []const u8) void {
+    const s = ctx.s;
+    var p: [8]i32 = [_]i32{-1} ** 8;
+    var n: usize = 0;
+
+    var pos: usize = 0;
+    while (pos <= seg.len and n < 8) {
+        const next = std.mem.indexOfScalarPos(u8, seg, pos, ':') orelse seg.len;
+        const part = seg[pos..next];
+        if (part.len > 0) {
+            p[n] = @as(i32, @intCast(std.fmt.parseInt(u32, part, 10) catch {
+                return;
+            }));
+        }
+        n += 1;
+        if (next >= seg.len) break;
+        pos = next + 1;
+    }
+
+    if (n == 0) return;
+
+    // 4:N — underline style variants
+    if (p[0] == 4) {
+        if (n != 2) return;
+        switch (p[1]) {
+            0 => s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE,
+            1 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE;
+            },
+            2 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE_2;
+            },
+            3 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE_3;
+            },
+            4 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE_4;
+            },
+            5 => {
+                s.cell_attr &= ~T.GRID_ATTR_ALL_UNDERSCORE;
+                s.cell_attr |= T.GRID_ATTR_UNDERSCORE_5;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    // 38:..., 48:..., 58:... — colour with colon sub-params
+    if (n < 2 or (p[0] != 38 and p[0] != 48 and p[0] != 58)) return;
+    const fgbg: u32 = @intCast(p[0]);
+    switch (p[1]) {
+        2 => {
+            if (n < 3) return;
+            // Two forms: 38:2:R:G:B (n==5) or 38:2:colourspace:R:G:B (n>=6)
+            var ci: usize = undefined;
+            if (n == 5)
+                ci = 2
+            else
+                ci = 3;
+            if (n < ci + 3) return;
+            const r = p[ci];
+            const g = p[ci + 1];
+            const b = p[ci + 2];
+            if (r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255) return;
+            sgr_set_colour_rgb(s, fgbg, @intCast(r), @intCast(g), @intCast(b));
+        },
+        5 => {
+            if (n < 3) return;
+            const c = p[2];
+            if (c < 0 or c > 255) return;
+            sgr_set_colour_256(s, fgbg, @intCast(c));
+        },
+        else => {},
+    }
+}
+
+fn sgr_set_colour_256(s: *T.Screen, fgbg: u32, c: u32) void {
+    const val = c | T.COLOUR_FLAG_256;
+    if (fgbg == 38)
+        s.cell_fg = val
+    else if (fgbg == 48)
+        s.cell_bg = val
+    else if (fgbg == 58)
+        s.cell_us = val;
+}
+
+fn sgr_set_colour_rgb(s: *T.Screen, fgbg: u32, r: u32, g: u32, b: u32) void {
+    const val = T.COLOUR_FLAG_RGB | (r << 16) | (g << 8) | b;
+    if (fgbg == 38)
+        s.cell_fg = val
+    else if (fgbg == 48)
+        s.cell_bg = val
+    else if (fgbg == 58)
+        s.cell_us = val;
+}
+
+/// Reset cell state to default (mirrors tmux's input_reset_cell).
+fn input_reset_cell(s: *T.Screen) void {
+    s.cell_fg = 8;
+    s.cell_bg = 8;
+    s.cell_us = 8;
+    s.cell_attr = 0;
+    s.g0set = 0;
+    s.g1set = 0;
 }
 
 fn apply_sm(ctx: *T.ScreenWriteCtx, params: []const u32, private: bool) void {
@@ -854,14 +978,37 @@ fn apply_decscusr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
 }
 
 fn apply_winops(ctx: *T.ScreenWriteCtx, params: []const u32) void {
-    // CSI Ps t — Window operations (reduced: no reply path yet, just consume).
-    // The most common sub-commands:
-    //   CSI 14 t — report text area size in pixels
-    //   CSI 18 t — report text area size in chars
-    //   CSI 21 t — report window title
-    // All are silently consumed since zmux does not have a reply path yet.
-    _ = ctx;
-    _ = params;
+    var m: usize = 0;
+    while (m < params.len) {
+        const n = params[m];
+        switch (n) {
+            1, 2, 5, 6, 7, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 24 => {},
+            3, 4, 8 => {
+                m += 1;
+                if (m >= params.len) return;
+                m += 1;
+                if (m >= params.len) return;
+            },
+            9, 10 => {
+                m += 1;
+                if (m >= params.len) return;
+            },
+            22 => {
+                m += 1;
+                if (m >= params.len) return;
+                if (params[m] == 0 or params[m] == 2)
+                    screen_mod.screen_push_title(ctx.s);
+            },
+            23 => {
+                m += 1;
+                if (m >= params.len) return;
+                if (params[m] == 0 or params[m] == 2)
+                    screen_mod.screen_pop_title(ctx.s);
+            },
+            else => {},
+        }
+        m += 1;
+    }
 }
 
 fn apply_modify_other_keys(ctx: *T.ScreenWriteCtx, params: []const u32) void {
@@ -1026,7 +1173,7 @@ const ParsedParams = struct {
     count: usize,
 };
 
-fn parse_csi_params(raw: []const u8, out: *[8]u32) ParsedParams {
+fn parse_csi_params(raw: []const u8, out: *[24]u32) ParsedParams {
     var count: usize = 0;
     var current: u32 = 0;
     var have_current = false;
@@ -1045,7 +1192,6 @@ fn parse_csi_params(raw: []const u8, out: *[8]u32) ParsedParams {
             have_current = false;
             continue;
         }
-        // Ignore private-mode markers like '?' and stray text.
     }
     if (have_current or count == 0) {
         if (count < out.len) {

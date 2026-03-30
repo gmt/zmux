@@ -252,6 +252,17 @@ pub fn paste_replace(pb: *PasteBuffer, data: []u8) void {
     notify_mod.notify_paste_buffer(pb.name, false);
 }
 
+/// Compare two paste buffers by name. Zig port of tmux paste_cmp_names().
+pub fn paste_cmp_names(a: *const PasteBuffer, b: *const PasteBuffer) std.math.Order {
+    return std.mem.order(u8, a.name, b.name);
+}
+
+/// Compare two paste buffers by time order (newest first).
+/// Zig port of tmux paste_cmp_times().
+pub fn paste_cmp_times(a: *const PasteBuffer, b: *const PasteBuffer) std.math.Order {
+    return std.math.order(b.order, a.order);
+}
+
 fn insert_buffer(pb: *PasteBuffer) void {
     paste_by_name.put(pb.name, pb) catch unreachable;
     paste_by_time.insert(xm.allocator, 0, pb) catch unreachable;

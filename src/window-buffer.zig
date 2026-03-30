@@ -29,6 +29,7 @@ const format_mod = @import("format.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const paste_mod = @import("paste.zig");
+const key_string = @import("key-string.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server_client = @import("server-client.zig");
@@ -41,6 +42,12 @@ const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "paste-buffer -p -b '%%'";
 const DEFAULT_FORMAT = "#{t/p:buffer_created}: #{buffer_sample}";
+const DEFAULT_KEY_FORMAT =
+    "#{?#{e|<:#{line},10}," ++
+    "#{line}" ++
+    ",#{e|<:#{line},36}," ++
+    "M-#{a:#{e|+:97,#{e|-:#{line},10}}}" ++
+    "}";
 const HELP_TEXT = "Enter/p/P paste  d/D delete  t/T/^T tags  e edit  arrows move  q cancel";
 
 const BufferItem = struct {
@@ -54,6 +61,7 @@ const BufferModeData = struct {
     tree: *mode_tree.Data,
     items: std.ArrayList(*BufferItem) = .{},
     format: []u8,
+    key_format: []u8,
     filter: ?[]u8 = null,
     command: []u8,
     sort_crit: T.SortCriteria = .{},
@@ -101,6 +109,7 @@ pub fn enterMode(
         .fs = fs.*,
         .tree = undefined,
         .format = xm.xstrdup(args.get('F') orelse DEFAULT_FORMAT),
+        .key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT),
         .filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null,
         .command = xm.xstrdup(args.value_at(0) orelse DEFAULT_COMMAND),
         .sort_crit = .{
@@ -222,6 +231,7 @@ fn windowBufferClose(wme: *T.WindowModeEntry) void {
     freeItems(data);
     data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
+    xm.allocator.free(data.key_format);
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
     xm.allocator.destroy(data);
@@ -246,6 +256,9 @@ fn refreshFromArgs(wme: *T.WindowModeEntry, fs: *const T.CmdFindState, args: *co
 
     xm.allocator.free(data.format);
     data.format = xm.xstrdup(args.get('F') orelse DEFAULT_FORMAT);
+
+    xm.allocator.free(data.key_format);
+    data.key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT);
 
     if (data.filter) |filter| xm.allocator.free(filter);
     data.filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null;
@@ -695,6 +708,230 @@ fn contains(haystack: []const u8, needle: []const u8, ignore_case: bool) bool {
         if (matched) return true;
     }
     return false;
+}
+
+// ── tmux-compatible public API (window-buffer) ─────────────────────────
+
+const window_buffer_order_seq = [_]T.SortOrder{ .creation, .name, .size, .end };
+
+const window_buffer_help_lines = [_][]const u8{
+    "\r\x1b[1m      Enter \x1b[0m\x0ex\x0f \x1b[0mPaste selected %1\n",
+    "\r\x1b[1m          p \x1b[0m\x0ex\x0f \x1b[0mPaste selected %1\n",
+    "\r\x1b[1m          P \x1b[0m\x0ex\x0f \x1b[0mPaste tagged %1s\n",
+    "\r\x1b[1m          d \x1b[0m\x0ex\x0f \x1b[0mDelete selected %1\n",
+    "\r\x1b[1m          D \x1b[0m\x0ex\x0f \x1b[0mDelete tagged %1s\n",
+    "\r\x1b[1m          e \x1b[0m\x0ex\x0f \x1b[0mOpen %1 in editor\n",
+    "\r\x1b[1m          f \x1b[0m\x0ex\x0f \x1b[0mEnter a filter\n",
+};
+
+pub fn window_buffer_init(
+    wp: *T.WindowPane,
+    fs: *const T.CmdFindState,
+    args: *const args_mod.Arguments,
+) *T.Screen {
+    const wme = enterMode(wp, fs, args);
+    return windowBufferGetScreen(wme);
+}
+
+pub fn window_buffer_free(wme: *T.WindowModeEntry) void {
+    windowBufferClose(wme);
+}
+
+pub fn window_buffer_resize(wme: *T.WindowModeEntry, _: u32, _: u32) void {
+    redraw(wme);
+}
+
+pub fn window_buffer_update(wme: *T.WindowModeEntry) void {
+    rebuildAndDraw(wme);
+}
+
+pub fn window_buffer_key(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: ?*T.Session,
+    wl: ?*T.Winlink,
+    key: T.key_code,
+    _: ?*const T.MouseEvent,
+) void {
+    if (paste_mod.paste_is_empty()) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+        return;
+    }
+    var finished = false;
+    switch (key) {
+        'e' => startEditSelected(wme, client),
+        'd' => {
+            window_buffer_do_delete(wme);
+            rebuildAfterDelete(wme);
+            return;
+        },
+        'D' => {
+            deleteTagged(wme);
+            return;
+        },
+        'P' => {
+            if (session != null and wl != null)
+                pasteTagged(wme, client, session.?, wl.?);
+            return;
+        },
+        'p', '\r' => {
+            if (session != null and wl != null)
+                window_buffer_do_paste(wme, client, session.?, wl.?);
+            finished = true;
+        },
+        else => {},
+    }
+    if (finished or paste_mod.paste_is_empty())
+        _ = window_mode_runtime.resetMode(wme.wp)
+    else
+        redraw(wme);
+}
+
+pub fn window_buffer_add_item(
+    data: *BufferModeData,
+    pb: *paste_mod.PasteBuffer,
+) *BufferItem {
+    return allocItem(data, pb);
+}
+
+pub fn window_buffer_free_item(data: *BufferModeData, item: *BufferItem) void {
+    for (data.items.items, 0..) |stored, idx| {
+        if (stored == item) {
+            _ = data.items.swapRemove(idx);
+            break;
+        }
+    }
+    xm.allocator.free(item.name);
+    xm.allocator.free(item.text);
+    xm.allocator.destroy(item);
+}
+
+pub fn window_buffer_build(wme: *T.WindowModeEntry) void {
+    buildTree(modeData(wme).tree);
+}
+
+pub fn window_buffer_draw(
+    wme: *T.WindowModeEntry,
+    ctx: *T.ScreenWriteCtx,
+    sx: u32,
+    sy: u32,
+) void {
+    const data = modeData(wme);
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
+
+    const pdata = paste_mod.paste_buffer_data(item.buffer, null);
+    if (pdata.len == 0) return;
+
+    const cx = ctx.s.cx;
+    const cy = ctx.s.cy;
+    var pos: usize = 0;
+    var row: u32 = 0;
+    while (row < sy and pos < pdata.len) : (row += 1) {
+        const start = pos;
+        while (pos < pdata.len and pdata[pos] != '\n') : (pos += 1) {}
+        const line = pdata[start..pos];
+        if (line.len > 0) {
+            screen_write.cursormove(ctx, cx, cy + row, false);
+            screen_write.nputs(ctx, @intCast(sx), &T.grid_default_cell, line);
+        }
+        if (pos < pdata.len) pos += 1;
+    }
+}
+
+pub fn window_buffer_find(
+    data: []const u8,
+    needle: []const u8,
+    icase: bool,
+) bool {
+    return contains(data, needle, icase);
+}
+
+pub fn window_buffer_search(
+    wme: *T.WindowModeEntry,
+    item: *BufferItem,
+    ss: []const u8,
+    icase: bool,
+) bool {
+    return searchItem(modeData(wme).tree, @ptrCast(item), ss, icase);
+}
+
+pub fn window_buffer_menu(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    key: T.key_code,
+) void {
+    if (wme.mode != &window_buffer_mode) return;
+    window_buffer_key(wme, client, null, null, key, null);
+}
+
+pub fn window_buffer_get_key(
+    wme: *T.WindowModeEntry,
+    item: *BufferItem,
+    line: u32,
+) T.key_code {
+    const data = modeData(wme);
+    const pb = paste_mod.paste_get_name(item.name) orelse return T.KEYC_NONE;
+
+    var ctx = formatContext(data, pb);
+    ctx.line = line;
+
+    const expanded = format_mod.format_require_complete(
+        xm.allocator,
+        data.key_format,
+        &ctx,
+    ) orelse return T.KEYC_NONE;
+    defer xm.allocator.free(expanded);
+
+    const key = key_string.key_string_lookup_string(expanded);
+    if (key == T.KEYC_UNKNOWN or key == T.KEYC_NONE) return T.KEYC_NONE;
+    return key;
+}
+
+pub fn window_buffer_sort(sort_crit: *T.SortCriteria) void {
+    sort_crit.order_seq = &window_buffer_order_seq;
+    if (sort_crit.order == .end)
+        sort_crit.order = window_buffer_order_seq[0];
+}
+
+pub fn window_buffer_help(width: *u32, item_name: *[]const u8) []const []const u8 {
+    width.* = 0;
+    item_name.* = "buffer";
+    return &window_buffer_help_lines;
+}
+
+pub fn window_buffer_do_delete(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    deleteItem(data, item_ptr);
+}
+
+pub fn window_buffer_do_paste(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: *T.Session,
+    wl: *T.Winlink,
+) void {
+    const data = modeData(wme);
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
+    if (paste_mod.paste_get_name(item.name) != null)
+        runCommand(client, session, wl, data.command, item.name);
+}
+
+pub fn window_buffer_start_edit(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+) void {
+    startEditSelected(wme, client);
+}
+
+pub fn window_buffer_finish_edit(ed: *EditData) void {
+    finishEdit(ed);
+}
+
+pub fn window_buffer_edit_close_cb(buf: ?[]u8, arg: ?*anyopaque) void {
+    finishEditClose(buf, arg);
 }
 
 fn sendPromptKey(client: *T.Client, key: T.key_code, bytes: []const u8) bool {

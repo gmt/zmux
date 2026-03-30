@@ -45,6 +45,7 @@ const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const client_registry = @import("client-registry.zig");
 const notify_mod = @import("notify.zig");
+const resize_mod = @import("resize.zig");
 
 pub fn server_lock() void {
     for (client_registry.clients.items) |cl| {
@@ -465,6 +466,101 @@ pub fn server_format_session(
 ) void {
     _ = _ft;
     _ = _s;
+}
+
+pub fn server_redraw_client(cl: *T.Client) void {
+    cl.flags |= T.CLIENT_REDRAW;
+}
+
+pub fn server_status_client(cl: *T.Client) void {
+    cl.flags |= T.CLIENT_REDRAWSTATUS;
+}
+
+pub fn server_check_unattached() void {
+    var to_destroy: std.ArrayList(*T.Session) = .{};
+    defer to_destroy.deinit(xm.allocator);
+
+    var it = sess.sessions.valueIterator();
+    while (it.next()) |s| {
+        if (s.*.attached != 0) continue;
+        const mode = opts.options_get_number(s.*.options, "destroy-unattached");
+        switch (mode) {
+            0 => continue,
+            1 => {},
+            2 => {
+                const sg = sess.session_group_contains(s.*);
+                if (sg == null or sess.session_group_count(sg.?) <= 1)
+                    continue;
+            },
+            3 => {
+                const sg = sess.session_group_contains(s.*);
+                if (sg != null and sess.session_group_count(sg.?) == 1)
+                    continue;
+            },
+            else => continue,
+        }
+        to_destroy.append(xm.allocator, s.*) catch unreachable;
+    }
+
+    for (to_destroy.items) |s|
+        sess.session_destroy(s, true, "server_check_unattached");
+}
+
+fn server_destroy_session_group(s: *T.Session) void {
+    if (sess.session_group_contains(s)) |sg| {
+        var members: std.ArrayList(*T.Session) = .{};
+        defer members.deinit(xm.allocator);
+        for (sg.sessions.items) |member|
+            members.append(xm.allocator, member) catch unreachable;
+        for (members.items) |member| {
+            srv.server_destroy_session(member);
+            sess.session_destroy(member, true, "server_destroy_session_group");
+        }
+    } else {
+        srv.server_destroy_session(s);
+        sess.session_destroy(s, true, "server_destroy_session_group");
+    }
+}
+
+pub fn server_kill_pane(wp: *T.WindowPane) void {
+    const w = wp.window;
+    if (win.window_count_panes(w) == 1) {
+        server_kill_window(w, true);
+        resize_mod.recalculate_sizes();
+    } else {
+        _ = win.window_unzoom(w);
+        win.window_remove_pane(w, wp);
+        srv.server_redraw_window(w);
+    }
+}
+
+pub fn server_unzoom_window(w: *T.Window) void {
+    if (win.window_unzoom(w))
+        srv.server_redraw_window(w);
+}
+
+fn server_find_session(
+    s: *T.Session,
+    comptime pred: fn (*T.Session, ?*T.Session) bool,
+) ?*T.Session {
+    var best: ?*T.Session = null;
+    var it = sess.sessions.valueIterator();
+    while (it.next()) |candidate| {
+        if (candidate.* == s) continue;
+        if (pred(candidate.*, best))
+            best = candidate.*;
+    }
+    return best;
+}
+
+fn server_newer_session(s_loop: *T.Session, s_out: ?*T.Session) bool {
+    const out = s_out orelse return true;
+    return s_loop.activity_time > out.activity_time;
+}
+
+fn server_newer_detached_session(s_loop: *T.Session, s_out: ?*T.Session) bool {
+    if (s_loop.attached != 0) return false;
+    return server_newer_session(s_loop, s_out);
 }
 
 test "server_destroy_pane removes non-last pane and reassigns active pane" {

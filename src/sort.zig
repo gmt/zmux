@@ -67,7 +67,7 @@ pub fn sorted_winlinks_session(s: *T.Session, sort_crit: T.SortCriteria) []*T.Wi
     while (it.next()) |entry| list.append(xm.allocator, entry.*) catch unreachable;
 
     const items = list.toOwnedSlice(xm.allocator) catch unreachable;
-    sort_winlinks_in_place(items, sort_crit, .index);
+    sort_winlinks_in_place(items, sort_crit);
     return items;
 }
 
@@ -80,14 +80,45 @@ pub fn sorted_winlinks(sort_crit: T.SortCriteria) []*T.Winlink {
     }
 
     const items = list.toOwnedSlice(xm.allocator) catch unreachable;
-    sort_winlinks_in_place(items, sort_crit, .index);
+    sort_winlinks_in_place(items, sort_crit);
+    return items;
+}
+
+/// All panes in all windows of all sessions (tmux `sort_get_panes`).
+pub fn sorted_panes(sort_crit: T.SortCriteria) []*T.WindowPane {
+    var list: std.ArrayList(*T.WindowPane) = .{};
+    var sit = sess.sessions.valueIterator();
+    while (sit.next()) |sp| {
+        var wit = sp.*.windows.valueIterator();
+        while (wit.next()) |wl| {
+            for (wl.*.window.panes.items) |wp| {
+                list.append(xm.allocator, wp) catch unreachable;
+            }
+        }
+    }
+    const items = list.toOwnedSlice(xm.allocator) catch unreachable;
+    sort_panes_in_place(items, sort_crit);
+    return items;
+}
+
+/// All panes in all windows of one session (tmux `sort_get_panes_session`).
+pub fn sorted_panes_session(s: *T.Session, sort_crit: T.SortCriteria) []*T.WindowPane {
+    var list: std.ArrayList(*T.WindowPane) = .{};
+    var wit = s.windows.valueIterator();
+    while (wit.next()) |wl| {
+        for (wl.*.window.panes.items) |wp| {
+            list.append(xm.allocator, wp) catch unreachable;
+        }
+    }
+    const items = list.toOwnedSlice(xm.allocator) catch unreachable;
+    sort_panes_in_place(items, sort_crit);
     return items;
 }
 
 pub fn sorted_panes_window(w: *T.Window, sort_crit: T.SortCriteria) []*T.WindowPane {
     const items = xm.allocator.alloc(*T.WindowPane, w.panes.items.len) catch unreachable;
     @memcpy(items, w.panes.items);
-    sort_panes_in_place(items, w, sort_crit);
+    sort_panes_in_place(items, sort_crit);
     return items;
 }
 
@@ -137,40 +168,151 @@ pub fn sorted_key_bindings_table(table: *T.KeyTable, sort_crit: T.SortCriteria) 
     return items;
 }
 
+/// tmux `window_tree_order_seq` — used with `sort_next_order` in tree mode.
+pub const window_tree_sort_order_seq: []const T.SortOrder = &.{ .index, .name, .activity };
+
+/// tmux `window_buffer_order_seq`.
+pub const window_buffer_sort_order_seq: []const T.SortOrder = &.{ .creation, .name, .size };
+
+/// tmux `window_client_order_seq`.
+pub const window_client_sort_order_seq: []const T.SortOrder = &.{ .name, .size, .creation, .activity };
+
+/// Cycle `sort_crit.order` through `sort_crit.order_seq` (tmux `sort_next_order`).
+pub fn sort_next_order(sort_crit: *T.SortCriteria) void {
+    const seq = sort_crit.order_seq orelse return;
+    if (seq.len == 0) return;
+
+    var i: usize = 0;
+    while (i < seq.len) : (i += 1) {
+        if (seq[i] == sort_crit.order) break;
+    }
+    if (i >= seq.len) {
+        i = 0;
+    } else {
+        i += 1;
+        if (i >= seq.len) i = 0;
+    }
+    sort_crit.order = seq[i];
+}
+
+/// True when tree window swap should be refused (tmux `sort_would_window_tree_swap`).
+pub fn sort_would_window_tree_swap(sort_crit: T.SortCriteria, wla: *T.Winlink, wlb: *T.Winlink) bool {
+    if (sort_crit.order == .index) return false;
+    return compare_winlink(wla, wlb, sort_crit.order) != .eq;
+}
+
+/// tmux `sort_qsort`: no sort if `.end`; if `.order`, only optional reverse; else block sort.
+pub fn sort_qsort(
+    comptime Elem: type,
+    items: []Elem,
+    sort_crit: T.SortCriteria,
+    comptime Ctx: type,
+    ctx: Ctx,
+    lessThan: fn (Ctx, Elem, Elem) bool,
+) void {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
+        if (sort_crit.reversed) reverse_slice(Elem, items);
+        return;
+    }
+    std.sort.block(Elem, items, ctx, lessThan);
+}
+
+/// tmux `sort_get_sessions` — fills `out_n` and returns an allocated slice (caller frees with `xm.allocator`).
+pub fn sort_get_sessions(out_n: *usize, sort_crit: T.SortCriteria) []*T.Session {
+    const items = sorted_sessions(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_winlinks(out_n: *usize, sort_crit: T.SortCriteria) []*T.Winlink {
+    const items = sorted_winlinks(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_winlinks_session(s: *T.Session, out_n: *usize, sort_crit: T.SortCriteria) []*T.Winlink {
+    const items = sorted_winlinks_session(s, sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_panes(out_n: *usize, sort_crit: T.SortCriteria) []*T.WindowPane {
+    const items = sorted_panes(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_panes_session(s: *T.Session, out_n: *usize, sort_crit: T.SortCriteria) []*T.WindowPane {
+    const items = sorted_panes_session(s, sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_panes_window(w: *T.Window, out_n: *usize, sort_crit: T.SortCriteria) []*T.WindowPane {
+    const items = sorted_panes_window(w, sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_clients(out_n: *usize, sort_crit: T.SortCriteria) []*T.Client {
+    const items = sorted_clients(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_buffers(out_n: *usize, sort_crit: T.SortCriteria) []*paste_mod.PasteBuffer {
+    const items = sorted_buffers(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_key_bindings(out_n: *usize, sort_crit: T.SortCriteria) []*T.KeyBinding {
+    const items = sorted_key_bindings(sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
+pub fn sort_get_key_bindings_table(table: *T.KeyTable, out_n: *usize, sort_crit: T.SortCriteria) []*T.KeyBinding {
+    const items = sorted_key_bindings_table(table, sort_crit);
+    out_n.* = items.len;
+    return items;
+}
+
 fn sort_sessions_in_place(items: []*T.Session, sort_crit: T.SortCriteria) void {
-    const effective = if (sort_crit.order == .end) T.SortOrder.name else sort_crit.order;
-    if (effective == .order) {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
         if (sort_crit.reversed) reverse_slice(*T.Session, items);
         return;
     }
-    std.sort.block(*T.Session, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, session_less_than);
+    std.sort.block(*T.Session, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, session_less_than);
 }
 
-fn sort_winlinks_in_place(items: []*T.Winlink, sort_crit: T.SortCriteria, default_order: T.SortOrder) void {
-    const effective = if (sort_crit.order == .end) default_order else sort_crit.order;
-    if (effective == .order) {
+fn sort_winlinks_in_place(items: []*T.Winlink, sort_crit: T.SortCriteria) void {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
         if (sort_crit.reversed) reverse_slice(*T.Winlink, items);
         return;
     }
-    std.sort.block(*T.Winlink, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, winlink_less_than);
+    std.sort.block(*T.Winlink, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, winlink_less_than);
 }
 
-fn sort_panes_in_place(items: []*T.WindowPane, w: *T.Window, sort_crit: T.SortCriteria) void {
-    const effective = if (sort_crit.order == .end) T.SortOrder.order else sort_crit.order;
-    if (effective == .order) {
+fn sort_panes_in_place(items: []*T.WindowPane, sort_crit: T.SortCriteria) void {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
         if (sort_crit.reversed) reverse_slice(*T.WindowPane, items);
         return;
     }
-    std.sort.block(*T.WindowPane, items, PaneSortContext{ .order = effective, .reversed = sort_crit.reversed, .window = w }, pane_less_than);
+    std.sort.block(*T.WindowPane, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, pane_less_than);
 }
 
 fn sort_clients_in_place(items: []*T.Client, sort_crit: T.SortCriteria) void {
-    const effective = if (sort_crit.order == .end) T.SortOrder.order else sort_crit.order;
-    if (effective == .order) {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
         if (sort_crit.reversed) reverse_slice(*T.Client, items);
         return;
     }
-    std.sort.block(*T.Client, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, client_less_than);
+    std.sort.block(*T.Client, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, client_less_than);
 }
 
 fn sort_buffers_in_place(items: []*paste_mod.PasteBuffer, sort_crit: T.SortCriteria) void {
@@ -183,23 +325,17 @@ fn sort_buffers_in_place(items: []*paste_mod.PasteBuffer, sort_crit: T.SortCrite
 }
 
 fn sort_key_bindings_in_place(items: []*T.KeyBinding, sort_crit: T.SortCriteria) void {
-    const effective = if (sort_crit.order == .end) T.SortOrder.index else sort_crit.order;
-    if (effective == .order) {
+    if (sort_crit.order == .end) return;
+    if (sort_crit.order == .order) {
         if (sort_crit.reversed) reverse_slice(*T.KeyBinding, items);
         return;
     }
-    std.sort.block(*T.KeyBinding, items, SortContext{ .order = effective, .reversed = sort_crit.reversed }, key_binding_less_than);
+    std.sort.block(*T.KeyBinding, items, SortContext{ .order = sort_crit.order, .reversed = sort_crit.reversed }, key_binding_less_than);
 }
 
 const SortContext = struct {
     order: T.SortOrder,
     reversed: bool,
-};
-
-const PaneSortContext = struct {
-    order: T.SortOrder,
-    reversed: bool,
-    window: *T.Window,
 };
 
 fn session_less_than(ctx: SortContext, a: *T.Session, b: *T.Session) bool {
@@ -210,8 +346,8 @@ fn winlink_less_than(ctx: SortContext, a: *T.Winlink, b: *T.Winlink) bool {
     return order_to_less(compare_winlink(a, b, ctx.order), ctx.reversed);
 }
 
-fn pane_less_than(ctx: PaneSortContext, a: *T.WindowPane, b: *T.WindowPane) bool {
-    return order_to_less(compare_pane(a, b, ctx.window, ctx.order), ctx.reversed);
+fn pane_less_than(ctx: SortContext, a: *T.WindowPane, b: *T.WindowPane) bool {
+    return order_to_less(compare_pane(a, b, ctx.order), ctx.reversed);
 }
 
 fn client_less_than(ctx: SortContext, a: *T.Client, b: *T.Client) bool {
@@ -230,44 +366,55 @@ fn order_to_less(order: std.math.Order, reversed: bool) bool {
     return if (reversed) order == .gt else order == .lt;
 }
 
+fn activity_newer_first(ta: i64, tb: i64) std.math.Order {
+    if (ta > tb) return .lt;
+    if (ta < tb) return .gt;
+    return .eq;
+}
+
 fn compare_session(a: *T.Session, b: *T.Session, order: T.SortOrder) std.math.Order {
     const primary = switch (order) {
-        .index, .creation => std.math.order(a.id, b.id),
+        .index => std.math.order(a.id, b.id),
+        .creation => std.math.order(a.created, b.created),
+        .activity => activity_newer_first(a.activity_time, b.activity_time),
         .name => std.mem.order(u8, a.name, b.name),
         else => std.math.Order.eq,
     };
     if (primary != .eq) return primary;
-    return std.math.order(a.id, b.id);
+    return std.mem.order(u8, a.name, b.name);
 }
 
 fn compare_winlink(a: *T.Winlink, b: *T.Winlink, order: T.SortOrder) std.math.Order {
     const primary = switch (order) {
         .index => std.math.order(a.idx, b.idx),
-        .creation => std.math.order(a.window.id, b.window.id),
+        // tmux uses window creation_time (newer first); zmux has no per-window time yet — higher id first.
+        .creation => std.math.order(b.window.id, a.window.id),
+        .activity => std.math.Order.eq,
         .name => std.mem.order(u8, a.window.name, b.window.name),
         .size => std.math.order(window_area(a.window), window_area(b.window)),
         else => std.math.Order.eq,
     };
     if (primary != .eq) return primary;
-    return std.math.order(a.idx, b.idx);
+    return std.mem.order(u8, a.window.name, b.window.name);
 }
 
-fn compare_pane(a: *T.WindowPane, b: *T.WindowPane, w: *T.Window, order: T.SortOrder) std.math.Order {
+fn compare_pane(a: *T.WindowPane, b: *T.WindowPane, order: T.SortOrder) std.math.Order {
     const primary = switch (order) {
         .activity => std.math.order(a.active_point, b.active_point),
         .creation => std.math.order(a.id, b.id),
-        .index => std.math.order(window_pane_index(w, a), window_pane_index(w, b)),
+        .index => std.math.order(window_pane_index(a.window, a), window_pane_index(b.window, b)),
         .name => std.mem.order(u8, pane_title(a), pane_title(b)),
         .size => std.math.order(a.sx * a.sy, b.sx * b.sy),
         else => std.math.Order.eq,
     };
     if (primary != .eq) return primary;
-    return std.math.order(a.id, b.id);
+    return std.mem.order(u8, pane_title(a), pane_title(b));
 }
 
 fn compare_client(a: *T.Client, b: *T.Client, order: T.SortOrder) std.math.Order {
     const primary = switch (order) {
-        .creation => std.math.order(a.id, b.id),
+        .creation => std.math.order(a.creation_time, b.creation_time),
+        .activity => activity_newer_first(a.activity_time, b.activity_time),
         .name => std.mem.order(u8, client_name(a), client_name(b)),
         .size => blk: {
             const sx_cmp = std.math.order(a.tty.sx, b.tty.sx);
@@ -277,7 +424,7 @@ fn compare_client(a: *T.Client, b: *T.Client, order: T.SortOrder) std.math.Order
         else => std.math.Order.eq,
     };
     if (primary != .eq) return primary;
-    return std.math.order(a.id, b.id);
+    return std.mem.order(u8, client_name(a), client_name(b));
 }
 
 fn compare_buffer(a: *paste_mod.PasteBuffer, b: *paste_mod.PasteBuffer, order: T.SortOrder) std.math.Order {
@@ -358,10 +505,63 @@ fn ascii_order_ignore_case(a: []const u8, b: []const u8) std.math.Order {
     return std.math.order(a.len, b.len);
 }
 
+fn order_as_cmp_int(ord: std.math.Order, reversed: bool) i32 {
+    const v: i32 = switch (ord) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+    return if (reversed) -v else v;
+}
+
+/// qsort-style comparison (tmux `sort_session_cmp`).
+pub fn sort_session_cmp(sort_crit: T.SortCriteria, a: *T.Session, b: *T.Session) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_session(a, b, sort_crit.order), sort_crit.reversed);
+}
+
+pub fn sort_winlink_cmp(sort_crit: T.SortCriteria, a: *T.Winlink, b: *T.Winlink) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_winlink(a, b, sort_crit.order), sort_crit.reversed);
+}
+
+pub fn sort_pane_cmp(sort_crit: T.SortCriteria, a: *T.WindowPane, b: *T.WindowPane) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_pane(a, b, sort_crit.order), sort_crit.reversed);
+}
+
+pub fn sort_client_cmp(sort_crit: T.SortCriteria, a: *T.Client, b: *T.Client) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_client(a, b, sort_crit.order), sort_crit.reversed);
+}
+
+pub fn sort_buffer_cmp(sort_crit: T.SortCriteria, a: *paste_mod.PasteBuffer, b: *paste_mod.PasteBuffer) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_buffer(a, b, sort_crit.order), sort_crit.reversed);
+}
+
+pub fn sort_key_binding_cmp(sort_crit: T.SortCriteria, a: *T.KeyBinding, b: *T.KeyBinding) i32 {
+    if (sort_crit.order == .end or sort_crit.order == .order) return 0;
+    return order_as_cmp_int(compare_key_binding(a, b, sort_crit.order), sort_crit.reversed);
+}
+
 test "sort_order_from_string parses aliases" {
     try std.testing.expectEqual(T.SortOrder.index, sort_order_from_string("key"));
     try std.testing.expectEqual(T.SortOrder.name, sort_order_from_string("title"));
     try std.testing.expectEqual(T.SortOrder.end, sort_order_from_string("mystery"));
+}
+
+test "sort_next_order cycles order_seq" {
+    var crit: T.SortCriteria = .{
+        .order = .index,
+        .order_seq = &.{ .index, .name, .activity },
+    };
+    sort_next_order(&crit);
+    try std.testing.expectEqual(T.SortOrder.name, crit.order);
+    sort_next_order(&crit);
+    try std.testing.expectEqual(T.SortOrder.activity, crit.order);
+    sort_next_order(&crit);
+    try std.testing.expectEqual(T.SortOrder.index, crit.order);
 }
 
 test "sorted_buffers preserves walk order and supports creation sort" {

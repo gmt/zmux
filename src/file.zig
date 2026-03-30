@@ -33,6 +33,10 @@ pub const ResolvedPath = file_path_mod.ResolvedPath;
 pub const ReadDoneCallback = file_read_mod.ReadDoneCallback;
 pub const RemoteReadStart = file_read_mod.StartResult;
 
+pub fn getPath(client: ?*T.Client, file: []const u8) []u8 {
+    return file_path_mod.file_get_path(client, file);
+}
+
 const max_stream_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(i32);
 
 pub const ReadResult = union(enum) {
@@ -218,6 +222,427 @@ pub fn resetForTests() void {
 pub fn clientCleanup() void {
     file_read_mod.client_cleanup();
     file_write_mod.client_cleanup();
+}
+
+// ── Ported from tmux file.c ───────────────────────────────────────────────
+//
+// The types and functions below mirror the tmux client_file lifecycle.
+// Callbacks that require libevent bufferevent (file_push, fire_done via
+// event_once, bufferevent read/write callbacks) are stubbed because zmux
+// does not yet integrate libevent's bufferevent layer.
+
+const log = @import("log.zig");
+const server_client_mod = @import("server-client.zig");
+const protocol = @import("zmux-protocol.zig");
+
+pub const ClientFile = T.ClientFile;
+pub const ClientFiles = T.ClientFiles;
+pub const ClientFileCb = T.ClientFileCb;
+
+var file_next_stream: i32 = 3;
+
+/// Tree comparison function. (tmux: file_cmp)
+///
+/// Orders ClientFile entries by stream id for use in sorted containers.
+pub fn fileCmp(a: *const ClientFile, b: *const ClientFile) std.math.Order {
+    return std.math.order(a.stream, b.stream);
+}
+
+/// Create a file object in the client process. (tmux: file_create_with_peer)
+///
+/// The peer is the server to send messages to.  The check callback is fired
+/// when the file is finished so the process can decide whether to exit.
+pub fn createWithPeer(
+    peer: *T.ZmuxPeer,
+    files: *ClientFiles,
+    stream: i32,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) *ClientFile {
+    const cf = xm.allocator.create(ClientFile) catch unreachable;
+    cf.* = .{
+        .client = null,
+        .peer = peer,
+        .stream = stream,
+        .cb = cb,
+        .data = cbdata,
+        .tree = files,
+    };
+    files.put(stream, cf) catch unreachable;
+    return cf;
+}
+
+/// Create a file object in the server. (tmux: file_create_with_client)
+///
+/// Communicates with the given client.  If the client is attached we
+/// clear it so file I/O falls back to direct server-side access.
+pub fn createWithClient(
+    client_in: ?*T.Client,
+    stream: i32,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) *ClientFile {
+    var cl = client_in;
+    if (cl) |cc| {
+        if (cc.flags & T.CLIENT_ATTACHED != 0) cl = null;
+    }
+
+    const cf = xm.allocator.create(ClientFile) catch unreachable;
+    cf.* = .{
+        .client = cl,
+        .stream = stream,
+        .cb = cb,
+        .data = cbdata,
+    };
+
+    if (cl) |cc| {
+        cf.peer = cc.peer;
+    }
+
+    return cf;
+}
+
+/// Free a file object. (tmux: file_free)
+///
+/// Reference-counted; the file is only freed when the last reference is
+/// released.
+pub fn fileFree(cf: *ClientFile) void {
+    cf.references -|= 1;
+    if (cf.references != 0) return;
+
+    cf.buffer.deinit(xm.allocator);
+    if (cf.path) |p| xm.allocator.free(p);
+
+    if (cf.tree) |tree| _ = tree.remove(cf.stream);
+    if (cf.client) |cl| server_client_mod.server_client_unref(cl);
+
+    xm.allocator.destroy(cf);
+}
+
+/// Fire the done callback directly. (tmux: file_fire_done_cb)
+///
+/// In tmux this is an event_once timeout callback.  We invoke it
+/// synchronously since zmux does not yet use libevent event_once.
+pub fn fireDoneCb(cf: *ClientFile) void {
+    if (cf.cb) |cb| {
+        if (cf.closed or cf.client == null) {
+            cb(cf.client, if (cf.path) |p| p else null, cf.@"error", 1, cf.buffer.items, cf.data);
+        }
+    }
+    fileFree(cf);
+}
+
+/// Schedule the done callback. (tmux: file_fire_done)
+///
+/// In tmux this uses event_once(-1, EV_TIMEOUT, ...) for deferred
+/// execution.  Without libevent integration we call it synchronously.
+pub fn fireDone(cf: *ClientFile) void {
+    fireDoneCb(cf);
+}
+
+/// Fire the read callback. (tmux: file_fire_read)
+pub fn fireRead(cf: *ClientFile) void {
+    if (cf.cb) |cb| {
+        cb(cf.client, if (cf.path) |p| p else null, cf.@"error", 0, cf.buffer.items, cf.data);
+    }
+}
+
+/// Check whether a client can be printed to. (tmux: file_can_print)
+///
+/// Returns true only for connected, unattached, non-control clients.
+pub fn canPrint(client: ?*T.Client) bool {
+    const cl = client orelse return false;
+    if (cl.flags & T.CLIENT_ATTACHED != 0) return false;
+    if (cl.flags & T.CLIENT_CONTROL != 0) return false;
+    return true;
+}
+
+/// Print formatted text to a client's stdout stream (tmux `file_vprint` / `file_print`).
+///
+/// Uses stream 1 (stdout).  Sends MSG_WRITE_OPEN on first use; subsequent
+/// calls push buffered data.
+pub fn file_vprint(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
+    if (!canPrint(client)) return;
+    const text = std.fmt.allocPrint(xm.allocator, fmt, args) catch return;
+    defer xm.allocator.free(text);
+    printToStream(client.?, 1, text, std.posix.STDOUT_FILENO);
+}
+
+/// Print formatted text to a client's stdout stream. (tmux: file_print)
+pub fn filePrint(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
+    file_vprint(client, fmt, args);
+}
+
+/// Print a raw buffer to a client's stdout stream. (tmux: file_print_buffer)
+pub fn printBuffer(client: ?*T.Client, data: []const u8) void {
+    if (!canPrint(client)) return;
+    printToStream(client.?, 1, data, std.posix.STDOUT_FILENO);
+}
+
+/// Report an error to a client's stderr stream. (tmux: file_error)
+///
+/// Uses stream 2 (stderr).
+pub fn fileError(client: ?*T.Client, comptime fmt: []const u8, args: anytype) void {
+    if (!canPrint(client)) return;
+    const text = std.fmt.allocPrint(xm.allocator, fmt, args) catch return;
+    defer xm.allocator.free(text);
+    printToStream(client.?, 2, text, std.posix.STDERR_FILENO);
+}
+
+fn printToStream(client: *T.Client, stream: i32, data: []const u8, fd_hint: i32) void {
+    const peer = client.peer orelse return;
+
+    var payload = std.ArrayList(u8){};
+    defer payload.deinit(xm.allocator);
+
+    const open_msg = protocol.MsgWriteOpen{
+        .stream = stream,
+        .fd = fd_hint,
+        .flags = 0,
+    };
+    payload.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch return;
+    payload.appendSlice(xm.allocator, "-") catch return;
+    payload.append(xm.allocator, 0) catch return;
+
+    if (proc_mod.proc_send(peer, .write_open, -1, payload.items.ptr, payload.items.len) != 0)
+        return;
+
+    var remaining = data;
+    while (remaining.len != 0) {
+        const chunk_len = @min(remaining.len, max_stream_payload);
+        var dpayload = std.ArrayList(u8){};
+        defer dpayload.deinit(xm.allocator);
+
+        const header = protocol.MsgWriteData{ .stream = stream };
+        dpayload.appendSlice(xm.allocator, std.mem.asBytes(&header)) catch return;
+        dpayload.appendSlice(xm.allocator, remaining[0..chunk_len]) catch return;
+        if (proc_mod.proc_send(peer, .write, -1, dpayload.items.ptr, dpayload.items.len) != 0)
+            return;
+        remaining = remaining[chunk_len..];
+    }
+
+    const close_msg = protocol.MsgWriteClose{ .stream = stream };
+    _ = proc_mod.proc_send(peer, .write_close, -1, std.mem.asBytes(&close_msg).ptr, @sizeOf(protocol.MsgWriteClose));
+}
+
+/// Cancel a pending file read. (tmux: file_cancel)
+///
+/// Sends MSG_READ_CANCEL to the peer and marks the file as closed.
+pub fn fileCancel(cf: *ClientFile) void {
+    log.log_debug("read cancel file {d}", .{cf.stream});
+
+    if (cf.closed) return;
+    cf.closed = true;
+
+    if (cf.peer) |peer| {
+        const msg = protocol.MsgReadCancel{ .stream = cf.stream };
+        _ = proc_mod.proc_send(peer, .read_cancel, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgReadCancel));
+    }
+}
+
+/// Push unwritten data to the client for a file. (tmux: file_push)
+///
+/// Stub: In tmux this drains the evbuffer by sending MSG_WRITE chunks
+/// and uses event_once for retry.  Full implementation requires libevent
+/// bufferevent integration.
+pub fn filePush(cf: *ClientFile) void {
+    const peer = cf.peer orelse return;
+
+    while (cf.buffer.items.len != 0) {
+        const left = cf.buffer.items.len;
+        const sent = @min(left, max_stream_payload);
+
+        var payload = std.ArrayList(u8){};
+        defer payload.deinit(xm.allocator);
+
+        const header = protocol.MsgWriteData{ .stream = cf.stream };
+        payload.appendSlice(xm.allocator, std.mem.asBytes(&header)) catch break;
+        payload.appendSlice(xm.allocator, cf.buffer.items[0..sent]) catch break;
+        if (proc_mod.proc_send(peer, .write, -1, payload.items.ptr, payload.items.len) != 0)
+            break;
+
+        std.mem.copyForwards(u8, cf.buffer.items[0 .. cf.buffer.items.len - sent], cf.buffer.items[sent..]);
+        cf.buffer.items.len -= sent;
+
+        log.log_debug("file {d} sent {d}, left {d}", .{ cf.stream, sent, cf.buffer.items.len });
+    }
+
+    if (cf.buffer.items.len != 0) {
+        cf.references += 1;
+        log.log_debug("file {d} push deferred, {d} bytes remain", .{ cf.stream, cf.buffer.items.len });
+    } else if (cf.stream > 2) {
+        const close_msg = protocol.MsgWriteClose{ .stream = cf.stream };
+        _ = proc_mod.proc_send(peer, .write_close, -1, std.mem.asBytes(&close_msg).ptr, @sizeOf(protocol.MsgWriteClose));
+        fireDone(cf);
+    }
+}
+
+/// Push callback, fired if there is more writing to do. (tmux: file_push_cb)
+///
+/// Stub: requires libevent event_once for deferred scheduling.
+pub fn filePushCb(cf: *ClientFile) void {
+    if (cf.client == null) {
+        filePush(cf);
+    }
+    fileFree(cf);
+}
+
+/// Check if any files have data left to write. (tmux: file_write_left)
+///
+/// Iterates the file tree and returns true if any file still has pending
+/// output data.
+pub fn writeLeft(files: *ClientFiles) bool {
+    var it = files.valueIterator();
+    while (it.next()) |cf_ptr| {
+        const cf = cf_ptr.*;
+        if (cf.buffer.items.len != 0) {
+            log.log_debug("file {d} {d} bytes left", .{ cf.stream, cf.buffer.items.len });
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Client file write error callback. (tmux: file_write_error_callback)
+///
+/// Stub: requires libevent bufferevent.  Logs the error and cleans up
+/// the fd.
+pub fn fileWriteErrorCallback(cf: *ClientFile) void {
+    log.log_debug("write error file {d}", .{cf.stream});
+
+    if (cf.fd != -1) {
+        _ = c.posix_sys.close(cf.fd);
+        cf.fd = -1;
+    }
+
+    if (cf.cb) |cb| cb(null, null, 0, -1, null, cf.data);
+}
+
+/// Client file write callback. (tmux: file_write_callback)
+///
+/// Stub: requires libevent bufferevent.  Fires the check callback and
+/// cleans up when all data has been written.
+pub fn fileWriteCallback(cf: *ClientFile) void {
+    log.log_debug("write check file {d}", .{cf.stream});
+
+    if (cf.cb) |cb| cb(null, null, 0, -1, null, cf.data);
+
+    if (cf.closed and cf.buffer.items.len == 0) {
+        if (cf.fd != -1) {
+            _ = c.posix_sys.close(cf.fd);
+            cf.fd = -1;
+        }
+        if (cf.tree) |tree| _ = tree.remove(cf.stream);
+        fileFree(cf);
+    }
+}
+
+/// Client file read error callback. (tmux: file_read_error_callback)
+///
+/// Stub: requires libevent bufferevent.  Sends MSG_READ_DONE and cleans
+/// up the fd.
+pub fn fileReadErrorCallback(cf: *ClientFile) void {
+    log.log_debug("read error file {d}", .{cf.stream});
+
+    if (cf.peer) |peer| {
+        const msg = protocol.MsgReadDone{
+            .stream = cf.stream,
+            .@"error" = 0,
+        };
+        _ = proc_mod.proc_send(peer, .read_done, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgReadDone));
+    }
+
+    if (cf.fd != -1) {
+        _ = c.posix_sys.close(cf.fd);
+        cf.fd = -1;
+    }
+    if (cf.tree) |tree| _ = tree.remove(cf.stream);
+    fileFree(cf);
+}
+
+/// Client file read callback. (tmux: file_read_callback)
+///
+/// Stub: requires libevent bufferevent.  Reads data from the
+/// bufferevent input and sends MSG_READ chunks to the peer.
+pub fn fileReadCallback(cf: *ClientFile) void {
+    log.log_debug("read callback file {d} (stub)", .{cf.stream});
+}
+
+// ── tmux `file.c` entry-point names (server/client imsg dispatch) ─────────
+
+/// Server: append read payload to the pending client file (tmux `file_read_data`).
+pub fn file_read_data(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleReadData(imsg_msg);
+}
+
+/// Server: finish a remote read (tmux `file_read_done`).
+pub fn file_read_done(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleReadDone(imsg_msg);
+}
+
+/// Server: write-ready notification from client (tmux `file_write_ready`).
+pub fn file_write_ready(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    handleWriteReady(imsg_msg);
+}
+
+/// Client: open a read stream (tmux `file_read_open`).
+pub fn file_read_open(
+    files: *ClientFiles,
+    peer: *T.ZmuxPeer,
+    imsg_msg: *c.imsg.imsg,
+    allow_streams: bool,
+    close_received: bool,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) void {
+    _ = files;
+    _ = cb;
+    _ = cbdata;
+    file_read_mod.client_handle_read_open(peer, imsg_msg, allow_streams, close_received);
+}
+
+/// Client: cancel a read (tmux `file_read_cancel`).
+pub fn file_read_cancel(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_read_mod.client_handle_read_cancel(imsg_msg);
+}
+
+/// Client: open a write stream (tmux `file_write_open`).
+pub fn file_write_open(
+    files: *ClientFiles,
+    peer: *T.ZmuxPeer,
+    imsg_msg: *c.imsg.imsg,
+    allow_streams: bool,
+    close_received: bool,
+    cb: ClientFileCb,
+    cbdata: ?*anyopaque,
+) void {
+    _ = files;
+    _ = cb;
+    _ = cbdata;
+    file_write_mod.client_handle_write_open(peer, imsg_msg, allow_streams, close_received);
+}
+
+/// Client: write payload to an open stream (tmux `file_write_data`).
+pub fn file_write_data(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_write_mod.client_handle_write_data(imsg_msg);
+}
+
+/// Client: close a write stream (tmux `file_write_close`).
+pub fn file_write_close(files: *ClientFiles, imsg_msg: *c.imsg.imsg) void {
+    _ = files;
+    file_write_mod.client_handle_write_close(imsg_msg);
+}
+
+/// Allocate the next stream id. (helper for file_write / file_read)
+pub fn nextStream() i32 {
+    const s = file_next_stream;
+    file_next_stream += 1;
+    return s;
 }
 
 test "readResolvedPathAlloc reads stdin for reduced detached consumers" {

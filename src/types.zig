@@ -351,6 +351,8 @@ pub const SortOrder = enum {
 pub const SortCriteria = struct {
     order: SortOrder = .end,
     reversed: bool = false,
+    /// When non-null, `sort_next_order` cycles through this sequence (tmux `order_seq`).
+    order_seq: ?[]const SortOrder = null,
 };
 
 // ── UTF-8 ─────────────────────────────────────────────────────────────────
@@ -634,6 +636,27 @@ pub const ScreenCursorStyle = enum {
     bar,
 };
 
+/// Selection state for a screen (mirrors tmux's struct screen_sel).
+pub const ScreenSel = struct {
+    hidden: bool = false,
+    rectangle: bool = false,
+    modekeys: u32 = MODEKEY_EMACS,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    ex: u32 = 0,
+    ey: u32 = 0,
+    cell: GridCell = std.mem.zeroes(GridCell),
+};
+
+/// Title stack entry (mirrors tmux's struct screen_title_entry).
+pub const ScreenTitleEntry = struct {
+    text: []u8,
+};
+
+pub fn colour_is_default(colour: i32) bool {
+    return colour == 8 or colour == 9;
+}
+
 pub const Screen = struct {
     title: ?[]u8 = null,
     path: ?[]u8 = null,
@@ -657,23 +680,39 @@ pub const Screen = struct {
     saved_cell: GridCell = std.mem.zeroes(GridCell),
     saved_flags: i32 = 0,
     tabs: ?[]u8 = null,
+    sel: ?*ScreenSel = null,
+    titles: std.ArrayList(ScreenTitleEntry) = .{},
     cell_fg: u32 = 8,
     cell_bg: u32 = 8,
+    cell_us: u32 = 8,
     cell_attr: u16 = 0,
-    g0set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
-    g1set: u8 = 0, // 0 = ASCII ('B'), 1 = DEC line drawing ('0')
-    input_last_valid: bool = false, // true when last_glyph contains a previous printable character
-    last_glyph: Utf8Data = std.mem.zeroes(Utf8Data), // last glyph for CSI REP
+    g0set: u8 = 0,
+    g1set: u8 = 0,
+    saved_cell_fg: u32 = 8,
+    saved_cell_bg: u32 = 8,
+    saved_cell_us: u32 = 8,
+    saved_cell_attr: u16 = 0,
+    saved_g0set: u8 = 0,
+    saved_g1set: u8 = 0,
+    saved_mode: i32 = 0,
+    input_last_valid: bool = false,
+    last_glyph: Utf8Data = std.mem.zeroes(Utf8Data),
+    write_list: ?[]ScreenWriteCline = null,
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────
 
 pub const TTY_NOCURSOR: u32 = 0x0001;
 pub const TTY_FREEZE: u32 = 0x0002;
+pub const TTY_TIMER: u32 = 0x0004;
+pub const TTY_NOBLOCK: u32 = 0x0008;
 pub const TTY_STARTED: u32 = 0x0010;
 pub const TTY_OPENED: u32 = 0x0020;
 pub const TTY_OSC52QUERY: u32 = 0x0040;
 pub const TTY_BLOCK: u32 = 0x0080;
+pub const TTY_HAVEDA: u32 = 0x0100;
+pub const TTY_HAVEXDA: u32 = 0x0200;
+pub const TTY_SYNCING: u32 = 0x0400;
 
 pub const Tty = struct {
     client: *Client,
@@ -744,6 +783,7 @@ pub const LayoutCell = struct {
 
 pub const PANE_REDRAW: u32 = 0x0001;
 pub const PANE_FOCUSED: u32 = 0x0004;
+pub const PANE_VISITED: u32 = 0x0008;
 pub const PANE_INPUTOFF: u32 = 0x0040;
 pub const PANE_CHANGED: u32 = 0x0080;
 pub const PANE_EXITED: u32 = 0x0100;
@@ -823,6 +863,10 @@ pub const WindowPane = struct {
     pipe_event: ?*c.libevent.event = null,
     pipe_flags: u8 = 0,
     pipe_offset: WindowPaneOffset = .{},
+
+    // Resize queue (ported from tmux's TAILQ-based resize_queue)
+    resize_queue: std.ArrayListUnmanaged(WindowPaneResize) = .{},
+    resize_timer: ?*c.libevent.event = null,
 };
 
 // ── Window ────────────────────────────────────────────────────────────────
@@ -864,12 +908,15 @@ pub const Window = struct {
 
     flags: u32 = 0,
     options: *Options,
+    fill_character: ?[]Utf8Data = null,
     references: u32 = 0,
     winlinks: std.ArrayList(*Winlink) = .{},
     alerts_timer: ?*c.libevent.event = null,
     name_event: ?*c.libevent.event = null,
     name_time: std.posix.timeval = .{ .sec = 0, .usec = 0 },
     alerts_queued: bool = false,
+    activity_time: i64 = 0,
+    creation_time: i64 = 0,
 };
 
 // ── Winlink ───────────────────────────────────────────────────────────────
@@ -1046,6 +1093,10 @@ pub const CLIENT_CONTROL_PAUSEAFTER: u64 = 0x100000000;
 pub const CLIENT_CONTROL_WAITEXIT: u64 = 0x200000000;
 pub const CLIENT_WINDOWSIZECHANGED: u64 = 0x400000000;
 pub const CLIENT_NO_DETACH_ON_DESTROY: u64 = 0x8000000000;
+pub const CLIENT_DEAD: u64 = 0x10000000000;
+pub const CLIENT_REPEAT: u64 = 0x20000000000;
+
+pub const CLIENT_UNATTACHEDFLAGS: u64 = CLIENT_DEAD | CLIENT_SUSPENDED | CLIENT_EXIT;
 
 pub const ClientExitReason = enum {
     none,
@@ -1134,14 +1185,30 @@ pub const WindowPaneOffset = struct {
     used: usize = 0,
 };
 
+pub const WindowPaneResize = struct {
+    osx: u32,
+    osy: u32,
+    sx: u32,
+    sy: u32,
+};
+
 pub const CONTROL_PANE_OFF: u8 = 0x1;
 pub const CONTROL_PANE_PAUSED: u8 = 0x2;
+
+pub const ControlBlock = struct {
+    size: usize = 0,
+    line: ?[]u8 = null,
+    t: i64 = 0,
+    pane_id: ?u32 = null,
+};
 
 pub const ControlPane = struct {
     pane: u32,
     offset: WindowPaneOffset = .{},
     queued: WindowPaneOffset = .{},
     flags: u8 = 0,
+    pending_flag: bool = false,
+    blocks: std.ArrayListUnmanaged(*ControlBlock) = .{},
 };
 
 pub const ClientPaneCache = struct {
@@ -1188,6 +1255,13 @@ pub const key_event = struct {
     m: MouseEvent = .{},
 };
 
+pub const OverlayCheckCb = *const fn (*Client, ?*anyopaque, u32, u32) bool;
+pub const OverlayModeCb = *const fn (*Client, ?*anyopaque, *u32, *u32) ?*anyopaque;
+pub const OverlayDrawCb = *const fn (*Client, ?*anyopaque, *anyopaque) void;
+pub const OverlayKeyCb = *const fn (*Client, ?*anyopaque, *key_event) i32;
+pub const OverlayFreeCb = *const fn (*Client, ?*anyopaque) void;
+pub const OverlayResizeCb = *const fn (*Client, ?*anyopaque) void;
+
 pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
@@ -1228,6 +1302,18 @@ pub const Client = struct {
     menu_data: ?*anyopaque = null,
     popup_data: ?*anyopaque = null,
 
+    overlay_check: ?OverlayCheckCb = null,
+    overlay_mode: ?OverlayModeCb = null,
+    overlay_draw: ?OverlayDrawCb = null,
+    overlay_key: ?OverlayKeyCb = null,
+    overlay_free: ?OverlayFreeCb = null,
+    overlay_resize: ?OverlayResizeCb = null,
+    overlay_data: ?*anyopaque = null,
+    overlay_timer: ?*c.libevent.event = null,
+
+    repeat_timer: ?*c.libevent.event = null,
+    last_key: key_code = KEYC_NONE,
+
     flags: u64 = 0,
     session: ?*Session = null,
     last_session: ?*Session = null,
@@ -1235,6 +1321,9 @@ pub const Client = struct {
     control_panes: std.ArrayListUnmanaged(ControlPane) = .{},
     control_subscriptions: std.ArrayListUnmanaged(ControlSubscription) = .{},
     control_subs_timer: ?*c.libevent.event = null,
+    control_all_blocks: std.ArrayListUnmanaged(*ControlBlock) = .{},
+    control_pending_count: u32 = 0,
+    control_ready_flag: bool = false,
     pan_window: ?*Window = null,
     pan_ox: u32 = 0,
     pan_oy: u32 = 0,
@@ -1253,6 +1342,30 @@ pub const Client = struct {
     click_state: MouseClickState = .none,
     pause_age: u32 = 0,
 };
+
+// ── Client file IPC ───────────────────────────────────────────────────────
+
+pub const ClientFileCb = ?*const fn (?*Client, ?[]const u8, c_int, i32, ?[]const u8, ?*anyopaque) void;
+
+pub const ClientFile = struct {
+    client: ?*Client = null,
+    peer: ?*ZmuxPeer = null,
+    tree: ?*ClientFiles = null,
+
+    references: u32 = 1,
+    stream: i32 = 0,
+    path: ?[]u8 = null,
+
+    buffer: std.ArrayList(u8) = .{},
+    cb: ClientFileCb = null,
+    data: ?*anyopaque = null,
+
+    fd: i32 = -1,
+    @"error": c_int = 0,
+    closed: bool = false,
+};
+
+pub const ClientFiles = std.AutoHashMap(i32, *ClientFile);
 
 // ── IPC proc layer ────────────────────────────────────────────────────────
 
@@ -1456,10 +1569,74 @@ pub const PANE_STATUS_OFF: u32 = 0;
 pub const PANE_STATUS_TOP: u32 = 1;
 pub const PANE_STATUS_BOTTOM: u32 = 2;
 
-// ── Screen write context (forward-compat stub) ────────────────────────────
+// ── Screen write collect types ────────────────────────────────────────────
+
+pub const SCREEN_WRITE_SYNC: u32 = 0x4;
+
+pub const ScreenWriteCitemType = enum(u8) {
+    TEXT = 0,
+    CLEAR = 1,
+};
+
+pub const ScreenWriteCitem = struct {
+    x: u32 = 0,
+    wrapped: bool = false,
+    ctype: ScreenWriteCitemType = .TEXT,
+    used: u32 = 0,
+    bg: u32 = 8,
+    gc: GridCell = grid_default_cell,
+    prev: ?*ScreenWriteCitem = null,
+    next: ?*ScreenWriteCitem = null,
+};
+
+pub const ScreenWriteCline = struct {
+    data: ?[]u8 = null,
+    first: ?*ScreenWriteCitem = null,
+    last: ?*ScreenWriteCitem = null,
+};
+
+pub const ScreenWriteInitCtxCb = *const fn (*ScreenWriteCtx, *TtyCtx) void;
+
+pub const TtyCtx = struct {
+    s: ?*Screen = null,
+    sx: u32 = 0,
+    sy: u32 = 0,
+    ocx: u32 = 0,
+    ocy: u32 = 0,
+    orlower: u32 = 0,
+    orupper: u32 = 0,
+    num: u32 = 0,
+    bg: u32 = 8,
+    cell: ?*const GridCell = null,
+    wrapped: bool = false,
+    ptr: ?[*]const u8 = null,
+    ptr2: ?[*:0]const u8 = null,
+    defaults: GridCell = grid_default_cell,
+    bigger: bool = false,
+    wox: u32 = 0,
+    woy: u32 = 0,
+    wsx: u32 = 0,
+    wsy: u32 = 0,
+    xoff: u32 = 0,
+    yoff: u32 = 0,
+    rxoff: u32 = 0,
+    ryoff: u32 = 0,
+    palette: ?*ColourPalette = null,
+    redraw_cb: ?*const fn (*const TtyCtx) void = null,
+    set_client_cb: ?*const fn (*TtyCtx, *Client) i32 = null,
+    arg: ?*anyopaque = null,
+    allow_invisible_panes: bool = false,
+};
+
+// ── Screen write context ──────────────────────────────────────────────────
 
 pub const ScreenWriteCtx = struct {
     wp: ?*WindowPane = null,
     s: *Screen,
     flags: u32 = 0,
+    item: ?*ScreenWriteCitem = null,
+    scrolled: u32 = 0,
+    bg: u32 = 8,
+    init_ctx_cb: ?ScreenWriteInitCtxCb = null,
+    arg: ?*anyopaque = null,
 };

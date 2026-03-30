@@ -20,9 +20,12 @@
 //! mode-tree.zig – shared reduced tree-mode state substrate.
 
 const std = @import("std");
+const format_draw = @import("format-draw.zig");
 const key_string = @import("key-string.zig");
 const screen = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
 const server = @import("server.zig");
+const sort_mod = @import("sort.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
 const xm = @import("xmalloc.zig");
@@ -69,11 +72,14 @@ pub const Line = struct {
 };
 
 pub const BuildCallback = *const fn (*Data) void;
+pub const DrawCallback = *const fn (*Data, ?*anyopaque, *T.ScreenWriteCtx, u32, u32) void;
 pub const SearchCallback = *const fn (*Data, ?*anyopaque, []const u8, bool) bool;
+pub const MenuCallback = *const fn (*Data, ?*T.Client, T.key_code) void;
 pub const HeightCallback = *const fn (*Data, u32) u32;
 pub const KeyCallback = *const fn (*Data, ?*anyopaque, u32) T.key_code;
 pub const SwapCallback = *const fn (?*anyopaque, ?*anyopaque, *T.SortCriteria) bool;
 pub const SortCallback = *const fn (*T.SortCriteria) void;
+pub const HelpCallback = *const fn (*u32, *[]const u8) ?[*]const ?[*:0]const u8;
 pub const EachCallback = *const fn (*Data, ?*anyopaque, ?*T.Client, T.key_code) void;
 
 pub const Config = struct {
@@ -81,25 +87,34 @@ pub const Config = struct {
     preview: Preview = .normal,
     zoom: bool = false,
     buildcb: BuildCallback,
+    drawcb: ?DrawCallback = null,
     searchcb: ?SearchCallback = null,
+    menucb: ?MenuCallback = null,
     heightcb: ?HeightCallback = null,
     keycb: ?KeyCallback = null,
     swapcb: ?SwapCallback = null,
     sortcb: ?SortCallback = null,
+    helpcb: ?HelpCallback = null,
 };
 
 pub const Data = struct {
+    dead: bool = false,
+    references: u32 = 1,
+
     wp: *T.WindowPane,
     modedata: ?*anyopaque,
 
     sort_crit: T.SortCriteria = .{},
 
     buildcb: BuildCallback,
+    drawcb: ?DrawCallback,
     searchcb: ?SearchCallback,
+    menucb: ?MenuCallback,
     heightcb: ?HeightCallback,
     keycb: ?KeyCallback,
     swapcb: ?SwapCallback,
     sortcb: ?SortCallback,
+    helpcb: ?HelpCallback,
 
     children: std.ArrayList(*Item) = .{},
     saved: std.ArrayList(*Item) = .{},
@@ -128,6 +143,82 @@ pub const Data = struct {
     }
 };
 
+// ── tmux C-name aliases (grep / port parity) ─────────────────────────────
+pub const mode_tree_start = start;
+pub const mode_tree_free = free;
+pub const mode_tree_resize = resize;
+pub const mode_tree_zoom = zoom;
+pub const mode_tree_set_filter = setFilter;
+pub const mode_tree_set_search = setSearch;
+pub const mode_tree_cycle_preview = cyclePreview;
+pub const mode_tree_build = build;
+pub const mode_tree_add = add;
+pub const mode_tree_draw_as_parent = drawAsParent;
+pub const mode_tree_no_tag = noTag;
+pub const mode_tree_align = setAlign;
+pub const mode_tree_remove = remove;
+pub const mode_tree_up = up;
+pub const mode_tree_down = down;
+pub const mode_tree_swap = swap;
+pub const mode_tree_get_current = getCurrent;
+pub const mode_tree_get_current_name = getCurrentName;
+pub const mode_tree_expand_current = expandCurrent;
+pub const mode_tree_collapse_current = collapseCurrent;
+pub const mode_tree_expand = expand;
+pub const mode_tree_set_current = setCurrent;
+pub const mode_tree_count_tagged = countTagged;
+pub const mode_tree_each_tagged = eachTagged;
+pub const mode_tree_clear_all_tagged = clearAllTagged;
+pub const mode_tree_tag_all = tagAll;
+pub const mode_tree_toggle_current_tag = toggleCurrentTag;
+pub const mode_tree_search_set = searchSet;
+pub const mode_tree_draw = draw;
+pub const mode_tree_key = handleKey;
+pub const mode_tree_run_command = runCommand;
+pub const mode_tree_display_menu = displayMenu;
+pub const mode_tree_display_help = displayHelp;
+pub const mode_tree_menu_callback = menuCallback;
+pub const mode_tree_search_callback = searchCallbackInternal;
+pub const mode_tree_filter_callback = filterCallbackInternal;
+pub const mode_tree_remove_ref = removeRef;
+pub const mode_tree_get_screen = Data.getScreen;
+pub const mode_tree_search_free = removeRef;
+pub const mode_tree_filter_free = removeRef;
+
+pub const mode_tree_build_lines = buildLines;
+pub const mode_tree_clear_lines = clearLines;
+pub const mode_tree_find_item = findItem;
+pub const mode_tree_free_item = freeItem;
+pub const mode_tree_free_items = freeItems;
+pub const mode_tree_search_forward = searchForward;
+pub const mode_tree_search_backward = searchBackward;
+
+/// tmux `mode_tree_clear_tagged(mtl)` — clear `tagged` on a list subtree.
+pub fn mode_tree_clear_tagged(mtl: *std.ArrayList(*Item)) void {
+    clearTaggedRecursive(mtl);
+}
+
+/// tmux `mode_tree_get_tag(mtd, tag, found)`.
+pub fn mode_tree_get_tag(mtd: *Data, tag: u64, found: *u32) bool {
+    if (findLineByTag(mtd, tag)) |idx| {
+        found.* = idx;
+        return true;
+    }
+    return false;
+}
+
+pub fn mode_tree_set_height(mtd: *Data) void {
+    setHeight(mtd);
+}
+
+pub fn mode_tree_check_selected(mtd: *Data) void {
+    checkSelected(mtd);
+}
+
+pub fn mode_tree_is_lowercase(ptr: []const u8) bool {
+    return isLowercase(ptr);
+}
+
 pub fn start(wp: *T.WindowPane, config: Config) *Data {
     const screen_ptr = screen.screen_init(wp.base.grid.sx, wp.base.grid.sy, 0);
     screen_ptr.mode &= ~T.MODE_CURSOR;
@@ -137,11 +228,14 @@ pub fn start(wp: *T.WindowPane, config: Config) *Data {
         .wp = wp,
         .modedata = config.modedata,
         .buildcb = config.buildcb,
+        .drawcb = config.drawcb,
         .searchcb = config.searchcb,
+        .menucb = config.menucb,
         .heightcb = config.heightcb,
         .keycb = config.keycb,
         .swapcb = config.swapcb,
         .sortcb = config.sortcb,
+        .helpcb = config.helpcb,
         .screen = screen_ptr,
         .preview = config.preview,
     };
@@ -162,7 +256,9 @@ pub fn free(mtd: *Data) void {
 
     screen.screen_free(mtd.screen);
     xm.allocator.destroy(mtd.screen);
-    xm.allocator.destroy(mtd);
+
+    mtd.dead = true;
+    removeRef(mtd);
 }
 
 pub fn resize(mtd: *Data, sx: u32, sy: u32) void {
@@ -507,6 +603,375 @@ pub fn searchSet(mtd: *Data) bool {
     _ = setCurrent(mtd, tag);
     mtd.wp.flags |= T.PANE_REDRAW;
     return true;
+}
+
+pub fn draw(mtd: *Data) void {
+    const s = mtd.screen;
+
+    if (mtd.line_list.items.len == 0) return;
+
+    var gc0 = T.grid_default_cell;
+    var gc = T.grid_default_cell;
+    _ = &gc0;
+    _ = &gc;
+
+    const w = mtd.width;
+    const h = mtd.height;
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    screen_write.erase_screen(&ctx);
+
+    var keylen: usize = 0;
+    for (mtd.line_list.items) |line| {
+        const mti = line.item;
+        if (mti.key == T.KEYC_NONE) continue;
+        if (mti.keylen + 3 > keylen)
+            keylen = mti.keylen + 3;
+    }
+
+    const max_depth_idx = mtd.maxdepth + 1;
+    var alignlen_buf: [64]usize = [_]usize{0} ** 64;
+    const alignlen = alignlen_buf[0..@min(max_depth_idx, 64)];
+    for (mtd.line_list.items) |line| {
+        const mti = line.item;
+        if (mti.@"align" != 0 and mti.name.len > alignlen[@min(line.depth, alignlen.len - 1)])
+            alignlen[@min(line.depth, alignlen.len - 1)] = mti.name.len;
+    }
+
+    for (mtd.line_list.items, 0..) |line, i| {
+        if (i < mtd.offset) continue;
+        if (i > mtd.offset + h - 1) break;
+        const mti = line.item;
+
+        screen_write.cursor_to(&ctx, @intCast(i - mtd.offset), 0);
+
+        var text_buf: std.ArrayList(u8) = .{};
+        defer text_buf.deinit(xm.allocator);
+
+        if (mti.key != T.KEYC_NONE) {
+            text_buf.append(xm.allocator, '(') catch unreachable;
+            if (mti.keystr) |ks| text_buf.appendSlice(xm.allocator, ks) catch unreachable;
+            text_buf.append(xm.allocator, ')') catch unreachable;
+            const pad = if (keylen > mti.keylen + 2) keylen - mti.keylen - 2 else 0;
+            var p: usize = 0;
+            while (p < pad) : (p += 1) text_buf.append(xm.allocator, ' ') catch unreachable;
+        } else {
+            var p: usize = 0;
+            while (p < keylen) : (p += 1) text_buf.append(xm.allocator, ' ') catch unreachable;
+        }
+
+        if (line.flat) {
+            // no symbol
+        } else if (mti.children.items.len == 0) {
+            text_buf.appendSlice(xm.allocator, "  ") catch unreachable;
+        } else if (mti.expanded) {
+            text_buf.appendSlice(xm.allocator, "- ") catch unreachable;
+        } else {
+            text_buf.appendSlice(xm.allocator, "+ ") catch unreachable;
+        }
+
+        if (line.depth > 0) {
+            var d: u32 = 0;
+            while (d < line.depth) : (d += 1)
+                text_buf.appendSlice(xm.allocator, "  ") catch unreachable;
+        }
+
+        const al_idx = @min(line.depth, @as(u32, @intCast(alignlen.len -| 1)));
+        const al = alignlen[al_idx];
+        if (mti.@"align" > 0 and al > mti.name.len) {
+            var pad = al - mti.name.len;
+            while (pad > 0) : (pad -= 1) text_buf.append(xm.allocator, ' ') catch unreachable;
+        }
+
+        text_buf.appendSlice(xm.allocator, mti.name) catch unreachable;
+        if (mti.tagged)
+            text_buf.append(xm.allocator, '*') catch unreachable;
+        if (mti.text) |t| {
+            text_buf.appendSlice(xm.allocator, ": ") catch unreachable;
+            text_buf.appendSlice(xm.allocator, t) catch unreachable;
+        }
+
+        screen_write.erase_to_eol(&ctx);
+        const max_write: u32 = @min(@as(u32, @intCast(text_buf.items.len)), w);
+        if (max_write > 0)
+            screen_write.putn(&ctx, text_buf.items[0..max_write]);
+    }
+
+    if (mtd.preview == .off) {
+        screen_write.cursor_to(&ctx, mtd.current -| mtd.offset, 0);
+        return;
+    }
+
+    const sy = s.grid.sy;
+    if (sy <= 4 or h < 2 or sy -| h <= 4 or w <= 4) {
+        screen_write.cursor_to(&ctx, mtd.current -| mtd.offset, 0);
+        return;
+    }
+
+    var draw_mti = mtd.line_list.items[mtd.current].item;
+    if (draw_mti.draw_as_parent)
+        if (draw_mti.parent) |parent| {
+            draw_mti = parent;
+        };
+
+    screen_write.cursor_to(&ctx, h, 0);
+    screen_write.box_draw(&ctx, w, sy - h);
+
+    const name_text = xm.xasprintf(" {s}", .{draw_mti.name});
+    defer xm.allocator.free(name_text);
+    if (w >= 2 + name_text.len) {
+        screen_write.cursor_to(&ctx, h, 1);
+        screen_write.putn(&ctx, name_text);
+        screen_write.putn(&ctx, " ");
+    }
+
+    const box_x = w -| 4;
+    const box_y = sy -| h -| 2;
+
+    if (box_x != 0 and box_y != 0) {
+        screen_write.cursor_to(&ctx, h + 1, 2);
+        if (mtd.drawcb) |drawcb|
+            drawcb(mtd, draw_mti.itemdata, &ctx, box_x, box_y);
+    }
+
+    screen_write.cursor_to(&ctx, mtd.current -| mtd.offset, 0);
+}
+
+pub fn handleKey(mtd: *Data, client: ?*T.Client, key_val: *T.key_code, mouse: ?*const T.MouseEvent, xp: ?*u32, yp: ?*u32) bool {
+    if (mtd.line_list.items.len == 0) return false;
+
+    if (T.keycIsMouse(key_val.*) and mouse != null) {
+        const m = mouse.?;
+        const x = m.x;
+        const y = m.y;
+        if (xp) |xout| xout.* = x;
+        if (yp) |yout| yout.* = y;
+        if (x > mtd.width or y > mtd.height) {
+            if (key_val.* == T.keycMouse(T.KEYC_MOUSEDOWN3, .pane))
+                displayMenu(mtd, client, x, y, true);
+            if (mtd.preview == .off)
+                key_val.* = T.KEYC_NONE;
+            return false;
+        }
+        if (mtd.offset + y < mtd.line_list.items.len) {
+            if (key_val.* == T.keycMouse(T.KEYC_MOUSEDOWN1, .pane) or
+                key_val.* == T.keycMouse(T.KEYC_MOUSEDOWN3, .pane) or
+                key_val.* == T.keycMouse(T.KEYC_DOUBLECLICK1, .pane))
+                mtd.current = mtd.offset + y;
+            if (key_val.* == T.keycMouse(T.KEYC_DOUBLECLICK1, .pane)) {
+                key_val.* = '\r';
+            } else {
+                if (key_val.* == T.keycMouse(T.KEYC_MOUSEDOWN3, .pane))
+                    displayMenu(mtd, client, x, y, false);
+                key_val.* = T.KEYC_NONE;
+            }
+        } else {
+            if (key_val.* == T.keycMouse(T.KEYC_MOUSEDOWN3, .pane))
+                displayMenu(mtd, client, x, y, false);
+            key_val.* = T.KEYC_NONE;
+        }
+        return false;
+    }
+
+    const line = &mtd.line_list.items[mtd.current];
+    var current = line.item;
+
+    for (mtd.line_list.items, 0..) |l, idx| {
+        if (key_val.* == l.item.key) {
+            if (idx > mtd.line_list.items.len - 1) {
+                key_val.* = T.KEYC_NONE;
+                return false;
+            }
+            mtd.current = @intCast(idx);
+            key_val.* = '\r';
+            return false;
+        }
+    }
+
+    switch (key_val.*) {
+        'q', '\x1b', 'g' | T.KEYC_CTRL => return true,
+        T.KEYC_F1, 'h' | T.KEYC_CTRL => displayHelp(mtd, client),
+        T.KEYC_UP, 'k', T.keycMouse(T.KEYC_WHEELUP, .pane), 'p' | T.KEYC_CTRL => up(mtd, true),
+        T.KEYC_DOWN, 'j', T.keycMouse(T.KEYC_WHEELDOWN, .pane), 'n' | T.KEYC_CTRL => _ = down(mtd, true),
+        T.KEYC_UP | T.KEYC_SHIFT, 'K' => swap(mtd, -1),
+        T.KEYC_DOWN | T.KEYC_SHIFT, 'J' => swap(mtd, 1),
+        T.KEYC_PPAGE, 'b' | T.KEYC_CTRL => {
+            var i: u32 = 0;
+            while (i < mtd.height) : (i += 1) {
+                if (mtd.current == 0) break;
+                up(mtd, true);
+            }
+        },
+        T.KEYC_NPAGE, 'f' | T.KEYC_CTRL => {
+            var i: u32 = 0;
+            while (i < mtd.height) : (i += 1) {
+                if (mtd.current == mtd.line_list.items.len - 1) break;
+                _ = down(mtd, true);
+            }
+        },
+        'g', T.KEYC_HOME => {
+            mtd.current = 0;
+            mtd.offset = 0;
+        },
+        'G', T.KEYC_END => {
+            mtd.current = @intCast(mtd.line_list.items.len - 1);
+            if (mtd.current > mtd.height -| 1)
+                mtd.offset = mtd.current - mtd.height + 1
+            else
+                mtd.offset = 0;
+        },
+        't' => {
+            if (!current.no_tag) {
+                if (!current.tagged) {
+                    var parent = current.parent;
+                    while (parent) |ancestor| {
+                        ancestor.tagged = false;
+                        parent = ancestor.parent;
+                    }
+                    clearTaggedRecursive(&current.children);
+                    current.tagged = true;
+                } else {
+                    current.tagged = false;
+                }
+                if (mouse != null) _ = down(mtd, false);
+            }
+        },
+        'T' => {
+            for (mtd.line_list.items) |l| l.item.tagged = false;
+        },
+        't' | T.KEYC_CTRL => {
+            for (mtd.line_list.items) |l| {
+                if ((l.item.parent == null and !l.item.no_tag) or
+                    (l.item.parent != null and l.item.parent.?.no_tag))
+                    l.item.tagged = true
+                else
+                    l.item.tagged = false;
+            }
+        },
+        'O' => {
+            sort_mod.sort_next_order(&mtd.sort_crit);
+            build(mtd);
+        },
+        'r' => {
+            mtd.sort_crit.reversed = !mtd.sort_crit.reversed;
+            build(mtd);
+        },
+        T.KEYC_LEFT, 'h', '-' => {
+            if (line.flat or !current.expanded)
+                current = current.parent orelse current;
+            if (current.parent == null and (line.flat or !mtd.line_list.items[mtd.current].item.expanded)) {
+                up(mtd, false);
+            } else {
+                current.expanded = false;
+                mtd.current = current.line;
+                build(mtd);
+            }
+        },
+        T.KEYC_RIGHT, 'l', '+' => {
+            if (line.flat or current.expanded) {
+                _ = down(mtd, false);
+            } else if (!line.flat) {
+                current.expanded = true;
+                build(mtd);
+            }
+        },
+        '-' | T.KEYC_META => {
+            for (mtd.children.items) |child| child.expanded = false;
+            build(mtd);
+        },
+        '+' | T.KEYC_META => {
+            for (mtd.children.items) |child| child.expanded = true;
+            build(mtd);
+        },
+        '?', '/', 's' | T.KEYC_CTRL => {
+            mtd.references += 1;
+            mtd.search_dir = .forward;
+            searchCallback(mtd, client);
+        },
+        'n' => {
+            mtd.search_dir = .forward;
+            _ = searchSet(mtd);
+        },
+        'N' => {
+            mtd.search_dir = .backward;
+            _ = searchSet(mtd);
+        },
+        'f' => {
+            mtd.references += 1;
+            filterCallback(mtd, client);
+        },
+        'v' => {
+            cyclePreview(mtd);
+            build(mtd);
+            if (mtd.preview != .off) checkSelected(mtd);
+        },
+        else => {},
+    }
+    return false;
+}
+
+pub fn runCommand(client: ?*T.Client, template: []const u8, name: []const u8) void {
+    _ = client;
+    _ = template;
+    _ = name;
+    // Stub: requires cmd_parse_and_append / cmdq_new_state from full runtime.
+}
+
+pub fn displayMenu(mtd: *Data, client: ?*T.Client, x: u32, y: u32, outside: bool) void {
+    _ = mtd;
+    _ = client;
+    _ = x;
+    _ = y;
+    _ = outside;
+    // Stub: requires menu_create / menu_display from full runtime.
+}
+
+pub fn displayHelp(mtd: *Data, client: ?*T.Client) void {
+    _ = mtd;
+    _ = client;
+    // Stub: requires popup_display / popup_write from full runtime.
+}
+
+pub fn menuCallback(mtd: *Data, client: ?*T.Client, key_val: T.key_code) void {
+    if (mtd.dead or key_val == T.KEYC_NONE) {
+        removeRef(mtd);
+        return;
+    }
+    if (mtd.menucb) |menucb| menucb(mtd, client, key_val);
+    removeRef(mtd);
+}
+
+pub fn searchCallbackInternal(mtd: *Data, s: ?[]const u8) void {
+    if (mtd.dead) return;
+    setSearch(mtd, s);
+    if (mtd.search != null) _ = searchSet(mtd);
+}
+
+pub fn filterCallbackInternal(mtd: *Data, s: ?[]const u8) void {
+    if (mtd.dead) return;
+    setFilter(mtd, s);
+    build(mtd);
+    draw(mtd);
+    mtd.wp.flags |= T.PANE_REDRAW;
+}
+
+pub fn removeRef(mtd: *Data) void {
+    mtd.references -|= 1;
+    if (mtd.references == 0)
+        xm.allocator.destroy(mtd);
+}
+
+fn searchCallback(mtd: *Data, client: ?*T.Client) void {
+    _ = client;
+    // Stub: in tmux this calls status_prompt_set with mode_tree_search_callback.
+    // For now, release the reference taken by the caller.
+    removeRef(mtd);
+}
+
+fn filterCallback(mtd: *Data, client: ?*T.Client) void {
+    _ = client;
+    // Stub: in tmux this calls status_prompt_set with mode_tree_filter_callback.
+    removeRef(mtd);
 }
 
 fn isLowercase(ptr: []const u8) bool {

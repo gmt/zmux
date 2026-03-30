@@ -23,9 +23,9 @@
 
 const std = @import("std");
 const T = @import("types.zig");
-const tty_features = @import("tty-features.zig");
 const xm = @import("xmalloc.zig");
 const c = @import("c.zig");
+const log = @import("log.zig");
 
 // ── Capability types ──────────────────────────────────────────────────────
 
@@ -541,6 +541,10 @@ comptime {
 
 pub const TtyTerm = struct {
     codes: []CapabilityValue,
+    /// Bitset of terminal feature indices merged into this term (mirrors tmux tty_term.features).
+    applied_features: i32 = 0,
+    /// TERM_* flags from tty-features.c (256/RGB/DECSLRM/DECFRA/sixel).
+    term_flags: i32 = 0,
 
     pub fn init() TtyTerm {
         const codes = xm.allocator.alloc(CapabilityValue, TTYC.count()) catch unreachable;
@@ -589,6 +593,15 @@ pub const TtyTerm = struct {
         }
     }
 
+    /// Apply a colon-separated capability override string (tmux tty_term_apply).
+    pub fn tty_term_apply(self: *TtyTerm, capabilities: []const u8, quiet: bool) void {
+        var offset: usize = 0;
+        var chunk_buf: [8192]u8 = undefined;
+        while (tty_term_override_next(capabilities, &offset, &chunk_buf)) |chunk| {
+            apply_capability_chunk(self, chunk, quiet);
+        }
+    }
+
     /// Returns true if the capability is present (not .none).
     pub fn has(self: *const TtyTerm, code: TTYC) bool {
         return self.codes[@intFromEnum(code)] != .none;
@@ -631,7 +644,360 @@ pub const TtyTerm = struct {
     pub fn codeEntry(code: TTYC) *const CodeEntry {
         return &code_table[@intFromEnum(code)];
     }
+
+    /// Describe a single capability for logging/display (mirrors tmux tty_term_describe).
+    pub fn describe(self: *const TtyTerm, code: TTYC) []u8 {
+        const idx = @intFromEnum(code);
+        const entry = &code_table[idx];
+        const val = self.codes[idx];
+        return switch (val) {
+            .none => std.fmt.allocPrint(xm.allocator, "{d: >4}: {s}: [missing]", .{ idx, entry.name }) catch unreachable,
+            .string => |s| blk: {
+                const escaped = escapeCapabilityValue(xm.allocator, s);
+                defer xm.allocator.free(escaped);
+                break :blk std.fmt.allocPrint(xm.allocator, "{d: >4}: {s}: (string) {s}", .{ idx, entry.name, escaped }) catch unreachable;
+            },
+            .number => |n| std.fmt.allocPrint(xm.allocator, "{d: >4}: {s}: (number) {d}", .{ idx, entry.name, n }) catch unreachable,
+            .flag => |f| std.fmt.allocPrint(xm.allocator, "{d: >4}: {s}: (flag) {s}", .{ idx, entry.name, if (f) "true" else "false" }) catch unreachable,
+        };
+    }
+
+    /// Get string capability expanded with one integer parameter (tparm).
+    pub fn string_i(self: *const TtyTerm, code: TTYC, a: c_int) []const u8 {
+        const base = self.string(code);
+        if (base.len == 0) return "";
+        const base_z = xm.xm_dupeZ(base);
+        defer xm.allocator.free(base_z);
+        const result = c.ncurses.tparm(base_z.ptr, @as(c_long, a), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+        if (result == null) {
+            log.log_debug("could not expand {s}", .{code_table[@intFromEnum(code)].name});
+            return "";
+        }
+        return std.mem.span(result.?);
+    }
+
+    /// Get string capability expanded with two integer parameters (tparm).
+    pub fn string_ii(self: *const TtyTerm, code: TTYC, a: c_int, b: c_int) []const u8 {
+        const base = self.string(code);
+        if (base.len == 0) return "";
+        const base_z = xm.xm_dupeZ(base);
+        defer xm.allocator.free(base_z);
+        const result = c.ncurses.tparm(base_z.ptr, @as(c_long, a), @as(c_long, b), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+        if (result == null) {
+            log.log_debug("could not expand {s}", .{code_table[@intFromEnum(code)].name});
+            return "";
+        }
+        return std.mem.span(result.?);
+    }
+
+    /// Get string capability expanded with three integer parameters (tparm).
+    pub fn string_iii(self: *const TtyTerm, code: TTYC, a: c_int, b: c_int, cc: c_int) []const u8 {
+        const base = self.string(code);
+        if (base.len == 0) return "";
+        const base_z = xm.xm_dupeZ(base);
+        defer xm.allocator.free(base_z);
+        const result = c.ncurses.tparm(base_z.ptr, @as(c_long, a), @as(c_long, b), @as(c_long, cc), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+        if (result == null) {
+            log.log_debug("could not expand {s}", .{code_table[@intFromEnum(code)].name});
+            return "";
+        }
+        return std.mem.span(result.?);
+    }
+
+    /// Get string capability expanded with one string parameter (tparm).
+    pub fn string_s(self: *const TtyTerm, code: TTYC, a: [*:0]const u8) []const u8 {
+        const base = self.string(code);
+        if (base.len == 0) return "";
+        const base_z = xm.xm_dupeZ(base);
+        defer xm.allocator.free(base_z);
+        const result = c.ncurses.tparm(base_z.ptr, @as(c_long, @intCast(@intFromPtr(a))), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+        if (result == null) {
+            log.log_debug("could not expand {s}", .{code_table[@intFromEnum(code)].name});
+            return "";
+        }
+        return std.mem.span(result.?);
+    }
+
+    /// Get string capability expanded with two string parameters (tparm).
+    pub fn string_ss(self: *const TtyTerm, code: TTYC, a: [*:0]const u8, b: [*:0]const u8) []const u8 {
+        const base = self.string(code);
+        if (base.len == 0) return "";
+        const base_z = xm.xm_dupeZ(base);
+        defer xm.allocator.free(base_z);
+        const result = c.ncurses.tparm(base_z.ptr, @as(c_long, @intCast(@intFromPtr(a))), @as(c_long, @intCast(@intFromPtr(b))), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+        if (result == null) {
+            log.log_debug("could not expand {s}", .{code_table[@intFromEnum(code)].name});
+            return "";
+        }
+        return std.mem.span(result.?);
+    }
 };
+
+// ── Standalone API (mirrors tmux C function names) ────────────────────────
+
+const opts = @import("options.zig");
+const tty_features = @import("tty-features.zig");
+const env_mod = @import("environ.zig");
+
+/// Return the total number of terminal capability codes (mirrors tmux tty_term_ncodes).
+pub fn tty_term_ncodes() usize {
+    return TTYC.count();
+}
+
+/// Strip terminfo padding sequences ($<...>) from a string (mirrors tmux tty_term_strip).
+pub fn tty_term_strip(s: []const u8) []u8 {
+    if (std.mem.indexOfScalar(u8, s, '$') == null)
+        return xm.xstrdup(s);
+
+    var buf: [8192]u8 = undefined;
+    var len: usize = 0;
+    var ptr: usize = 0;
+    while (ptr < s.len) {
+        if (s[ptr] == '$' and ptr + 1 < s.len and s[ptr + 1] == '<') {
+            while (ptr < s.len and s[ptr] != '>') ptr += 1;
+            if (ptr < s.len and s[ptr] == '>') ptr += 1;
+            if (ptr >= s.len) break;
+        }
+        if (len >= buf.len - 1) break;
+        buf[len] = s[ptr];
+        len += 1;
+        ptr += 1;
+    }
+    return xm.xstrdup(buf[0..len]);
+}
+
+/// Create a TtyTerm from a set of capability strings (reduced port of tmux tty_term_create).
+/// Populates capability codes, applies terminal features and overrides, and
+/// validates that required capabilities (clear, cup) are present.
+pub fn tty_term_create(
+    name: []const u8,
+    caps: [][]u8,
+    feat: *i32,
+    cause: *?[]u8,
+) ?*TtyTerm {
+    log.log_debug("adding term {s}", .{name});
+
+    const term = xm.allocator.create(TtyTerm) catch unreachable;
+    term.* = TtyTerm.init();
+
+    for (caps) |cap| {
+        const sep = std.mem.indexOfScalar(u8, cap, '=') orelse continue;
+        const cap_name = cap[0..sep];
+        const value = cap[sep + 1 ..];
+
+        for (code_table, 0..) |entry, idx| {
+            if (!nameMatch(entry.name, cap_name)) continue;
+
+            switch (entry.cap_type) {
+                .none => {},
+                .string => {
+                    const stripped = tty_term_strip(value);
+                    if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+                    term.codes[idx] = .{ .string = stripped };
+                },
+                .number => {
+                    const n = std.fmt.parseInt(i32, value, 10) catch {
+                        log.log_debug("{s}: invalid number", .{entry.name});
+                        continue;
+                    };
+                    term.codes[idx] = .{ .number = n };
+                },
+                .flag => {
+                    term.codes[idx] = .{ .flag = value.len > 0 and value[0] == '1' };
+                },
+            }
+            break;
+        }
+    }
+
+    // Apply terminal features from the terminal-features option.
+    if (opts.options_get_only(opts.global_options, "terminal-features")) |o| {
+        if (opts.options_array_first(o)) |first_item| {
+            var item: ?*const T.OptionsArrayItem = first_item;
+            while (item) |a| {
+                const s = opts.options_array_item_value(a);
+                var offset: usize = 0;
+                var chunk_buf: [8192]u8 = undefined;
+                if (tty_term_override_next(s, &offset, &chunk_buf)) |first| {
+                    if (fnmatchSlice(first, name))
+                        tty_features.tty_add_features(feat, s[offset..], ":");
+                }
+                item = opts.options_array_next(o, a);
+            }
+        }
+    }
+
+    // Apply overrides.
+    tty_term_apply_overrides(term, name);
+
+    // Validate required capabilities.
+    if (!term.has(.CLEAR)) {
+        cause.* = xm.xstrdup("terminal does not support clear");
+        tty_term_free(term);
+        return null;
+    }
+    if (!term.has(.CUP)) {
+        cause.* = xm.xstrdup("terminal does not support cup");
+        tty_term_free(term);
+        return null;
+    }
+
+    // VT100-like detection.
+    const clear_str = term.string(.CLEAR);
+    if (term.flag(.XT) or (clear_str.len >= 2 and clear_str[0] == '\x1b' and clear_str[1] == '[')) {
+        term.term_flags |= TERM_VT100LIKE;
+        tty_features.tty_add_features(feat, "bpaste,focus,title", ",");
+    }
+
+    // Add RGB feature if terminal advertises truecolor.
+    if ((term.flag(.TC) or term.has(.RGB)) and (!term.has(.SETRGBF) or !term.has(.SETRGBB)))
+        tty_features.tty_add_features(feat, "RGB", ",");
+
+    // Apply the features and overrides again.
+    if (tty_features.tty_apply_features(term, feat.*) != 0)
+        tty_term_apply_overrides(term, name);
+
+    // Log capabilities.
+    for (0..TTYC.count()) |i| {
+        const desc = term.describe(@enumFromInt(i));
+        defer xm.allocator.free(desc);
+        log.log_debug("{s}{s}", .{ name, desc });
+    }
+
+    return term;
+}
+
+/// Free a TtyTerm and all its resources (mirrors tmux tty_term_free).
+pub fn tty_term_free(term: *TtyTerm) void {
+    log.log_debug("removing term", .{});
+    term.deinit();
+    xm.allocator.destroy(term);
+}
+
+/// Apply terminal-overrides option entries to a TtyTerm (mirrors tmux tty_term_apply_overrides).
+pub fn tty_term_apply_overrides(term: *TtyTerm, name: []const u8) void {
+    if (opts.options_get_only(opts.global_options, "terminal-overrides")) |o| {
+        if (opts.options_array_first(o)) |first_item| {
+            var item: ?*const T.OptionsArrayItem = first_item;
+            while (item) |a| {
+                const s = opts.options_array_item_value(a);
+                var offset: usize = 0;
+                var chunk_buf: [8192]u8 = undefined;
+                if (tty_term_override_next(s, &offset, &chunk_buf)) |first| {
+                    if (fnmatchSlice(first, name))
+                        term.tty_term_apply(s[offset..], false);
+                }
+                item = opts.options_array_next(o, a);
+            }
+        }
+    }
+
+    // Update RGB flag.
+    if (term.has(.SETRGBF) and term.has(.SETRGBB))
+        term.term_flags |= tty_features.TERM_RGBCOLOURS
+    else
+        term.term_flags &= ~tty_features.TERM_RGBCOLOURS;
+    log.log_debug("RGBCOLOURS flag is {d}", .{@as(i32, if (term.term_flags & tty_features.TERM_RGBCOLOURS != 0) 1 else 0)});
+
+    // Update DECSLRM flag.
+    if (term.has(.CMG) and term.has(.CLMG))
+        term.term_flags |= tty_features.TERM_DECSLRM
+    else
+        term.term_flags &= ~tty_features.TERM_DECSLRM;
+    log.log_debug("DECSLRM flag is {d}", .{@as(i32, if (term.term_flags & tty_features.TERM_DECSLRM != 0) 1 else 0)});
+
+    // Update DECFRA flag.
+    if (term.has(.RECT))
+        term.term_flags |= tty_features.TERM_DECFRA
+    else
+        term.term_flags &= ~tty_features.TERM_DECFRA;
+    log.log_debug("DECFRA flag is {d}", .{@as(i32, if (term.term_flags & tty_features.TERM_DECFRA != 0) 1 else 0)});
+
+    // Update NOAM flag.
+    if (!term.flag(.AM))
+        term.term_flags |= TERM_NOAM
+    else
+        term.term_flags &= ~TERM_NOAM;
+    log.log_debug("NOAM flag is {d}", .{@as(i32, if (term.term_flags & TERM_NOAM != 0) 1 else 0)});
+}
+
+/// Standalone tty_term_has (delegates to TtyTerm method).
+pub fn tty_term_has(term: *const TtyTerm, code: TTYC) bool {
+    return term.has(code);
+}
+
+/// Standalone tty_term_string (delegates to TtyTerm method).
+pub fn tty_term_string(term: *const TtyTerm, code: TTYC) []const u8 {
+    return term.string(code);
+}
+
+/// Standalone tty_term_string_i (delegates to TtyTerm method).
+pub fn tty_term_string_i(term: *const TtyTerm, code: TTYC, a: c_int) []const u8 {
+    return term.string_i(code, a);
+}
+
+/// Standalone tty_term_string_ii (delegates to TtyTerm method).
+pub fn tty_term_string_ii(term: *const TtyTerm, code: TTYC, a: c_int, b: c_int) []const u8 {
+    return term.string_ii(code, a, b);
+}
+
+/// Standalone tty_term_string_iii (delegates to TtyTerm method).
+pub fn tty_term_string_iii(term: *const TtyTerm, code: TTYC, a: c_int, b: c_int, cc: c_int) []const u8 {
+    return term.string_iii(code, a, b, cc);
+}
+
+/// Standalone tty_term_string_s (delegates to TtyTerm method).
+pub fn tty_term_string_s(term: *const TtyTerm, code: TTYC, a: [*:0]const u8) []const u8 {
+    return term.string_s(code, a);
+}
+
+/// Standalone tty_term_string_ss (delegates to TtyTerm method).
+pub fn tty_term_string_ss(term: *const TtyTerm, code: TTYC, a: [*:0]const u8, b: [*:0]const u8) []const u8 {
+    return term.string_ss(code, a, b);
+}
+
+/// Standalone tty_term_number (delegates to TtyTerm method).
+pub fn tty_term_number(term: *const TtyTerm, code: TTYC) i32 {
+    return term.number(code);
+}
+
+/// Standalone tty_term_flag (delegates to TtyTerm method).
+pub fn tty_term_flag(term: *const TtyTerm, code: TTYC) bool {
+    return term.flag(code);
+}
+
+/// Standalone tty_term_describe (delegates to TtyTerm method).
+pub fn tty_term_describe(term: *const TtyTerm, code: TTYC) []u8 {
+    return term.describe(code);
+}
+
+/// Standalone tty_term_read_list (delegates to readTermCaps).
+pub fn tty_term_read_list(term_name: []const u8, fd: i32) ![][]u8 {
+    return readTermCaps(term_name, fd);
+}
+
+/// Standalone tty_term_free_list (delegates to freeTermCaps).
+pub fn tty_term_free_list(caps: [][]u8) void {
+    freeTermCaps(caps);
+}
+
+// Term flags not in tty-features.zig (local to tty-term).
+const TERM_VT100LIKE: i32 = 0x20;
+const TERM_NOAM: i32 = 0x80;
+
+/// Shell-glob match on Zig slices using C fnmatch.
+fn fnmatchSlice(pattern: []const u8, text: []const u8) bool {
+    const pattern_z = xm.xm_dupeZ(pattern);
+    defer xm.allocator.free(pattern_z);
+    const text_z = xm.xm_dupeZ(text);
+    defer xm.allocator.free(text_z);
+    return c.posix_sys.fnmatch(pattern_z.ptr, text_z.ptr, 0) == 0;
+}
+
+/// Case-sensitive name match for capability lookup.
+fn nameMatch(entry_name: []const u8, cap_name: []const u8) bool {
+    return std.mem.eql(u8, entry_name, cap_name);
+}
 
 // ── Full terminfo read (ncurses-backed) ───────────────────────────────────
 
@@ -735,6 +1101,91 @@ pub fn lookupCode(name: []const u8) ?TTYC {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
+
+fn capabilityNameForTable(raw: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, raw, "*:")) return raw[2..];
+    return raw;
+}
+
+/// Next colon-separated field; `::` is a literal colon (tmux tty_term_override_next).
+fn tty_term_override_next(s: []const u8, offset: *usize, out: *[8192]u8) ?[]const u8 {
+    var at = offset.*;
+    if (at >= s.len) return null;
+    var n: usize = 0;
+    while (at < s.len) {
+        if (s[at] == ':') {
+            if (at + 1 < s.len and s[at + 1] == ':') {
+                if (n >= out.len - 1) return null;
+                out[n] = ':';
+                n += 1;
+                at += 2;
+            } else break;
+        } else {
+            if (n >= out.len - 1) return null;
+            out[n] = s[at];
+            n += 1;
+            at += 1;
+        }
+    }
+    if (at < s.len and s[at] == ':') at += 1;
+    offset.* = at;
+    return out[0..n];
+}
+
+fn apply_capability_chunk(term: *TtyTerm, chunk: []const u8, quiet: bool) void {
+    if (chunk.len == 0) return;
+
+    var remove = false;
+    var name_part: []const u8 = chunk;
+    var value_slice: []const u8 = "";
+
+    if (std.mem.indexOfScalar(u8, chunk, '=')) |eq| {
+        name_part = chunk[0..eq];
+        value_slice = chunk[eq + 1 ..];
+    } else if (chunk.len >= 1 and chunk[chunk.len - 1] == '@') {
+        name_part = chunk[0 .. chunk.len - 1];
+        remove = true;
+    }
+
+    const lookup_name = capabilityNameForTable(name_part);
+    const code = TtyTerm.codeByName(lookup_name) orelse return;
+    const entry = TtyTerm.codeEntry(code);
+    const idx = @intFromEnum(code);
+
+    if (!quiet) {
+        if (remove) {
+            log.log_debug("override: {s}@", .{lookup_name});
+        } else if (value_slice.len == 0 and entry.cap_type == .flag) {
+            log.log_debug("override: {s}", .{lookup_name});
+        } else {
+            log.log_debug("override: {s}={s}", .{ lookup_name, value_slice });
+        }
+    }
+
+    if (remove) {
+        if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+        term.codes[idx] = .none;
+        return;
+    }
+
+    switch (entry.cap_type) {
+        .none => {},
+        .string => {
+            const owned = xm.xstrdup(value_slice);
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .string = owned };
+        },
+        .number => {
+            const n = std.fmt.parseInt(i32, value_slice, 10) catch return;
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .number = n };
+        },
+        .flag => {
+            if (term.codes[idx] == .string) xm.allocator.free(term.codes[idx].string);
+            term.codes[idx] = .{ .flag = true };
+        },
+    }
+}
 
 fn capabilityValue(cl: *const T.Client, name: []const u8) ?[]const u8 {
     const caps = cl.term_caps orelse return null;

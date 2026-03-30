@@ -1,136 +1,67 @@
 # zmux Architecture
 
-This file is the canonical architecture note for the current port. It names
-the stack shape we want, the seams that are already shared, and the seams that
-still stay intentionally reduced.
-
-`/goodz/work/agents/zmux/utf8-midgame-brainstorm.md` is inspiration only. If
-it disagrees with this file, this file wins.
-
-This note stays compact on purpose. If a topic needs more than a small current-
-state summary, add a separate focused doc under `docs/` instead of growing this
-file into a planner blob.
+Canonical architecture note for zmux. Names the stack shape and where
+ported behavior lives. Stays compact — topic-specific detail goes in
+separate docs under `docs/`.
 
 ## Truth Split
 
 - `tmux` is the behavioral oracle. Read the C when behavior is unclear.
-- this file decides where ported behavior should live in the Zig stack
+- This file decides where ported behavior lives in the Zig stack.
 
-## Identity And Independence
+## Identity
 
-- tmux is tmux. It does things called tmux.
-- zmux is zmux. It does things called zmux.
-- zmux is a clone of tmux, but it is meant to be independent and distinct.
-- it should be possible to nest tmux inside zmux and zmux inside tmux.
-- that should come from each program behaving like itself, not from bespoke
-  cross-tool awareness.
-- when choosing names, messages, environment variables, and user-visible
-  behavior in zmux, prefer `zmux` names unless the text is explicitly about
-  tmux itself.
-- tmux should not be modeled as explicitly aware of zmux; because zmux is
-  unreleased, there is no way for tmux to know anything about zmux anyway.
+- zmux is a feature-compatible clone of tmux, independent and distinct.
+- Nesting tmux inside zmux and zmux inside tmux should work by each
+  program behaving like itself, not through cross-tool awareness.
+- User-visible names, messages, and environment variables use `zmux`.
 
 ## Stack Shape
 
-### Text And Cells
+### Text and Cells
 
-- `src/types.zig`, `src/utf8.zig`, and `src/utf8-combined.zig` own UTF-8
-  payloads, decode helpers, width policy, and combine policy
-- `src/tty-acs.zig` owns the reduced ACS-versus-UTF-8 drawing policy seam
-- `src/grid.zig` owns stored `GridCell` payloads and the reduced
-  `string_cells` render seam for capture-style consumers
-- `src/screen-write.zig` owns shared glyph and cell writes into the live grid
+- `types.zig`, `utf8.zig`, `utf8-combined.zig` — UTF-8 payloads,
+  decode helpers, width policy, combine policy
+- `tty-acs.zig` — ACS-versus-UTF-8 drawing policy
+- `grid.zig` — stored `GridCell` payloads, `string_cells` for capture
+- `screen-write.zig` — glyph and cell writes into the live grid
 
-### Prompt, Status, And Message Consumers
+### Prompt, Status, Message
 
-- `src/status-prompt.zig` uses the shared cell model for prompt storage and
-  editing
-- `src/format-draw.zig`, `src/status.zig`, `src/status-runtime.zig`, and
-  `src/menu.zig` own the reduced shared status, message, and menu-overlay
-  presentation path
-- `src/server-print.zig` and `src/cmd-queue.zig` route attached, detached, and
-  control-client output through shared lower seams instead of command-local
-  writers
-- `src/control.zig`, `src/control-notify.zig`, and
-  `src/control-subscriptions.zig` own the reduced control-client pane-offset
-  bookkeeping, notify, and `%subscription-changed` polling path
+- `status-prompt.zig` — prompt storage and editing over the cell model
+- `format-draw.zig`, `status.zig`, `status-runtime.zig`, `menu.zig` —
+  status, message, and menu-overlay presentation
+- `server-print.zig`, `cmd-queue.zig` — attached/detached/control
+  output routing
+- `control.zig`, `control-notify.zig`, `control-subscriptions.zig` —
+  control-client pane-offset bookkeeping, notify, subscription polling
 
-### Mouse, Redraw, And TTY Runtime
+### Mouse, Redraw, TTY
 
-- `src/window.zig`, `src/mouse-runtime.zig`, `src/server-fn.zig`, and
-  `src/tty-draw.zig` own the reduced pane hit-test, redraw, border, and
-  scrollbar seams
-- `src/tty-term.zig`, `src/tty-features.zig`, and `src/tty.zig` own the
-  reduced terminfo and outer-tty capability path
+- `window.zig`, `mouse-runtime.zig`, `server-fn.zig`, `tty-draw.zig` —
+  pane hit-test, redraw, border, scrollbar
+- `tty-term.zig`, `tty-features.zig`, `tty.zig` — terminfo and
+  outer-tty capability path
 
-### Layout And Geometry
+### Layout and Geometry
 
-- `src/layout.zig` owns the reduced geometry-tree reconstruction and
-  layout-dependent pane-resize seam used by `resize-pane`
-- future intent is to replace that transient reconstruction with persistent
-  layout ownership as more split, destroy, and layout-aware consumers land
+- `layout.zig` — geometry-tree reconstruction, layout-dependent
+  pane-resize
 
-### Async Job Runtime
+### Async Jobs
 
-- `src/job.zig` owns the reduced shared job registry, summary fields, shell
-  launcher, and async completion bridge
-- `src/cmd-run-shell.zig` and `src/cmd-if-shell.zig` consume that shared job
-  seam instead of keeping private launch loops
-- `src/cmd-show-messages.zig` uses the shared job summary seam for `-J`
-- `src/server.zig` routes shared async job child-exit status through
-  `job_check_died`
+- `job.zig` — shared job registry, shell launcher, async completion
+- `cmd-run-shell.zig`, `cmd-if-shell.zig` — consume the shared job seam
+- `cmd-show-messages.zig` — job summary for `-J`
+- `server.zig` — routes job child-exit status through `job_check_died`
 
-## Current Open Seams
+## Rules
 
-### UTF-8 And Display
-
-- the live writer is still reduced relative to tmux `screen_write_cell`
-- broader prompt, search, edit, and reader consumers still do not all operate
-  on the same shared display-cell model
-- the reopen gate is consumer adoption plus fuller writer side effects, not
-  more local UTF-8 helpers
-
-### Status And Runtime
-
-- multiline status and message presentation remains reduced
-- the redraw matrix is still much smaller than tmux's pane, border, status, and
-  overlay runtime
-- shared status and message producers exist, but producer coverage is still
-  incomplete
-
-### Jobs And Files
-
-- the shared job layer is still reduced relative to tmux `job.c`
-- output capture uses a thread-backed reader plus wakeup, not tmux's
-  bufferevent job runtime
-- there is still no shared `file.c`-style print or read runtime under that job
-  layer
-
-### TTY And Input
-
-- the tty runtime still exposes only a selected-capability `tty-term` seam
-- mouse/runtime coverage is still reduced compared with tmux's fuller attached
-  client path
-- layout mutation now covers reduced `resize-pane` border motion, but the
-  broader persistent layout runtime is still intentionally incomplete
-
-## Rules For New Work
-
-- port honest behavior from tmux before making design claims
-- reuse shared lower layers when they already carry truthful semantics
-- if a consumer needs missing semantics, extend the shared layer instead of
-  adding a local workaround
-- do not add new UTF-8, display-width, combine, or rendering hacks outside the
-  declared stack
-- put ugly-but-ported cleanup in `TODO.md`, not in queue notes or this file
-
-## Queue Pressure
-
-- finish the remaining shared writer and display-consumer adoption work before
-  reopening more UTF-8-sensitive command work
-- keep message, prompt, and redraw producers moving onto the shared runtime
-- grow the job and file runtime only where an active consumer needs a more
-  truthful lower seam
-- widen tty and mouse runtime beneath the existing shared ownership boundaries
-- turn material discoveries into small canonical queue tasks or small topical
-  docs, not long planner prose
+- Port honest behavior from tmux before making design claims.
+- Reuse shared lower layers when they carry truthful semantics.
+- Extend shared layers for missing semantics instead of adding
+  local workarounds.
+- UTF-8, display-width, combine, and rendering code stays within
+  the declared stack.
+- Functional gaps go in `docs/porting-todo.md`.
+- Zig-idiom cleanup goes in `docs/zig-porting-debt.md`.

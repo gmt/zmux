@@ -42,6 +42,12 @@ const style_default = T.Style{
     .default_type = .base,
 };
 
+pub fn style_parse_is_valid(in: []const u8) bool {
+    var sy = style_default;
+    const base = T.GridCell{};
+    return style_parse(&sy, &base, in) == 0;
+}
+
 pub fn style_parse(sy: *T.Style, base: *const T.GridCell, in: []const u8) i32 {
     if (in.len == 0) return 0;
 
@@ -320,14 +326,14 @@ fn parseRange(sy: *T.Style, value: []const u8) bool {
         if (sep != null) return false;
         sy.range_type = .left;
         sy.range_argument = 0;
-        setRangeString(sy, "");
+        style_set_range_string(sy, "");
         return true;
     }
     if (std.ascii.eqlIgnoreCase(kind, "right")) {
         if (sep != null) return false;
         sy.range_type = .right;
         sy.range_argument = 0;
-        setRangeString(sy, "");
+        style_set_range_string(sy, "");
         return true;
     }
     if (std.ascii.eqlIgnoreCase(kind, "pane")) {
@@ -335,7 +341,7 @@ fn parseRange(sy: *T.Style, value: []const u8) bool {
         const parsed = parseAnyU32(arg[1..]) orelse return false;
         sy.range_type = .pane;
         sy.range_argument = parsed;
-        setRangeString(sy, "");
+        style_set_range_string(sy, "");
         return true;
     }
     if (std.ascii.eqlIgnoreCase(kind, "window")) {
@@ -343,7 +349,7 @@ fn parseRange(sy: *T.Style, value: []const u8) bool {
         const parsed = parseAnyU32(arg) orelse return false;
         sy.range_type = .window;
         sy.range_argument = parsed;
-        setRangeString(sy, "");
+        style_set_range_string(sy, "");
         return true;
     }
     if (std.ascii.eqlIgnoreCase(kind, "session")) {
@@ -351,20 +357,20 @@ fn parseRange(sy: *T.Style, value: []const u8) bool {
         const parsed = parseAnyU32(arg[1..]) orelse return false;
         sy.range_type = .session;
         sy.range_argument = parsed;
-        setRangeString(sy, "");
+        style_set_range_string(sy, "");
         return true;
     }
     if (std.ascii.eqlIgnoreCase(kind, "user")) {
         if (sep == null or arg.len == 0) return false;
         sy.range_type = .user;
         sy.range_argument = 0;
-        setRangeString(sy, arg);
+        style_set_range_string(sy, arg);
         return true;
     }
     return false;
 }
 
-fn setRangeString(sy: *T.Style, s: []const u8) void {
+pub fn style_set_range_string(sy: *T.Style, s: []const u8) void {
     @memset(&sy.range_string, 0);
     const len = @min(sy.range_string.len - 1, s.len);
     @memcpy(sy.range_string[0..len], s[0..len]);

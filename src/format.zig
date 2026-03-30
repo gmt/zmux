@@ -1429,3 +1429,11 @@ const child_context_for_pane = fmt_resolve.child_context_for_pane;
 const child_context_for_client = fmt_resolve.child_context_for_client;
 const session_is_active = fmt_resolve.session_is_active;
 
+// ── tmux C-name wrappers ─────────────────────────────────────────────────
+pub const format_true = format_truthy;
+pub const format_log_debug = format_log_defaults;
+pub const format_job_tidy = format_tidy_jobs;
+pub const format_grid_word = fmt_resolve.format_grid_word;
+pub const format_grid_line = fmt_resolve.format_grid_line;
+pub const format_grid_hyperlink = fmt_resolve.format_grid_hyperlink;
+

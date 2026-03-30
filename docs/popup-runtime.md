@@ -1,27 +1,20 @@
 # Popup Runtime
 
-This note describes the current `display-popup` runtime in zmux and the
-intended direction for the remaining popup seam.
-
 ## Current State
 
-- `display-popup` now owns a shared popup overlay runtime instead of returning
-  a permanent command-local stub.
-- the current popup body is built from captured shell-command output and
-  rendered through the attached-client overlay path
-- popup title, width, height, close, border-line selection, popup style, and
-  border style are applied by the shared runtime
-- popup modify and close reuse the same shared popup ownership instead of
-  rebuilding command-local state
-- popup rendering currently lives inside the pane area below any status rows;
-  it does not yet cover tmux's full-screen overlay/status intersection
-- popup output currently uses the reduced shared screen writer over captured
-  bytes; it does not yet emulate tmux's live PTY-fed terminal parser inside the
-  popup body
+- `display-popup` owns a shared popup overlay runtime.
+- The popup body is built from captured shell-command output and
+  rendered through the attached-client overlay path.
+- Title, width, height, close, border-line selection, popup style,
+  and border style are applied by the shared runtime.
+- Popup modify and close reuse shared popup ownership.
+- Rendering lives inside the pane area below status rows; full-screen
+  overlay/status intersection is not covered.
+- Output uses the shared screen writer over captured bytes; a live
+  PTY-fed terminal parser inside the popup body is not implemented.
 
-## Future Intent
+## Gaps (tracked in docs/porting-todo.md)
 
-- replace captured-output popup bodies with a live PTY-backed popup job runtime
-- widen popup positioning to tmux's richer format-aware coordinate rules
-- add the remaining popup job, mouse, resize, menu, and editor behaviors on the
-  shared popup runtime instead of in `display-popup`
+- Live PTY-backed popup job runtime
+- Format-aware coordinate rules
+- Popup job, mouse, resize, menu, and editor behaviors

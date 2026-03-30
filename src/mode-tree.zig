@@ -185,6 +185,28 @@ pub const mode_tree_get_screen = Data.getScreen;
 pub const mode_tree_search_free = removeRef;
 pub const mode_tree_filter_free = removeRef;
 
+pub const mode_tree_build_lines = buildLines;
+pub const mode_tree_clear_lines = clearLines;
+pub const mode_tree_find_item = findItem;
+pub const mode_tree_free_item = freeItem;
+pub const mode_tree_free_items = freeItems;
+pub const mode_tree_search_forward = searchForward;
+pub const mode_tree_search_backward = searchBackward;
+
+/// tmux `mode_tree_clear_tagged(mtl)` — clear `tagged` on a list subtree.
+pub fn mode_tree_clear_tagged(mtl: *std.ArrayList(*Item)) void {
+    clearTaggedRecursive(mtl);
+}
+
+/// tmux `mode_tree_get_tag(mtd, tag, found)`.
+pub fn mode_tree_get_tag(mtd: *Data, tag: u64, found: *u32) bool {
+    if (findLineByTag(mtd, tag)) |idx| {
+        found.* = idx;
+        return true;
+    }
+    return false;
+}
+
 pub fn mode_tree_set_height(mtd: *Data) void {
     setHeight(mtd);
 }

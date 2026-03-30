@@ -867,6 +867,13 @@ pub fn status_prompt_clear(c: *T.Client) void {
     status_runtime.status_prompt_leave(c);
 }
 
+/// Handle a raw key code in the prompt (tmux `status_prompt_key`).
+/// zmux routes keys through `key_event`; this wrapper exists for C-name parity.
+pub fn status_prompt_key(c: *T.Client, key: T.key_code) i32 {
+    var event = T.key_event{ .key = key };
+    return @intFromBool(status_prompt_handle_key(c, &event));
+}
+
 pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
     const state = find_state(c) orelse return false;
     const masked = event.key & T.KEYC_MASK_KEY;
@@ -1429,10 +1436,10 @@ pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayLi
 
     for (cmd_mod.cmd_entries()) |entry| {
         if (entry.name.len >= slen and std.mem.eql(u8, entry.name[0..slen], word))
-            completionAddUnique(&list, entry.name);
+            status_prompt_add_list(&list, entry.name);
         if (entry.alias) |alias| {
             if (alias.len >= slen and std.mem.eql(u8, alias[0..slen], word))
-                completionAddUnique(&list, alias);
+                status_prompt_add_list(&list, alias);
         }
     }
 
@@ -1443,7 +1450,7 @@ pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayLi
             if (std.mem.indexOfScalar(u8, value, '=')) |eq_pos| {
                 const alias_name = value[0..eq_pos];
                 if (alias_name.len >= slen and std.mem.eql(u8, alias_name[0..slen], word))
-                    completionAddUnique(&list, alias_name);
+                    status_prompt_add_list(&list, alias_name);
             }
             a = opts.options_array_next(v, item);
         }
@@ -1453,7 +1460,7 @@ pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayLi
 
     for (options_table.options_table) |*oe| {
         if (oe.name.len >= slen and std.mem.eql(u8, oe.name[0..slen], word))
-            completionAddUnique(&list, oe.name);
+            status_prompt_add_list(&list, oe.name);
     }
 
     const layouts = [_][]const u8{
@@ -1464,7 +1471,7 @@ pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayLi
     };
     for (&layouts) |layout| {
         if (layout.len >= slen and std.mem.eql(u8, layout[0..slen], word))
-            completionAddUnique(&list, layout);
+            status_prompt_add_list(&list, layout);
     }
 
     return list;
@@ -1486,7 +1493,7 @@ pub fn status_prompt_complete_session(
         {
             const with_colon = std.fmt.allocPrint(xm.allocator, "{s}:", .{sess.name}) catch unreachable;
             defer xm.allocator.free(with_colon);
-            completionAddUnique(list, with_colon);
+            status_prompt_add_list(list, with_colon);
         } else if (s.len > 0 and s[0] == '$') {
             const id_str = std.fmt.allocPrint(xm.allocator, "{d}", .{sess.id}) catch unreachable;
             defer xm.allocator.free(id_str);
@@ -1496,12 +1503,12 @@ pub fn status_prompt_complete_session(
             {
                 const with_dollar = std.fmt.allocPrint(xm.allocator, "${s}:", .{id_str}) catch unreachable;
                 defer xm.allocator.free(with_dollar);
-                completionAddUnique(list, with_dollar);
+                status_prompt_add_list(list, with_dollar);
             }
         }
     }
 
-    const out = completePrefix(list.items) orelse return null;
+    const out = status_prompt_complete_prefix(list.items) orelse return null;
     if (flag != 0) {
         const tmp = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ flag, out }) catch unreachable;
         xm.allocator.free(out);
@@ -1559,7 +1566,7 @@ pub fn status_prompt_complete_window_menu(
     }
 
     const const_items = @as([][]const u8, items.items);
-    return completePrefix(const_items);
+    return status_prompt_complete_prefix(const_items);
 }
 
 /// Show the completion list as a popup menu
@@ -1614,7 +1621,7 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
             return std.fmt.allocPrint(xm.allocator, "{s} ", .{list.items[0]}) catch unreachable;
 
         status_prompt_complete_sort(&list);
-        const prefix = completePrefix(list.items);
+        const prefix = status_prompt_complete_prefix(list.items);
         if (prefix) |p| {
             if (std.mem.eql(u8, word, p)) {
                 xm.allocator.free(p);
@@ -1679,11 +1686,11 @@ pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
     // Match against command names and aliases
     for (cmd_mod.cmd_entries()) |entry| {
         if (entry.name.len >= slen and std.mem.eql(u8, entry.name[0..slen], word)) {
-            completionAddUnique(&list, entry.name);
+            status_prompt_add_list(&list, entry.name);
         }
         if (entry.alias) |alias| {
             if (alias.len >= slen and std.mem.eql(u8, alias[0..slen], word)) {
-                completionAddUnique(&list, alias);
+                status_prompt_add_list(&list, alias);
             }
         }
     }
@@ -1699,14 +1706,15 @@ pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
     };
     for (&layouts) |layout| {
         if (layout.len >= slen and std.mem.eql(u8, layout[0..slen], word)) {
-            completionAddUnique(&list, layout);
+            status_prompt_add_list(&list, layout);
         }
     }
 
     return completeFromList(list.items);
 }
 
-fn completionAddUnique(list: *std.ArrayList([]const u8), s: []const u8) void {
+/// Add a unique string to a completion list (tmux `status_prompt_add_list`).
+pub fn status_prompt_add_list(list: *std.ArrayList([]const u8), s: []const u8) void {
     for (list.items) |item| {
         if (std.mem.eql(u8, item, s)) return;
     }
@@ -1718,10 +1726,11 @@ fn completeFromList(items: [][]const u8) ?[]u8 {
     if (items.len == 1) {
         return std.fmt.allocPrint(xm.allocator, "{s} ", .{items[0]}) catch unreachable;
     }
-    return completePrefix(items);
+    return status_prompt_complete_prefix(items);
 }
 
-fn completePrefix(items: [][]const u8) ?[]u8 {
+/// Longest common prefix of completion candidates (tmux `status_prompt_complete_prefix`).
+pub fn status_prompt_complete_prefix(items: [][]const u8) ?[]u8 {
     if (items.len == 0) return null;
     var shortest: usize = items[0].len;
     for (items[1..]) |item| shortest = @min(shortest, item.len);

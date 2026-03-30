@@ -28,6 +28,8 @@ const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
+const tty_draw_mod = @import("tty-draw.zig");
+const hyperlinks_mod = @import("hyperlinks.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -1664,6 +1666,159 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
 
     _ = file_mod.sendPeerStream(peer, 1, payload);
+}
+
+// ── C-name stubs: tmux screen-write / overlay API ─────────────────────────
+// zmux redraws via tty-draw.zig; these symbols match tmux names for porting
+// and cross-reference. `tty_ctx` is represented as opaque until a full port
+// wires screen-write → tty.
+
+/// Stub stand-in for tmux `visible_range` / `visible_ranges`.
+pub const VisibleRange = struct {
+    px: u32 = 0,
+    nx: u32 = 0,
+};
+
+pub const VisibleRanges = struct {
+    ranges: [1]VisibleRange = .{.{ .px = 0, .nx = 0 }},
+    used: u32 = 0,
+};
+
+threadlocal var tty_stub_overlay_storage: VisibleRanges = .{};
+
+/// tmux `tty_draw_line` — implementation lives in tty-draw.zig (stub body there).
+pub const tty_draw_line = tty_draw_mod.tty_draw_line;
+
+/// tmux `tty_draw_pane(tty, ctx, py)` — no live pane row dispatch in tty.zig.
+pub fn tty_draw_pane(_: *T.Tty, _: *const anyopaque, _: u32) void {}
+
+pub fn tty_check_overlay(_: *T.Tty, _: u32, _: u32) i32 {
+    return 1;
+}
+
+pub fn tty_check_overlay_range(tty: *T.Tty, px: u32, py: u32, nx: u32) *VisibleRanges {
+    _ = tty;
+    _ = py;
+    tty_stub_overlay_storage.ranges[0] = .{ .px = px, .nx = nx };
+    tty_stub_overlay_storage.used = 1;
+    return &tty_stub_overlay_storage;
+}
+
+pub fn tty_update_cursor(_: *T.Tty, mode: i32, _: ?*T.Screen) i32 {
+    return mode;
+}
+
+pub fn tty_update_mode(_: *T.Tty, _: i32, _: ?*T.Screen) void {}
+
+pub fn tty_sync_start(_: *T.Tty) void {}
+
+pub fn tty_sync_end(_: *T.Tty) void {}
+
+pub fn tty_default_colours(gc: *T.GridCell, wp: *T.WindowPane) void {
+    gc.* = T.grid_default_cell;
+    gc.fg = wp.palette.fg;
+    gc.bg = wp.palette.bg;
+}
+
+pub fn tty_default_attributes(
+    _: *T.Tty,
+    _: *const T.GridCell,
+    _: *T.ColourPalette,
+    _: u32,
+    _: ?*hyperlinks_mod.Hyperlinks,
+) void {}
+
+pub fn tty_set_selection(_: *T.Tty, _: ?[*:0]const u8, _: ?[*]const u8, _: usize) void {}
+
+pub fn tty_hyperlink(_: *T.Tty, _: *const T.GridCell, _: ?*hyperlinks_mod.Hyperlinks) void {}
+
+pub fn tty_cmd_insertcharacter(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_deletecharacter(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearcharacter(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_insertline(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_deleteline(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearline(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearendofline(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearstartofline(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_reverseindex(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_linefeed(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_scrollup(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_scrolldown(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearendofscreen(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearstartofscreen(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_clearscreen(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_alignmenttest(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_cell(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_cells(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_setselection(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_rawstring(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
+}
+pub fn tty_cmd_syncstart(tty: *T.Tty, ctx: *const anyopaque) void {
+    _ = tty;
+    _ = ctx;
 }
 
 test "tty_open starts reduced tty lifecycle" {

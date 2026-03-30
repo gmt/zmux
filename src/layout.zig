@@ -1413,6 +1413,21 @@ fn apply_panes(lc: *Cell) void {
         apply_panes(child);
 }
 
+fn apply_panes_skip(lc: *Cell, skip: ?*T.WindowPane) void {
+    if (lc.type == .windowpane) {
+        const wp = lc.wp orelse return;
+        if (skip) |s| if (s == wp) return;
+        wp.xoff = lc.xoff;
+        wp.yoff = lc.yoff;
+        wp.sx = lc.sx;
+        wp.sy = lc.sy;
+        return;
+    }
+
+    for (lc.cells.items) |child|
+        apply_panes_skip(child, skip);
+}
+
 fn is_last_child(parent: *Cell, child: *Cell) bool {
     return parent.cells.items[parent.cells.items.len - 1] == child;
 }
@@ -1438,3 +1453,298 @@ fn previous_sibling(parent: *Cell, child: *Cell) ?*Cell {
     }
     return null;
 }
+
+// ── tmux C-name wrappers (layout.c) for audit cross-reference ─────────────
+
+pub const layout_resize_pane = resize_pane;
+pub const layout_resize_pane_to = resize_pane_to;
+pub const layout_spread_out = spread_out;
+
+pub fn layout_create_cell(lcparent: ?*T.LayoutCell) *T.LayoutCell {
+    const lc = xm.allocator.create(T.LayoutCell) catch unreachable;
+    lc.* = .{
+        .type = .windowpane,
+        .parent = lcparent,
+        .sx = std.math.maxInt(u32),
+        .sy = std.math.maxInt(u32),
+        .xoff = std.math.maxInt(u32),
+        .yoff = std.math.maxInt(u32),
+        .wp = null,
+        .cells = .{},
+    };
+    return lc;
+}
+
+pub fn layout_free_cell(lc: *T.LayoutCell) void {
+    switch (lc.type) {
+        .leftright, .topbottom => {
+            for (lc.cells.items) |child| {
+                layout_free_cell(child);
+            }
+            lc.cells.deinit(xm.allocator);
+        },
+        .windowpane => {
+            if (lc.wp) |wp| {
+                wp.layout_cell = null;
+            }
+        },
+    }
+    xm.allocator.destroy(lc);
+}
+
+pub fn layout_make_leaf(lc: *T.LayoutCell, wp: *T.WindowPane) void {
+    switch (lc.type) {
+        .leftright, .topbottom => {
+            for (lc.cells.items) |child| {
+                layout_free_cell(child);
+            }
+            lc.cells.deinit(xm.allocator);
+        },
+        .windowpane => {},
+    }
+    lc.type = .windowpane;
+    lc.cells = .{};
+    if (lc.wp) |old| {
+        if (old != wp) old.layout_cell = null;
+    }
+    wp.layout_cell = lc;
+    lc.wp = wp;
+}
+
+pub fn layout_make_node(lc: *T.LayoutCell, type_: T.LayoutType) void {
+    std.debug.assert(type_ != .windowpane);
+    if (lc.wp) |wp| {
+        wp.layout_cell = null;
+        lc.wp = null;
+    }
+    switch (lc.type) {
+        .leftright, .topbottom => {
+            for (lc.cells.items) |child| {
+                layout_free_cell(child);
+            }
+            lc.cells.deinit(xm.allocator);
+        },
+        .windowpane => {},
+    }
+    lc.type = type_;
+    lc.cells = .{};
+}
+
+pub fn layout_set_size(lc: *T.LayoutCell, sx: u32, sy: u32, xoff: u32, yoff: u32) void {
+    lc.sx = sx;
+    lc.sy = sy;
+    lc.xoff = xoff;
+    lc.yoff = yoff;
+}
+
+pub fn layout_fix_offsets(w: *T.Window) void {
+    const lc = w.layout_root orelse return;
+    lc.xoff = 0;
+    lc.yoff = 0;
+    fix_offsets1(lc);
+}
+
+pub fn layout_fix_panes(w: *T.Window, skip: ?*T.WindowPane) void {
+    const root = w.layout_root orelse return;
+    apply_panes_skip(root, skip);
+}
+
+pub fn layout_resize(w: *T.Window, sx: u32, sy: u32) void {
+    const lc = w.layout_root orelse return;
+    var xchange: i32 = @as(i32, @intCast(sx)) - @as(i32, @intCast(lc.sx));
+    const xlimit: i32 = @intCast(resize_check(lc, .leftright));
+    if (xchange < 0 and xchange < -xlimit) xchange = -xlimit;
+    if (xlimit == 0) {
+        if (sx <= lc.sx)
+            xchange = 0
+        else
+            xchange = @as(i32, @intCast(sx)) - @as(i32, @intCast(lc.sx));
+    }
+    if (xchange != 0)
+        resize_adjust(lc, .leftright, xchange);
+
+    var ychange: i32 = @as(i32, @intCast(sy)) - @as(i32, @intCast(lc.sy));
+    const ylimit: i32 = @intCast(resize_check(lc, .topbottom));
+    if (ychange < 0 and ychange < -ylimit) ychange = -ylimit;
+    if (ylimit == 0) {
+        if (sy <= lc.sy)
+            ychange = 0
+        else
+            ychange = @as(i32, @intCast(sy)) - @as(i32, @intCast(lc.sy));
+    }
+    if (ychange != 0)
+        resize_adjust(lc, .topbottom, ychange);
+
+    layout_fix_offsets(w);
+    layout_fix_panes(w, null);
+}
+
+pub fn layout_resize_check(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType) u32 {
+    _ = w;
+    return resize_check(lc, type_);
+}
+
+pub fn layout_resize_adjust(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType, change: i32) void {
+    _ = w;
+    resize_adjust(lc, type_, change);
+}
+
+pub fn layout_count_cells(lc: *T.LayoutCell) u32 {
+    return @intCast(count_cells(lc));
+}
+
+pub fn layout_destroy_cell(w: *T.Window, lc: *T.LayoutCell) void {
+    const lcparent_or_null = lc.parent;
+    if (lcparent_or_null == null) {
+        layout_free_cell(lc);
+        w.layout_root = null;
+        return;
+    }
+    const parent = lcparent_or_null.?;
+    const idx = child_index(parent, lc) orelse return;
+
+    const lcother: ?*T.LayoutCell = if (parent.cells.items.len > 1)
+        if (idx == 0) parent.cells.items[1] else parent.cells.items[idx - 1]
+    else
+        null;
+
+    if (lcother) |other| {
+        if (parent.type == .leftright)
+            layout_resize_adjust(w, other, .leftright, @intCast(lc.sx + 1))
+        else
+            layout_resize_adjust(w, other, .topbottom, @intCast(lc.sy + 1));
+    }
+
+    _ = parent.cells.orderedRemove(idx);
+    layout_free_cell(lc);
+
+    if (parent.cells.items.len != 1)
+        return;
+
+    const survivor = parent.cells.items[0];
+    _ = parent.cells.orderedRemove(0);
+
+    survivor.parent = parent.parent;
+    if (survivor.parent) |grandparent| {
+        const parent_idx = child_index(grandparent, parent) orelse return;
+        grandparent.cells.items[parent_idx] = survivor;
+    } else {
+        survivor.xoff = 0;
+        survivor.yoff = 0;
+        w.layout_root = survivor;
+    }
+    layout_free_cell(parent);
+}
+
+pub fn layout_close_pane(wp: *T.WindowPane) void {
+    const w = wp.window;
+    const lc = wp.layout_cell orelse return;
+    layout_destroy_cell(w, lc);
+    if (w.layout_root != null) {
+        layout_fix_offsets(w);
+        layout_fix_panes(w, null);
+    }
+}
+
+pub fn layout_init(w: *T.Window, wp: *T.WindowPane) void {
+    const lc = layout_create_cell(null);
+    w.layout_root = lc;
+    layout_set_size(lc, w.sx, w.sy, 0, 0);
+    layout_make_leaf(lc, wp);
+    layout_fix_panes(w, null);
+}
+
+pub fn layout_free(w: *T.Window) void {
+    if (w.layout_root) |root| {
+        layout_free_cell(root);
+        w.layout_root = null;
+    }
+}
+
+pub fn layout_cell_is_top(w: *T.Window, lc: *T.LayoutCell) bool {
+    var cur = lc;
+    while (cur != w.layout_root) {
+        const next = cur.parent orelse return true;
+        if (next.type == .topbottom and next.cells.items.len > 0 and next.cells.items[0] != cur)
+            return false;
+        cur = next;
+    }
+    return true;
+}
+
+pub fn layout_cell_is_bottom(w: *T.Window, lc: *T.LayoutCell) bool {
+    var cur = lc;
+    while (cur != w.layout_root) {
+        const next = cur.parent orelse return true;
+        if (next.type == .topbottom and next.cells.items.len > 0) {
+            const last = next.cells.items[next.cells.items.len - 1];
+            if (last != cur) return false;
+        }
+        cur = next;
+    }
+    return true;
+}
+
+pub fn layout_add_horizontal_border(w: *T.Window, lc: *T.LayoutCell, status: i32) bool {
+    if (status == T.PANE_STATUS_TOP)
+        return layout_cell_is_top(w, lc);
+    if (status == T.PANE_STATUS_BOTTOM)
+        return layout_cell_is_bottom(w, lc);
+    return false;
+}
+
+pub fn layout_spread_cell(w: *T.Window, parent: *T.LayoutCell) i32 {
+    _ = w;
+    return if (spread_cell(parent)) 1 else 0;
+}
+
+pub fn layout_assign_pane(lc: *T.LayoutCell, wp: *T.WindowPane, do_not_resize: i32) void {
+    layout_make_leaf(lc, wp);
+    if (do_not_resize != 0)
+        layout_fix_panes(wp.window, wp)
+    else
+        layout_fix_panes(wp.window, null);
+}
+
+pub fn layout_search_by_border(lc: *T.LayoutCell, x: u32, y: u32) ?*T.LayoutCell {
+    return search_by_border(lc, x, y);
+}
+
+pub fn layout_resize_layout(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType, change: i32, opposite: bool) bool {
+    const root = w.layout_root orelse return false;
+    return resize_layout(root, lc, type_, change, opposite);
+}
+
+pub fn layout_resize_pane_grow(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType, needed: i32, opposite: bool) i32 {
+    _ = w;
+    return resize_pane_grow(lc, type_, needed, opposite);
+}
+
+pub fn layout_resize_pane_shrink(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType, needed: i32) i32 {
+    _ = w;
+    return resize_pane_shrink(lc, type_, needed);
+}
+
+pub fn layout_new_pane_size(
+    _: *T.Window,
+    _: u32,
+    _: *T.LayoutCell,
+    _: T.LayoutType,
+    _: u32,
+    _: u32,
+    _: u32,
+) u32 {
+    return T.PANE_MINIMUM;
+}
+
+pub fn layout_set_size_check(_: *T.Window, _: *T.LayoutCell, _: T.LayoutType, _: i32) bool {
+    return true;
+}
+
+pub fn layout_resize_child_cells(_: *T.Window, _: *T.LayoutCell) void {}
+
+pub fn layout_split_pane(_: *T.WindowPane, _: T.LayoutType, _: i32, _: i32, _: i32, _: i32) ?*T.LayoutCell {
+    return null;
+}
+
+pub fn layout_print_cell(_: *const T.LayoutCell, _: []const u8, _: u32) void {}

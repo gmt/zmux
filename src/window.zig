@@ -798,6 +798,12 @@ pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {
             w.manual_sy = clamped;
         }
     }
+
+    if (window_pane_mode(wp)) |wme| {
+        const clock_mod = @import("window-clock.zig");
+        if (wme.mode == &clock_mod.window_clock_mode)
+            clock_mod.window_clock_resize(wme, wp.sx, wp.sy);
+    }
 }
 
 pub fn window_pane_reset_contents(wp: *T.WindowPane) void {

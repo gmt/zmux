@@ -1222,6 +1222,137 @@ fn drawAsciiToSegment(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, ch: u8) void {
     screen_write.putCell(ctx, gc);
 }
 
+// ── tmux format-draw.c names (delegate to internal layout helpers) ────────
+
+pub fn format_free_range(frs: *DrawRanges, index: usize) void {
+    if (index >= frs.items.len) return;
+    _ = frs.orderedRemove(index);
+}
+
+pub fn format_update_ranges(frs: *DrawRanges, offset: u32, start: u32, width: u32) void {
+    var i: usize = 0;
+    const clip_end = start + width;
+    while (i < frs.items.len) {
+        var fr = frs.items[i];
+        if (fr.end <= start or fr.start >= clip_end) {
+            _ = frs.orderedRemove(i);
+            continue;
+        }
+        if (fr.start < start) fr.start = start;
+        if (fr.end > clip_end) fr.end = clip_end;
+        if (fr.start == fr.end) {
+            _ = frs.orderedRemove(i);
+            continue;
+        }
+        fr.start = fr.start - start + offset;
+        fr.end = fr.end - start + offset;
+        frs.items[i] = fr;
+        i += 1;
+    }
+}
+
+pub fn format_draw_put(
+    ctx: *T.ScreenWriteCtx,
+    target_x: u32,
+    target_y: u32,
+    src: *T.Screen,
+    ranges: ?*DrawRanges,
+    offset: u32,
+    start: u32,
+    width: u32,
+) void {
+    copyScreenRaw(ctx.s, target_x + offset, target_y, src, start, width);
+    if (ranges) |out| format_update_ranges(out, offset, start, width);
+}
+
+pub fn format_draw_put_list(
+    ctx: *T.ScreenWriteCtx,
+    target_x: u32,
+    target_y: u32,
+    offset: u32,
+    width: u32,
+    screens: [segment_count]*T.Screen,
+    focus_start: i32,
+    focus_end: i32,
+    ranges: ?*DrawRanges,
+) void {
+    copyList(
+        ctx,
+        target_x,
+        target_y,
+        offset,
+        width,
+        screens,
+        @intCast(focus_start),
+        @intCast(focus_end),
+        &.{},
+        ranges,
+    );
+}
+
+pub fn format_draw_none(
+    ctx: *T.ScreenWriteCtx,
+    available: u32,
+    target_x: u32,
+    target_y: u32,
+    screens: [segment_count]*T.Screen,
+    ranges: ?*DrawRanges,
+) void {
+    drawWithoutList(ctx, target_x, target_y, available, screens, &.{}, ranges);
+}
+
+pub fn format_draw_left(
+    ctx: *T.ScreenWriteCtx,
+    available: u32,
+    target_x: u32,
+    target_y: u32,
+    screens: [segment_count]*T.Screen,
+    focus_start: i32,
+    focus_end: i32,
+    ranges: ?*DrawRanges,
+) void {
+    drawWithLeftList(ctx, target_x, target_y, available, screens, focus_start, focus_end, &.{}, ranges);
+}
+
+pub fn format_draw_centre(
+    ctx: *T.ScreenWriteCtx,
+    available: u32,
+    target_x: u32,
+    target_y: u32,
+    screens: [segment_count]*T.Screen,
+    focus_start: i32,
+    focus_end: i32,
+    ranges: ?*DrawRanges,
+) void {
+    drawWithCentreList(ctx, target_x, target_y, available, screens, focus_start, focus_end, &.{}, ranges);
+}
+
+pub fn format_draw_right(
+    ctx: *T.ScreenWriteCtx,
+    available: u32,
+    target_x: u32,
+    target_y: u32,
+    screens: [segment_count]*T.Screen,
+    focus_start: i32,
+    focus_end: i32,
+    ranges: ?*DrawRanges,
+) void {
+    drawWithRightList(ctx, target_x, target_y, available, screens, focus_start, focus_end, &.{}, ranges);
+}
+
+pub fn format_draw_absolute_centre(
+    ctx: *T.ScreenWriteCtx,
+    available: u32,
+    target_x: u32,
+    target_y: u32,
+    screens: [segment_count]*T.Screen,
+    focus_start: i32,
+    focus_end: i32,
+    ranges: ?*DrawRanges,
+) void {
+    drawWithAbsoluteCentreList(ctx, target_x, target_y, available, screens, focus_start, focus_end, &.{}, ranges);
+}
+
 test "format_trim_left and format_trim_right respect display width and #[styles]" {
     {
         const out = format_trim_left("hello", 3);

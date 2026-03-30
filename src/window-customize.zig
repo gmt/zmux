@@ -949,6 +949,19 @@ fn freeItems(data: *CustomizeModeData) void {
 // Zig-idiomatic name the wrapper simply delegates; where the tmux
 // function has no equivalent yet a minimal stub is provided.
 
+/// tmux: `window_customize_get_key` — resolve key table + binding for a customize item.
+pub fn window_customize_get_key(
+    item: *OptionItem,
+    ktp: ?**T.KeyTable,
+    bdp: ?**T.KeyBinding,
+) bool {
+    _ = item;
+    _ = ktp;
+    _ = bdp;
+    // Options-only customize mode in zmux has no per-item key/table; key UI is unported.
+    return false;
+}
+
 /// tmux: window_customize_init – enter options/customize mode.
 pub const window_customize_init = enterMode;
 

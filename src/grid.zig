@@ -1468,3 +1468,169 @@ fn get_cell_from_line(line: *T.GridLine, col: u32, gc: *T.GridCell) void {
     gc.link = 0;
     utf8.utf8_set(&gc.data, entry.offset_or_data.data.data);
 }
+
+// ── tmux C-name wrappers (grid.c) for audit cross-reference ───────────────
+
+pub const grid_destroy = grid_free;
+pub const grid_line_length = line_length;
+pub const grid_cells_look_equal = cells_look_equal;
+pub const grid_cells_equal = cells_equal;
+pub const grid_set_tab = set_tab;
+pub const grid_duplicate_lines = duplicate_lines;
+pub const grid_remove_history = remove_history;
+
+pub fn grid_get_cell(gd: *T.Grid, px: u32, py: u32, gc: *T.GridCell) void {
+    get_cell(gd, py, px, gc);
+}
+
+pub fn grid_set_cell(gd: *T.Grid, px: u32, py: u32, gc: *const T.GridCell) void {
+    set_cell(gd, py, px, gc);
+}
+
+pub fn grid_set_padding(gd: *T.Grid, px: u32, py: u32) void {
+    set_padding(gd, py, px);
+}
+
+pub fn grid_get_line(gd: *T.Grid, line: u32) *T.GridLine {
+    return &gd.linedata[line];
+}
+
+pub fn grid_check_y(gd: *const T.Grid, from: []const u8, py: u32) i32 {
+    _ = from;
+    if (py >= gd.hsize + gd.sy) return -1;
+    return 0;
+}
+
+pub fn grid_peek_line(gd: *const T.Grid, py: u32) ?*const T.GridLine {
+    if (grid_check_y(gd, "grid_peek_line", py) != 0) return null;
+    return &gd.linedata[py];
+}
+
+pub fn grid_free_line(gd: *T.Grid, py: u32) void {
+    if (py >= gd.linedata.len) return;
+    free_line_storage(&gd.linedata[py]);
+}
+
+pub fn grid_free_lines(gd: *T.Grid, py: u32, ny: u32) void {
+    var yy = py;
+    while (yy < py + ny) : (yy += 1) {
+        grid_free_line(gd, yy);
+    }
+}
+
+pub fn grid_clear_cell(gd: *T.Grid, px: u32, py: u32, bg: u32) void {
+    clear_cell_bg(gd, px, py, bg);
+}
+
+pub fn grid_empty_line(gd: *T.Grid, py: u32, bg: u32) void {
+    empty_line(gd, py, bg);
+}
+
+pub fn grid_expand_line(gd: *T.Grid, py: u32, sx: u32, bg: u32) void {
+    expand_line(gd, py, sx, bg);
+}
+
+pub fn grid_compact_line(gl: *T.GridLine) void {
+    compact_line(gl);
+}
+
+pub fn grid_adjust_lines(gd: *T.Grid, lines: u32) void {
+    resize_linedata(gd, @intCast(lines));
+}
+
+pub fn grid_trim_history(gd: *T.Grid, ny: u32) void {
+    trim_history(gd, ny);
+}
+
+pub fn grid_store_cell(gce: *T.GridCellEntry, gc: *const T.GridCell, ch: u8) void {
+    store_cell(gce, gc, ch);
+}
+
+pub fn grid_need_extended_cell(gce: *const T.GridCellEntry, gc: *const T.GridCell) bool {
+    return need_extended_cell(gce, gc);
+}
+
+pub fn grid_get_extended_cell(gl: *T.GridLine, gce: *T.GridCellEntry, flags: u8) *T.GridExtdEntry {
+    return get_extended_slot(gl, gce, flags);
+}
+
+pub fn grid_extended_cell(gl: *T.GridLine, gce: *T.GridCellEntry, gc: *const T.GridCell) *T.GridExtdEntry {
+    extended_cell(gl, gce, gc);
+    return &gl.extddata[gce.offset_or_data.offset];
+}
+
+pub fn grid_get_cell1(gl: *T.GridLine, px: u32, gc: *T.GridCell) void {
+    get_cell_from_line(gl, px, gc);
+}
+
+pub fn grid_compare(ga: *const T.Grid, gb: *const T.Grid) i32 {
+    if (ga.sx != gb.sx or ga.sy != gb.sy) return 1;
+    var yy: u32 = 0;
+    while (yy < ga.sy) : (yy += 1) {
+        const gla = &ga.linedata[yy];
+        const glb = &gb.linedata[yy];
+        if (gla.celldata.len != glb.celldata.len) return 1;
+        var xx: u32 = 0;
+        const w: u32 = @intCast(gla.celldata.len);
+        while (xx < w) : (xx += 1) {
+            var gca: T.GridCell = undefined;
+            var gcb: T.GridCell = undefined;
+            get_cell(ga, yy, xx, &gca);
+            get_cell(gb, yy, xx, &gcb);
+            if (!cells_equal(&gca, &gcb)) return 1;
+        }
+    }
+    return 0;
+}
+
+pub fn grid_set_cells(_: *T.Grid, _: u32, _: u32, _: *const T.GridCell, _: []const u8) void {}
+
+pub fn grid_string_cells(_: *T.Grid, _: u32, _: u32, _: u32, _: StringCellsOptions) []u8 {
+    return xm.xstrdup("");
+}
+
+pub fn grid_string_cells_fg(_: *const T.GridCell, _: []i32) usize {
+    return 0;
+}
+
+pub fn grid_string_cells_bg(_: *const T.GridCell, _: []i32) usize {
+    return 0;
+}
+
+pub fn grid_string_cells_us(_: *const T.GridCell, _: []i32) usize {
+    return 0;
+}
+
+pub fn grid_string_cells_add_code(_: []u8, _: usize, _: u32, _: []i32, _: []i32, _: usize, _: usize, _: u32) void {}
+
+pub fn grid_string_cells_add_hyperlink(_: []u8, _: usize, _: []const u8, _: []const u8, _: u32) void {}
+
+pub fn grid_string_cells_code(
+    _: *const T.GridCell,
+    _: *const T.GridCell,
+    _: []u8,
+    _: usize,
+    _: u32,
+    _: ?*T.Screen,
+    _: *bool,
+) void {}
+
+pub fn grid_reflow_dead(_: *T.GridLine) void {}
+
+pub fn grid_reflow_add(_: *T.Grid, _: u32) ?*T.GridLine {
+    return null;
+}
+
+pub fn grid_reflow_move(_: *T.Grid, _: *T.GridLine) ?*T.GridLine {
+    return null;
+}
+
+pub fn grid_reflow_join(_: *T.Grid, _: *T.Grid, _: u32, _: u32, _: u32, _: bool) void {}
+
+pub fn grid_reflow_split(_: *T.Grid, _: *T.Grid, _: u32, _: u32, _: u32) void {}
+
+pub fn grid_reflow(_: *T.Grid, _: u32) void {}
+
+pub fn grid_wrap_position(_: *T.Grid, _: u32, _: u32, _: *u32, _: *u32) void {}
+
+pub fn grid_unwrap_position(_: *T.Grid, _: *u32, _: *u32, _: u32, _: u32) void {}

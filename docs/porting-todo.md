@@ -48,10 +48,15 @@ Each item describes what zmux does and what it lacks.
 
 ## Window Copy Mode
 
-- ~200 `window_copy_*` functions are stubs or have stub bodies
-  (parameter discards, hardcoded returns). The copy-mode engine
-  lacks cursor movement, selection, search, scroll, copy/pipe,
-  and draw implementations.
+- Core helpers, cursor movement, selection, scroll, and draw layers
+  have real implementations.
+- 14 functions remain blocked:
+  - `cursor_hyperlink_cb`, `cursor_word_cb`, `cursor_line_cb`,
+    `search_match_cb` — need `format_get_pane`
+  - `window_copy_formats` — needs `format_add`
+  - Regex search functions — need POSIX `regex_t` bridge
+  - Search mark management — `searchmark[]` array not in
+    `CopyModeData` struct
 
 ## Window Modes (tree, buffer, client, customize)
 

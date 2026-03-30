@@ -65,6 +65,200 @@ const ActiveRange = struct {
     string: [16]u8 = std.mem.zeroes([16]u8),
 };
 
+/// Byte index within `s` of the first `end_ch` at brace depth 0 (tmux `format_skip` for `#[…]` content).
+fn formatSkipTo(s: []const u8, end_ch: u8) ?usize {
+    var brackets: i32 = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{')
+            brackets += 1;
+        if (i + 1 < s.len and s[i] == '#') {
+            const c = s[i + 1];
+            if (c == ',' or c == '#' or c == '{' or c == '}' or c == ':') {
+                i += 1;
+                continue;
+            }
+        }
+        if (s[i] == '}') brackets -= 1;
+        if (brackets == 0 and s[i] == end_ch)
+            return i;
+        i += 1;
+    }
+    return null;
+}
+
+/// Leading run of `#` at `cp[0]` (tmux `format_leading_hashes`): `n` is the count of `#`,
+/// `leading_width` is display width of literal hashes, `end_skip` is the byte offset from
+/// `cp[0]` to the next scan position (C `end - cp`).
+pub fn format_leading_hashes(cp: []const u8) struct {
+    n: u32,
+    leading_width: u32,
+    end_skip: usize,
+} {
+    var n: u32 = 0;
+    while (n < cp.len and cp[n] == '#') n += 1;
+    if (n == 0) {
+        return .{ .n = 0, .leading_width = 0, .end_skip = 0 };
+    }
+    const n_usize: usize = @intCast(n);
+    if (n_usize >= cp.len or cp[n_usize] != '[') {
+        const width: u32 = if ((n % 2) == 0) n / 2 else n / 2 + 1;
+        return .{ .n = n, .leading_width = width, .end_skip = n_usize };
+    }
+    const leading_width = n / 2;
+    if ((n % 2) == 0) {
+        return .{ .n = n, .leading_width = leading_width, .end_skip = n_usize };
+    }
+    return .{ .n = n, .leading_width = leading_width, .end_skip = n_usize - 1 };
+}
+
+/// Whether `fr` matches the range described by `sy` (tmux `format_is_type`).
+pub fn format_is_type(fr: T.StyleRange, sy: *const T.Style) bool {
+    if (fr.type != sy.range_type) return false;
+    return switch (fr.type) {
+        .none, .left, .right => true,
+        .pane, .window, .session => fr.argument == sy.range_argument,
+        .user => std.mem.eql(u8, std.mem.sliceTo(&fr.string, 0), std.mem.sliceTo(&sy.range_string, 0)),
+    };
+}
+
+/// Emit `count` copies of `ch` as cells (tmux `format_draw_many`).
+pub fn format_draw_many(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, ch: u8, count: u32) void {
+    drawMany(ctx, gc, ch, count);
+}
+
+/// Trim on the left by display width, respecting `#[…]` style syntax (tmux `format_trim_left`).
+/// Caller frees with `xm.allocator` / `xfree` like other xmalloc-backed strings.
+pub fn format_trim_left(expanded: []const u8, limit: u32) []u8 {
+    var out: std.ArrayList(u8) = .{};
+    var width: u32 = 0;
+    var pos: usize = 0;
+    var decoder = utf8.Decoder.init();
+
+    while (pos < expanded.len) {
+        if (width >= limit) break;
+        if (expanded[pos] == '#') {
+            const lh = format_leading_hashes(expanded[pos..]);
+            var leading_width = lh.leading_width;
+            if (leading_width > limit - width)
+                leading_width = limit - width;
+            if (leading_width != 0) {
+                if (lh.n == 1) {
+                    out.append(xm.allocator, '#') catch unreachable;
+                } else {
+                    const run: usize = 2 * @as(usize, leading_width);
+                    var j: usize = 0;
+                    while (j < run) : (j += 1) {
+                        out.append(xm.allocator, '#') catch unreachable;
+                    }
+                }
+                width += leading_width;
+            }
+            pos += lh.end_skip;
+            if (pos < expanded.len and expanded[pos] == '#') {
+                if (pos + 2 > expanded.len) break;
+                const close_rel = formatSkipTo(expanded[pos + 2 ..], ']') orelse break;
+                const end_abs = pos + 2 + close_rel;
+                out.appendSlice(xm.allocator, expanded[pos .. end_abs + 1]) catch unreachable;
+                pos = end_abs + 1;
+            }
+            continue;
+        }
+
+        switch (decoder.feed(expanded[pos..])) {
+            .glyph => |step| {
+                const w = step.glyph.width();
+                if (width + w <= limit) {
+                    out.appendSlice(xm.allocator, expanded[pos .. pos + step.consumed]) catch unreachable;
+                }
+                width += w;
+                pos += step.consumed;
+            },
+            .invalid, .need_more => {
+                const ch = expanded[pos];
+                if (ch > 0x1f and ch < 0x7f) {
+                    if (width + 1 <= limit)
+                        out.append(xm.allocator, ch) catch unreachable;
+                    width += 1;
+                }
+                pos += 1;
+                decoder.reset();
+            },
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+/// Trim on the right by display width, respecting `#[…]` style syntax (tmux `format_trim_right`).
+pub fn format_trim_right(expanded: []const u8, limit: u32) []u8 {
+    const total_width = format_width(expanded);
+    if (total_width <= limit) return xm.xstrdup(expanded);
+    const skip = total_width - limit;
+
+    var out: std.ArrayList(u8) = .{};
+    var width: u32 = 0;
+    var pos: usize = 0;
+    var decoder = utf8.Decoder.init();
+
+    while (pos < expanded.len) {
+        if (expanded[pos] == '#') {
+            const lh = format_leading_hashes(expanded[pos..]);
+            var copy_width = lh.leading_width;
+            if (width <= skip) {
+                if (skip - width >= copy_width)
+                    copy_width = 0
+                else
+                    copy_width -= @as(u32, @intCast(skip - width));
+            }
+            if (copy_width != 0) {
+                if (lh.n == 1) {
+                    out.append(xm.allocator, '#') catch unreachable;
+                } else {
+                    const run: usize = 2 * @as(usize, copy_width);
+                    var j: usize = 0;
+                    while (j < run) : (j += 1) {
+                        out.append(xm.allocator, '#') catch unreachable;
+                    }
+                }
+            }
+            width += lh.leading_width;
+            pos += lh.end_skip;
+            if (pos < expanded.len and expanded[pos] == '#') {
+                if (pos + 2 > expanded.len) break;
+                const close_rel = formatSkipTo(expanded[pos + 2 ..], ']') orelse break;
+                const end_abs = pos + 2 + close_rel;
+                out.appendSlice(xm.allocator, expanded[pos .. end_abs + 1]) catch unreachable;
+                pos = end_abs + 1;
+            }
+            continue;
+        }
+
+        switch (decoder.feed(expanded[pos..])) {
+            .glyph => |step| {
+                const w = step.glyph.width();
+                if (width >= skip) {
+                    out.appendSlice(xm.allocator, expanded[pos .. pos + step.consumed]) catch unreachable;
+                }
+                width += w;
+                pos += step.consumed;
+            },
+            .invalid, .need_more => {
+                const ch = expanded[pos];
+                if (ch > 0x1f and ch < 0x7f) {
+                    if (width >= skip)
+                        out.append(xm.allocator, ch) catch unreachable;
+                    width += 1;
+                }
+                pos += 1;
+                decoder.reset();
+            },
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
 pub fn format_width(expanded: []const u8) u32 {
     var width: u32 = 0;
     var pos: usize = 0;
@@ -1026,6 +1220,41 @@ fn drawMany(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, ch: u8, count: u32) void {
 fn drawAsciiToSegment(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, ch: u8) void {
     utf8.utf8_set(&gc.data, ch);
     screen_write.putCell(ctx, gc);
+}
+
+test "format_trim_left and format_trim_right respect display width and #[styles]" {
+    {
+        const out = format_trim_left("hello", 3);
+        defer xm.allocator.free(out);
+        try std.testing.expectEqualStrings("hel", out);
+    }
+    {
+        const out = format_trim_right("hello", 3);
+        defer xm.allocator.free(out);
+        try std.testing.expectEqualStrings("llo", out);
+    }
+    {
+        const out = format_trim_left("#[fg=red]ab", 2);
+        defer xm.allocator.free(out);
+        try std.testing.expectEqualStrings("#[fg=red]ab", out);
+    }
+    {
+        const out = format_trim_right("#[fg=red]abcd", 2);
+        defer xm.allocator.free(out);
+        try std.testing.expectEqualStrings("#[fg=red]cd", out);
+    }
+}
+
+test "format_leading_hashes matches tmux hash runs" {
+    const a = format_leading_hashes("##[");
+    try std.testing.expectEqual(@as(u32, 2), a.n);
+    try std.testing.expectEqual(@as(u32, 1), a.leading_width);
+    try std.testing.expectEqual(@as(usize, 3), a.end_skip);
+
+    const b = format_leading_hashes("###");
+    try std.testing.expectEqual(@as(u32, 3), b.n);
+    try std.testing.expectEqual(@as(u32, 2), b.leading_width);
+    try std.testing.expectEqual(@as(usize, 3), b.end_skip);
 }
 
 test "format_width ignores style directives and counts utf8 cells" {

@@ -872,6 +872,234 @@ pub fn setselection(ctx: *T.ScreenWriteCtx, clip: []const u8, str: []const u8) v
     _ = str;
 }
 
+/// Origin-aware cursor positioning (screen_write_cursormove).
+/// Pass null for px or py to keep the current value unchanged.
+/// When `origin` is true and MODE_ORIGIN is set, py is relative to the
+/// scroll region (rupper).
+pub fn cursormove(ctx: *T.ScreenWriteCtx, px: ?u32, py_in: ?u32, origin: bool) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+
+    var py = py_in;
+    if (origin and py != null and (s.mode & T.MODE_ORIGIN) != 0) {
+        if (py.? > s.rlower -| s.rupper)
+            py = s.rlower
+        else
+            py = py.? + s.rupper;
+    }
+
+    if (px) |x| {
+        s.cx = @min(x, gd.sx - 1);
+    }
+    if (py) |y| {
+        s.cy = @min(y, gd.sy - 1);
+    }
+}
+
+/// Scroll-region-aware cursor up (screen_write_cursorup).
+/// When the cursor is above the scroll region, movement is clamped to row 0.
+/// When inside or below the region, movement is clamped to rupper.
+pub fn cursorup(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+
+    var ny: u32 = if (count == 0) 1 else count;
+    var cx = s.cx;
+    var cy = s.cy;
+
+    if (cy < s.rupper) {
+        if (ny > cy) ny = cy;
+    } else {
+        if (ny > cy - s.rupper) ny = cy - s.rupper;
+    }
+    if (cx == gd.sx) cx -= 1;
+
+    cy -= ny;
+    s.cx = cx;
+    s.cy = cy;
+}
+
+/// Scroll-region-aware cursor down (screen_write_cursordown).
+/// When the cursor is below the scroll region, movement is clamped to the
+/// last screen row.  When inside or above, it is clamped to rlower.
+pub fn cursordown(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0 or gd.sy == 0) return;
+
+    var ny: u32 = if (count == 0) 1 else count;
+    var cx = s.cx;
+    var cy = s.cy;
+
+    if (cy > s.rlower) {
+        const space = gd.sy -| 1 -| cy;
+        if (ny > space) ny = space;
+    } else {
+        if (ny > s.rlower - cy) ny = s.rlower - cy;
+    }
+    if (cx == gd.sx) {
+        cx -= 1;
+    } else if (ny == 0) {
+        return;
+    }
+
+    cy += ny;
+    s.cx = cx;
+    s.cy = cy;
+}
+
+/// Cursor right by count, clamped to the last column (screen_write_cursorright).
+pub fn cursorright(ctx: *T.ScreenWriteCtx, count: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sx == 0) return;
+
+    var nx: u32 = if (count == 0) 1 else count;
+    var cx = s.cx;
+
+    if (nx > gd.sx - 1 -| cx) nx = gd.sx - 1 -| cx;
+    if (nx == 0) return;
+
+    cx += nx;
+    s.cx = cx;
+}
+
+/// Cursor left by count, clamped to column 0 (screen_write_cursorleft).
+pub fn cursorleft(ctx: *T.ScreenWriteCtx, count: u32) void {
+    var nx: u32 = if (count == 0) 1 else count;
+    var cx = ctx.s.cx;
+
+    if (nx > cx) nx = cx;
+    if (nx == 0) return;
+
+    cx -= nx;
+    ctx.s.cx = cx;
+}
+
+/// Write single character with grid cell style (screen_write_putc).
+/// Copies `gcp`, sets the data to `ch`, then writes the cell.
+pub fn putc_styled(ctx: *T.ScreenWriteCtx, gcp: *const T.GridCell, ch: u8) void {
+    var gc = gcp.*;
+    utf8.utf8_set(&gc.data, ch);
+    putCell(ctx, &gc);
+}
+
+/// Write a string with a maximum display width, using a grid cell for
+/// style (screen_write_nputs / screen_write_vnputs).
+/// A non-positive `maxlen` means unlimited width.
+pub fn nputs(ctx: *T.ScreenWriteCtx, maxlen: i32, gcp: *const T.GridCell, str: []const u8) void {
+    var gc = gcp.*;
+    var size: usize = 0;
+    var decoder = utf8.Decoder.init();
+    var i: usize = 0;
+
+    while (i < str.len) {
+        const ch = str[i];
+
+        if (ch > 0x7f) {
+            switch (decoder.feed(str[i..])) {
+                .glyph => |step| {
+                    const ud = step.glyph.payload();
+                    const w: usize = ud.width;
+                    if (maxlen > 0 and size + w > @as(usize, @intCast(maxlen))) {
+                        while (size < @as(usize, @intCast(maxlen))) {
+                            putc_styled(ctx, &gc, ' ');
+                            size += 1;
+                        }
+                        return;
+                    }
+                    size += w;
+                    gc.data = ud.*;
+                    putCell(ctx, &gc);
+                    i += step.consumed;
+                },
+                .invalid => |consumed| {
+                    i += if (consumed == 0) 1 else consumed;
+                },
+                .need_more => return,
+            }
+            continue;
+        }
+
+        if (maxlen > 0 and size + 1 > @as(usize, @intCast(maxlen))) break;
+
+        if (ch == 0x01) {
+            gc.attr ^= T.GRID_ATTR_CHARSET;
+        } else if (ch == '\n') {
+            linefeed(ctx, false);
+            carriage_return(ctx);
+        } else if (ch == '\t' or (ch > 0x1f and ch < 0x7f)) {
+            size += 1;
+            putc_styled(ctx, &gc, ch);
+        }
+        i += 1;
+    }
+}
+
+/// Fast copy from source screen to destination (screen_write_fast_copy).
+/// Copies an nx-by-ny rectangle starting at (px, py) in `src` into the
+/// destination screen at the current cursor position.  The cursor is
+/// restored to its original position afterward.
+pub fn fast_copy(ctx: *T.ScreenWriteCtx, src: *const T.Screen, px: u32, py: u32, nx: u32, ny: u32) void {
+    const s = ctx.s;
+    const src_gd = src.grid;
+    if (nx == 0 or ny == 0) return;
+
+    const save_cx = s.cx;
+    const save_cy = s.cy;
+
+    var yy: u32 = 0;
+    while (yy < ny) : (yy += 1) {
+        const src_row = py + yy;
+        if (src_row >= src_gd.linedata.len) break;
+
+        s.cx = save_cx;
+        if (s.cy >= s.grid.linedata.len) break;
+
+        const src_used = grid.line_used(src_gd, src_row);
+        const dst_used = grid.line_used(s.grid, s.cy);
+
+        var xx: u32 = 0;
+        while (xx < nx) : (xx += 1) {
+            const src_col = px + xx;
+            if (src_col >= src_gd.sx) break;
+
+            if (src_col >= src_used and s.cx >= dst_used) break;
+
+            var gc: T.GridCell = undefined;
+            grid.get_cell(src_gd, src_row, src_col, &gc);
+            if (src_col + gc.data.width > px + nx) break;
+            grid.set_cell(s.grid, s.cy, s.cx, &gc);
+            s.cx += 1;
+        }
+        s.cy += 1;
+    }
+
+    s.cx = save_cx;
+    s.cy = save_cy;
+}
+
+/// Set scroll region and reset cursor to top-left (screen_write_scrollregion).
+/// This is the full tmux-compatible version; the cursor always moves to (0,0).
+pub fn scrollregion(ctx: *T.ScreenWriteCtx, rupper: u32, rlower: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    if (gd.sy == 0) return;
+
+    var top = rupper;
+    var bottom = rlower;
+    if (top > gd.sy - 1) top = gd.sy - 1;
+    if (bottom > gd.sy - 1) bottom = gd.sy - 1;
+    if (top >= bottom) return;
+
+    s.cx = 0;
+    s.cy = 0;
+    s.rupper = top;
+    s.rlower = bottom;
+}
+
 test "screen-write handles cursor movement and erase" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(4, 2, 100);
@@ -1169,4 +1397,176 @@ test "screen-write fullredraw is a no-op that doesn't corrupt content" {
     try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(s.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(s.grid, 0, 1));
     try std.testing.expectEqual(@as(u8, 'c'), grid.ascii_at(s.grid, 0, 2));
+}
+
+test "screen-write cursormove respects origin mode" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 10, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    s.rupper = 2;
+    s.rlower = 7;
+
+    cursormove(&ctx, 3, 1, false);
+    try std.testing.expectEqual(@as(u32, 3), s.cx);
+    try std.testing.expectEqual(@as(u32, 1), s.cy);
+
+    s.mode |= T.MODE_ORIGIN;
+    cursormove(&ctx, 0, 0, true);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 2), s.cy);
+
+    cursormove(&ctx, null, 3, true);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 5), s.cy);
+}
+
+test "screen-write cursorup and cursordown respect scroll region" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 10, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    s.rupper = 2;
+    s.rlower = 7;
+
+    s.cy = 5;
+    cursorup(&ctx, 10);
+    try std.testing.expectEqual(@as(u32, 2), s.cy);
+
+    s.cy = 1;
+    cursorup(&ctx, 10);
+    try std.testing.expectEqual(@as(u32, 0), s.cy);
+
+    s.cy = 5;
+    cursordown(&ctx, 10);
+    try std.testing.expectEqual(@as(u32, 7), s.cy);
+
+    s.cy = 8;
+    cursordown(&ctx, 10);
+    try std.testing.expectEqual(@as(u32, 9), s.cy);
+}
+
+test "screen-write cursorleft and cursorright clamp at edges" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 5, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    s.cx = 5;
+    cursorright(&ctx, 100);
+    try std.testing.expectEqual(@as(u32, 9), s.cx);
+
+    cursorleft(&ctx, 100);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+
+    cursorleft(&ctx, 0);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+}
+
+test "screen-write putc_styled writes character with cell attributes" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(6, 2, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    var gc = T.grid_default_cell;
+    gc.attr |= T.GRID_ATTR_BRIGHT;
+    putc_styled(&ctx, &gc, 'A');
+
+    var stored: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 0, &stored);
+    try std.testing.expectEqual(@as(u8, 'A'), stored.data.data[0]);
+    try std.testing.expect(stored.attr & T.GRID_ATTR_BRIGHT != 0);
+}
+
+test "screen-write nputs writes styled string with width limit" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 2, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    var gc = T.grid_default_cell;
+    gc.attr |= T.GRID_ATTR_ITALICS;
+    nputs(&ctx, 4, &gc, "Hello!");
+
+    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(s.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'e'), grid.ascii_at(s.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'l'), grid.ascii_at(s.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'l'), grid.ascii_at(s.grid, 0, 3));
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(s.grid, 0, 4));
+
+    var stored: T.GridCell = undefined;
+    grid.get_cell(s.grid, 0, 0, &stored);
+    try std.testing.expect(stored.attr & T.GRID_ATTR_ITALICS != 0);
+}
+
+test "screen-write fast_copy copies cells between screens" {
+    const screen = @import("screen.zig");
+    const src = screen.screen_init(6, 3, 100);
+    defer {
+        screen.screen_free(src);
+        xm.allocator.destroy(src);
+    }
+    const dst = screen.screen_init(6, 3, 100);
+    defer {
+        screen.screen_free(dst);
+        xm.allocator.destroy(dst);
+    }
+
+    {
+        var src_ctx = T.ScreenWriteCtx{ .s = src };
+        putn(&src_ctx, "abcdef");
+        cursor_to(&src_ctx, 1, 0);
+        putn(&src_ctx, "ghijkl");
+    }
+
+    var dst_ctx = T.ScreenWriteCtx{ .s = dst };
+    cursor_to(&dst_ctx, 0, 0);
+    fast_copy(&dst_ctx, src, 2, 0, 3, 2);
+
+    try std.testing.expectEqual(@as(u8, 'c'), grid.ascii_at(dst.grid, 0, 0));
+    try std.testing.expectEqual(@as(u8, 'd'), grid.ascii_at(dst.grid, 0, 1));
+    try std.testing.expectEqual(@as(u8, 'e'), grid.ascii_at(dst.grid, 0, 2));
+    try std.testing.expectEqual(@as(u8, 'i'), grid.ascii_at(dst.grid, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'j'), grid.ascii_at(dst.grid, 1, 1));
+    try std.testing.expectEqual(@as(u8, 'k'), grid.ascii_at(dst.grid, 1, 2));
+
+    try std.testing.expectEqual(@as(u32, 0), dst.cx);
+    try std.testing.expectEqual(@as(u32, 0), dst.cy);
+}
+
+test "screen-write scrollregion resets cursor to top-left" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 10, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .s = s };
+    s.cx = 5;
+    s.cy = 5;
+
+    scrollregion(&ctx, 2, 7);
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 0), s.cy);
+    try std.testing.expectEqual(@as(u32, 2), s.rupper);
+    try std.testing.expectEqual(@as(u32, 7), s.rlower);
 }

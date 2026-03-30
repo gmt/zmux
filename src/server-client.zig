@@ -1426,3 +1426,399 @@ fn server_client_uses_server_tty(cl: *const T.Client) bool {
     return false;
 }
 
+// ── Overlay functions ─────────────────────────────────────────────────────
+
+pub const OverlayCheckCb = *const fn (*T.Client, ?*anyopaque, u32, u32) bool;
+pub const OverlayModeCb = *const fn (*T.Client, ?*anyopaque, *u32, *u32) ?*anyopaque;
+pub const OverlayDrawCb = *const fn (*T.Client, ?*anyopaque, *anyopaque) void;
+pub const OverlayKeyCb = *const fn (*T.Client, ?*anyopaque, *T.key_event) i32;
+pub const OverlayFreeCb = *const fn (*T.Client, ?*anyopaque) void;
+pub const OverlayResizeCb = *const fn (*T.Client, ?*anyopaque) void;
+
+pub fn server_client_set_overlay(
+    cl: *T.Client,
+    delay: u32,
+    _checkcb: ?OverlayCheckCb,
+    _modecb: ?OverlayModeCb,
+    _drawcb: ?OverlayDrawCb,
+    _keycb: ?OverlayKeyCb,
+    _freecb: ?OverlayFreeCb,
+    _resizecb: ?OverlayResizeCb,
+    _data: ?*anyopaque,
+) void {
+    _ = _checkcb;
+    _ = _modecb;
+    _ = _drawcb;
+    _ = _keycb;
+    _ = _freecb;
+    _ = _resizecb;
+    _ = _data;
+    log.log_debug("server_client_set_overlay: stub (delay={d})", .{delay});
+    server_client_force_redraw(cl);
+}
+
+pub fn server_client_clear_overlay(cl: *T.Client) void {
+    log.log_debug("server_client_clear_overlay: stub", .{});
+    const mask: i32 = @intCast(@as(u32, T.TTY_FREEZE | T.TTY_NOCURSOR));
+    cl.tty.flags &= ~mask;
+    server_client_force_redraw(cl);
+}
+
+export fn server_client_overlay_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    log.log_debug("server_client_overlay_timer fired", .{});
+    server_client_clear_overlay(cl);
+}
+
+pub const VisibleRange = struct {
+    px: u32 = 0,
+    nx: u32 = 0,
+};
+
+pub const VisibleRanges = struct {
+    ranges: ?[]VisibleRange = null,
+    size: u32 = 0,
+    used: u32 = 0,
+};
+
+pub fn server_client_overlay_range(
+    x: u32,
+    y: u32,
+    sx: u32,
+    sy: u32,
+    px: u32,
+    py: u32,
+    nx: u32,
+    r: *VisibleRanges,
+) void {
+    if (py < y or py > y + sy -| 1) {
+        server_client_ensure_ranges(r, 1);
+        r.ranges.?[0].px = px;
+        r.ranges.?[0].nx = nx;
+        r.used = 1;
+        return;
+    }
+    server_client_ensure_ranges(r, 2);
+
+    if (px < x) {
+        r.ranges.?[0].px = px;
+        r.ranges.?[0].nx = @min(x - px, nx);
+    } else {
+        r.ranges.?[0].px = 0;
+        r.ranges.?[0].nx = 0;
+    }
+
+    const ox = if (px > x + sx) px else x + sx;
+    const onx = px + nx;
+    if (onx > ox) {
+        r.ranges.?[1].px = ox;
+        r.ranges.?[1].nx = onx - ox;
+    } else {
+        r.ranges.?[1].px = 0;
+        r.ranges.?[1].nx = 0;
+    }
+    r.used = 2;
+}
+
+pub fn server_client_ranges_is_empty(r: *const VisibleRanges) bool {
+    if (r.ranges == null or r.used == 0) return true;
+    for (r.ranges.?[0..r.used]) |rng| {
+        if (rng.nx != 0) return false;
+    }
+    return true;
+}
+
+pub fn server_client_ensure_ranges(r: *VisibleRanges, n: u32) void {
+    if (r.size >= n) return;
+    if (r.ranges) |old| {
+        const new = xm.allocator.realloc(old, n) catch unreachable;
+        for (new[r.size..n]) |*slot| slot.* = .{};
+        r.ranges = new;
+    } else {
+        const new = xm.allocator.alloc(VisibleRange, n) catch unreachable;
+        for (new) |*slot| slot.* = .{};
+        r.ranges = new;
+    }
+    r.size = n;
+}
+
+// ── Mouse functions ───────────────────────────────────────────────────────
+
+const MouseWhere = enum {
+    nowhere,
+    pane,
+    status_area,
+    status_left,
+    status_right,
+    status_default,
+    border,
+    scrollbar_up,
+    scrollbar_slider,
+    scrollbar_down,
+};
+
+pub fn server_client_check_mouse(cl: *T.Client, event: *T.key_event) T.key_code {
+    _ = cl;
+    _ = event;
+    log.log_debug("server_client_check_mouse: stub", .{});
+    return T.KEYC_UNKNOWN;
+}
+
+pub fn server_client_check_mouse_in_pane(
+    wp: *T.WindowPane,
+    px: u32,
+    py: u32,
+    _sl_mpos: *u32,
+) MouseWhere {
+    _ = wp;
+    _ = px;
+    _ = py;
+    _ = _sl_mpos;
+    log.log_debug("server_client_check_mouse_in_pane: stub", .{});
+    return .nowhere;
+}
+
+// ── Key handling functions ────────────────────────────────────────────────
+
+pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, _data: ?*anyopaque) T.CmdRetval {
+    _ = _data;
+    const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
+    _ = cl.session orelse return .normal;
+    log.log_debug("server_client_key_callback: stub", .{});
+    return .normal;
+}
+
+pub fn server_client_is_bracket_paste(cl: *T.Client, key: T.key_code) bool {
+    if ((key & T.KEYC_MASK_KEY) == T.KEYC_PASTE_START) {
+        cl.flags |= T.CLIENT_FOCUSED;
+        log.log_debug("bracket paste on", .{});
+        return false;
+    }
+    if ((key & T.KEYC_MASK_KEY) == T.KEYC_PASTE_END) {
+        cl.flags &= ~@as(u64, T.CLIENT_FOCUSED);
+        log.log_debug("bracket paste off", .{});
+        return false;
+    }
+    return (cl.flags & T.CLIENT_FOCUSED) != 0;
+}
+
+pub fn server_client_is_assume_paste(cl: *T.Client) bool {
+    _ = cl.session orelse return false;
+    const diff_ms = cl.activity_time - cl.last_activity_time;
+    if (diff_ms >= 0 and diff_ms < 1) {
+        log.log_debug("assume paste detected", .{});
+        return true;
+    }
+    return false;
+}
+
+pub fn server_client_key_table_activity_diff(cl: *T.Client) u64 {
+    _ = cl;
+    return 0;
+}
+
+pub fn server_client_get_key_table(cl: *T.Client) []const u8 {
+    const s = cl.session orelse return "root";
+    const name = opts.options_get_string(s.options, "key-table");
+    if (name.len == 0) return "root";
+    return name;
+}
+
+pub fn server_client_is_default_key_table(cl: *T.Client, table: *T.KeyTable) bool {
+    return std.mem.eql(u8, table.name, server_client_get_key_table(cl));
+}
+
+pub fn server_client_repeat_time(cl: *T.Client, bd: *T.KeyBinding) u32 {
+    const s = cl.session orelse return 0;
+    if (bd.flags & T.KEY_BINDING_REPEAT == 0) return 0;
+    const repeat = opts.options_get_number(s.options, "repeat-time");
+    if (repeat <= 0) return 0;
+    return @intCast(repeat);
+}
+
+// ── Resize / buffer functions ─────────────────────────────────────────────
+
+pub fn server_client_check_window_resize(w: *T.Window) void {
+    if (w.flags & T.WINDOW_RESIZE == 0) return;
+    log.log_debug("server_client_check_window_resize: @{d}", .{w.id});
+    w.flags &= ~@as(u32, T.WINDOW_RESIZE);
+    resize_mod.resize_window(w, w.new_sx, w.new_sy, 0, 0);
+}
+
+pub fn server_client_check_pane_resize(wp: *T.WindowPane) void {
+    _ = wp;
+    log.log_debug("server_client_check_pane_resize: stub", .{});
+}
+
+pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
+    _ = wp;
+    log.log_debug("server_client_check_pane_buffer: stub", .{});
+}
+
+// ── Timer callbacks ───────────────────────────────────────────────────────
+
+export fn server_client_repeat_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = arg;
+    log.log_debug("server_client_repeat_timer fired", .{});
+}
+
+export fn server_client_resize_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = arg;
+    log.log_debug("server_client_resize_timer fired", .{});
+}
+
+export fn server_client_redraw_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = arg;
+    log.log_debug("server_client_redraw_timer fired", .{});
+}
+
+export fn server_client_click_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    server_client_cancel_click_timer(cl);
+    log.log_debug("server_client_click_timer fired", .{});
+}
+
+// ── Lifecycle functions ───────────────────────────────────────────────────
+
+pub fn server_client_unref(cl: *T.Client) void {
+    log.log_debug("server_client_unref: stub for {*}", .{cl});
+}
+
+export fn server_client_free(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    log.log_debug("server_client_free: freeing client {*}", .{cl});
+    if (cl.name) |name| xm.allocator.free(@constCast(name));
+    xm.allocator.destroy(cl);
+}
+
+pub fn server_client_attached_lost(cl: *T.Client) void {
+    log.log_debug("lost attached client {*}", .{cl});
+
+    var wit = win_mod.windows.valueIterator();
+    while (wit.next()) |w_ptr| {
+        const w = w_ptr.*;
+        if (w.latest != @as(?*anyopaque, @ptrCast(cl))) continue;
+
+        var found: ?*T.Client = null;
+        for (client_registry.clients.items) |loop| {
+            if (loop == cl) continue;
+            const s = loop.session orelse continue;
+            const wl = s.curw orelse continue;
+            if (wl.window != w) continue;
+            if (found == null or loop.activity_time > found.?.activity_time)
+                found = loop;
+        }
+        if (found) |best|
+            server_client_update_latest(best);
+    }
+}
+
+pub fn server_client_remove_pane(wp: *T.WindowPane) void {
+    const w_id = wp.window.id;
+    for (client_registry.clients.items) |cl| {
+        var i: usize = 0;
+        while (i < cl.client_windows.items.len) {
+            const cw = &cl.client_windows.items[i];
+            if (cw.window == w_id and cw.pane != null and cw.pane.? == wp) {
+                _ = cl.client_windows.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+// ── Misc functions ────────────────────────────────────────────────────────
+
+pub fn server_client_how_many() u32 {
+    var n: u32 = 0;
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != null and (cl.flags & T.CLIENT_ATTACHED != 0))
+            n += 1;
+    }
+    return n;
+}
+
+pub fn server_client_get_flags(cl: *T.Client) []const u8 {
+    var buf: std.ArrayList(u8) = .{};
+    if (cl.flags & T.CLIENT_ATTACHED != 0)
+        buf.appendSlice(xm.allocator, "attached,") catch {};
+    if (cl.flags & T.CLIENT_FOCUSED != 0)
+        buf.appendSlice(xm.allocator, "focused,") catch {};
+    if (cl.flags & T.CLIENT_CONTROL != 0)
+        buf.appendSlice(xm.allocator, "control-mode,") catch {};
+    if (cl.flags & T.CLIENT_IGNORESIZE != 0)
+        buf.appendSlice(xm.allocator, "ignore-size,") catch {};
+    if (cl.flags & T.CLIENT_NO_DETACH_ON_DESTROY != 0)
+        buf.appendSlice(xm.allocator, "no-detach-on-destroy,") catch {};
+    if (cl.flags & T.CLIENT_CONTROL_NOOUTPUT != 0)
+        buf.appendSlice(xm.allocator, "no-output,") catch {};
+    if (cl.flags & T.CLIENT_CONTROL_WAITEXIT != 0)
+        buf.appendSlice(xm.allocator, "wait-exit,") catch {};
+    if (cl.flags & T.CLIENT_CONTROL_PAUSEAFTER != 0) {
+        const s = xm.xasprintf("pause-after={d},", .{cl.pause_age / 1000});
+        defer xm.allocator.free(s);
+        buf.appendSlice(xm.allocator, s) catch {};
+    }
+    if (cl.flags & T.CLIENT_READONLY != 0)
+        buf.appendSlice(xm.allocator, "read-only,") catch {};
+    if (cl.flags & T.CLIENT_ACTIVEPANE != 0)
+        buf.appendSlice(xm.allocator, "active-pane,") catch {};
+    if (cl.flags & T.CLIENT_SUSPENDED != 0)
+        buf.appendSlice(xm.allocator, "suspended,") catch {};
+    if (cl.flags & T.CLIENT_UTF8 != 0)
+        buf.appendSlice(xm.allocator, "UTF-8,") catch {};
+
+    if (buf.items.len > 0) {
+        const result = xm.xstrdup(buf.items[0 .. buf.items.len - 1]);
+        buf.deinit(xm.allocator);
+        return result;
+    }
+    buf.deinit(xm.allocator);
+    return xm.xstrdup("");
+}
+
+pub fn server_client_report_theme(cl: *T.Client, theme: T.ClientTheme) void {
+    if (theme == .light) {
+        cl.theme = .light;
+        notify.notify_client("client-light-theme", cl);
+    } else {
+        cl.theme = .dark;
+        notify.notify_client("client-dark-theme", cl);
+    }
+    log.log_debug("server_client_report_theme: {s}", .{if (theme == .light) "light" else "dark"});
+}
+
+pub fn server_client_window_cmp(cw1: *const T.ClientWindow, cw2: *const T.ClientWindow) i32 {
+    if (cw1.window < cw2.window) return -1;
+    if (cw1.window > cw2.window) return 1;
+    return 0;
+}
+
+pub fn server_client_read_only(item: *cmdq_mod.CmdqItem, _data: ?*anyopaque) T.CmdRetval {
+    _ = _data;
+    _ = item;
+    log.log_debug("server_client_read_only: client is read-only", .{});
+    return .@"error";
+}
+
+pub fn server_client_default_command(item: *cmdq_mod.CmdqItem, _data: ?*anyopaque) T.CmdRetval {
+    _ = _data;
+    const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
+    log.log_debug("server_client_default_command: client {*}", .{cl});
+    server_client_dispatch_default_command(cl);
+    return .normal;
+}
+

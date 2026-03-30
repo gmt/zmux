@@ -93,6 +93,15 @@ class ControlClient:
             time.sleep(0.1)
         raise SmokeError(f"{self.name}: control client never attached")
 
+    def current_name(self) -> str | None:
+        text = self.stdout_path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.startswith("%client-session-changed "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return parts[1]
+        return None
+
     def close(self) -> None:
         try:
             if self.proc.stdin is not None and self.proc.poll() is None:
@@ -152,6 +161,7 @@ class SmokeHarness:
         "display-menu",
         "display-panes",
         "display-popup",
+        "kill-server",
         "lock-client",
         "lock-server",
         "lock-session",
@@ -378,7 +388,7 @@ class SmokeHarness:
         if command == "command-prompt":
             return ["command-prompt", "-t", client_target, "display-message command-prompt"]
         if command == "confirm-before":
-            return ["confirm-before", "-y", "display-message confirmed"]
+            return ["confirm-before", "-b", "-y", "-t", client_target, "display-message", "confirmed"]
         if command == "copy-mode":
             return ["copy-mode", "-t", "smoke:0.0"]
         if command == "customize-mode":

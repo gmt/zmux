@@ -24,6 +24,7 @@ const cmd_display = @import("cmd-display-message.zig");
 const cmd_display_panes = @import("cmd-display-panes.zig");
 const cmd_find = @import("cmd-find.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_render = @import("cmd-render.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_draw = @import("format-draw.zig");
 const job_mod = @import("job.zig");
@@ -37,6 +38,7 @@ const server_fn = @import("server-fn.zig");
 const status = @import("status.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
+const env_mod = @import("environ.zig");
 
 const POPUP_BORDER_NONE: u32 = 6;
 
@@ -518,6 +520,105 @@ fn popup_modify_flags(args: *const args_mod.Arguments) ?i32 {
     return flags;
 }
 
+fn append_popup_shell_word(out: *std.ArrayList(u8), word: []const u8) void {
+    cmd_render.append_shell_word(out, word);
+}
+
+fn popup_shell_command(args: *const args_mod.Arguments, session: *T.Session) []u8 {
+    if (args.count() == 0) {
+        const default_command = opts.options_get_string(session.options, "default-command");
+        if (default_command.len != 0) return xm.xstrdup(default_command);
+
+        const default_shell = opts.options_get_string(session.options, "default-shell");
+        if (default_shell.len != 0 and @import("zmux.zig").checkshell(default_shell))
+            return xm.xstrdup(default_shell);
+        return xm.xstrdup("/bin/sh");
+    }
+
+    if (args.count() == 1) return xm.xstrdup(args.value_at(0).?);
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+    for (0..args.count()) |idx| {
+        if (idx != 0) out.append(xm.allocator, ' ') catch unreachable;
+        append_popup_shell_word(&out, args.value_at(idx).?);
+    }
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn popup_environment_overlays(args: *const args_mod.Arguments) ?*T.Environ {
+    const env_entry = args.entry('e') orelse return null;
+    if (env_entry.count == 0) return null;
+
+    const env = env_mod.environ_create();
+    for (env_entry.values.items) |value| env_mod.environ_put(env, value, 0);
+    return env;
+}
+
+fn popup_working_directory(args: *const args_mod.Arguments, target: *const T.CmdFindState, tc: *T.Client, session: *T.Session) []u8 {
+    if (args.get('d')) |raw|
+        return cmd_display.expand_format(xm.allocator, raw, target);
+    return xm.xstrdup(server_client.server_client_get_cwd(tc, session));
+}
+
+fn popup_render_environment_prefix(env: *T.Environ) []u8 {
+    const entries = env_mod.environ_sorted_entries(env);
+    defer xm.allocator.free(entries);
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+    var first = true;
+    for (entries) |env_entry| {
+        const value = env_entry.value orelse continue;
+        if (!first) out.append(xm.allocator, ' ') catch unreachable;
+        first = false;
+        out.appendSlice(xm.allocator, env_entry.name) catch unreachable;
+        out.append(xm.allocator, '=') catch unreachable;
+        append_popup_shell_word(&out, value);
+    }
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn popup_command_with_environment(shell_command: []const u8, env: ?*T.Environ) []u8 {
+    const overlays = env orelse return xm.xstrdup(shell_command);
+    const prefix = popup_render_environment_prefix(overlays);
+    defer xm.allocator.free(prefix);
+    if (prefix.len == 0) return xm.xstrdup(shell_command);
+    return xm.xasprintf("env {s} {s}", .{ prefix, shell_command });
+}
+
+fn popup_job_environment_map(env: ?*T.Environ) ?*std.process.EnvMap {
+    const overlays = env orelse return null;
+
+    const env_map_ptr = xm.allocator.create(std.process.EnvMap) catch unreachable;
+    env_map_ptr.* = std.process.EnvMap.init(xm.allocator);
+    errdefer {
+        env_map_ptr.deinit();
+        xm.allocator.destroy(env_map_ptr);
+    }
+
+    const base_env = std.process.getEnvMap(xm.allocator) catch {
+        env_map_ptr.deinit();
+        xm.allocator.destroy(env_map_ptr);
+        return null;
+    };
+    defer @constCast(&base_env).deinit();
+
+    var base_it = base_env.iterator();
+    while (base_it.next()) |env_entry| {
+        env_map_ptr.put(env_entry.key_ptr.*, env_entry.value_ptr.*) catch unreachable;
+    }
+
+    const overlay_entries = env_mod.environ_sorted_entries(overlays);
+    defer xm.allocator.free(overlay_entries);
+    for (overlay_entries) |overlay_entry| {
+        const value = overlay_entry.value orelse continue;
+        env_map_ptr.put(overlay_entry.name, value) catch unreachable;
+    }
+
+    return env_map_ptr;
+}
+
 fn exec_display_menu(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     const target = resolve_target(item, args.get('t')) orelse return .@"error";
@@ -598,62 +699,43 @@ fn exec_display_popup(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .normal;
     }
 
-    if (args.has('e')) {
-        cmdq.cmdq_error(item, "popup environment overlays not supported yet", .{});
-        return .@"error";
-    }
-    if (args.has('E')) {
-        cmdq.cmdq_error(item, "popup close-on-exit is not supported yet", .{});
-        return .@"error";
-    }
-    if (args.count() > 1) {
-        cmdq.cmdq_error(item, "popup argv vector not supported yet", .{});
-        return .@"error";
-    }
-
     const popup_limit_h: u32 = @intCast(available_popup_height(tc));
     const popup_h = popup_dimension(args, 'h', @max(@as(u32, 1), if (popup_limit_h == 0) @as(u32, 1) else popup_limit_h / 2), popup_limit_h, item, "height") orelse return .@"error";
     const popup_w = popup_dimension(args, 'w', @max(@as(u32, 1), @divTrunc(tc.tty.sx, 2)), tc.tty.sx, item, "width") orelse return .@"error";
     const popup_y = parse_popup_position(args.get('y'), if (popup_limit_h > popup_h) (popup_limit_h - popup_h) / 2 else 0, popup_h, popup_limit_h, item, "y", true) orelse return .@"error";
     const popup_x = parse_popup_position(args.get('x'), if (tc.tty.sx > popup_w) (tc.tty.sx - popup_w) / 2 else 0, popup_w, tc.tty.sx, item, "x", false) orelse return .@"error";
 
-    const cwd = if (args.get('d')) |raw|
-        cmd_display.expand_format(xm.allocator, raw, &target)
-    else
-        xm.xstrdup(server_client.server_client_get_cwd(tc, session));
+    const cwd = popup_working_directory(args, &target, tc, session);
     defer xm.allocator.free(cwd);
 
-    const shell_command = blk: {
-        if (args.count() == 0) {
-            const default_command = opts.options_get_string(session.options, "default-command");
-            if (default_command.len == 0) {
-                cmdq.cmdq_error(item, "interactive popup shell not supported yet", .{});
-                return .@"error";
-            }
-            break :blk default_command;
-        }
-        const value = args.value_at(0).?;
-        if (value.len == 0) {
-            cmdq.cmdq_error(item, "interactive popup shell not supported yet", .{});
-            return .@"error";
-        }
-        break :blk value;
+    const shell_command = popup_shell_command(args, session);
+    defer xm.allocator.free(shell_command);
+    const overlay_env = popup_environment_overlays(args);
+    defer if (overlay_env) |env| env_mod.environ_free(env);
+    const command = popup_command_with_environment(shell_command, overlay_env);
+    defer xm.allocator.free(command);
+    const job_env = popup_job_environment_map(overlay_env);
+    defer if (job_env) |env_map| {
+        env_map.deinit();
+        xm.allocator.destroy(env_map);
     };
 
-    var result = job_mod.job_run_shell_command(null, shell_command, .{
+    var result = job_mod.job_run_shell_command(null, command, .{
         .cwd = cwd,
         .merge_stderr = true,
         .capture_output = true,
+        .env_map = job_env,
     });
     defer result.deinit();
     if (result.spawn_failed) {
-        cmdq.cmdq_error(item, "failed to run command: {s}", .{shell_command});
+        cmdq.cmdq_error(item, "failed to run command: {s}", .{command});
         return .@"error";
     }
 
     const title = popup_title(args, &target);
     defer xm.allocator.free(title);
-    const initial_flags: i32 = flags orelse 0;
+    var initial_flags: i32 = flags orelse 0;
+    if (args.has('E')) initial_flags |= popup.POPUP_CLOSEANYKEY;
     if (popup.popup_display(
         initial_flags,
         lines,
@@ -700,7 +782,6 @@ fn test_setup(name: []const u8) struct {
     window: *T.Window,
     client: T.Client,
 } {
-    const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");
     const sess = @import("session.zig");
     const win = @import("window.zig");
@@ -744,7 +825,6 @@ fn test_setup(name: []const u8) struct {
 }
 
 fn test_teardown(setup: *@TypeOf(test_setup("unused"))) void {
-    const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");
     const sess = @import("session.zig");
     const status_runtime = @import("status-runtime.zig");
@@ -1059,7 +1139,7 @@ test "display-popup validates popup border lines before the reduced runtime erro
     try std.testing.expectEqualStrings("Popup-border-lines invalid choice: mystery", setup.client.message_string.?);
 }
 
-test "display-popup without a command reports the missing interactive shell runtime" {
+test "display-popup without a command falls back to the default shell" {
     var setup = test_setup("display-popup-shell");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1071,27 +1151,30 @@ test "display-popup without a command reports the missing interactive shell runt
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Interactive popup shell not supported yet", setup.client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(popup.overlay_active(&setup.client));
 }
 
-test "display-popup rejects environment overlays in the reduced runtime" {
+test "display-popup accepts environment overlays in the reduced runtime" {
     var setup = test_setup("display-popup-env");
     bind_test_client(&setup);
     defer test_teardown(&setup);
 
     var parse_cause: ?[]u8 = null;
     defer if (parse_cause) |msg| xm.allocator.free(msg);
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-e", "NAME=value", "printf ready" }, null, &parse_cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-e", "NAME=value", "sh", "-lc", "printf '%s' \"$NAME\"" }, null, &parse_cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Popup environment overlays not supported yet", setup.client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+    const payload = (try popup.render_overlay_payload_region(&setup.client, 0, 0, 80, 24, 0)).?;
+    defer xm.allocator.free(payload);
+    const state = popup.popup_data(&setup.client).?;
+    try std.testing.expectEqualStrings("value", state.content.items);
 }
 
-test "display-popup rejects argv vector commands in the reduced runtime" {
+test "display-popup accepts argv vector commands in the reduced runtime" {
     var setup = test_setup("display-popup-argv");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1103,8 +1186,30 @@ test "display-popup rejects argv vector commands in the reduced runtime" {
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
-    try std.testing.expectEqualStrings("Popup argv vector not supported yet", setup.client.message_string.?);
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+    const state = popup.popup_data(&setup.client).?;
+    try std.testing.expectEqualStrings("ready", state.content.items);
+}
+
+test "display-popup close-on-exit maps to close-any-key in the reduced runtime" {
+    var setup = test_setup("display-popup-close-exit");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-E", "printf ready" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(popup.overlay_active(&setup.client));
+
+    var event = T.key_event{ .key = 'x', .len = 1 };
+    event.data[0] = 'x';
+    try std.testing.expect(popup.handle_key(&setup.client, &event));
+    try std.testing.expect(!popup.overlay_active(&setup.client));
 }
 
 test "display-popup modify updates title and close-any-key handling" {

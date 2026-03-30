@@ -2135,43 +2135,51 @@ pub fn window_copy_get_word(wp: *T.WindowPane, x: u32, y: u32) ?[]u8 {
     const wme = window.window_pane_mode(wp) orelse return null;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return null;
     const data = modeData(wme);
-    _ = data;
-    _ = x;
-    _ = y;
-    return null;
+    const gd = data.backing.grid;
+    const row = data.top + y;
+    const format_resolve = @import("format-resolve.zig");
+    return format_resolve.format_grid_word(xm.allocator, gd, x, row, word_whitespace);
 }
 
 pub fn window_copy_get_line(wp: *T.WindowPane, y: u32) ?[]u8 {
     const wme = window.window_pane_mode(wp) orelse return null;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return null;
-    _ = y;
-    return null;
+    const data = modeData(wme);
+    const gd = data.backing.grid;
+    const row = data.top + y;
+    const format_resolve = @import("format-resolve.zig");
+    return format_resolve.format_grid_line(xm.allocator, gd, row);
 }
 
 pub fn window_copy_get_hyperlink(wp: *T.WindowPane, x: u32, y: u32) ?[]u8 {
     const wme = window.window_pane_mode(wp) orelse return null;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return null;
-    _ = x;
-    _ = y;
-    return null;
+    const data = modeData(wme);
+    const row = data.top + y;
+    const format_resolve = @import("format-resolve.zig");
+    return format_resolve.format_grid_hyperlink(data.backing, x, row);
 }
 
 pub fn window_copy_cursor_hyperlink_cb(_ft: ?*anyopaque) ?*anyopaque {
+    // Requires format_get_pane infrastructure; returns null until wired.
     _ = _ft;
     return null;
 }
 
 pub fn window_copy_cursor_word_cb(_ft: ?*anyopaque) ?*anyopaque {
+    // Requires format_get_pane infrastructure; returns null until wired.
     _ = _ft;
     return null;
 }
 
 pub fn window_copy_cursor_line_cb(_ft: ?*anyopaque) ?*anyopaque {
+    // Requires format_get_pane infrastructure; returns null until wired.
     _ = _ft;
     return null;
 }
 
 pub fn window_copy_search_match_cb(_ft: ?*anyopaque) ?*anyopaque {
+    // Requires format_get_pane + searchmark infrastructure; returns null until wired.
     _ = _ft;
     return null;
 }
@@ -2179,7 +2187,10 @@ pub fn window_copy_search_match_cb(_ft: ?*anyopaque) ?*anyopaque {
 pub fn window_copy_formats(wme: *T.WindowModeEntry, _ft: ?*anyopaque) void {
     _ = modeData(wme);
     _ = _ft;
-    // stub – format_add calls not yet wired
+    // format_add is not yet ported to Zig; once available, this should
+    // populate scroll_position, rectangle_toggle, copy_cursor_x/y,
+    // selection_start_x/y, selection_end_x/y, selection_active,
+    // selection_present, selection_mode, top_line_time, etc.
 }
 
 // ── Scroll helpers (public API wrappers) ───────────────────────────────────
@@ -2257,14 +2268,30 @@ pub fn window_copy_write_one(wme: *T.WindowModeEntry, _ctx: ?*anyopaque, _py: u3
     _ = wme;
 }
 
-pub fn window_copy_update_style(wme: *T.WindowModeEntry, _fx: u32, _fy: u32, _gc: ?*T.GridCell, _mgc: ?*const T.GridCell, _cgc: ?*const T.GridCell, _mkgc: ?*const T.GridCell) void {
-    _ = _fx;
-    _ = _fy;
-    _ = _gc;
+pub fn window_copy_update_style(wme: *T.WindowModeEntry, fx: u32, fy: u32, gc: ?*T.GridCell, _mgc: ?*const T.GridCell, _cgc: ?*const T.GridCell, mkgc: ?*const T.GridCell) void {
+    const data = modeData(wme);
+
+    // Apply mark style if the cell is on the mark line
+    if (data.show_mark and fy == data.mark_y) {
+        if (gc) |g| {
+            if (mkgc) |mk| {
+                g.attr = mk.attr;
+                if (fx == data.mark_x) {
+                    g.fg = mk.bg;
+                    g.bg = mk.fg;
+                } else {
+                    g.fg = mk.fg;
+                    g.bg = mk.bg;
+                }
+            }
+        }
+    }
+
+    // Search mark highlighting requires searchmark array (not yet ported).
+    // When available, this would also highlight search matches and the
+    // current match differently.
     _ = _mgc;
     _ = _cgc;
-    _ = _mkgc;
-    _ = wme;
 }
 
 pub fn window_copy_get_current_offset(wp: *T.WindowPane, offset: ?*u32, size: ?*u32) bool {
@@ -2376,14 +2403,74 @@ pub fn window_copy_append_selection(wme: *T.WindowModeEntry) void {
     cmdAppendSelection(wme, undefined);
 }
 
-pub fn window_copy_copy_line(wme: *T.WindowModeEntry, buf: ?*?[]u8, off: ?*usize, py: u32, sx: u32, ex: u32) void {
-    _ = wme;
-    _ = buf;
-    _ = off;
-    _ = py;
-    _ = sx;
-    _ = ex;
-    // stub – low-level line copy into buffer
+pub fn window_copy_copy_line(wme: *T.WindowModeEntry, buf: ?*?[]u8, off: ?*usize, py: u32, sx: u32, ex_in: u32) void {
+    const data = modeData(wme);
+    const gd = data.backing.grid;
+    var ex = ex_in;
+
+    if (sx > ex) return;
+
+    // Check if the line was wrapped at the screen edge
+    var wrapped: bool = false;
+    if (py < gd.linedata.len) {
+        const gl = &gd.linedata[py];
+        wrapped = (gl.flags & T.GRID_LINE_WRAPPED) != 0 and gl.cellused <= gd.sx;
+    }
+
+    const xx: u32 = if (wrapped)
+        (if (py < gd.linedata.len) gd.linedata[py].cellused else 0)
+    else
+        backingLineLength(wme, py);
+    if (ex > xx) ex = xx;
+    var start = sx;
+    if (start > xx) start = xx;
+
+    const out_buf = buf orelse return;
+    const out_off = off orelse return;
+
+    if (start < ex) {
+        var i: u32 = start;
+        while (i < ex) : (i += 1) {
+            var gc: T.GridCell = undefined;
+            grid.get_cell(gd, py, i, &gc);
+            if (gc.isPadding()) continue;
+
+            const cell_data = if ((gc.flags & T.GRID_FLAG_TAB) != 0)
+                "\t"
+            else if (gc.data.size > 0)
+                gc.data.data[0..gc.data.size]
+            else
+                continue;
+
+            // Grow the buffer
+            const new_size = out_off.* + cell_data.len;
+            if (out_buf.*) |old| {
+                const grown = xm.allocator.realloc(old, new_size) catch unreachable;
+                @memcpy(grown[out_off.*..new_size], cell_data);
+                out_buf.* = grown;
+            } else {
+                const new = xm.allocator.alloc(u8, new_size) catch unreachable;
+                @memcpy(new[out_off.*..new_size], cell_data);
+                out_buf.* = new;
+            }
+            out_off.* = new_size;
+        }
+    }
+
+    // Only add a newline if the line wasn't wrapped
+    if (!wrapped or ex != xx) {
+        const new_size = out_off.* + 1;
+        if (out_buf.*) |old| {
+            const grown = xm.allocator.realloc(old, new_size) catch unreachable;
+            grown[out_off.*] = '\n';
+            out_buf.* = grown;
+        } else {
+            const new = xm.allocator.alloc(u8, new_size) catch unreachable;
+            new[out_off.*] = '\n';
+            out_buf.* = new;
+        }
+        out_off.* = new_size;
+    }
 }
 
 // ── Search helpers ─────────────────────────────────────────────────────────
@@ -2401,6 +2488,7 @@ pub fn window_copy_search_rl(gd: *T.Grid, sgd: *T.Grid, ppx: *u32, py: u32, firs
 }
 
 pub fn window_copy_search_lr_regex(_gd: *T.Grid, _ppx: *u32, _psx: *u32, _py: u32, _first: u32, _last: u32, _re: ?*anyopaque) bool {
+    // Requires POSIX regex support (regex_t); not yet ported to Zig.
     _ = _gd;
     _ = _ppx;
     _ = _psx;
@@ -2412,6 +2500,7 @@ pub fn window_copy_search_lr_regex(_gd: *T.Grid, _ppx: *u32, _psx: *u32, _py: u3
 }
 
 pub fn window_copy_search_rl_regex(_gd: *T.Grid, _ppx: *u32, _psx: *u32, _py: u32, _first: u32, _last: u32, _re: ?*anyopaque) bool {
+    // Requires POSIX regex support (regex_t); not yet ported to Zig.
     _ = _gd;
     _ = _ppx;
     _ = _psx;
@@ -2427,6 +2516,7 @@ pub fn window_copy_is_lowercase(ptr: []const u8) bool {
 }
 
 pub fn window_copy_search_back_overlap(_gd: *T.Grid, _preg: ?*anyopaque, _ppx: *u32, _psx: *u32, _ppy: *u32, _endline: u32) void {
+    // Requires POSIX regex support (regex_t); not yet ported to Zig.
     _ = _gd;
     _ = _preg;
     _ = _ppx;
@@ -2435,21 +2525,64 @@ pub fn window_copy_search_back_overlap(_gd: *T.Grid, _preg: ?*anyopaque, _ppx: *
     _ = _endline;
 }
 
-pub fn window_copy_search_jump(wme: *T.WindowModeEntry, _gd: *T.Grid, _sgd: ?*T.Grid, _fx: u32, _fy: u32, _endline: u32, _cis: bool, _wrap: bool, _direction: bool, _regex: bool) bool {
-    _ = wme;
-    _ = _gd;
-    _ = _sgd;
-    _ = _fx;
-    _ = _fy;
-    _ = _endline;
-    _ = _cis;
+pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Grid, fx_in: u32, fy: u32, endline: u32, cis: bool, _wrap: bool, direction: bool, regex: bool) bool {
     _ = _wrap;
-    _ = _direction;
-    _ = _regex;
+    const search_gd = sgd orelse return false;
+
+    if (regex) {
+        // Regex search not yet supported
+        return false;
+    }
+
+    var found = false;
+    var px: u32 = 0;
+    var result_row: u32 = 0;
+
+    if (direction) {
+        // Forward search
+        var fx = fx_in;
+        var i: u32 = fy;
+        while (i <= endline) : (i += 1) {
+            if (searchLR(gd, search_gd, &px, i, fx, gd.sx, cis)) {
+                found = true;
+                result_row = i;
+                break;
+            }
+            fx = 0;
+        }
+    } else {
+        // Backward search
+        var fx = fx_in;
+        var i: u32 = fy + 1;
+        while (i > endline) {
+            i -= 1;
+            if (i == 0 and endline == 0) {
+                if (searchRL(gd, search_gd, &px, 0, 0, fx + 1, cis)) {
+                    found = true;
+                    result_row = 0;
+                }
+                break;
+            }
+            if (searchRL(gd, search_gd, &px, i, 0, fx + 1, cis)) {
+                found = true;
+                result_row = i;
+                break;
+            }
+            fx = gd.sx -| 1;
+        }
+    }
+
+    if (found) {
+        window_copy_scroll_to(wme, px, result_row, true);
+        return true;
+    }
     return false;
 }
 
 pub fn window_copy_move_after_search_mark(data: *CopyModeData, _fx: *u32, _fy: *u32, _endline: u32) void {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When available, advances fx/fy past the current search mark
+    // so the next search skips the current match.
     _ = data;
     _ = _fx;
     _ = _fy;
@@ -2470,6 +2603,9 @@ pub fn window_copy_search_down(wme: *T.WindowModeEntry, regex: bool) bool {
 }
 
 pub fn window_copy_search_marks(wme: *T.WindowModeEntry, _ssp: ?*T.Screen, _regex: bool, _again: bool) bool {
+    // Requires searchmark array allocation and population logic.
+    // When implemented, this will scan the visible region for matches
+    // and store their positions in data.searchmark[].
     _ = wme;
     _ = _ssp;
     _ = _regex;
@@ -2478,32 +2614,47 @@ pub fn window_copy_search_marks(wme: *T.WindowModeEntry, _ssp: ?*T.Screen, _rege
 }
 
 pub fn window_copy_clear_marks(wme: *T.WindowModeEntry) void {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When available, frees and nulls data.searchmark.
     _ = wme;
-    // stub – clear search highlight marks
 }
 
 pub fn window_copy_visible_lines(data: *CopyModeData, start: *u32, end: *u32) void {
-    start.* = data.top;
-    end.* = data.top + data.backing.grid.sy;
+    const gd = data.backing.grid;
+    // Walk backward from the top of the viewport to find the first
+    // non-wrapped line (mirrors tmux behaviour for wrapped lines).
+    var s: u32 = data.top;
+    while (s > 0) {
+        const gl = grid.grid_peek_line(@constCast(gd), s - 1);
+        if (gl == null or (gl.?.flags & T.GRID_LINE_WRAPPED) == 0)
+            break;
+        s -= 1;
+    }
+    start.* = s;
+    end.* = data.top + gd.sy;
 }
 
-pub fn window_copy_search_mark_at(data: *CopyModeData, _px: u32, _py: u32, at: *u32) bool {
-    _ = data;
-    _ = _px;
-    _ = _py;
-    at.* = 0;
-    return false;
+pub fn window_copy_search_mark_at(data: *CopyModeData, px: u32, py: u32, at: *u32) bool {
+    const gd = data.backing.grid;
+    // Translate py to viewport-relative offset
+    if (py < data.top) return false;
+    if (py > data.top + gd.sy -| 1) return false;
+    at.* = ((py - data.top) * gd.sx) + px;
+    return true;
 }
 
-pub fn window_copy_clip_width(_width: u32, _b: u32, _sx: u32, _sy: u32) u32 {
-    _ = _width;
-    _ = _b;
-    _ = _sx;
-    _ = _sy;
-    return 0;
+pub fn window_copy_clip_width(width: u32, b: u32, sx: u32, sy: u32) u32 {
+    const total = @as(u64, sx) * @as(u64, sy);
+    const b64 = @as(u64, b);
+    if (b64 + @as(u64, width) > total)
+        return @intCast(total -| b64)
+    else
+        return width;
 }
 
 pub fn window_copy_search_mark_match(data: *CopyModeData, _px: u32, _py: u32, _width: u32, _mark: bool) u32 {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When available, marks the given range in the searchmark array.
     _ = data;
     _ = _px;
     _ = _py;
@@ -2514,15 +2665,60 @@ pub fn window_copy_search_mark_match(data: *CopyModeData, _px: u32, _py: u32, _w
 
 // ── Other search / match helpers ───────────────────────────────────────────
 
-pub fn window_copy_cellstring(_gl: ?*const T.GridLine, _px: u32, _size: ?*usize, _free_flag: ?*bool) ?[]const u8 {
-    _ = _gl;
-    _ = _px;
-    _ = _size;
-    _ = _free_flag;
-    return null;
+pub fn window_copy_cellstring(gl: ?*const T.GridLine, px: u32, size: ?*usize, free_flag: ?*bool) ?[]const u8 {
+    if (free_flag) |f| f.* = false;
+
+    const line = gl orelse {
+        if (size) |s| s.* = 1;
+        return " ";
+    };
+
+    if (px >= line.cellused or px >= line.celldata.len) {
+        if (size) |s| s.* = 1;
+        return " ";
+    }
+
+    const gce = &line.celldata[px];
+    if ((gce.flags & T.GRID_FLAG_PADDING) != 0) {
+        if (size) |s| s.* = 0;
+        return null;
+    }
+
+    if ((gce.flags & T.GRID_FLAG_TAB) != 0) {
+        if (size) |s| s.* = 1;
+        return "\t";
+    }
+
+    if ((gce.flags & T.GRID_FLAG_EXTENDED) == 0) {
+        if (size) |s| s.* = 1;
+        return @as([*]const u8, @ptrCast(&gce.offset_or_data.data.data))[0..1];
+    }
+
+    // Extended cell: look up the utf8_char in the extended data table
+    const offset = gce.offset_or_data.offset;
+    if (offset < line.extddata.len) {
+        const extd = &line.extddata[offset];
+        // Convert utf8_char (u32) to bytes via a temporary Utf8Data
+        // We need to allocate a small copy since we can't return pointers
+        // to locals. Use a thread-local static buffer instead.
+        const S = struct {
+            threadlocal var buf: T.Utf8Data = std.mem.zeroes(T.Utf8Data);
+        };
+        utf8.utf8_to_data(extd.data, &S.buf);
+        if (S.buf.size == 0) {
+            if (size) |s| s.* = 1;
+            return " ";
+        }
+        if (size) |s| s.* = S.buf.size;
+        return S.buf.data[0..S.buf.size];
+    }
+
+    if (size) |s| s.* = 1;
+    return " ";
 }
 
 pub fn window_copy_last_regex(_gd: *T.Grid, _py: u32, _first: u32, _last: u32, _width: u32, _ppx: *u32, _psx: *u32, _pattern: []const u8, _preg: ?*anyopaque, _eflags: i32) bool {
+    // Requires POSIX regex support (regex_t); not yet ported to Zig.
     _ = _gd;
     _ = _py;
     _ = _first;
@@ -2536,25 +2732,126 @@ pub fn window_copy_last_regex(_gd: *T.Grid, _py: u32, _first: u32, _last: u32, _
     return false;
 }
 
-pub fn window_copy_stringify(_gd: *T.Grid, _py: u32, _first: u32, _last: u32, _buf: ?[]u8, _plen: *u32) ?[]u8 {
-    _ = _gd;
-    _ = _py;
-    _ = _first;
-    _ = _last;
+pub fn window_copy_stringify(gd: *T.Grid, py: u32, first: u32, last: u32, _buf: ?[]u8, plen: *u32) ?[]u8 {
     _ = _buf;
-    _ = _plen;
-    return null;
+    const gl = grid.grid_peek_line(@constCast(&gd.*), py) orelse {
+        var result = xm.allocator.alloc(u8, plen.*) catch unreachable;
+        if (plen.* > 0) result[plen.* - 1] = 0;
+        return result;
+    };
+
+    var buf_list: std.ArrayList(u8) = .{};
+
+    // Copy any existing data from plen
+    const existing = plen.*;
+    if (existing > 0) {
+        buf_list.ensureTotalCapacity(xm.allocator, existing + (last - first) * 4) catch unreachable;
+    }
+
+    // Pre-fill with existing size minus null terminator
+    if (existing > 1) {
+        buf_list.resize(xm.allocator, existing - 1) catch unreachable;
+    }
+
+    var ax: u32 = first;
+    while (ax < last) : (ax += 1) {
+        var dlen: usize = 0;
+        var allocated: bool = false;
+        const d = window_copy_cellstring(gl, ax, &dlen, &allocated) orelse continue;
+        if (dlen > 0) {
+            buf_list.appendSlice(xm.allocator, d[0..dlen]) catch unreachable;
+        }
+    }
+
+    // Add null terminator
+    buf_list.append(xm.allocator, 0) catch unreachable;
+    plen.* = @intCast(buf_list.items.len);
+    return buf_list.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
-pub fn window_copy_cstrtocellpos(_gd: *T.Grid, _ncells: u32, _ppx: *u32, _ppy: *u32, _str: []const u8) void {
-    _ = _gd;
-    _ = _ncells;
-    _ = _ppx;
-    _ = _ppy;
-    _ = _str;
+pub fn window_copy_cstrtocellpos(gd: *T.Grid, ncells: u32, ppx: *u32, ppy: *u32, str: []const u8) void {
+    if (ncells == 0 or str.len == 0) return;
+
+    const CellInfo = struct {
+        d: ?[]const u8,
+        dlen: usize,
+    };
+
+    var cells = xm.allocator.alloc(CellInfo, ncells) catch unreachable;
+    defer xm.allocator.free(cells);
+
+    var cell: u32 = 0;
+    var px = ppx.*;
+    var pywrap = ppy.*;
+    var gl = grid.grid_peek_line(@constCast(&gd.*), pywrap);
+    if (gl == null) return;
+
+    while (cell < ncells) : (cell += 1) {
+        var dlen: usize = 0;
+        var allocated: bool = false;
+        const d = window_copy_cellstring(gl, px, &dlen, &allocated);
+        cells[cell] = .{ .d = d, .dlen = dlen };
+        px += 1;
+        if (px == gd.sx) {
+            px = 0;
+            pywrap += 1;
+            gl = grid.grid_peek_line(@constCast(&gd.*), pywrap);
+            if (gl == null) break;
+        }
+    }
+
+    // Locate starting cell
+    cell = 0;
+    const len = str.len;
+    while (cell < ncells) {
+        var ccell = cell;
+        var pos: usize = 0;
+        var matched = true;
+        while (ccell < ncells) {
+            if (pos >= len) {
+                matched = false;
+                break;
+            }
+            const d = cells[ccell].d orelse {
+                ccell += 1;
+                continue;
+            };
+            const dlen = cells[ccell].dlen;
+            if (dlen == 1) {
+                if (str[pos] != d[0]) {
+                    matched = false;
+                    break;
+                }
+                pos += 1;
+            } else {
+                const cmp_len = @min(dlen, len - pos);
+                if (!std.mem.eql(u8, str[pos..][0..cmp_len], d[0..cmp_len])) {
+                    matched = false;
+                    break;
+                }
+                pos += cmp_len;
+            }
+            ccell += 1;
+        }
+        if (matched) break;
+        cell += 1;
+    }
+
+    px = ppx.* + cell;
+    pywrap = ppy.*;
+    while (px >= gd.sx) {
+        px -= gd.sx;
+        pywrap += 1;
+    }
+
+    ppx.* = px;
+    ppy.* = pywrap;
 }
 
 pub fn window_copy_match_start_end(data: *CopyModeData, _at: u32, start: *u32, end: *u32) void {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When searchmark is available, this walks backward/forward from `at`
+    // to find the contiguous run of the same mark value.
     _ = data;
     _ = _at;
     start.* = 0;
@@ -2562,6 +2859,9 @@ pub fn window_copy_match_start_end(data: *CopyModeData, _at: u32, start: *u32, e
 }
 
 pub fn window_copy_match_at_cursor(data: *CopyModeData) ?[]u8 {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When searchmark is available, this extracts the matched text
+    // at the cursor position from the grid.
     _ = data;
     return null;
 }
@@ -2569,21 +2869,36 @@ pub fn window_copy_match_at_cursor(data: *CopyModeData) ?[]u8 {
 // ── Movement helpers ───────────────────────────────────────────────────────
 
 pub fn window_copy_move_left(s: *T.Screen, fx: *u32, fy: *u32, wrapflag: bool) void {
-    _ = s;
-    if (fx.* > 0) {
-        fx.* -= 1;
-    } else if (wrapflag and fy.* > 0) {
+    if (fx.* == 0) {
+        if (fy.* == 0) {
+            if (wrapflag) {
+                fx.* = if (s.grid.sx > 0) s.grid.sx - 1 else 0;
+                fy.* = s.grid.sy -| 1;
+            }
+            return;
+        }
+        fx.* = if (s.grid.sx > 0) s.grid.sx - 1 else 0;
         fy.* -= 1;
-        fx.* = std.math.maxInt(u32);
+    } else {
+        fx.* -= 1;
     }
 }
 
 pub fn window_copy_move_right(s: *T.Screen, fx: *u32, fy: *u32, wrapflag: bool) void {
-    if (fx.* + 1 < s.grid.sx) {
-        fx.* += 1;
-    } else if (wrapflag and fy.* + 1 < s.grid.sy) {
-        fy.* += 1;
+    const sx = s.grid.sx;
+    const max_y = s.grid.sy -| 1;
+    if (sx > 0 and fx.* == sx - 1) {
+        if (fy.* == max_y) {
+            if (wrapflag) {
+                fx.* = 0;
+                fy.* = 0;
+            }
+            return;
+        }
         fx.* = 0;
+        fy.* += 1;
+    } else {
+        fx.* += 1;
     }
 }
 
@@ -2615,22 +2930,46 @@ pub fn window_copy_other_end(wme: *T.WindowModeEntry) void {
 }
 
 pub fn window_copy_cursor_left(wme: *T.WindowModeEntry) void {
-    moveCursorX(wme, -1);
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) return;
+    grid.grid_reader_cursor_left(&gr, true);
+    applyMotionReader(wme, &gr);
 }
 
 pub fn window_copy_cursor_right(wme: *T.WindowModeEntry, all: bool) void {
-    _ = all;
-    moveCursorX(wme, 1);
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) return;
+    grid.grid_reader_cursor_right(&gr, true, all);
+    applyMotionReader(wme, &gr);
 }
 
 pub fn window_copy_cursor_up(wme: *T.WindowModeEntry, scroll_only: bool) void {
-    _ = scroll_only;
-    scrollLines(wme, -1);
+    if (scroll_only) {
+        // Scroll viewport up by 1 without moving the cursor row
+        const data = modeData(wme);
+        if (data.top > 0) {
+            data.top -= 1;
+            if (data.cy < viewRows(wme.wp) -| 1)
+                data.cy += 1;
+        }
+    } else {
+        scrollLines(wme, -1);
+    }
 }
 
 pub fn window_copy_cursor_down(wme: *T.WindowModeEntry, scroll_only: bool) void {
-    _ = scroll_only;
-    cursorDownLines(wme, 1);
+    if (scroll_only) {
+        // Scroll viewport down by 1 without moving the cursor row
+        const data = modeData(wme);
+        const max_top = maxTop(data.backing, wme.wp);
+        if (data.top < max_top) {
+            data.top += 1;
+            if (data.cy > 0)
+                data.cy -= 1;
+        }
+    } else {
+        cursorDownLines(wme, 1);
+    }
 }
 
 pub fn window_copy_cursor_jump(wme: *T.WindowModeEntry) void {
@@ -2659,11 +2998,23 @@ pub fn window_copy_cursor_next_word_end(wme: *T.WindowModeEntry, separators: []c
 }
 
 pub fn window_copy_cursor_next_word_end_pos(wme: *T.WindowModeEntry, separators: []const u8, ppx: *u32, ppy: *u32) void {
-    _ = wme;
-    _ = separators;
-    ppx.* = 0;
-    ppy.* = 0;
-    // stub – position query without cursor move
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) {
+        ppx.* = modeData(wme).cx;
+        ppy.* = absoluteCursorRow(wme);
+        return;
+    }
+
+    if (copyModeUsesViKeys(wme)) {
+        if (grid.grid_reader_in_set(&gr, word_whitespace) == 0)
+            grid.grid_reader_cursor_right(&gr, false, false);
+        grid.grid_reader_cursor_next_word_end(&gr, separators);
+        grid.grid_reader_cursor_left(&gr, true);
+    } else {
+        grid.grid_reader_cursor_next_word_end(&gr, separators);
+    }
+
+    grid.grid_reader_get_cursor(&gr, ppx, ppy);
 }
 
 pub fn window_copy_cursor_previous_word(wme: *T.WindowModeEntry, separators: []const u8, already: bool) void {
@@ -2671,20 +3022,46 @@ pub fn window_copy_cursor_previous_word(wme: *T.WindowModeEntry, separators: []c
 }
 
 pub fn window_copy_cursor_previous_word_pos(wme: *T.WindowModeEntry, separators: []const u8, ppx: *u32, ppy: *u32) void {
-    _ = wme;
-    _ = separators;
-    ppx.* = 0;
-    ppy.* = 0;
-    // stub – position query without cursor move
+    var gr: T.GridReader = undefined;
+    if (!startMotionReader(wme, &gr)) {
+        ppx.* = modeData(wme).cx;
+        ppy.* = absoluteCursorRow(wme);
+        return;
+    }
+
+    grid.grid_reader_cursor_previous_word(&gr, separators, true, !copyModeUsesViKeys(wme));
+    grid.grid_reader_get_cursor(&gr, ppx, ppy);
 }
 
-pub fn window_copy_cursor_prompt(wme: *T.WindowModeEntry, direction: i32, start: bool) void {
-    _ = start;
-    if (direction < 0) {
-        scrollLines(wme, -1);
-    } else {
-        cursorDownLines(wme, 1);
+pub fn window_copy_cursor_prompt(wme: *T.WindowModeEntry, direction: i32, start_output: bool) void {
+    const data = modeData(wme);
+    const gd = data.backing.grid;
+    const line_flag: i32 = if (start_output) T.GRID_LINE_START_OUTPUT else T.GRID_LINE_START_PROMPT;
+
+    var line = absoluteCursorRow(wme);
+    const end_line: u32 = if (direction <= 0) 0 else rowCount(data.backing) -| 1;
+
+    if (line == end_line) return;
+
+    while (true) {
+        if (line == end_line) return;
+        if (direction <= 0) {
+            if (line == 0) return;
+            line -= 1;
+        } else {
+            line += 1;
+        }
+
+        if (line < gd.linedata.len) {
+            if ((gd.linedata[line].flags & line_flag) != 0)
+                break;
+        }
     }
+
+    data.cx = 0;
+    setAbsoluteCursorRow(wme, line);
+    _ = updateSelection(wme);
+    redraw(wme);
 }
 
 // ── Scroll ─────────────────────────────────────────────────────────────────
@@ -3070,13 +3447,206 @@ pub fn window_copy_cmd_middle_line(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_previous_matching_bracket(cs: *const CmdState) CmdAction {
-    _ = cs;
-    return .redraw;
+    const wme = cs.wme;
+    var np = repeatCount(wme);
+    const data = modeData(wme);
+    const s = data.backing;
+    const open_chars = "{[(";
+    const close_chars = "}])";
+
+    while (np > 0) : (np -= 1) {
+        var px = data.cx;
+        var py = absoluteCursorRow(wme);
+        var xx = backingLineLength(wme, py);
+        if (xx == 0) break;
+
+        // Get the current character. If not on a closing bracket, try previous.
+        var tried = false;
+        var found_char: ?u8 = null;
+        var bracket_idx: ?usize = null;
+        while (true) {
+            var gc: T.GridCell = undefined;
+            grid.get_cell(s.grid, py, px, &gc);
+            if (gc.data.size == 1 and !gc.isPadding()) {
+                const ch = gc.data.data[0];
+                if (std.mem.indexOfScalar(u8, close_chars, ch)) |idx| {
+                    found_char = ch;
+                    bracket_idx = idx;
+                    break;
+                }
+            }
+            if (!tried and px > 0) {
+                px -= 1;
+                tried = true;
+                continue;
+            }
+            break;
+        }
+
+        if (found_char == null or bracket_idx == null) {
+            if (copyModeUsesViKeys(wme)) {} else {
+                cursorPreviousWord(wme, close_chars, true);
+            }
+            continue;
+        }
+
+        const start_char = open_chars[bracket_idx.?];
+        const found = found_char.?;
+
+        // Walk backward until the matching bracket is reached
+        var n: u32 = 1;
+        var failed = false;
+        while (n != 0) {
+            if (px == 0) {
+                if (py == 0) {
+                    failed = true;
+                    break;
+                }
+                while (true) {
+                    py -= 1;
+                    xx = backingLineLength(wme, py);
+                    if (xx != 0 or py == 0) break;
+                }
+                if (xx == 0 and py == 0) {
+                    failed = true;
+                    break;
+                }
+                px = xx - 1;
+            } else {
+                px -= 1;
+            }
+
+            var gc: T.GridCell = undefined;
+            grid.get_cell(s.grid, py, px, &gc);
+            if (gc.data.size == 1 and !gc.isPadding()) {
+                if (gc.data.data[0] == found)
+                    n += 1
+                else if (gc.data.data[0] == start_char)
+                    n -= 1;
+            }
+        }
+
+        if (!failed)
+            window_copy_scroll_to(wme, px, py, false);
+    }
+
+    return .nothing;
 }
 
 pub fn window_copy_cmd_next_matching_bracket(cs: *const CmdState) CmdAction {
-    _ = cs;
-    return .redraw;
+    const wme = cs.wme;
+    var np = repeatCount(wme);
+    const data = modeData(wme);
+    const s = data.backing;
+    const open_chars = "{[(";
+    const close_chars = "}])";
+
+    while (np > 0) : (np -= 1) {
+        var px = data.cx;
+        var py = absoluteCursorRow(wme);
+        var xx = backingLineLength(wme, py);
+        const yy = rowCount(s) -| 1;
+        if (xx == 0) break;
+
+        // Get the current character
+        var tried = false;
+        var found_char: ?u8 = null;
+        var bracket_idx: ?usize = null;
+        while (true) {
+            var gc: T.GridCell = undefined;
+            grid.get_cell(s.grid, py, px, &gc);
+            if (gc.data.size == 1 and !gc.isPadding()) {
+                const ch = gc.data.data[0];
+
+                // In vi mode, if closing bracket found, try previous match
+                if (std.mem.indexOfScalar(u8, close_chars, ch)) |_| {
+                    if (copyModeUsesViKeys(wme)) {
+                        const sx = data.cx;
+                        const sy = absoluteCursorRow(wme);
+                        window_copy_scroll_to(wme, px, py, false);
+                        _ = window_copy_cmd_previous_matching_bracket(cs);
+                        const npx = data.cx;
+                        const npy = absoluteCursorRow(wme);
+                        var gc2: T.GridCell = undefined;
+                        grid.get_cell(s.grid, npy, npx, &gc2);
+                        if (gc2.data.size == 1 and !gc2.isPadding() and
+                            std.mem.indexOfScalar(u8, close_chars, gc2.data.data[0]) != null)
+                        {
+                            window_copy_scroll_to(wme, sx, sy, false);
+                        }
+                        return .nothing;
+                    }
+                }
+
+                if (std.mem.indexOfScalar(u8, open_chars, ch)) |idx| {
+                    found_char = ch;
+                    bracket_idx = idx;
+                    break;
+                }
+            }
+            if (!copyModeUsesViKeys(wme)) {
+                if (!tried and px <= xx) {
+                    px += 1;
+                    tried = true;
+                    continue;
+                }
+                cursorNextWordEnd(wme, open_chars);
+                break;
+            } else {
+                // vi: continue searching for bracket until EOL
+                if (px > xx) {
+                    if (py == yy) break;
+                    if (py < s.grid.linedata.len) {
+                        const gl = &s.grid.linedata[py];
+                        if ((gl.flags & T.GRID_LINE_WRAPPED) == 0) break;
+                        if (gl.cellused > s.grid.sx) break;
+                    }
+                    px = 0;
+                    py += 1;
+                    xx = backingLineLength(wme, py);
+                } else {
+                    px += 1;
+                }
+                continue;
+            }
+        }
+
+        if (found_char == null or bracket_idx == null) continue;
+
+        const end_char = close_chars[bracket_idx.?];
+        const found = found_char.?;
+
+        // Walk forward until the matching bracket is reached
+        var n: u32 = 1;
+        var failed = false;
+        while (n != 0) {
+            if (px > xx) {
+                if (py == yy) {
+                    failed = true;
+                    break;
+                }
+                px = 0;
+                py += 1;
+                xx = backingLineLength(wme, py);
+            } else {
+                px += 1;
+            }
+
+            var gc: T.GridCell = undefined;
+            grid.get_cell(s.grid, py, px, &gc);
+            if (gc.data.size == 1 and !gc.isPadding()) {
+                if (gc.data.data[0] == found)
+                    n += 1
+                else if (gc.data.data[0] == end_char)
+                    n -= 1;
+            }
+        }
+
+        if (!failed)
+            window_copy_scroll_to(wme, px, py, false);
+    }
+
+    return .nothing;
 }
 
 pub fn window_copy_cmd_next_paragraph(cs: *const CmdState) CmdAction {

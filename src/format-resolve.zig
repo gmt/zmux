@@ -2252,12 +2252,12 @@ fn resolve_bracket_paste_flag(alloc: std.mem.Allocator, ctx: *const FormatContex
 
 fn resolve_buffer_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8, "") catch unreachable;
+    return alloc.dupe(u8, "#{t/p:buffer_created}: #{buffer_sample}") catch unreachable;
 }
 
 fn resolve_client_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8, "") catch unreachable;
+    return alloc.dupe(u8, "#{client_tty}: session #{client_session_name}") catch unreachable;
 }
 
 fn resolve_client_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2265,13 +2265,24 @@ fn resolve_client_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 }
 
 fn resolve_client_written(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux tracks cumulative bytes written to the client tty in c->written.
+    // zmux does not yet have a Client.written counter; returns 0 until that
+    // accounting is wired up.
     _ = ctx.client orelse return null;
     return alloc.dupe(u8, "0") catch unreachable;
 }
 
 fn resolve_config_files(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8, "") catch unreachable;
+    const cfg = @import("cfg.zig");
+    const paths = cfg.cfg_file_paths.items;
+    if (paths.len == 0) return alloc.dupe(u8, "") catch unreachable;
+    var out: std.ArrayList(u8) = .{};
+    for (paths, 0..) |path, idx| {
+        if (idx != 0) out.append(alloc, ',') catch unreachable;
+        out.appendSlice(alloc, path) catch unreachable;
+    }
+    return out.toOwnedSlice(alloc) catch unreachable;
 }
 
 fn resolve_current_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2287,6 +2298,9 @@ fn resolve_mouse_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
 }
 
 fn resolve_pane_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when the format tree's type is FORMAT_TYPE_PANE
+    // (set by format_defaults_pane). zmux's FormatContext does not carry a
+    // format-type tag; callers that need this should set it on the context.
     _ = ctx;
     return alloc.dupe(u8, "0") catch unreachable;
 }
@@ -2304,6 +2318,8 @@ fn resolve_session_bell_flag(alloc: std.mem.Allocator, ctx: *const FormatContext
 }
 
 fn resolve_session_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when format tree type is FORMAT_TYPE_SESSION.
+    // zmux FormatContext lacks a format-type discriminator; always "0".
     _ = ctx;
     return alloc.dupe(u8, "0") catch unreachable;
 }
@@ -2343,6 +2359,7 @@ fn resolve_session_stack(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
 }
 
 fn resolve_sixel_support(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // zmux does not implement sixel graphics; always report unsupported.
     _ = ctx;
     return alloc.dupe(u8, "0") catch unreachable;
 }
@@ -2357,7 +2374,21 @@ fn resolve_start_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 
 fn resolve_tree_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8, "") catch unreachable;
+    return alloc.dupe(u8,
+        "#{?pane_format," ++
+        "#{?pane_marked,#[reverse],}" ++
+        "#{pane_current_command}#{?pane_active,*,}#{?pane_marked,M,}" ++
+        "#{?#{&&:#{pane_title},#{!=:#{pane_title},#{host_short}}},: \"#{pane_title}\",}" ++
+        ",#{?window_format," ++
+        "#{?window_marked_flag,#[reverse],}" ++
+        "#{window_name}#{window_flags}" ++
+        "#{?#{&&:#{==:#{window_panes},1},#{&&:#{pane_title},#{!=:#{pane_title},#{host_short}}}},: \"#{pane_title}\",}" ++
+        "," ++
+        "#{session_windows} windows" ++
+        "#{?session_grouped, (group #{session_group}: #{session_group_list}),}" ++
+        "#{?session_attached, (attached),}" ++
+        "}}"
+    ) catch unreachable;
 }
 
 fn resolve_uid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2428,8 +2459,8 @@ fn resolve_window_active_sessions_list(alloc: std.mem.Allocator, ctx: *const For
 
 fn resolve_window_activity(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
-    _ = ctx_window(ctx) orelse return null;
-    return xm.xasprintf("{d}", .{@as(i64, 0)});
+    const w = ctx_window(ctx) orelse return null;
+    return xm.xasprintf("{d}", .{normalize_format_time(w.activity_time)});
 }
 
 fn resolve_window_cell_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2458,6 +2489,8 @@ fn resolve_window_end_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) 
 }
 
 fn resolve_window_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    // tmux returns "1" when format tree type is FORMAT_TYPE_WINDOW.
+    // zmux FormatContext lacks a format-type discriminator; always "0".
     _ = ctx;
     return alloc.dupe(u8, "0") catch unreachable;
 }

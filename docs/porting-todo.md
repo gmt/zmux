@@ -22,16 +22,6 @@ Each item describes what zmux does and what it lacks.
 
 ## TTY
 
-- All `tty_cmd_*` dispatch functions are empty stubs. Pane content
-  does not flow through the tmux-style command dispatch path.
-- `tty_draw_pane`/`tty_draw_line` in `tty.zig` are stubs. Pane
-  drawing uses the separate `tty-draw.zig` row-diff cache instead.
-- `tty_check_overlay`/`tty_check_overlay_range` return placeholder
-  values.
-- `tty_update_mode`/`tty_update_cursor` are stubs.
-- `tty_sync_start`/`tty_sync_end` synchronized update is stubbed.
-- `tty_set_selection` clipboard output is stubbed.
-- `tty_hyperlink` hyperlink output is stubbed.
 - `tty.c` request/buffer/query/path machinery is absent. Capability
   capture is a selected subset, not tmux's full terminal registry.
 - Local raw-mode/alternate-screen takeover is split into

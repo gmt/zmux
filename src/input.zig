@@ -2395,3 +2395,105 @@ test "input SOS is consumed cleanly" {
     try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 0, 3));
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }
+
+// ── tmux C-name stubs (tmux `input_ctx`; zmux uses `input_parse_screen` on panes) ──
+const input_win = @import("window.zig");
+
+pub fn input_parse_buffer(wp: *T.WindowPane, buf: []const u8) void {
+    input_parse_screen(wp, buf);
+}
+
+pub fn input_parse_pane(wp: *T.WindowPane) void {
+    var wpo: T.WindowPaneOffset = .{};
+    var size: usize = undefined;
+    const data = input_win.window_pane_get_new_data(wp, &wpo, &size);
+    input_parse_buffer(wp, data);
+    input_win.window_pane_update_used_data(wp, &wpo, size);
+}
+
+pub fn input_init(_: ?*T.WindowPane, _: ?*anyopaque) void {}
+pub fn input_free(_: ?*anyopaque) void {}
+pub fn input_reset(_: ?*anyopaque, _: i32) void {}
+
+pub fn input_parse(_: ?*anyopaque, _: [*]const u8, _: usize) void {}
+
+pub fn input_csi_dispatch(_: ?*anyopaque) void {}
+pub fn input_esc_dispatch(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_rm(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_rm_private(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_sm(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_sm_private(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_sm_graphics(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_winops(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_sgr(_: ?*anyopaque) void {}
+pub fn input_csi_dispatch_sgr_colon(_: ?*anyopaque, _: u32) void {}
+pub fn input_csi_dispatch_sgr_rgb(_: ?*anyopaque, _: i32, _: *u32) void {}
+pub fn input_csi_dispatch_sgr_rgb_do(_: ?*anyopaque, _: i32, _: i32, _: i32, _: i32) void {}
+
+pub fn input_clear(_: ?*anyopaque) void {}
+pub fn input_ground(_: ?*anyopaque) void {}
+pub fn input_print(_: ?*anyopaque) void {}
+pub fn input_intermediate(_: ?*anyopaque) void {}
+pub fn input_parameter(_: ?*anyopaque) void {}
+pub fn input_input(_: ?*anyopaque) void {}
+
+pub fn input_enter_dcs(_: ?*anyopaque) void {}
+pub fn input_enter_osc(_: ?*anyopaque) void {}
+pub fn input_exit_osc(_: ?*anyopaque) void {}
+pub fn input_enter_apc(_: ?*anyopaque) void {}
+pub fn input_exit_apc(_: ?*anyopaque) void {}
+pub fn input_enter_rename(_: ?*anyopaque) void {}
+pub fn input_exit_rename(_: ?*anyopaque) void {}
+pub fn input_end_bel(_: ?*anyopaque) void {}
+
+pub fn input_top_bit_set(_: ?*anyopaque) void {}
+
+pub fn input_split(_: ?*anyopaque) i32 {
+    return 0;
+}
+
+pub fn input_get(_: ?*anyopaque, _: u32, _: i32, _: i32) i32 {
+    return 0;
+}
+
+pub fn input_set_state(_: ?*anyopaque, _: ?*anyopaque) void {}
+
+pub fn input_save_state(_: ?*anyopaque) void {}
+pub fn input_restore_state(_: ?*anyopaque) void {}
+
+pub fn input_send_reply(_: ?*anyopaque, _: [*:0]const u8) void {}
+pub fn input_reply(_: ?*anyopaque, _: i32, _: [*:0]const u8) void {}
+
+pub fn input_osc_colour_reply(_: ?*anyopaque, _: i32, _: u32, _: i32, _: i32, _: i32) void {}
+
+pub fn input_report_current_theme(_: ?*anyopaque) void {}
+
+pub fn input_set_buffer_size(_: usize) void {}
+
+pub fn input_ground_timer_callback(_: i32, _: i32, _: ?*anyopaque) void {}
+pub fn input_start_ground_timer(_: ?*anyopaque) void {}
+
+pub fn input_request_timer_callback(_: i32, _: i32, _: ?*anyopaque) void {}
+pub fn input_start_request_timer(_: ?*anyopaque) void {}
+
+pub fn input_make_request(_: ?*anyopaque, _: u32) ?*anyopaque {
+    return null;
+}
+
+pub fn input_free_request(_: ?*anyopaque) void {}
+
+pub fn input_add_request(_: ?*anyopaque, _: u32, _: i32) i32 {
+    return 0;
+}
+
+pub fn input_cancel_requests(_: ?*T.Client) void {}
+
+pub fn input_request_palette_reply(_: ?*anyopaque, _: ?*anyopaque) void {}
+pub fn input_request_clipboard_reply(_: ?*anyopaque, _: ?*anyopaque) void {}
+pub fn input_request_reply(_: ?*T.Client, _: u32, _: ?*anyopaque) void {}
+
+pub fn input_reply_clipboard(_: ?*anyopaque, _: [*]const u8, _: usize, _: i32) void {}
+
+pub fn input_table_compare(_: ?*const anyopaque, _: ?*const anyopaque) i32 {
+    return 0;
+}

@@ -570,6 +570,13 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         apply_private_modes(ctx, params, final == 'h');
         return;
     }
+    if (private and final == 'n') {
+        // CSI ? Ps n — DSR_PRIVATE (device status report, private mode).
+        // tmux handles case 996 to report the current theme.
+        // zmux cannot reply to the terminal yet (no tty write path), so
+        // we consume the sequence without generating a response.
+        return;
+    }
     if (has_intermediate_space and final == 'q') {
         // CSI Ps SP q — DECSCUSR set cursor style
         apply_decscusr(ctx, params);
@@ -599,6 +606,10 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             0 => screen_write.erase_to_screen_end(ctx),
             1 => screen_write.erase_to_screen_beginning(ctx),
             2 => screen_write.erase_screen(ctx),
+            3 => {
+                if (second_param(params, 0) == 0)
+                    screen_write.clearhistory(ctx);
+            },
             else => {},
         },
         'K' => switch (first_param(params, 0)) {
@@ -1150,18 +1161,23 @@ fn apply_private_modes(ctx: *T.ScreenWriteCtx, params: []const u32, set: bool) v
                     current.mode &= ~T.MODE_BRACKETPASTE;
             },
             2026 => {
-                // Synchronized output (reduced: track mode bit)
-                if (set)
-                    current.mode |= T.MODE_SYNC
-                else
-                    current.mode &= ~T.MODE_SYNC;
+                // Synchronized output
+                if (set) {
+                    screen_write.screen_write_start_sync(wp);
+                } else {
+                    screen_write.screen_write_stop_sync(wp);
+                    wp.flags |= T.PANE_REDRAW;
+                }
             },
             2031 => {
-                // Theme update notifications (reduced: track mode bit)
-                if (set)
-                    current.mode |= T.MODE_THEME_UPDATES
-                else
+                // Theme update notifications
+                if (set) {
+                    current.mode |= T.MODE_THEME_UPDATES;
+                    wp.flags &= ~T.PANE_THEMECHANGED;
+                } else {
                     current.mode &= ~T.MODE_THEME_UPDATES;
+                    wp.flags &= ~T.PANE_THEMECHANGED;
+                }
             },
             else => {},
         }
@@ -2396,13 +2412,37 @@ test "input SOS is consumed cleanly" {
     try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
 }
 
-// ── tmux C-name stubs (tmux `input_ctx`; zmux uses `input_parse_screen` on panes) ──
+// ── tmux C-name API ──
+//
+// zmux does NOT use tmux's state-machine `input_ctx` architecture.  Instead,
+// `input_parse_screen` drives an inline byte-by-byte parser that operates
+// directly on `WindowPane` / `ScreenWriteCtx`.  The functions below provide
+// tmux-compatible entry points so that callers written against the C API can
+// link and build.  Where possible they delegate to the real zmux
+// implementations above; where the required infrastructure (libevent timers,
+// bufferevent write-back, tty query path) does not yet exist, the body
+// contains a comment explaining what is needed.
+//
 const input_win = @import("window.zig");
 
+// ── Core parsing entry points ──
+
+/// Parse raw bytes for a pane (tmux: `input_parse_buffer`).
+/// Delegates directly to `input_parse_screen`.
 pub fn input_parse_buffer(wp: *T.WindowPane, buf: []const u8) void {
     input_parse_screen(wp, buf);
 }
 
+/// Low-level parse entry point (tmux: `input_parse`).
+/// In tmux this takes an `input_ctx` pointer and drives the state machine.
+/// zmux delegates to `input_parse_screen` when a pane is available.
+/// This overload exists for callers that only have an opaque context.
+pub fn input_parse(_: ?*anyopaque, _: [*]const u8, _: usize) void {
+    // zmux cannot recover the WindowPane from an opaque pointer.
+    // Callers should use input_parse_buffer or input_parse_screen instead.
+}
+
+/// Read new data from a pane's pty buffer and parse it (tmux: `input_parse_pane`).
 pub fn input_parse_pane(wp: *T.WindowPane) void {
     var wpo: T.WindowPaneOffset = .{};
     var size: usize = undefined;
@@ -2411,89 +2451,348 @@ pub fn input_parse_pane(wp: *T.WindowPane) void {
     input_win.window_pane_update_used_data(wp, &wpo, size);
 }
 
-pub fn input_init(_: ?*T.WindowPane, _: ?*anyopaque) void {}
-pub fn input_free(_: ?*anyopaque) void {}
-pub fn input_reset(_: ?*anyopaque, _: i32) void {}
+// ── Lifecycle (tmux: `input_init` / `input_free` / `input_reset`) ──
+//
+// tmux allocates a heap `input_ctx` with DCS/APC accumulation buffers,
+// a ground timer (libevent), a request queue, and saved cell state.
+// zmux keeps all equivalent state on `Screen` (cell_fg/bg/us/attr,
+// g0set/g1set, saved_* variants) and `WindowPane.input_pending`.
+// No separate heap object is needed, so `input_init` resets cell state
+// and `input_free` drains the pending buffer.
 
-pub fn input_parse(_: ?*anyopaque, _: [*]const u8, _: usize) void {}
+/// Initialise input parsing state for a pane (tmux: `input_init`).
+/// Resets the cell attributes on the pane's base screen to defaults.
+pub fn input_init(wp: ?*T.WindowPane, _: ?*anyopaque) void {
+    if (wp) |w| {
+        input_reset_cell(&w.base);
+        w.input_pending.clearRetainingCapacity();
+    }
+}
 
+/// Tear down input parsing state (tmux: `input_free`).
+/// Drains any pending bytes on the pane.  zmux has no heap-allocated
+/// `input_ctx`, so there is no structure to free.
+pub fn input_free(wp: ?*T.WindowPane) void {
+    if (wp) |w| {
+        w.input_pending.clearRetainingCapacity();
+        // tmux also calls screen_write_stop_sync here; mirror that.
+        screen_write.screen_write_stop_sync(w);
+    }
+}
+
+/// Reset input state and optionally clear the screen (tmux: `input_reset`).
+/// Resets cell attributes to default.  If `clear` is non-zero and the pane
+/// has no active modes, the base screen is erased.
+pub fn input_reset(wp: ?*T.WindowPane, clear: i32) void {
+    if (wp) |w| {
+        input_reset_cell(&w.base);
+        w.input_pending.clearRetainingCapacity();
+
+        if (clear != 0) {
+            var ctx = T.ScreenWriteCtx{ .wp = w, .s = &w.base };
+            screen_write.reset(&ctx);
+        }
+    }
+}
+
+// ── State save / restore (DECSC / DECRC) ──
+//
+// tmux saves the full `input_cell` (cell attributes + g0/g1 sets), cursor
+// position, and origin mode into `old_cell` / `old_cx` / `old_cy` /
+// `old_mode` on the `input_ctx`.  zmux stores the same information on the
+// `Screen` struct (saved_cell_fg/bg/us/attr, saved_g0set/g1set, saved_cx,
+// saved_cy, saved_mode) and the save/restore is done through
+// `screen_write.save_cursor` / `screen_write.restore_cursor`.
+
+/// Save cursor position and cell attributes (tmux: DECSC / `input_save_state`).
+pub fn input_save_state(wp: ?*T.WindowPane) void {
+    if (wp) |w| {
+        var ctx = T.ScreenWriteCtx{ .wp = w, .s = screen_mod.screen_current(w) };
+        screen_write.save_cursor(&ctx);
+    }
+}
+
+/// Restore cursor position and cell attributes (tmux: DECRC / `input_restore_state`).
+pub fn input_restore_state(wp: ?*T.WindowPane) void {
+    if (wp) |w| {
+        var ctx = T.ScreenWriteCtx{ .wp = w, .s = screen_mod.screen_current(w) };
+        screen_write.restore_cursor(&ctx);
+    }
+}
+
+// ── CSI dispatch wrappers ──
+//
+// In tmux these are called from the state-machine CSI dispatch with an
+// `input_ctx` that carries parsed parameters.  zmux's inline parser calls
+// `apply_csi` / `apply_sgr_raw` / `apply_private_modes` etc. directly, so
+// these C-name entry points exist only for link compatibility.
+
+/// CSI dispatch (tmux: `input_csi_dispatch`).
+/// zmux handles this inline in `apply_csi`; this wrapper is a no-op.
 pub fn input_csi_dispatch(_: ?*anyopaque) void {}
+
+/// ESC dispatch (tmux: `input_esc_dispatch`).
+/// zmux handles ESC sequences inline in `input_parse_screen`.
 pub fn input_esc_dispatch(_: ?*anyopaque) void {}
+
+/// CSI RM (tmux: `input_csi_dispatch_rm`).
+/// Real logic: `apply_rm` (mode 4 IRM, mode 34).
 pub fn input_csi_dispatch_rm(_: ?*anyopaque) void {}
+
+/// CSI RM private (tmux: `input_csi_dispatch_rm_private`).
+/// Real logic: `apply_private_modes` with set=false.
 pub fn input_csi_dispatch_rm_private(_: ?*anyopaque) void {}
+
+/// CSI SM (tmux: `input_csi_dispatch_sm`).
+/// Real logic: `apply_sm` (mode 4 IRM, mode 34).
 pub fn input_csi_dispatch_sm(_: ?*anyopaque) void {}
+
+/// CSI SM private (tmux: `input_csi_dispatch_sm_private`).
+/// Real logic: `apply_private_modes` with set=true.
 pub fn input_csi_dispatch_sm_private(_: ?*anyopaque) void {}
+
+/// CSI SM graphics / Sixel (tmux: `input_csi_dispatch_sm_graphics`).
+/// Sixel support is not yet implemented in zmux.
 pub fn input_csi_dispatch_sm_graphics(_: ?*anyopaque) void {}
+
+/// CSI window operations (tmux: `input_csi_dispatch_winops`).
+/// Real logic: `apply_winops`.
 pub fn input_csi_dispatch_winops(_: ?*anyopaque) void {}
+
+/// CSI SGR (tmux: `input_csi_dispatch_sgr`).
+/// Real logic: `apply_sgr_raw` / `apply_sgr` / `apply_sgr_colon`.
 pub fn input_csi_dispatch_sgr(_: ?*anyopaque) void {}
+
+/// CSI SGR colon sub-params (tmux: `input_csi_dispatch_sgr_colon`).
+/// Real logic: `apply_sgr_colon`.
 pub fn input_csi_dispatch_sgr_colon(_: ?*anyopaque, _: u32) void {}
+
+/// CSI SGR RGB (tmux: `input_csi_dispatch_sgr_rgb`).
+/// Real logic: `sgr_set_colour_rgb`.
 pub fn input_csi_dispatch_sgr_rgb(_: ?*anyopaque, _: i32, _: *u32) void {}
+
+/// CSI SGR RGB direct (tmux: `input_csi_dispatch_sgr_rgb_do`).
+/// Real logic: `sgr_set_colour_rgb`.
 pub fn input_csi_dispatch_sgr_rgb_do(_: ?*anyopaque, _: i32, _: i32, _: i32, _: i32) void {}
 
+// ── State-machine transition handlers ──
+//
+// In tmux's VT parser state machine these are called on state entry/exit.
+// zmux's inline parser handles the equivalent logic directly, so these
+// are no-ops retained for API surface compatibility only.
+
+/// Clear intermediate/parameter/input buffers (tmux: `input_clear`).
+/// zmux does not maintain separate intermediate/parameter buffers.
 pub fn input_clear(_: ?*anyopaque) void {}
+
+/// Enter ground state (tmux: `input_ground`).
+/// zmux has no since_ground evbuffer to drain.
 pub fn input_ground(_: ?*anyopaque) void {}
+
+/// Print a character (tmux: `input_print`).
+/// zmux uses `handle_plain_bytes` → `screen_write.putBytes`.
 pub fn input_print(_: ?*anyopaque) void {}
+
+/// Collect intermediate byte (tmux: `input_intermediate`).
+/// zmux parses intermediates inline.
 pub fn input_intermediate(_: ?*anyopaque) void {}
+
+/// Collect parameter byte (tmux: `input_parameter`).
+/// zmux parses parameters inline via `parse_csi_params`.
 pub fn input_parameter(_: ?*anyopaque) void {}
+
+/// Collect input byte (tmux: `input_input`).
+/// zmux reads DCS/OSC/APC payloads inline.
 pub fn input_input(_: ?*anyopaque) void {}
 
+// ── DCS / OSC / APC / Rename entry/exit handlers ──
+//
+// tmux calls these when the state machine enters/exits the corresponding
+// string-accumulation states.  zmux handles the enter/exit logic inline:
+//   - DCS: `parse_dcs_structured` + `apply_dcs`
+//   - OSC: `parse_osc` + `apply_osc`
+//   - APC: `parse_apc` + `apply_apc`
+//   - Rename: `parse_rename`
+// The stubs below document why they are no-ops.
+
+/// Enter DCS string state (tmux: `input_enter_dcs`).
+/// zmux: `parse_dcs_structured` handles DCS inline, including parameter
+/// collection, intermediate bytes, and data accumulation.
 pub fn input_enter_dcs(_: ?*anyopaque) void {}
+
+/// Enter OSC string state (tmux: `input_enter_osc`).
+/// zmux: `parse_osc` + `apply_osc` handle OSC inline.
 pub fn input_enter_osc(_: ?*anyopaque) void {}
+
+/// Exit OSC string state (tmux: `input_exit_osc`).
+/// zmux: `apply_osc` dispatches the OSC at parse time.
 pub fn input_exit_osc(_: ?*anyopaque) void {}
+
+/// Enter APC string state (tmux: `input_enter_apc`).
+/// zmux: `parse_apc` + `apply_apc` handle APC inline.
 pub fn input_enter_apc(_: ?*anyopaque) void {}
+
+/// Exit APC string state (tmux: `input_exit_apc`).
+/// zmux: `apply_apc` dispatches the APC at parse time.
 pub fn input_exit_apc(_: ?*anyopaque) void {}
+
+/// Enter rename string state (tmux: `input_enter_rename`).
+/// zmux: `parse_rename` handles window rename inline.
 pub fn input_enter_rename(_: ?*anyopaque) void {}
+
+/// Exit rename string state (tmux: `input_exit_rename`).
+/// zmux: `parse_rename` dispatches the rename at parse time.
 pub fn input_exit_rename(_: ?*anyopaque) void {}
+
+/// BEL terminator for OSC (tmux: `input_end_bel`).
+/// zmux: `parse_osc` handles BEL as an OSC terminator inline.
 pub fn input_end_bel(_: ?*anyopaque) void {}
 
+/// Handle high-bit (UTF-8 lead) byte (tmux: `input_top_bit_set`).
+/// zmux: `screen_write.putBytes` handles UTF-8 decoding.
 pub fn input_top_bit_set(_: ?*anyopaque) void {}
 
+// ── Parameter splitting / access ──
+//
+// tmux splits the raw CSI parameter buffer into a `param_list` array of
+// typed values (number, string, or missing).  zmux parses CSI parameters
+// inline with `parse_csi_params`.
+
+/// Split parameter buffer (tmux: `input_split`).
+/// zmux: parameters are parsed inline; see `parse_csi_params`.
 pub fn input_split(_: ?*anyopaque) i32 {
     return 0;
 }
 
+/// Get a parsed parameter value (tmux: `input_get`).
+/// zmux: parameters are accessed via `first_param` / `second_param`.
 pub fn input_get(_: ?*anyopaque, _: u32, _: i32, _: i32) i32 {
     return 0;
 }
 
+/// Change state machine state (tmux: `input_set_state`).
+/// zmux: no state machine; the inline parser does not maintain explicit state.
 pub fn input_set_state(_: ?*anyopaque, _: ?*anyopaque) void {}
 
-pub fn input_save_state(_: ?*anyopaque) void {}
-pub fn input_restore_state(_: ?*anyopaque) void {}
+// ── Reply / request infrastructure ──
+//
+// tmux sends responses back to the terminal via `bufferevent_write` on the
+// pane's pty.  This enables DA1/DA2, DSR, DECRQSS, OSC 10/11/12 queries,
+// OSC 52 clipboard replies, and palette colour query replies.
+//
+// zmux does not yet have a tty write-back path: there is no `bufferevent`,
+// no `input_ctx.event`, and no client-to-pane reply channel.  Until this
+// infrastructure is added, all reply/request functions are no-ops.
+// The specific missing pieces are:
+//   1. A write-back fd or buffer on `WindowPane` to send bytes to the pty
+//   2. A client dispatch loop to relay requests to the appropriate tty
+//   3. Timer support (libevent `evtimer`) for request timeouts
 
+/// Send a raw reply string to the terminal (tmux: `input_send_reply`).
+/// BLOCKED: requires pty write-back path.
 pub fn input_send_reply(_: ?*anyopaque, _: [*:0]const u8) void {}
+
+/// Format and send a reply (tmux: `input_reply`).
+/// BLOCKED: requires pty write-back path.
 pub fn input_reply(_: ?*anyopaque, _: i32, _: [*:0]const u8) void {}
 
+/// Reply with an OSC colour value (tmux: `input_osc_colour_reply`).
+/// BLOCKED: requires pty write-back path.
 pub fn input_osc_colour_reply(_: ?*anyopaque, _: i32, _: u32, _: i32, _: i32, _: i32) void {}
 
+/// Report the current dark/light theme (tmux: `input_report_current_theme`).
+/// In tmux this sends CSI ? 997 ; 1 n (dark) or CSI ? 997 ; 2 n (light).
+/// BLOCKED: requires pty write-back path and `window_pane_get_theme`.
 pub fn input_report_current_theme(_: ?*anyopaque) void {}
 
-pub fn input_set_buffer_size(_: usize) void {}
+/// Send a clipboard reply (tmux: `input_reply_clipboard`).
+/// BLOCKED: requires pty write-back path.
+pub fn input_reply_clipboard(_: ?*anyopaque, _: [*]const u8, _: usize, _: i32) void {}
 
+/// Set the maximum input buffer size (tmux: `input_set_buffer_size`).
+/// zmux uses growable ArrayList for pending input; no fixed cap needed.
+var input_buffer_size: usize = 1024 * 1024;
+pub fn input_set_buffer_size(size: usize) void {
+    input_buffer_size = size;
+}
+
+// ── Ground timer ──
+//
+// tmux uses a libevent timer (`ground_timer`) that fires after 5 seconds
+// of being outside the ground state.  When it fires, the parser is reset
+// to ground to prevent stuck-in-escape conditions from bad data.
+//
+// zmux does not use libevent and does not maintain explicit parser state,
+// so the ground timer concept does not directly apply.  The inline parser
+// naturally returns to "ground" after consuming or failing to match each
+// sequence.  Incomplete sequences remain in `input_pending` and are
+// retried when more data arrives.
+//
+// BLOCKED: full equivalent requires libevent `evtimer` or a Zig async
+// timer that calls `input_reset` after a timeout period.
+
+/// Ground timer callback (tmux: `input_ground_timer_callback`).
+/// BLOCKED: requires libevent timer.
 pub fn input_ground_timer_callback(_: i32, _: i32, _: ?*anyopaque) void {}
+
+/// Start the ground timer (tmux: `input_start_ground_timer`).
+/// BLOCKED: requires libevent timer.
 pub fn input_start_ground_timer(_: ?*anyopaque) void {}
 
+// ── Request queue / timer ──
+//
+// tmux maintains a TAILQ of `input_request` objects for pending terminal
+// queries (palette, clipboard).  A 100ms libevent timer expires stale
+// requests.  Clients are matched by session membership and activity time.
+//
+// zmux does not have the client dispatch infrastructure, session/window
+// association for query routing, or libevent timers needed for this.
+//
+// BLOCKED: requires client/session infrastructure, libevent timers, and
+// tty write-back path.
+
+/// Request timer callback (tmux: `input_request_timer_callback`).
+/// BLOCKED: requires libevent timer + request queue.
 pub fn input_request_timer_callback(_: i32, _: i32, _: ?*anyopaque) void {}
+
+/// Start the request timer (tmux: `input_start_request_timer`).
+/// BLOCKED: requires libevent timer.
 pub fn input_start_request_timer(_: ?*anyopaque) void {}
 
+/// Create a new request object (tmux: `input_make_request`).
+/// BLOCKED: requires request queue infrastructure.
 pub fn input_make_request(_: ?*anyopaque, _: u32) ?*anyopaque {
     return null;
 }
 
+/// Free a request object (tmux: `input_free_request`).
+/// BLOCKED: requires request queue infrastructure.
 pub fn input_free_request(_: ?*anyopaque) void {}
 
+/// Add a request and route to the appropriate client (tmux: `input_add_request`).
+/// BLOCKED: requires client dispatch + tty write-back + request queue.
 pub fn input_add_request(_: ?*anyopaque, _: u32, _: i32) i32 {
     return 0;
 }
 
+/// Cancel all pending requests for a client (tmux: `input_cancel_requests`).
+/// BLOCKED: requires request queue infrastructure.
 pub fn input_cancel_requests(_: ?*T.Client) void {}
 
+/// Handle a palette query reply from the terminal (tmux: `input_request_palette_reply`).
+/// BLOCKED: requires request queue + pty write-back.
 pub fn input_request_palette_reply(_: ?*anyopaque, _: ?*anyopaque) void {}
+
+/// Handle a clipboard query reply from the terminal (tmux: `input_request_clipboard_reply`).
+/// BLOCKED: requires request queue + pty write-back.
 pub fn input_request_clipboard_reply(_: ?*anyopaque, _: ?*anyopaque) void {}
+
+/// Dispatch a reply to a pending request (tmux: `input_request_reply`).
+/// BLOCKED: requires request queue infrastructure.
 pub fn input_request_reply(_: ?*T.Client, _: u32, _: ?*anyopaque) void {}
 
-pub fn input_reply_clipboard(_: ?*anyopaque, _: [*]const u8, _: usize, _: i32) void {}
-
+/// Table comparison for binary search (tmux: `input_table_compare`).
+/// zmux does not use a dispatch table; CSI/ESC commands are matched inline.
 pub fn input_table_compare(_: ?*const anyopaque, _: ?*const anyopaque) i32 {
     return 0;
 }

@@ -28,17 +28,11 @@ Each item describes what zmux does and what it lacks.
 
 ## Format
 
-- 185 `format_cb_*` aliases point to a single no-op stub. zmux's
-  resolver table in `format-resolve.zig` handles many of these, but
-  some format variables return empty/zero placeholder values.
-- `format_create`/`format_free`/`format_find`/`format_add` are
-  stubs. zmux uses `FormatContext` struct initialization instead.
-- `format_defaults_*` context population is stubbed.
-- `format_loop_*` iteration stubs return empty results.
-- `format_job_get`/`format_job_complete` job-backed expansion is
-  stubbed.
-- `format_replace`/`format_replace_expression` expansion engine
-  stubs delegate to the existing resolver but lack the full DSL.
+- `client_written`, `pane_format`, `session_format`,
+  `window_format` return placeholder values because the backing
+  state fields do not exist yet.
+- `sixel_support` returns `"0"` because zmux does not implement
+  sixel graphics.
 - The formatter lacks jobs, pane-search `C`, and the broader DSL.
 
 ## Server-Client

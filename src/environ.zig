@@ -29,11 +29,15 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
+const build_options = @import("build_options");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
 
 pub var global_environ: *T.Environ = undefined;
+
+/// Server socket path for `environ_for_session` / `ZMUX` (keep in sync with `server.socket_path`).
+pub var socket_path: []const u8 = "";
 
 /// Allocate and initialise a new empty environment.
 pub fn environ_create() *T.Environ {
@@ -53,11 +57,65 @@ pub fn environ_free(env: *T.Environ) void {
     xm.allocator.destroy(env);
 }
 
-/// Return the first entry (sorted alphabetically; we sort on demand).
+/// Lexicographic compare on variable names (strcmp semantics), matching tmux `environ_cmp`.
+pub fn environ_cmp(a: *const T.EnvironEntry, b: *const T.EnvironEntry) i32 {
+    return switch (std.mem.order(u8, a.name, b.name)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+}
+
+/// Smallest entry by name (tmux `RB_MIN` / `environ_first`).
 pub fn environ_first(env: *T.Environ) ?*T.EnvironEntry {
-    // For ordered iteration, callers should iterate the values directly.
     var it = env.entries.valueIterator();
-    return it.next();
+    var best: ?*T.EnvironEntry = null;
+    while (it.next()) |entry| {
+        if (best == null or environ_cmp(entry, best.?) < 0)
+            best = entry;
+    }
+    return best;
+}
+
+/// Next entry in name order after `current`. Requires `env` because entries are not RB-linked.
+pub fn environ_next(env: *T.Environ, current: *const T.EnvironEntry) ?*T.EnvironEntry {
+    var it = env.entries.valueIterator();
+    var best: ?*T.EnvironEntry = null;
+    while (it.next()) |entry| {
+        if (environ_cmp(entry, current) <= 0) continue;
+        if (best == null or environ_cmp(entry, best.?) < 0)
+            best = entry;
+    }
+    return best;
+}
+
+/// Initial child environment: global + session overrides, TERM defaults, optional systemd cleanup, `ZMUX`.
+pub fn environ_for_session(s: ?*T.Session, no_term: bool) *T.Environ {
+    const env = environ_create();
+    environ_copy(global_environ, env);
+    if (s) |sess|
+        environ_copy(sess.environ, env);
+
+    if (!no_term) {
+        const term = opts.options_get_string(opts.global_options, "default-terminal");
+        environ_set(env, "TERM", 0, term);
+        environ_set(env, "TERM_PROGRAM", 0, "zmux");
+        environ_set(env, "TERM_PROGRAM_VERSION", 0, T.ZMUX_VERSION);
+        environ_set(env, "COLORTERM", 0, "truecolor");
+    }
+
+    if (build_options.have_systemd) {
+        environ_clear(env, "LISTEN_PID");
+        environ_clear(env, "LISTEN_FDS");
+        environ_clear(env, "LISTEN_FDNAMES");
+    }
+
+    const idx: i32 = if (s) |sess| @intCast(sess.id) else -1;
+    const zmux_val = xm.xasprintf("{s},{d},{d}", .{ socket_path, std.c.getpid(), idx });
+    defer xm.allocator.free(zmux_val);
+    environ_set(env, "ZMUX", 0, zmux_val);
+
+    return env;
 }
 
 /// Copy all entries from src into dst.
@@ -180,7 +238,7 @@ pub fn environ_sorted_entries(env: *T.Environ) []*T.EnvironEntry {
 }
 
 fn less_than_entry(_: void, a: *T.EnvironEntry, b: *T.EnvironEntry) bool {
-    return std.mem.lessThan(u8, a.name, b.name);
+    return environ_cmp(a, b) < 0;
 }
 
 fn environ_match(pattern: []const u8, name: []const u8) bool {
@@ -202,4 +260,26 @@ test "environ_sorted_entries returns alphabetical order" {
 
     try std.testing.expectEqualStrings("A_FIRST", entries[0].name);
     try std.testing.expectEqualStrings("Z_LAST", entries[1].name);
+}
+
+test "environ_cmp and first/next iteration order" {
+    var a = T.EnvironEntry{ .name = "a", .value = null, .flags = 0 };
+    var b = T.EnvironEntry{ .name = "b", .value = null, .flags = 0 };
+    try std.testing.expect(environ_cmp(&a, &b) < 0);
+    try std.testing.expect(environ_cmp(&b, &a) > 0);
+    try std.testing.expectEqual(@as(i32, 0), environ_cmp(&a, &a));
+
+    const env = environ_create();
+    defer environ_free(env);
+    environ_set(env, "M", 0, "2");
+    environ_set(env, "A", 0, "1");
+    environ_set(env, "Z", 0, "3");
+
+    const first = environ_first(env).?;
+    try std.testing.expectEqualStrings("A", first.name);
+    const second = environ_next(env, first).?;
+    try std.testing.expectEqualStrings("M", second.name);
+    const third = environ_next(env, second).?;
+    try std.testing.expectEqualStrings("Z", third.name);
+    try std.testing.expect(environ_next(env, third) == null);
 }

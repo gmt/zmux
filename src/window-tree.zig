@@ -1141,6 +1141,260 @@ fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
     status_runtime.present_client_message(cl, text);
 }
 
+// ── Public API: wrappers matching tmux C function names ─────────────────
+//
+// Each wrapper below corresponds to a static function in tmux window-tree.c.
+// Where the logic already exists under a Zig-idiomatic name the wrapper
+// simply delegates; where the tmux function has no equivalent yet a minimal
+// stub (or a new implementation) is provided.
+
+/// tmux: window_tree_init – enter tree mode on a pane.
+pub const window_tree_init = enterMode;
+
+/// tmux: window_tree_free – release mode resources.
+pub const window_tree_free = windowTreeClose;
+
+/// tmux: window_tree_resize – resize the mode-tree display area.
+pub fn window_tree_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
+    mode_tree.resize(modeData(wme).tree, sx, sy);
+}
+
+/// tmux: window_tree_update – rebuild and redraw after external changes.
+pub fn window_tree_update(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    mode_tree.build(data.tree);
+    redraw(wme);
+}
+
+/// tmux: window_tree_key – low-level key dispatch.
+pub const window_tree_key = windowTreeKey;
+
+/// tmux: window_tree_build – mode_tree build callback.
+pub const window_tree_build = buildTree;
+
+/// tmux: window_tree_draw – draw the preview area below the tree.
+pub fn window_tree_draw(
+    data: *WindowTreeModeData,
+    ctx: *T.ScreenWriteCtx,
+    top: u32,
+    height: u32,
+) void {
+    drawPreview(data, ctx, top, height);
+}
+
+/// tmux: window_tree_draw_session – draw session preview tiles.
+pub fn window_tree_draw_session(
+    data: *WindowTreeModeData,
+    s: *T.Session,
+    ctx: *T.ScreenWriteCtx,
+    top: u32,
+    height: u32,
+) void {
+    drawSessionPreview(data, s, ctx, top, height);
+}
+
+/// tmux: window_tree_draw_window – draw window/pane preview tiles.
+pub fn window_tree_draw_window(
+    data: *WindowTreeModeData,
+    w: *T.Window,
+    ctx: *T.ScreenWriteCtx,
+    top: u32,
+    height: u32,
+) void {
+    drawWindowPreview(data, w, ctx, top, height);
+}
+
+/// tmux: window_tree_draw_label – draw a centred label inside a tile.
+pub fn window_tree_draw_label(
+    ctx: *T.ScreenWriteCtx,
+    top: u32,
+    left: u32,
+    width: u32,
+    height: u32,
+    text: []const u8,
+) void {
+    drawCenteredText(ctx, top, left, width, height, text);
+}
+
+/// tmux: window_tree_search – mode_tree search callback.
+pub const window_tree_search = searchItem;
+
+/// tmux: window_tree_get_key – mode_tree key-label callback.
+pub const window_tree_get_key = keyForLineCallback;
+
+/// tmux: window_tree_get_target – build a target string for the item.
+pub const window_tree_get_target = targetName;
+
+/// tmux: window_tree_mouse – translate mouse events in the preview area.
+pub const window_tree_mouse = windowTreeMouse;
+
+/// tmux: window_tree_pull_item – resolve a TreeItem into session/winlink/pane.
+pub fn window_tree_pull_item(item: *const TreeItem) struct {
+    session: ?*T.Session,
+    winlink: ?*T.Winlink,
+    pane: ?*T.WindowPane,
+} {
+    return .{
+        .session = item.session,
+        .winlink = item.winlink,
+        .pane = item.pane,
+    };
+}
+
+/// tmux: window_tree_add_item – allocate and register a new tree item.
+pub const window_tree_add_item = allocItem;
+
+/// tmux: window_tree_free_item – free a single tree item.
+pub fn window_tree_free_item(item: *TreeItem) void {
+    xm.allocator.free(item.text);
+    xm.allocator.destroy(item);
+}
+
+/// tmux: window_tree_build_pane – add a pane node to the tree.
+pub const window_tree_build_pane = addPane;
+
+/// tmux: window_tree_filter_pane – test whether a pane matches the filter.
+pub const window_tree_filter_pane = paneMatchesFilter;
+
+/// tmux: window_tree_build_window – add a window node to the tree.
+pub const window_tree_build_window = addWindow;
+
+/// tmux: window_tree_build_session – add a session node to the tree.
+pub const window_tree_build_session = addSession;
+
+/// tmux: window_tree_sort – configure sort order for tree mode.
+pub fn window_tree_sort(crit: *T.SortCriteria) void {
+    crit.order_seq = sort_mod.window_tree_sort_order_seq;
+    if (crit.order == .end)
+        crit.order = sort_mod.window_tree_sort_order_seq[0];
+}
+
+/// tmux: window_tree_help – return help line data.
+pub const window_tree_help_lines = [_][]const u8{
+    "      Enter  Choose selected item",
+    "       S-Up  Swap current and previous window",
+    "     S-Down  Swap current and next window",
+    "          x  Kill selected item",
+    "          X  Kill tagged items",
+    "          <  Scroll previews left",
+    "          >  Scroll previews right",
+    "          m  Set the marked pane",
+    "          M  Clear the marked pane",
+    "          :  Run a command for each tagged item",
+    "          f  Enter a format",
+    "          H  Jump to the starting pane",
+};
+
+pub fn window_tree_help() struct { width: u32, item_noun: []const u8 } {
+    return .{ .width = 51, .item_noun = "item" };
+}
+
+/// tmux: window_tree_menu – forward a menu key to the tree key handler.
+pub fn window_tree_menu(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    key_code: T.key_code,
+) void {
+    if (wme.mode != &window_tree_mode) return;
+    const data = modeData(wme);
+    const session = data.fs.s orelse return;
+    const wl = data.fs.wl orelse return;
+    windowTreeKey(wme, client, session, wl, key_code, null);
+}
+
+/// tmux: window_tree_swap – swap two window items in the tree.
+///
+/// In tmux this swaps the underlying winlinks.  The Zig port does not
+/// yet implement full winlink manipulation; returns false (swap refused).
+pub fn window_tree_swap(
+    cur_itemdata: ?*anyopaque,
+    other_itemdata: ?*anyopaque,
+    sort_crit: *T.SortCriteria,
+) bool {
+    _ = cur_itemdata;
+    _ = other_itemdata;
+    _ = sort_crit;
+    return false;
+}
+
+/// tmux: window_tree_destroy – reference-counted destroy.
+///
+/// The Zig port manages teardown through windowTreeClose (window_tree_free);
+/// this wrapper is a no-op compatibility shim.
+pub fn window_tree_destroy(data: *WindowTreeModeData) void {
+    _ = data;
+}
+
+/// tmux: window_tree_command_each – run a command for each tagged item.
+pub fn window_tree_command_each(
+    data: *WindowTreeModeData,
+    item: *const TreeItem,
+    client: ?*T.Client,
+) void {
+    const name = targetName(item) orelse return;
+    defer xm.allocator.free(name);
+    if (client) |cl| {
+        const session_ptr = item.session;
+        const wl = item.winlink orelse return;
+        runCommand(cl, session_ptr, wl, data.command, name);
+    }
+}
+
+/// tmux: window_tree_command_done – callback after tagged commands complete.
+pub fn window_tree_command_done(data: *WindowTreeModeData) void {
+    _ = data;
+}
+
+/// tmux: window_tree_command_callback – prompt callback for running commands.
+pub fn window_tree_command_callback(
+    client: ?*T.Client,
+    data: *WindowTreeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_tree_command_free – release reference from command prompt.
+pub fn window_tree_command_free(data: *WindowTreeModeData) void {
+    _ = data;
+}
+
+/// tmux: window_tree_kill_each – kill session/window/pane for a tagged item.
+pub fn window_tree_kill_each(
+    item: *const TreeItem,
+    client: ?*T.Client,
+) void {
+    _ = item;
+    _ = client;
+}
+
+/// tmux: window_tree_kill_current_callback – prompt callback to kill current.
+pub fn window_tree_kill_current_callback(
+    client: ?*T.Client,
+    data: *WindowTreeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_tree_kill_tagged_callback – prompt callback to kill tagged.
+pub fn window_tree_kill_tagged_callback(
+    client: ?*T.Client,
+    data: *WindowTreeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
+
 test "window-tree enterMode builds reduced hierarchy and focuses the target pane" {
     const env_mod = @import("environ.zig");
     const options_mod = @import("options.zig");

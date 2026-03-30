@@ -147,10 +147,11 @@ pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
         s.input_last_valid = true;
     }
 
-    // Apply screen's current cell state (fg/bg/attr) to the cell.
+    // Apply screen's current cell state (fg/bg/us/attr) to the cell.
     var merged = gc.*;
     if (gc.fg == 8) merged.fg = @intCast(s.cell_fg);
     if (gc.bg == 8) merged.bg = @intCast(s.cell_bg);
+    if (gc.us == 8) merged.us = @intCast(s.cell_us);
     merged.attr |= s.cell_attr;
 
     if (combineCell(ctx, &merged)) return;
@@ -437,13 +438,32 @@ pub fn set_scroll_region(ctx: *T.ScreenWriteCtx, top: u32, bottom: u32) void {
 }
 
 pub fn save_cursor(ctx: *T.ScreenWriteCtx) void {
-    ctx.s.saved_cx = ctx.s.cx;
-    ctx.s.saved_cy = ctx.s.cy;
+    const s = ctx.s;
+    s.saved_cx = s.cx;
+    s.saved_cy = s.cy;
+    s.saved_cell_fg = s.cell_fg;
+    s.saved_cell_bg = s.cell_bg;
+    s.saved_cell_us = s.cell_us;
+    s.saved_cell_attr = s.cell_attr;
+    s.saved_g0set = s.g0set;
+    s.saved_g1set = s.g1set;
+    s.saved_mode = s.mode;
 }
 
 pub fn restore_cursor(ctx: *T.ScreenWriteCtx) void {
-    if (ctx.s.grid.sx != 0) ctx.s.cx = @min(ctx.s.saved_cx, ctx.s.grid.sx - 1) else ctx.s.cx = 0;
-    if (ctx.s.grid.sy != 0) ctx.s.cy = @min(ctx.s.saved_cy, ctx.s.grid.sy - 1) else ctx.s.cy = 0;
+    const s = ctx.s;
+    s.cell_fg = s.saved_cell_fg;
+    s.cell_bg = s.saved_cell_bg;
+    s.cell_us = s.saved_cell_us;
+    s.cell_attr = s.saved_cell_attr;
+    s.g0set = s.saved_g0set;
+    s.g1set = s.saved_g1set;
+    if (s.saved_mode & T.MODE_ORIGIN != 0)
+        s.mode |= T.MODE_ORIGIN
+    else
+        s.mode &= ~T.MODE_ORIGIN;
+    if (s.grid.sx != 0) s.cx = @min(s.saved_cx, s.grid.sx - 1) else s.cx = 0;
+    if (s.grid.sy != 0) s.cy = @min(s.saved_cy, s.grid.sy - 1) else s.cy = 0;
 }
 
 fn advanceCursorAfterWrite(ctx: *T.ScreenWriteCtx, width: u8) void {

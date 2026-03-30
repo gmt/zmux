@@ -127,6 +127,14 @@ pub fn control_notify_window_renamed(w: *T.Window) void {
     }
 }
 
+pub fn control_notify_window_pane_changed(w: *T.Window) void {
+    const active = w.active orelse return;
+    for (registry.clients.items) |cl| {
+        if (!should_notify_client(cl)) continue;
+        write_control(cl, "%window-pane-changed @{d} %{d}", .{ w.id, active.id });
+    }
+}
+
 pub fn control_notify_window_unlinked(_s: *T.Session, w: *T.Window) void {
     _ = _s;
     for (registry.clients.items) |cl| {

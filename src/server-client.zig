@@ -52,6 +52,7 @@ const screen_mod = @import("screen.zig");
 const control = @import("control.zig");
 const control_subscriptions = @import("control-subscriptions.zig");
 const popup = @import("popup.zig");
+const key_bindings = @import("key-bindings.zig");
 
 var next_client_id: u32 = 0;
 
@@ -610,6 +611,11 @@ pub fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) voi
 }
 
 pub fn server_client_loop() void {
+    var wit = win_mod.windows.valueIterator();
+    while (wit.next()) |w_ptr| {
+        server_client_check_window_resize(w_ptr.*);
+    }
+
     for (client_registry.clients.items) |cl| {
         server_client_check_exit(cl);
 
@@ -622,11 +628,14 @@ pub fn server_client_loop() void {
         server_client_reset_state(cl);
     }
 
-    // Clear pane redraw flags after drawing.
-    var wit = win_mod.windows.valueIterator();
+    wit = win_mod.windows.valueIterator();
     while (wit.next()) |w_ptr| {
         const w = w_ptr.*;
         for (w.panes.items) |wp| {
+            if (wp.fd != -1) {
+                server_client_check_pane_resize(wp);
+                server_client_check_pane_buffer(wp);
+            }
             wp.flags &= ~@as(u32, T.PANE_REDRAW);
         }
     }
@@ -1428,39 +1437,79 @@ fn server_client_uses_server_tty(cl: *const T.Client) bool {
 
 // ── Overlay functions ─────────────────────────────────────────────────────
 
-pub const OverlayCheckCb = *const fn (*T.Client, ?*anyopaque, u32, u32) bool;
-pub const OverlayModeCb = *const fn (*T.Client, ?*anyopaque, *u32, *u32) ?*anyopaque;
-pub const OverlayDrawCb = *const fn (*T.Client, ?*anyopaque, *anyopaque) void;
-pub const OverlayKeyCb = *const fn (*T.Client, ?*anyopaque, *T.key_event) i32;
-pub const OverlayFreeCb = *const fn (*T.Client, ?*anyopaque) void;
-pub const OverlayResizeCb = *const fn (*T.Client, ?*anyopaque) void;
-
 pub fn server_client_set_overlay(
     cl: *T.Client,
     delay: u32,
-    _checkcb: ?OverlayCheckCb,
-    _modecb: ?OverlayModeCb,
-    _drawcb: ?OverlayDrawCb,
-    _keycb: ?OverlayKeyCb,
-    _freecb: ?OverlayFreeCb,
-    _resizecb: ?OverlayResizeCb,
-    _data: ?*anyopaque,
+    checkcb: ?T.OverlayCheckCb,
+    modecb: ?T.OverlayModeCb,
+    drawcb: ?T.OverlayDrawCb,
+    keycb: ?T.OverlayKeyCb,
+    freecb: ?T.OverlayFreeCb,
+    resizecb: ?T.OverlayResizeCb,
+    data: ?*anyopaque,
 ) void {
-    _ = _checkcb;
-    _ = _modecb;
-    _ = _drawcb;
-    _ = _keycb;
-    _ = _freecb;
-    _ = _resizecb;
-    _ = _data;
-    log.log_debug("server_client_set_overlay: stub (delay={d})", .{delay});
+    if (cl.overlay_draw != null)
+        server_client_clear_overlay(cl);
+
+    if (cl.overlay_timer) |ev| {
+        _ = c.libevent.event_del(ev);
+    } else {
+        const base = proc_mod.libevent orelse return;
+        cl.overlay_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            server_client_overlay_timer,
+            cl,
+        );
+    }
+    if (delay != 0) {
+        if (cl.overlay_timer) |ev| {
+            var tv = std.posix.timeval{
+                .sec = @intCast(@divFloor(delay, 1000)),
+                .usec = @intCast(@mod(delay, 1000) * 1000),
+            };
+            _ = c.libevent.event_add(ev, @ptrCast(&tv));
+        }
+    }
+
+    cl.overlay_check = checkcb;
+    cl.overlay_mode = modecb;
+    cl.overlay_draw = drawcb;
+    cl.overlay_key = keycb;
+    cl.overlay_free = freecb;
+    cl.overlay_resize = resizecb;
+    cl.overlay_data = data;
+
+    if (cl.overlay_check == null)
+        cl.tty.flags |= T.TTY_FREEZE;
+    if (cl.overlay_mode == null)
+        cl.tty.flags |= T.TTY_NOCURSOR;
+
+    // TODO: window_update_focus when ported
     server_client_force_redraw(cl);
 }
 
 pub fn server_client_clear_overlay(cl: *T.Client) void {
-    log.log_debug("server_client_clear_overlay: stub", .{});
+    if (cl.overlay_draw == null) return;
+
+    if (cl.overlay_timer) |ev|
+        _ = c.libevent.event_del(ev);
+
+    if (cl.overlay_free) |free_cb|
+        free_cb(cl, cl.overlay_data);
+
+    cl.overlay_check = null;
+    cl.overlay_mode = null;
+    cl.overlay_draw = null;
+    cl.overlay_key = null;
+    cl.overlay_free = null;
+    cl.overlay_resize = null;
+    cl.overlay_data = null;
+
     const mask: i32 = @intCast(@as(u32, T.TTY_FREEZE | T.TTY_NOCURSOR));
     cl.tty.flags &= ~mask;
+    // TODO: window_update_focus when ported
     server_client_force_redraw(cl);
 }
 
@@ -1560,34 +1609,551 @@ const MouseWhere = enum {
 };
 
 pub fn server_client_check_mouse(cl: *T.Client, event: *T.key_event) T.key_code {
-    _ = cl;
-    _ = event;
-    log.log_debug("server_client_check_mouse: stub", .{});
-    return T.KEYC_UNKNOWN;
+    const s = cl.session orelse return T.KEYC_UNKNOWN;
+    const wl = s.curw orelse return T.KEYC_UNKNOWN;
+    const w = wl.window;
+    const m = &event.m;
+
+    log.log_debug("check_mouse {x:0>2} at {d},{d} (last {d},{d})", .{ m.b, m.x, m.y, m.lx, m.ly });
+
+    const effective = classifyMouseEvent(cl, event) orelse return T.KEYC_UNKNOWN;
+    const x = effective.x;
+    const y = effective.y;
+    const b = effective.buttons;
+    var kind = effective.kind;
+    var where: MouseWhere = .nowhere;
+
+    m.s = @intCast(s.id);
+    m.w = -1;
+    m.wp = -1;
+    m.ignore = effective.ignore;
+
+    m.statusat = status.status_at_line(cl);
+    m.statuslines = resize_mod.status_line_size(cl);
+    if (m.statusat != -1 and
+        y >= @as(u32, @intCast(m.statusat)) and
+        y < @as(u32, @intCast(m.statusat)) + m.statuslines)
+    {
+        where = .status_default;
+    }
+
+    if (where == .nowhere) {
+        if (cl.tty.mouse_scrolling_flag) {
+            where = .scrollbar_slider;
+        } else {
+            var px = x;
+            var py: u32 = undefined;
+            if (m.statusat == 0 and y >= m.statuslines)
+                py = y - m.statuslines
+            else if (m.statusat > 0 and y >= @as(u32, @intCast(m.statusat)))
+                py = @as(u32, @intCast(m.statusat)) -| 1
+            else
+                py = y;
+
+            var win_sx: u32 = 0;
+            var win_sy: u32 = 0;
+            _ = tty_mod.tty_window_offset(&cl.tty, &m.ox, &m.oy, &win_sx, &win_sy);
+
+            px = px + m.ox;
+            py = py + m.oy;
+
+            const wp_opt = win_mod.window_get_active_at(w, px, py);
+            if (wp_opt == null) return T.KEYC_UNKNOWN;
+            const wp = wp_opt.?;
+            var sl_mpos: u32 = 0;
+            where = server_client_check_mouse_in_pane(wp, px, py, &sl_mpos);
+
+            if (where == .pane)
+                log.log_debug("mouse {d},{d} on pane %%{d}", .{ x, y, wp.id })
+            else if (where == .border)
+                log.log_debug("mouse on pane %%{d} border", .{wp.id})
+            else if (where == .scrollbar_up or where == .scrollbar_slider or where == .scrollbar_down)
+                log.log_debug("mouse on pane %%{d} scrollbar", .{wp.id});
+            m.wp = @intCast(wp.id);
+            m.w = @intCast(wp.window.id);
+        }
+    }
+
+    if (kind == .down or kind == .second or kind == .triple) {
+        if (kind != .down and
+            (m.b != cl.click_button or
+            @intFromEnum(where) != @intFromEnum(mouseWhereToTarget(where) orelse .pane) or
+            m.wp != cl.click_wp))
+        {
+            kind = .down;
+            log.log_debug("click sequence reset at {d},{d}", .{ x, y });
+        }
+    }
+
+    if (kind != .drag and
+        kind != .wheel and
+        kind != .double and
+        kind != .triple and
+        cl.tty.mouse_drag_flag != 0)
+    {
+        if (cl.tty.mouse_drag_release) |release|
+            release(cl, m);
+
+        cl.tty.mouse_drag_update = null;
+        cl.tty.mouse_drag_release = null;
+        cl.tty.mouse_scrolling_flag = false;
+
+        const drag_end_key = mouseKeyForDragEnd(cl.tty.mouse_drag_flag -| 1, where);
+        cl.tty.mouse_drag_flag = 0;
+        if (drag_end_key != T.KEYC_UNKNOWN) return drag_end_key;
+    }
+
+    var key: T.key_code = T.KEYC_UNKNOWN;
+    const target = mouseWhereToTarget(where);
+    switch (kind) {
+        .move => {
+            if (target) |t| key = T.keycMouse(T.KEYC_MOUSEMOVE, t);
+        },
+        .drag => {
+            if (cl.tty.mouse_drag_update != null)
+                key = T.KEYC_DRAGGING
+            else if (target) |t|
+                key = mouseKeyForDrag(T.mouseButtons(b), t);
+        },
+        .wheel => {
+            if (target) |t| {
+                if (T.mouseButtons(b) == T.MOUSE_WHEEL_UP)
+                    key = T.keycMouse(T.KEYC_WHEELUP, t)
+                else
+                    key = T.keycMouse(T.KEYC_WHEELDOWN, t);
+            }
+        },
+        .up => {
+            if (target) |t| key = mouseKeyForUp(T.mouseButtons(b), t);
+        },
+        .down => {
+            if (target) |t| key = mouseKeyForDown(T.mouseButtons(b), t);
+        },
+        .second => {
+            if (target) |t| key = mouseKeyForSecond(T.mouseButtons(b), t);
+        },
+        .double => {
+            if (target) |t| key = mouseKeyForDouble(T.mouseButtons(b), t);
+        },
+        .triple => {
+            if (target) |t| key = mouseKeyForTriple(T.mouseButtons(b), t);
+        },
+    }
+    return key;
+}
+
+fn mouseWhereToTarget(where: MouseWhere) ?T.KeyMouseTarget {
+    return switch (where) {
+        .pane => .pane,
+        .status_area => .status,
+        .status_left => .status_left,
+        .status_right => .status_right,
+        .status_default => .status_default,
+        .border => .border,
+        .scrollbar_up => .scrollbar_up,
+        .scrollbar_slider => .scrollbar_slider,
+        .scrollbar_down => .scrollbar_down,
+        .nowhere => null,
+    };
+}
+
+fn mouseKeyForDown(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_MOUSEDOWN1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_MOUSEDOWN2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_MOUSEDOWN3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_MOUSEDOWN6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_MOUSEDOWN7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_MOUSEDOWN8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_MOUSEDOWN9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_MOUSEDOWN10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_MOUSEDOWN11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForUp(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_MOUSEUP1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_MOUSEUP2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_MOUSEUP3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_MOUSEUP6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_MOUSEUP7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_MOUSEUP8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_MOUSEUP9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_MOUSEUP10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_MOUSEUP11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForDrag(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_MOUSEDRAG1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_MOUSEDRAG2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_MOUSEDRAG3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_MOUSEDRAG6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_MOUSEDRAG7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_MOUSEDRAG8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_MOUSEDRAG9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_MOUSEDRAG10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_MOUSEDRAG11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForDragEnd(flag: u32, where: MouseWhere) T.key_code {
+    const target = mouseWhereToTarget(where) orelse return T.KEYC_MOUSE;
+    return switch (flag) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_MOUSEDRAGEND1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_MOUSEDRAGEND2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_MOUSEDRAGEND3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_MOUSEDRAGEND6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_MOUSEDRAGEND7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_MOUSEDRAGEND8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_MOUSEDRAGEND9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_MOUSEDRAGEND10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_MOUSEDRAGEND11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForSecond(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_SECONDCLICK1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_SECONDCLICK2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_SECONDCLICK3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_SECONDCLICK6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_SECONDCLICK7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_SECONDCLICK8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_SECONDCLICK9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_SECONDCLICK10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_SECONDCLICK11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForDouble(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_DOUBLECLICK1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_DOUBLECLICK2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_DOUBLECLICK3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_DOUBLECLICK6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_DOUBLECLICK7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_DOUBLECLICK8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_DOUBLECLICK9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_DOUBLECLICK10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_DOUBLECLICK11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+fn mouseKeyForTriple(buttons: u32, target: T.KeyMouseTarget) T.key_code {
+    return switch (buttons) {
+        T.MOUSE_BUTTON_1 => T.keycMouse(T.KEYC_TRIPLECLICK1, target),
+        T.MOUSE_BUTTON_2 => T.keycMouse(T.KEYC_TRIPLECLICK2, target),
+        T.MOUSE_BUTTON_3 => T.keycMouse(T.KEYC_TRIPLECLICK3, target),
+        T.MOUSE_BUTTON_6 => T.keycMouse(T.KEYC_TRIPLECLICK6, target),
+        T.MOUSE_BUTTON_7 => T.keycMouse(T.KEYC_TRIPLECLICK7, target),
+        T.MOUSE_BUTTON_8 => T.keycMouse(T.KEYC_TRIPLECLICK8, target),
+        T.MOUSE_BUTTON_9 => T.keycMouse(T.KEYC_TRIPLECLICK9, target),
+        T.MOUSE_BUTTON_10 => T.keycMouse(T.KEYC_TRIPLECLICK10, target),
+        T.MOUSE_BUTTON_11 => T.keycMouse(T.KEYC_TRIPLECLICK11, target),
+        else => T.KEYC_MOUSE,
+    };
+}
+
+const ClassifiedEvent = struct {
+    kind: MouseEventKind,
+    x: u32,
+    y: u32,
+    buttons: u32,
+    ignore: bool = false,
+};
+
+const MouseEventKind = enum { move, down, up, drag, wheel, second, double, triple };
+
+fn classifyMouseEvent(cl: *T.Client, event: *T.key_event) ?ClassifiedEvent {
+    const m = &event.m;
+
+    if (event.key == T.KEYC_DOUBLECLICK) {
+        return ClassifiedEvent{ .kind = .double, .x = m.x, .y = m.y, .buttons = m.b, .ignore = true };
+    }
+
+    if ((m.sgr_type != ' ' and T.mouseDrag(m.sgr_b) and T.mouseRelease(m.sgr_b)) or
+        (m.sgr_type == ' ' and T.mouseDrag(m.b) and T.mouseRelease(m.b) and T.mouseRelease(m.lb)))
+    {
+        return ClassifiedEvent{ .kind = .move, .x = m.x, .y = m.y, .buttons = 0 };
+    }
+
+    if (T.mouseDrag(m.b)) {
+        if (cl.tty.mouse_drag_flag != 0) {
+            if (m.x == m.lx and m.y == m.ly) return null;
+            return ClassifiedEvent{ .kind = .drag, .x = m.x, .y = m.y, .buttons = m.b };
+        }
+        return ClassifiedEvent{ .kind = .drag, .x = m.lx, .y = m.ly, .buttons = m.lb };
+    }
+
+    if (T.mouseWheel(m.b))
+        return ClassifiedEvent{ .kind = .wheel, .x = m.x, .y = m.y, .buttons = m.b };
+
+    if (T.mouseRelease(m.b)) {
+        var up_b = m.lb;
+        if (m.sgr_type == 'm') up_b = m.sgr_b;
+        return ClassifiedEvent{ .kind = .up, .x = m.x, .y = m.y, .buttons = up_b };
+    }
+
+    if (cl.click_state == .double_pending) {
+        server_client_cancel_click_timer(cl);
+        cl.click_state = .triple_pending;
+        return ClassifiedEvent{ .kind = .second, .x = m.x, .y = m.y, .buttons = m.b };
+    }
+    if (cl.click_state == .triple_pending) {
+        server_client_cancel_click_timer(cl);
+        cl.click_state = .none;
+        return ClassifiedEvent{ .kind = .triple, .x = m.x, .y = m.y, .buttons = m.b };
+    }
+
+    cl.click_state = .double_pending;
+    return ClassifiedEvent{ .kind = .down, .x = m.x, .y = m.y, .buttons = m.b };
 }
 
 pub fn server_client_check_mouse_in_pane(
     wp: *T.WindowPane,
     px: u32,
     py: u32,
-    _sl_mpos: *u32,
+    sl_mpos: *u32,
 ) MouseWhere {
-    _ = wp;
-    _ = px;
-    _ = py;
-    _ = _sl_mpos;
-    log.log_debug("server_client_check_mouse_in_pane: stub", .{});
+    sl_mpos.* = 0;
+    const bounds = win_mod.window_pane_draw_bounds(wp);
+    const scrollbar = win_mod.window_pane_scrollbar_layout(wp);
+
+    if (scrollbar) |sb| {
+        const sb_x: u32 = if (sb.left) bounds.xoff else bounds.xoff + bounds.sx + sb.pad;
+        if (px >= sb_x and px < sb_x + sb.width and
+            py >= bounds.yoff and py < bounds.yoff + bounds.sy)
+        {
+            const rel_y = py - bounds.yoff;
+            if (rel_y < wp.sb_slider_y)
+                return .scrollbar_up;
+            if (rel_y < wp.sb_slider_y + wp.sb_slider_h) {
+                sl_mpos.* = rel_y - wp.sb_slider_y;
+                return .scrollbar_slider;
+            }
+            return .scrollbar_down;
+        }
+    }
+
+    const content_xoff = if (scrollbar != null and scrollbar.?.left)
+        bounds.xoff + scrollbar.?.width + scrollbar.?.pad
+    else
+        bounds.xoff;
+    const content_sx = bounds.sx;
+
+    if (px >= content_xoff and px < content_xoff + content_sx and
+        py >= bounds.yoff and py < bounds.yoff + bounds.sy)
+    {
+        return .pane;
+    }
+
+    if ((px == content_xoff +| content_sx or (content_xoff > 0 and px == content_xoff - 1)) and
+        py >= bounds.yoff and py < bounds.yoff + bounds.sy)
+    {
+        return .border;
+    }
+    if (px >= content_xoff and px < content_xoff + content_sx and
+        (py == bounds.yoff +| bounds.sy or (bounds.yoff > 0 and py == bounds.yoff - 1)))
+    {
+        return .border;
+    }
+
     return .nowhere;
 }
 
 // ── Key handling functions ────────────────────────────────────────────────
 
-pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, _data: ?*anyopaque) T.CmdRetval {
-    _ = _data;
+pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
-    _ = cl.session orelse return .normal;
-    log.log_debug("server_client_key_callback: stub", .{});
+    const s = cl.session orelse {
+        freeKeyEventData(data);
+        return .normal;
+    };
+
+    if (cl.flags & T.CLIENT_UNATTACHEDFLAGS != 0) {
+        freeKeyEventData(data);
+        return .normal;
+    }
+
+    const wl = s.curw orelse {
+        freeKeyEventData(data);
+        return .normal;
+    };
+
+    const now = std.time.milliTimestamp();
+    cl.last_activity_time = cl.activity_time;
+    cl.activity_time = now;
+    sess.session_update_activity(s, now);
+
+    const event_ptr = if (data) |d| @as(*T.key_event, @ptrCast(@alignCast(d))) else null;
+    var key: T.key_code = if (event_ptr) |e| e.key else T.KEYC_NONE;
+
+    if (key == T.KEYC_MOUSE or key == T.KEYC_DOUBLECLICK) {
+        if (cl.flags & T.CLIENT_READONLY != 0) {
+            freeKeyEventData(data);
+            return .normal;
+        }
+        if (event_ptr) |e| {
+            key = server_client_check_mouse(cl, e);
+            if (key == T.KEYC_UNKNOWN) {
+                freeKeyEventData(data);
+                return .normal;
+            }
+            e.m.valid = true;
+            e.m.key = key;
+            if ((key & T.KEYC_MASK_KEY) == T.KEYC_DRAGGING) {
+                if (cl.tty.mouse_drag_update) |update|
+                    update(cl, &e.m);
+                freeKeyEventData(data);
+                return .normal;
+            }
+            e.key = key;
+        }
+    }
+
+    const wp = wl.window.active;
+
+    if (T.keycIsMouse(key) and opts.options_get_number(s.options, "mouse") == 0) {
+        if (cl.flags & T.CLIENT_READONLY == 0 and wp != null) {
+            if (event_ptr) |e| {
+                _ = win_mod.window_pane_key(wp.?, key, &e.m);
+            }
+        }
+        freeKeyEventData(data);
+        return .normal;
+    }
+
+    if (server_client_is_bracket_paste(cl, key)) {
+        if (cl.flags & T.CLIENT_READONLY == 0 and wp != null) {
+            if (event_ptr) |e| {
+                win_mod.window_pane_paste(wp.?, key, e.data[0..e.len]);
+            }
+        }
+        freeKeyEventData(data);
+        return .normal;
+    }
+
+    if (!T.keycIsMouse(key) and
+        key != T.KEYC_FOCUS_IN and
+        key != T.KEYC_FOCUS_OUT and
+        (key & T.KEYC_SENT == 0) and
+        server_client_is_assume_paste(cl))
+    {
+        if (cl.flags & T.CLIENT_READONLY == 0 and wp != null) {
+            if (event_ptr) |e| {
+                win_mod.window_pane_paste(wp.?, key, e.data[0..e.len]);
+            }
+        }
+        freeKeyEventData(data);
+        return .normal;
+    }
+
+    const client_table_name = if (cl.key_table_name) |name| name else blk: {
+        const configured = opts.options_get_string(s.options, "key-table");
+        break :blk if (configured.len != 0) configured else "root";
+    };
+
+    const key0 = key & (T.KEYC_MASK_KEY | T.KEYC_MASK_MODIFIERS);
+    const prefix: T.key_code = @intCast(@as(u64, @bitCast(opts.options_get_number(s.options, "prefix"))));
+    const prefix2: T.key_code = @intCast(@as(u64, @bitCast(opts.options_get_number(s.options, "prefix2"))));
+    if ((prefix != T.KEYC_NONE and key0 == (prefix & (T.KEYC_MASK_KEY | T.KEYC_MASK_MODIFIERS))) or
+        (prefix2 != T.KEYC_NONE and key0 == (prefix2 & (T.KEYC_MASK_KEY | T.KEYC_MASK_MODIFIERS))))
+    {
+        if (!std.mem.eql(u8, client_table_name, "prefix")) {
+            server_client_set_key_table(cl, "prefix");
+            cl.flags |= T.CLIENT_REDRAWSTATUS;
+            freeKeyEventData(data);
+            return .normal;
+        }
+    }
+
+    if (key_bindings.key_bindings_get_table(client_table_name, false)) |table| {
+        if (key_bindings.key_bindings_get(table, key0)) |bd| {
+            if (cl.flags & T.CLIENT_REPEAT != 0 and bd.flags & T.KEY_BINDING_REPEAT == 0) {
+                server_client_set_key_table(cl, null);
+                cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
+            cl.flags |= T.CLIENT_REDRAWSTATUS;
+        } else {
+                table.references += 1;
+                const repeat = server_client_repeat_time(cl, bd);
+                if (repeat != 0) {
+                    cl.flags |= T.CLIENT_REPEAT;
+                    cl.last_key = bd.key;
+                    server_client_arm_repeat_timer(cl, repeat);
+                } else {
+                    cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
+                    server_client_set_key_table(cl, null);
+                }
+                cl.flags |= T.CLIENT_REDRAWSTATUS;
+                _ = key_bindings.key_bindings_dispatch(bd, item, cl, event_ptr orelse &T.key_event{}, null);
+                key_bindings.key_bindings_unref_table(table);
+                if (s != cl.session orelse s) {
+                    freeKeyEventData(data);
+                    return .normal;
+                }
+                server_client_update_latest(cl);
+                freeKeyEventData(data);
+                return .normal;
+            }
+        }
+    }
+
+    if (!std.mem.eql(u8, client_table_name, server_client_get_key_table(cl)) or
+        (cl.flags & T.CLIENT_REPEAT != 0))
+    {
+        server_client_set_key_table(cl, null);
+        cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
+        cl.flags |= T.CLIENT_REDRAWSTATUS;
+    }
+
+    if (cl.flags & T.CLIENT_READONLY == 0 and wp != null) {
+        if (event_ptr) |e|
+            _ = win_mod.window_pane_key(wp.?, key, &e.m)
+        else
+            _ = win_mod.window_pane_key(wp.?, key, null);
+    }
+
+    if (key != T.KEYC_FOCUS_OUT)
+        server_client_update_latest(cl);
+    freeKeyEventData(data);
     return .normal;
+}
+
+fn freeKeyEventData(data: ?*anyopaque) void {
+    if (data) |d| {
+        const event: *T.key_event = @ptrCast(@alignCast(d));
+        xm.allocator.destroy(event);
+    }
+}
+
+fn server_client_arm_repeat_timer(cl: *T.Client, repeat_ms: u32) void {
+    if (cl.repeat_timer == null) {
+        const base = proc_mod.libevent orelse return;
+        cl.repeat_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            server_client_repeat_timer,
+            cl,
+        );
+    }
+    if (cl.repeat_timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = @intCast(@divFloor(repeat_ms, 1000)),
+            .usec = @intCast(@mod(repeat_ms, 1000) * 1000),
+        };
+        _ = c.libevent.event_del(ev);
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
 }
 
 pub fn server_client_is_bracket_paste(cl: *T.Client, key: T.key_code) bool {
@@ -1648,13 +2214,132 @@ pub fn server_client_check_window_resize(w: *T.Window) void {
 }
 
 pub fn server_client_check_pane_resize(wp: *T.WindowPane) void {
-    _ = wp;
-    log.log_debug("server_client_check_pane_resize: stub", .{});
+    if (wp.resize_queue.items.len == 0) return;
+
+    if (wp.resize_timer != null) {
+        if (c.libevent.event_pending(wp.resize_timer.?, @as(c_short, @intCast(c.libevent.EV_TIMEOUT)), null) != 0) return;
+    } else {
+        const base = proc_mod.libevent orelse return;
+        wp.resize_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            server_client_resize_timer,
+            wp,
+        );
+    }
+
+    log.log_debug("check_pane_resize: %%{d} needs to be resized", .{wp.id});
+
+    const queue = wp.resize_queue.items;
+    const first = queue[0];
+    const last = queue[queue.len - 1];
+    var timer_usec: i64 = 250000;
+
+    if (queue.len == 1) {
+        win_mod.window_pane_send_resize(wp, first.sx, first.sy);
+        _ = wp.resize_queue.orderedRemove(0);
+    } else if (last.sx != first.osx or last.sy != first.osy) {
+        win_mod.window_pane_send_resize(wp, last.sx, last.sy);
+        wp.resize_queue.clearRetainingCapacity();
+    } else {
+        const penultimate = queue[queue.len - 2];
+        win_mod.window_pane_send_resize(wp, penultimate.sx, penultimate.sy);
+        const keep = wp.resize_queue.items[queue.len - 1];
+        wp.resize_queue.clearRetainingCapacity();
+        wp.resize_queue.append(xm.allocator, keep) catch unreachable;
+        timer_usec = 10000;
+    }
+
+    if (wp.resize_timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = 0,
+            .usec = @intCast(timer_usec),
+        };
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
 }
 
 pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
-    _ = wp;
-    log.log_debug("server_client_check_pane_buffer: stub", .{});
+    if (wp.fd < 0) return;
+
+    var minimum: usize = wp.offset.used;
+    if (wp.pipe_fd != -1 and wp.pipe_offset.used < minimum)
+        minimum = wp.pipe_offset.used;
+
+    var off: bool = true;
+    var attached_clients: u32 = 0;
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == null) continue;
+        attached_clients += 1;
+
+        if (cl.flags & T.CLIENT_CONTROL == 0) {
+            off = false;
+            continue;
+        }
+
+        var flag: bool = false;
+        const wpo = control.control_pane_offset(cl, wp, &flag);
+        if (wpo == null) {
+            if (!flag) off = false;
+            continue;
+        }
+        if (!flag) off = false;
+
+        var new_size: usize = 0;
+        _ = win_mod.window_pane_get_new_data(wp, wpo.?, &new_size);
+        log.log_debug("check_pane_buffer: {s} has {d} bytes used and {d} left for %%{d}", .{
+            cl.name orelse "?",
+            wpo.?.used -| wp.base_offset,
+            new_size,
+            wp.id,
+        });
+        if (wpo.?.used < minimum)
+            minimum = wpo.?.used;
+    }
+    if (attached_clients == 0)
+        off = false;
+
+    minimum -|= wp.base_offset;
+    if (minimum == 0) {
+        if (off) {
+            log.log_debug("check_pane_buffer: pane %%{d} is off", .{wp.id});
+        }
+        return;
+    }
+
+    log.log_debug("check_pane_buffer: %%{d} has {d} minimum bytes used", .{ wp.id, minimum });
+
+    if (wp.input_pending.items.len >= minimum) {
+        const remaining = wp.input_pending.items.len - minimum;
+        if (remaining != 0) {
+            std.mem.copyForwards(
+                u8,
+                wp.input_pending.items[0..remaining],
+                wp.input_pending.items[minimum..],
+            );
+        }
+        wp.input_pending.shrinkRetainingCapacity(remaining);
+    }
+
+    if (wp.base_offset > std.math.maxInt(usize) - minimum) {
+        log.log_debug("check_pane_buffer: %%{d} base offset has wrapped", .{wp.id});
+        wp.offset.used -|= wp.base_offset;
+        if (wp.pipe_fd != -1)
+            wp.pipe_offset.used -|= wp.base_offset;
+        for (client_registry.clients.items) |cl| {
+            if (cl.session == null or (cl.flags & T.CLIENT_CONTROL == 0)) continue;
+            var flag: bool = false;
+            const wpo = control.control_pane_offset(cl, wp, &flag);
+            if (wpo != null and !flag)
+                wpo.?.used -|= wp.base_offset;
+        }
+        wp.base_offset = minimum;
+    } else {
+        wp.base_offset += minimum;
+    }
+
+    log.log_debug("check_pane_buffer: pane %%{d} is {s}", .{ wp.id, if (off) "off" else "on" });
 }
 
 // ── Timer callbacks ───────────────────────────────────────────────────────
@@ -1662,15 +2347,23 @@ pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
 export fn server_client_repeat_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = arg;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
     log.log_debug("server_client_repeat_timer fired", .{});
+
+    if (cl.flags & T.CLIENT_REPEAT != 0) {
+        server_client_set_key_table(cl, null);
+        cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
+        cl.flags |= T.CLIENT_REDRAWSTATUS;
+    }
 }
 
 export fn server_client_resize_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = arg;
-    log.log_debug("server_client_resize_timer fired", .{});
+    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
+    log.log_debug("server_client_resize_timer: %%{d} timer expired", .{wp.id});
+    if (wp.resize_timer) |ev|
+        _ = c.libevent.event_del(ev);
 }
 
 export fn server_client_redraw_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {

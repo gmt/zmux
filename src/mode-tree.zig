@@ -143,6 +143,60 @@ pub const Data = struct {
     }
 };
 
+// ── tmux C-name aliases (grep / port parity) ─────────────────────────────
+pub const mode_tree_start = start;
+pub const mode_tree_free = free;
+pub const mode_tree_resize = resize;
+pub const mode_tree_zoom = zoom;
+pub const mode_tree_set_filter = setFilter;
+pub const mode_tree_set_search = setSearch;
+pub const mode_tree_cycle_preview = cyclePreview;
+pub const mode_tree_build = build;
+pub const mode_tree_add = add;
+pub const mode_tree_draw_as_parent = drawAsParent;
+pub const mode_tree_no_tag = noTag;
+pub const mode_tree_align = setAlign;
+pub const mode_tree_remove = remove;
+pub const mode_tree_up = up;
+pub const mode_tree_down = down;
+pub const mode_tree_swap = swap;
+pub const mode_tree_get_current = getCurrent;
+pub const mode_tree_get_current_name = getCurrentName;
+pub const mode_tree_expand_current = expandCurrent;
+pub const mode_tree_collapse_current = collapseCurrent;
+pub const mode_tree_expand = expand;
+pub const mode_tree_set_current = setCurrent;
+pub const mode_tree_count_tagged = countTagged;
+pub const mode_tree_each_tagged = eachTagged;
+pub const mode_tree_clear_all_tagged = clearAllTagged;
+pub const mode_tree_tag_all = tagAll;
+pub const mode_tree_toggle_current_tag = toggleCurrentTag;
+pub const mode_tree_search_set = searchSet;
+pub const mode_tree_draw = draw;
+pub const mode_tree_key = handleKey;
+pub const mode_tree_run_command = runCommand;
+pub const mode_tree_display_menu = displayMenu;
+pub const mode_tree_display_help = displayHelp;
+pub const mode_tree_menu_callback = menuCallback;
+pub const mode_tree_search_callback = searchCallbackInternal;
+pub const mode_tree_filter_callback = filterCallbackInternal;
+pub const mode_tree_remove_ref = removeRef;
+pub const mode_tree_get_screen = Data.getScreen;
+pub const mode_tree_search_free = removeRef;
+pub const mode_tree_filter_free = removeRef;
+
+pub fn mode_tree_set_height(mtd: *Data) void {
+    setHeight(mtd);
+}
+
+pub fn mode_tree_check_selected(mtd: *Data) void {
+    checkSelected(mtd);
+}
+
+pub fn mode_tree_is_lowercase(ptr: []const u8) bool {
+    return isLowercase(ptr);
+}
+
 pub fn start(wp: *T.WindowPane, config: Config) *Data {
     const screen_ptr = screen.screen_init(wp.base.grid.sx, wp.base.grid.sy, 0);
     screen_ptr.mode &= ~T.MODE_CURSOR;

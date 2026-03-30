@@ -476,6 +476,65 @@ const RowRenderer = struct {
     }
 };
 
+/// tmux `tty_draw_line`: zmux draws panes via cached ANSI rows, not a live `Tty`.
+pub fn tty_draw_line(
+    tty: *T.Tty,
+    s: *T.Screen,
+    px: u32,
+    py: u32,
+    nx: u32,
+    atx: u32,
+    aty: u32,
+    defaults: *const T.GridCell,
+    palette: *const T.ColourPalette,
+) void {
+    _ = tty;
+    _ = s;
+    _ = px;
+    _ = py;
+    _ = nx;
+    _ = atx;
+    _ = aty;
+    _ = defaults;
+    _ = palette;
+}
+
+/// tmux `tty_draw_line_clear` (stub: no direct TTY cell clearing in this module).
+pub fn tty_draw_line_clear(
+    tty: *T.Tty,
+    px: u32,
+    py: u32,
+    nx: u32,
+    defaults: *const T.GridCell,
+    bg: u32,
+    wrapped: bool,
+) void {
+    _ = tty;
+    _ = px;
+    _ = py;
+    _ = nx;
+    _ = defaults;
+    _ = bg;
+    _ = wrapped;
+}
+
+/// tmux `tty_draw_line_get_empty` — display cells to treat as empty for line drawing.
+pub fn tty_draw_line_get_empty(gc: *const T.GridCell, nx: u32) u32 {
+    var empty: u32 = 0;
+    if (gc.data.width != 1 and gc.data.width > nx) {
+        empty = nx;
+    } else if (gc.attr == 0 and gc.link == 0) {
+        if ((gc.flags & T.GRID_FLAG_CLEARED) != 0) {
+            empty = 1;
+        } else if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
+            empty = gc.data.width;
+        } else if (gc.data.size == 1 and gc.data.data[0] == ' ') {
+            empty = 1;
+        }
+    }
+    return empty;
+}
+
 fn render_pane_row(
     wp: *T.WindowPane,
     gd: *T.Grid,

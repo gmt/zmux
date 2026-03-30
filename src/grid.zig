@@ -1087,6 +1087,352 @@ fn expand_line(gd: *T.Grid, row: u32, wanted_cells: u32, bg: u32) void {
     }
 }
 
+// ── Move/scroll/view functions (ported from tmux grid.c / grid-view.c) ────
+
+/// Compact extended cell data in a line, removing unused slots.
+fn compact_line(line: *T.GridLine) void {
+    if (line.extddata.len == 0) return;
+
+    var new_count: usize = 0;
+    for (line.celldata) |entry| {
+        if ((entry.flags & T.GRID_FLAG_EXTENDED) != 0)
+            new_count += 1;
+    }
+
+    if (new_count == 0) {
+        xm.allocator.free(line.extddata);
+        line.extddata = &.{};
+        return;
+    }
+
+    const new_extd = xm.allocator.alloc(T.GridExtdEntry, new_count) catch unreachable;
+    var idx: usize = 0;
+    for (line.celldata) |*entry| {
+        if ((entry.flags & T.GRID_FLAG_EXTENDED) != 0) {
+            const off = entry.offset_or_data.offset;
+            if (off < line.extddata.len) {
+                new_extd[idx] = line.extddata[off];
+            } else {
+                new_extd[idx] = std.mem.zeroes(T.GridExtdEntry);
+            }
+            entry.offset_or_data = .{ .offset = @intCast(idx) };
+            idx += 1;
+        }
+    }
+
+    xm.allocator.free(line.extddata);
+    line.extddata = new_extd;
+}
+
+/// Zero a line and optionally expand with a background colour.
+fn empty_line(gd: *T.Grid, py: u32, bg: u32) void {
+    gd.linedata[py] = .{};
+    if (!colour_is_default(@intCast(bg)))
+        expand_line(gd, py, gd.sx, bg);
+}
+
+/// Clear a single cell, respecting bg colour.
+fn clear_cell_bg(gd: *T.Grid, px: u32, py: u32, bg: u32) void {
+    const line = &gd.linedata[py];
+    if (px >= line.celldata.len) return;
+    const entry = &line.celldata[px];
+    entry.* = cleared_entry();
+    if (!colour_is_default(@intCast(bg))) {
+        var gc = T.grid_cleared_cell;
+        gc.bg = @intCast(bg);
+        store_entry(line, entry, &gc);
+        entry.flags |= T.GRID_FLAG_CLEARED;
+    }
+}
+
+/// Remove ny oldest history lines and shift remaining forward.
+fn trim_history(gd: *T.Grid, ny: u32) void {
+    const history_start: usize = @intCast(gd.sy);
+    const n: usize = @intCast(ny);
+    const hsize: usize = @intCast(gd.hsize);
+
+    for (gd.linedata[history_start .. history_start + n]) |*line| {
+        free_line_storage(line);
+    }
+
+    const remaining = hsize - n;
+    if (remaining > 0) {
+        std.mem.copyForwards(
+            T.GridLine,
+            gd.linedata[history_start .. history_start + remaining],
+            gd.linedata[history_start + n .. history_start + n + remaining],
+        );
+    }
+    const new_len: usize = @intCast(gd.sy);
+    resize_linedata(gd, new_len + remaining);
+}
+
+/// Clear full lines (free and re-empty with bg).
+pub fn grid_clear_lines(gd: *T.Grid, py: u32, ny: u32, bg: u32) void {
+    if (ny == 0) return;
+    var yy = py;
+    while (yy < py + ny) : (yy += 1) {
+        if (yy >= gd.linedata.len) break;
+        free_line_storage(&gd.linedata[yy]);
+        empty_line(gd, yy, bg);
+    }
+    if (py != 0 and py < gd.linedata.len)
+        gd.linedata[py - 1].flags &= ~T.GRID_LINE_WRAPPED;
+}
+
+/// Clear a rectangular area with bg colour.
+pub fn grid_clear(gd: *T.Grid, px: u32, py: u32, nx: u32, ny: u32, bg: u32) void {
+    if (nx == 0 or ny == 0) return;
+    if (px == 0 and nx == gd.sx) {
+        grid_clear_lines(gd, py, ny, bg);
+        return;
+    }
+
+    var yy = py;
+    while (yy < py + ny) : (yy += 1) {
+        if (yy >= gd.linedata.len) break;
+        const line = &gd.linedata[yy];
+        var sx = gd.sx;
+        if (sx > @as(u32, @intCast(line.celldata.len)))
+            sx = @intCast(line.celldata.len);
+        var ox = nx;
+        if (colour_is_default(@intCast(bg))) {
+            if (px > sx) continue;
+            if (px + nx > sx) ox = sx - px;
+        }
+        expand_line(gd, yy, px + ox, 8);
+        var xx = px;
+        while (xx < px + ox) : (xx += 1) {
+            clear_cell_bg(gd, xx, yy, bg);
+        }
+    }
+}
+
+/// Move nx cells from column px to column dx on line py.
+pub fn grid_move_cells(gd: *T.Grid, dx: u32, px: u32, py: u32, nx: u32, bg: u32) void {
+    if (nx == 0 or px == dx) return;
+    if (py >= gd.linedata.len) return;
+
+    expand_line(gd, py, px + nx, 8);
+    expand_line(gd, py, dx + nx, 8);
+
+    const line = &gd.linedata[py];
+    if (dx < px) {
+        std.mem.copyForwards(
+            T.GridCellEntry,
+            line.celldata[dx .. dx + nx],
+            line.celldata[px .. px + nx],
+        );
+    } else {
+        std.mem.copyBackwards(
+            T.GridCellEntry,
+            line.celldata[dx .. dx + nx],
+            line.celldata[px .. px + nx],
+        );
+    }
+    if (dx + nx > line.cellused) line.cellused = dx + nx;
+
+    var xx = px;
+    while (xx < px + nx) : (xx += 1) {
+        if (xx >= dx and xx < dx + nx) continue;
+        clear_cell_bg(gd, xx, py, bg);
+    }
+}
+
+/// Move ny lines from row py to row dy.
+pub fn grid_move_lines(gd: *T.Grid, dy: u32, py: u32, ny: u32, bg: u32) void {
+    if (ny == 0 or py == dy) return;
+    if (py + ny > gd.linedata.len or dy + ny > gd.linedata.len) return;
+
+    {
+        var yy = dy;
+        while (yy < dy + ny) : (yy += 1) {
+            if (yy >= py and yy < py + ny) continue;
+            free_line_storage(&gd.linedata[yy]);
+        }
+    }
+    if (dy != 0)
+        gd.linedata[dy - 1].flags &= ~T.GRID_LINE_WRAPPED;
+
+    if (dy < py) {
+        std.mem.copyForwards(
+            T.GridLine,
+            gd.linedata[dy .. dy + ny],
+            gd.linedata[py .. py + ny],
+        );
+    } else {
+        std.mem.copyBackwards(
+            T.GridLine,
+            gd.linedata[dy .. dy + ny],
+            gd.linedata[py .. py + ny],
+        );
+    }
+
+    {
+        var yy = py;
+        while (yy < py + ny) : (yy += 1) {
+            if (yy < dy or yy >= dy + ny)
+                empty_line(gd, yy, bg);
+        }
+    }
+    if (py != 0 and (py < dy or py >= dy + ny))
+        gd.linedata[py - 1].flags &= ~T.GRID_LINE_WRAPPED;
+}
+
+/// Scroll entire visible screen, moving top line into history.
+pub fn grid_scroll_history(gd: *T.Grid, bg: u32) void {
+    const old_len = gd.linedata.len;
+    resize_linedata(gd, old_len + 1);
+
+    const top_line = gd.linedata[0];
+    if (gd.sy > 1) {
+        std.mem.copyForwards(
+            T.GridLine,
+            gd.linedata[0 .. gd.sy - 1],
+            gd.linedata[1..gd.sy],
+        );
+    }
+
+    gd.linedata[gd.sy - 1] = .{};
+    empty_line(gd, gd.sy - 1, bg);
+
+    const history_idx: usize = @intCast(gd.sy + gd.hsize);
+    gd.linedata[history_idx] = top_line;
+    compact_line(&gd.linedata[history_idx]);
+    gd.linedata[history_idx].time = std.time.timestamp();
+
+    gd.hscrolled += 1;
+    gd.hsize += 1;
+}
+
+/// Scroll a region up, moving the upper line into history.
+pub fn grid_scroll_history_region(gd: *T.Grid, upper: u32, lower: u32, bg: u32) void {
+    const old_len = gd.linedata.len;
+    resize_linedata(gd, old_len + 1);
+
+    const saved_line = gd.linedata[upper];
+    if (lower > upper) {
+        const count: usize = @intCast(lower - upper);
+        std.mem.copyForwards(
+            T.GridLine,
+            gd.linedata[upper .. upper + count],
+            gd.linedata[upper + 1 .. upper + 1 + count],
+        );
+    }
+
+    gd.linedata[lower] = .{};
+    empty_line(gd, lower, bg);
+
+    const history_idx: usize = @intCast(gd.sy + gd.hsize);
+    gd.linedata[history_idx] = saved_line;
+    gd.linedata[history_idx].time = std.time.timestamp();
+
+    gd.hscrolled += 1;
+    gd.hsize += 1;
+}
+
+/// Compact history, trimming oldest lines when at the limit.
+pub fn grid_collect_history(gd: *T.Grid, all: bool) void {
+    if (gd.hsize == 0 or gd.hsize < gd.hlimit) return;
+
+    var ny: u32 = if (all) gd.hsize - gd.hlimit else gd.hlimit / 10;
+    if (ny < 1) ny = 1;
+    if (ny > gd.hsize) ny = gd.hsize;
+
+    trim_history(gd, ny);
+    gd.hsize -= ny;
+    if (gd.hscrolled > gd.hsize)
+        gd.hscrolled = gd.hsize;
+}
+
+// ── grid_view_* functions ─────────────────────────────────────────────────
+
+/// Clear visible area into history.
+pub fn grid_view_clear_history(gd: *T.Grid, bg: u32) void {
+    var last: u32 = 0;
+    {
+        var yy: u32 = 0;
+        while (yy < gd.sy) : (yy += 1) {
+            if (yy < gd.linedata.len and gd.linedata[yy].cellused != 0)
+                last = yy + 1;
+        }
+    }
+    if (last == 0) {
+        grid_clear(gd, 0, 0, gd.sx, gd.sy, bg);
+        return;
+    }
+    {
+        var yy: u32 = 0;
+        while (yy < last) : (yy += 1) {
+            grid_collect_history(gd, false);
+            grid_scroll_history(gd, bg);
+        }
+    }
+    if (last < gd.sy)
+        grid_clear(gd, 0, 0, gd.sx, gd.sy - last, bg);
+    gd.hscrolled = 0;
+}
+
+/// Scroll a view region up.
+pub fn grid_view_scroll_region_up(gd: *T.Grid, rupper: u32, rlower: u32, bg: u32) void {
+    if ((gd.flags & T.GRID_HISTORY) != 0) {
+        grid_collect_history(gd, false);
+        if (rupper == 0 and rlower == gd.sy - 1)
+            grid_scroll_history(gd, bg)
+        else
+            grid_scroll_history_region(gd, rupper, rlower, bg);
+    } else {
+        grid_move_lines(gd, rupper, rupper + 1, rlower - rupper, bg);
+    }
+}
+
+/// Scroll a view region down.
+pub fn grid_view_scroll_region_down(gd: *T.Grid, rupper: u32, rlower: u32, bg: u32) void {
+    grid_move_lines(gd, rupper + 1, rupper, rlower - rupper, bg);
+}
+
+/// Insert lines at view position.
+pub fn grid_view_insert_lines(gd: *T.Grid, py: u32, ny: u32, bg: u32) void {
+    grid_move_lines(gd, py + ny, py, gd.sy - py - ny, bg);
+}
+
+/// Delete lines at view position.
+pub fn grid_view_delete_lines(gd: *T.Grid, py: u32, ny: u32, bg: u32) void {
+    grid_move_lines(gd, py, py + ny, gd.sy - py - ny, bg);
+    grid_clear(gd, 0, gd.sy - ny, gd.sx, ny, bg);
+}
+
+/// Insert lines within a scroll region.
+pub fn grid_view_insert_lines_region(gd: *T.Grid, rlower: u32, py: u32, ny: u32, bg: u32) void {
+    const ny2 = rlower + 1 - py - ny;
+    grid_move_lines(gd, rlower + 1 - ny2, py, ny2, bg);
+    grid_clear(gd, 0, py + ny2, gd.sx, ny - ny2, bg);
+}
+
+/// Delete lines within a scroll region.
+pub fn grid_view_delete_lines_region(gd: *T.Grid, rlower: u32, py: u32, ny: u32, bg: u32) void {
+    const ny2 = rlower + 1 - py - ny;
+    grid_move_lines(gd, py, py + ny, ny2, bg);
+    grid_clear(gd, 0, py + ny2, gd.sx, ny - ny2, bg);
+}
+
+/// Insert cells (shift right) at view position.
+pub fn grid_view_insert_cells(gd: *T.Grid, px: u32, py: u32, nx: u32, bg: u32) void {
+    const sx = gd.sx;
+    if (sx == 0) return;
+    if (px >= sx - 1)
+        grid_clear(gd, px, py, 1, 1, bg)
+    else
+        grid_move_cells(gd, px + nx, px, py, sx - px - nx, bg);
+}
+
+/// Delete cells (shift left) at view position.
+pub fn grid_view_delete_cells(gd: *T.Grid, px: u32, py: u32, nx: u32, bg: u32) void {
+    const sx = gd.sx;
+    grid_move_cells(gd, px, px + nx, py, sx - px - nx, bg);
+    grid_clear(gd, sx - nx, py, nx, 1, bg);
+}
+
 fn get_cell_from_line(line: *T.GridLine, col: u32, gc: *T.GridCell) void {
     const entry = &line.celldata[col];
     if ((entry.flags & T.GRID_FLAG_EXTENDED) != 0) {

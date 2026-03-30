@@ -13,12 +13,11 @@ Each item describes what zmux does and what it lacks.
 
 ## Input Parser
 
-- The input parser uses a direct byte-by-byte approach instead of
-  tmux's state machine. CSI/ESC dispatch, DCS, APC entry points
-  are stubs.
-- `input_init`/`input_free`/`input_reset` lifecycle is stubbed.
-- Request/reply machinery (DA, clipboard, colour, palette) is
-  stubbed.
+- Request/reply machinery (DA, clipboard, colour, palette) requires
+  a PTY write-back path that does not exist yet.
+- Ground timer requires libevent `evtimer` or Zig async timer.
+- Theme reporting requires PTY write-back plus
+  `window_pane_get_theme`.
 
 ## TTY
 

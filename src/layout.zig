@@ -32,16 +32,8 @@ const Rect = struct {
     sy: u32,
 };
 
-const Cell = struct {
-    type: T.LayoutType,
-    parent: ?*Cell = null,
-    xoff: u32,
-    yoff: u32,
-    sx: u32,
-    sy: u32,
-    wp: ?*T.WindowPane = null,
-    cells: std.ArrayList(*Cell),
-};
+/// tmux `struct layout_cell` — used throughout layout algorithms and audit wrappers.
+const Cell = T.LayoutCell;
 
 const BuildError = error{
     InvalidLayout,

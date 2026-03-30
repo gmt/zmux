@@ -1120,6 +1120,48 @@ pub fn scrollregion(ctx: *T.ScreenWriteCtx, rupper: u32, rlower: u32) void {
     s.rlower = bottom;
 }
 
+// ── tmux C-name wrappers ─────────────────────────────────────────────────
+pub const screen_write_putc = putc_styled;
+pub const screen_write_cell = putCell;
+pub const screen_write_nputs = nputs;
+pub const screen_write_vnputs = nputs;
+pub const screen_write_fast_copy = fast_copy;
+pub const screen_write_clearendofline = erase_to_eol;
+pub const screen_write_clearstartofline = erase_to_bol;
+pub const screen_write_clearline = erase_line;
+pub const screen_write_clearscreen = erase_screen;
+pub const screen_write_clearendofscreen = erase_to_screen_end;
+pub const screen_write_clearstartofscreen = erase_to_screen_beginning;
+pub const screen_write_cursorup = cursorup;
+pub const screen_write_cursordown = cursordown;
+pub const screen_write_cursorleft = cursorleft;
+pub const screen_write_cursorright = cursorright;
+pub const screen_write_cursormove = cursormove;
+pub const screen_write_linefeed = linefeed;
+pub const screen_write_reverseindex = reverseindex;
+pub const screen_write_carriagereturn = carriage_return;
+pub const screen_write_backspace = backspace;
+pub const screen_write_scrollup = scrollup;
+pub const screen_write_scrolldown = scrolldown;
+pub const screen_write_scrollregion = scrollregion;
+pub const screen_write_insertcharacter = insert_characters;
+pub const screen_write_deletecharacter = delete_characters;
+pub const screen_write_clearcharacter = clearcharacter;
+pub const screen_write_insertline = insert_lines;
+pub const screen_write_deleteline = delete_lines;
+pub const screen_write_mode_set = mode_set;
+pub const screen_write_mode_clear = mode_clear;
+pub const screen_write_alignmenttest = alignmenttest;
+pub const screen_write_reset = reset;
+pub const screen_write_box = box_draw;
+pub const screen_write_hline = hline;
+pub const screen_write_vline = vline;
+pub const screen_write_preview = preview;
+pub const screen_write_fullredraw = fullredraw;
+pub const screen_write_clearhistory = clearhistory;
+pub const screen_write_rawstring = rawstring;
+pub const screen_write_setselection = setselection;
+
 test "screen-write handles cursor movement and erase" {
     const screen = @import("screen.zig");
     const s = screen.screen_init(4, 2, 100);

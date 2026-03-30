@@ -5,17 +5,9 @@ Each item describes what zmux does and what it lacks.
 
 ## Grid and Screen
 
-- `grid_reflow`, `grid_wrap_position`, `grid_unwrap_position` are
-  stubs. Screen resize does not reflow wrapped lines or track cursor
-  position through reflow.
-- `screen_write_collect_*` batching system is stubbed. Cell writes
-  go directly to the grid without the flush/callback path that feeds
-  tty command dispatch.
-- `screen_write_cell`, `screen_write_combine`,
-  `screen_write_overwrite` are stubs. The core cell-write path
-  lacks combining character handling and wide-char overwrite logic.
-- `screen_write_start`/`screen_write_stop` lifecycle does not wire
-  pane redraw callbacks.
+- `screen_write_collect_*` batching system feeds the tty callback
+  path. When no callback is set (off-screen renders), the collect
+  path tracks state but skips the callback.
 - Scrollback storage uses visible-rows-first ordering instead of
   tmux's history-first layout.
 

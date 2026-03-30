@@ -46,6 +46,7 @@ pub const ShellRunOptions = struct {
     cwd: []const u8,
     merge_stderr: bool = false,
     capture_output: bool = false,
+    env_map: ?*const std.process.EnvMap = null,
 };
 
 pub const ShellRunResult = struct {
@@ -189,6 +190,7 @@ fn spawnShellProcess(shell_command: []const u8, options: ShellRunOptions) !Spawn
     child.stdout_behavior = if (options.capture_output) .Pipe else .Ignore;
     child.stderr_behavior = .Ignore;
     child.cwd = options.cwd;
+    child.env_map = options.env_map;
 
     try child.spawn();
     return .{
@@ -443,6 +445,7 @@ pub fn job_run_shell_command(job: ?*Job, shell_command: []const u8, options: She
     child.stdout_behavior = if (options.capture_output) .Pipe else .Ignore;
     child.stderr_behavior = .Ignore;
     child.cwd = options.cwd;
+    child.env_map = options.env_map;
 
     child.spawn() catch {
         result.spawn_failed = true;

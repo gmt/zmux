@@ -498,11 +498,17 @@ fn screen_resize_y(s: *T.Screen, sy: u32, eat_empty: bool, cy: *u32) void {
 
 /// Line reflow after width change (screen_reflow).
 fn screen_reflow(s: *T.Screen, new_x: u32, cx: *u32, cy: *u32, cursor: bool) void {
-    _ = new_x;
-    // Reflow is complex and depends on grid_reflow/grid_wrap_position/grid_unwrap_position
-    // which are not yet fully ported. For now, just clamp the cursor.
+    var wx: u32 = undefined;
+    var wy: u32 = undefined;
+
     if (cursor) {
-        if (cx.* >= s.grid.sx) cx.* = if (s.grid.sx == 0) 0 else s.grid.sx - 1;
+        grid.grid_wrap_position(s.grid, cx.*, cy.*, &wx, &wy);
+    }
+
+    grid.grid_reflow(s.grid, new_x);
+
+    if (cursor) {
+        grid.grid_unwrap_position(s.grid, cx, cy, wx, wy);
     } else {
         cx.* = 0;
         cy.* = s.grid.hsize;

@@ -1238,7 +1238,9 @@ fn get_citem() *T.ScreenWriteCitem {
         ci.* = .{};
         return ci;
     }
-    return xm.allocator.create(T.ScreenWriteCitem) catch unreachable;
+    const ci = xm.allocator.create(T.ScreenWriteCitem) catch unreachable;
+    ci.* = .{};
+    return ci;
 }
 
 fn free_citem(ci: *T.ScreenWriteCitem) void {

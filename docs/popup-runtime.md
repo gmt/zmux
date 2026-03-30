@@ -13,7 +13,7 @@
 - Output uses the shared screen writer over captured bytes; a live
   PTY-fed terminal parser inside the popup body is not implemented.
 
-## Gaps (tracked in docs/porting-todo.md)
+## Gaps (tracked in docs/zig-porting-todo.md)
 
 - Live PTY-backed popup job runtime
 - Format-aware coordinate rules

@@ -202,7 +202,7 @@ markers stripped to make the result easier to read.
 EOF
 }
 
-link_labs() {
+link_museum() {
     mkdir -p "$REBUILD_DIR"
     ln -sfn "$XREF_OUT" "$REBUILD_DIR/xref"
     ln -sfn "$GDB_OUT" "$REBUILD_DIR/gdb"
@@ -244,13 +244,13 @@ main() {
                 build_pp "${pp_sources[@]}"
                 ;;
             link)
-                link_labs
+                link_museum
                 ;;
             all)
                 build_xref
                 build_gdb
                 build_pp "${pp_sources[@]}"
-                link_labs
+                link_museum
                 ;;
         esac
     done

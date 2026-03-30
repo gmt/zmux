@@ -27,7 +27,7 @@
 - Pane drag tracks cursor position but does not maintain a visual
   selection.
 
-## Gaps (tracked in docs/porting-todo.md)
+## Gaps (tracked in docs/zig-porting-todo.md)
 
 - Real pane history backing instead of snapshot-only screen
 - Selection, copy, search, marks, drag semantics

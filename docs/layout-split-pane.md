@@ -8,4 +8,4 @@ of a full tmux layout tree.
 - `-h`/default `-v`, `-l`, `-p`, `-b`, `-I`, and `-Z` ride the shared
   seam.
 - Full-size `-f` splits across a multi-pane window require a real
-  top-level layout runtime (see `docs/porting-todo.md`).
+  top-level layout runtime (see `docs/zig-porting-todo.md`).

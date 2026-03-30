@@ -21,7 +21,6 @@ const std = @import("std");
 const T = @import("types.zig");
 const cmdq = @import("cmd-queue.zig");
 const grid = @import("grid.zig");
-const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status = @import("status.zig");
@@ -33,7 +32,55 @@ const xm = @import("xmalloc.zig");
 
 pub const POPUP_CLOSEANYKEY: i32 = 0x1;
 
-const PopupData = struct {
+/// Matches tmux `BOX_LINES_NONE` / zmux display-popup `-B` (see cmd-display-menu.zig).
+pub const POPUP_BORDER_NONE: u32 = 6;
+
+/// Subset of tmux `tty_ctx` used by overlay hooks (`popup_set_client_cb`, `popup_redraw_cb`).
+pub const PopupTtyCtx = struct {
+    bigger: i32 = 0,
+    wox: u32 = 0,
+    woy: u32 = 0,
+    wsx: u32 = 0,
+    wsy: u32 = 0,
+    xoff: u32 = 0,
+    yoff: u32 = 0,
+    rxoff: u32 = 0,
+    ryoff: u32 = 0,
+    defaults: T.GridCell = T.grid_default_cell,
+    arg: ?*anyopaque = null,
+};
+
+/// Visible line ranges for `popup_check_cb` (same layout as tmux / server-client overlay math).
+pub const PopupVisibleRange = struct {
+    px: u32 = 0,
+    nx: u32 = 0,
+};
+
+pub const PopupVisibleRanges = struct {
+    ranges: ?[]PopupVisibleRange = null,
+    size: u32 = 0,
+    used: u32 = 0,
+};
+
+pub const PopupScreenRedrawCtx = struct {};
+
+/// tmux `layout_type` values used by `popup_make_pane`.
+pub const PopupLayoutType = enum {
+    leftright,
+    topbottom,
+};
+
+pub const PopupFinishEditCb = *const fn (?[]u8, usize, ?*anyopaque) void;
+
+pub const PopupEditor = struct {
+    path: ?[]u8 = null,
+    cb: ?PopupFinishEditCb = null,
+    arg: ?*anyopaque = null,
+};
+
+const Dragging = enum { off, move, size };
+
+pub const PopupData = struct {
     client: *T.Client,
     item: ?*cmdq.CmdqItem = null,
     flags: i32 = 0,
@@ -49,8 +96,26 @@ const PopupData = struct {
     py: u32 = 0,
     sx: u32 = 0,
     sy: u32 = 0,
+    /// Preferred geometry (tmux `ppx` / `ppy` / `psx` / `psy`) for resize.
+    ppx: u32 = 0,
+    ppy: u32 = 0,
+    psx: u32 = 0,
+    psy: u32 = 0,
+    dragging: Dragging = .off,
+    dx: u32 = 0,
+    dy: u32 = 0,
+    lx: u32 = 0,
+    ly: u32 = 0,
+    lb: u32 = 0,
+    overlay_ranges: PopupVisibleRanges = .{},
 
     fn deinit(self: *PopupData) void {
+        if (self.overlay_ranges.ranges) |r| {
+            xm.allocator.free(r);
+            self.overlay_ranges.ranges = null;
+            self.overlay_ranges.size = 0;
+            self.overlay_ranges.used = 0;
+        }
         if (self.screen) |screen| {
             screen_mod.screen_free(screen);
             xm.allocator.destroy(screen);
@@ -69,9 +134,15 @@ const ClippedBounds = struct {
     sy: u32,
 };
 
+var popup_check_null_data_fallback: PopupVisibleRanges = .{};
+
 fn state(client: *const T.Client) ?*PopupData {
     const ptr = client.popup_data orelse return null;
     return @ptrCast(@alignCast(ptr));
+}
+
+pub fn popup_data(client: *const T.Client) ?*PopupData {
+    return state(client);
 }
 
 pub fn overlay_active(client: *const T.Client) bool {
@@ -153,6 +224,10 @@ pub fn popup_display(
         .py = py,
         .sx = sx,
         .sy = sy,
+        .ppx = px,
+        .ppy = py,
+        .psx = sx,
+        .psy = sy,
         .content = .{},
     };
     errdefer {
@@ -190,6 +265,309 @@ pub fn handle_key(client: *T.Client, event: *const T.key_event) bool {
     }
 
     return true;
+}
+
+fn ensure_popup_visible_ranges(r: *PopupVisibleRanges, n: u32) void {
+    if (r.size >= n) return;
+    if (r.ranges) |old| {
+        const new = xm.allocator.realloc(old, n) catch unreachable;
+        for (new[r.size..n]) |*slot| slot.* = .{};
+        r.ranges = new;
+    } else {
+        const new = xm.allocator.alloc(PopupVisibleRange, n) catch unreachable;
+        for (new) |*slot| slot.* = .{};
+        r.ranges = new;
+    }
+    r.size = n;
+}
+
+/// Parts of the input range not covered by the popup (tmux `server_client_overlay_range`).
+fn popup_overlay_range(
+    x: u32,
+    y: u32,
+    sx: u32,
+    sy: u32,
+    px: u32,
+    py: u32,
+    nx: u32,
+    out: *PopupVisibleRanges,
+) void {
+    if (py < y or py > y + sy -| 1) {
+        ensure_popup_visible_ranges(out, 1);
+        out.ranges.?[0].px = px;
+        out.ranges.?[0].nx = nx;
+        out.used = 1;
+        return;
+    }
+    ensure_popup_visible_ranges(out, 2);
+
+    if (px < x) {
+        out.ranges.?[0].px = px;
+        out.ranges.?[0].nx = @min(x - px, nx);
+    } else {
+        out.ranges.?[0].px = 0;
+        out.ranges.?[0].nx = 0;
+    }
+
+    const ox = if (px > x + sx) px else x + sx;
+    const onx = px + nx;
+    if (onx > ox) {
+        out.ranges.?[1].px = ox;
+        out.ranges.?[1].nx = onx - ox;
+    } else {
+        out.ranges.?[1].px = 0;
+        out.ranges.?[1].nx = 0;
+    }
+    out.used = 2;
+}
+
+/// Re-read option-backed popup styles (tmux `popup_reapply_styles`).
+pub fn popup_reapply_styles(pd: *PopupData) void {
+    apply_styles(pd);
+}
+
+/// Request overlay redraw (tmux `popup_redraw_cb`).
+pub fn popup_redraw_cb(ttyctx: *const PopupTtyCtx) void {
+    const pd: *PopupData = @ptrCast(@alignCast(ttyctx.arg orelse return));
+    pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
+}
+
+/// Configure tty draw offsets for the popup pane (tmux `popup_set_client_cb`). Returns 1 if `c` owns the ctx.
+pub fn popup_set_client_cb(ttyctx: *PopupTtyCtx, c: *T.Client) i32 {
+    const pd: *PopupData = @ptrCast(@alignCast(ttyctx.arg orelse return 0));
+    if (c != pd.client) return 0;
+    if ((pd.client.flags & T.CLIENT_REDRAWOVERLAY) != 0) return 0;
+
+    ttyctx.bigger = 0;
+    ttyctx.wox = 0;
+    ttyctx.woy = 0;
+    ttyctx.wsx = c.tty.sx;
+    ttyctx.wsy = c.tty.sy;
+
+    if (pd.border_lines == POPUP_BORDER_NONE) {
+        ttyctx.xoff = pd.px;
+        ttyctx.rxoff = pd.px;
+        ttyctx.yoff = pd.py;
+        ttyctx.ryoff = pd.py;
+    } else {
+        ttyctx.xoff = pd.px + 1;
+        ttyctx.rxoff = pd.px + 1;
+        ttyctx.yoff = pd.py + 1;
+        ttyctx.ryoff = pd.py + 1;
+    }
+    return 1;
+}
+
+/// Initialize tty context for writes into the popup screen (tmux `popup_init_ctx_cb`).
+/// Callers must set `ttyctx.arg` to the [`PopupData`] pointer before calling (tmux passes it via `ctx->arg`).
+pub fn popup_init_ctx_cb(ctx: *T.ScreenWriteCtx, ttyctx: *PopupTtyCtx) void {
+    const pd: *PopupData = @ptrCast(@alignCast(ttyctx.arg orelse return));
+    ttyctx.defaults = pd.defaults;
+    ttyctx.arg = pd;
+    _ = ctx;
+}
+
+/// Mode cursor screen for the popup (tmux `popup_mode_cb`). Menu integration is not wired yet.
+pub fn popup_mode_cb(_: *T.Client, data: ?*anyopaque, cx: *u32, cy: *u32) ?*T.Screen {
+    const pd: *PopupData = @ptrCast(@alignCast(data orelse return null));
+    const scr = pd.screen orelse return null;
+    if (pd.border_lines == POPUP_BORDER_NONE) {
+        cx.* = pd.px + scr.cx;
+        cy.* = pd.py + scr.cy;
+    } else {
+        cx.* = pd.px + 1 + scr.cx;
+        cy.* = pd.py + 1 + scr.cy;
+    }
+    return scr;
+}
+
+/// Menu-aware path is a stub; without overlay menu, ranges match tmux `popup_check_cb` non-menu branch.
+pub fn popup_check_cb(
+    _: *T.Client,
+    data: ?*anyopaque,
+    px: u32,
+    py: u32,
+    nx: u32,
+) *PopupVisibleRanges {
+    const pd: *PopupData = @ptrCast(@alignCast(data orelse return &popup_check_null_data_fallback));
+    popup_overlay_range(pd.px, pd.py, pd.sx, pd.sy, px, py, nx, &pd.overlay_ranges);
+    return &pd.overlay_ranges;
+}
+
+/// Draw the popup into the client (tmux `popup_draw_cb`). Full tty pipeline not ported; stub.
+pub fn popup_draw_cb(_: *T.Client, _: ?*anyopaque, _: *PopupScreenRedrawCtx) void {}
+
+/// Tear down overlay-owned state (tmux `popup_free_cb`). zmux uses [`clear_overlay`] for lifecycle; stub.
+pub fn popup_free_cb(_: *T.Client, _: ?*anyopaque) void {}
+
+/// Adjust popup geometry on tty resize (tmux `popup_resize_cb`).
+pub fn popup_resize_cb(_: *T.Client, data: ?*anyopaque) void {
+    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
+    const tty = &pd.client.tty;
+
+    if (pd.psy > tty.sy)
+        pd.sy = tty.sy
+    else
+        pd.sy = pd.psy;
+    if (pd.psx > tty.sx)
+        pd.sx = tty.sx
+    else
+        pd.sx = pd.psx;
+    if (pd.ppy + pd.sy > tty.sy)
+        pd.py = tty.sy - pd.sy
+    else
+        pd.py = pd.ppy;
+    if (pd.ppx + pd.sx > tty.sx)
+        pd.px = tty.sx - pd.sx
+    else
+        pd.px = pd.ppx;
+
+    rebuild_screen(pd);
+    pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
+}
+
+/// Promote popup PTY into a split pane (tmux `popup_make_pane`). Needs window/layout runtime; stub.
+pub fn popup_make_pane(_: *PopupData, _: PopupLayoutType) void {}
+
+/// Context menu selection (tmux `popup_menu_done`). Menu + job integration not wired; stub.
+pub fn popup_menu_done(_: ?*anyopaque, _: u32, _: T.key_code, _: ?*anyopaque) void {}
+
+/// Mouse move/resize drag (tmux `popup_handle_drag`).
+pub fn popup_handle_drag(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
+    var px: u32 = undefined;
+    var py: u32 = undefined;
+
+    if (!T.mouseDrag(m.b))
+        pd.dragging = .off
+    else if (pd.dragging == .move) {
+        if (m.x < pd.dx)
+            px = 0
+        else if (m.x - pd.dx + pd.sx > c.tty.sx)
+            px = c.tty.sx - pd.sx
+        else
+            px = m.x - pd.dx;
+        if (m.y < pd.dy)
+            py = 0
+        else if (m.y - pd.dy + pd.sy > c.tty.sy)
+            py = c.tty.sy - pd.sy
+        else
+            py = m.y - pd.dy;
+        pd.px = px;
+        pd.py = py;
+        pd.dx = m.x - pd.px;
+        pd.dy = m.y - pd.py;
+        pd.ppx = px;
+        pd.ppy = py;
+        c.flags |= T.CLIENT_REDRAWOVERLAY;
+    } else if (pd.dragging == .size) {
+        if (pd.border_lines == POPUP_BORDER_NONE) {
+            if (m.x < pd.px + 1 or m.y < pd.py + 1) return;
+        } else {
+            if (m.x < pd.px + 3 or m.y < pd.py + 3) return;
+        }
+        pd.sx = m.x - pd.px;
+        pd.sy = m.y - pd.py;
+        pd.psx = pd.sx;
+        pd.psy = pd.sy;
+
+        rebuild_screen(pd);
+        c.flags |= T.CLIENT_REDRAWOVERLAY;
+    }
+
+    pd.lx = m.x;
+    pd.ly = m.y;
+    pd.lb = m.b;
+}
+
+/// Key / mouse dispatch (tmux `popup_key_cb`). Returns 1 to request closing the overlay; 0 otherwise.
+pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) i32 {
+    const pd: *PopupData = @ptrCast(@alignCast(data orelse return 0));
+    const cur = state(c) orelse return 0;
+    if (pd != cur) return 0;
+
+    if (T.keycIsMouse(event.key)) {
+        const m = &event.m;
+        if (pd.dragging != .off) {
+            popup_handle_drag(c, pd, m);
+            return 0;
+        }
+        if (m.x < pd.px or m.x > pd.px + pd.sx - 1 or
+            m.y < pd.py or m.y > pd.py + pd.sy - 1)
+        {
+            return 0;
+        }
+        var border: enum { none, left, right, top, bottom } = .none;
+        if (pd.border_lines != POPUP_BORDER_NONE) {
+            if (m.x == pd.px) {
+                border = .left;
+            } else if (m.x == pd.px + pd.sx - 1) {
+                border = .right;
+            } else if (m.y == pd.py) {
+                border = .top;
+            } else if (m.y == pd.py + pd.sy - 1) {
+                border = .bottom;
+            }
+        }
+        if ((m.b & T.MOUSE_MASK_MODIFIERS) == 0 and
+            T.mouseButtons(m.b) == T.MOUSE_BUTTON_3 and
+            (border == .left or border == .top))
+        {
+            // Context menu: stub (`popup_menu_done` not wired).
+            return 0;
+        }
+        if (((m.b & T.MOUSE_MASK_MODIFIERS) == T.MOUSE_MASK_META) or
+            (border != .none and !T.mouseDrag(m.lb)))
+        {
+            if (!T.mouseDrag(m.b)) return 0;
+            if (T.mouseButtons(m.lb) == T.MOUSE_BUTTON_1)
+                pd.dragging = .move
+            else if (T.mouseButtons(m.lb) == T.MOUSE_BUTTON_3)
+                pd.dragging = .size;
+            pd.dx = m.lx - pd.px;
+            pd.dy = m.ly - pd.py;
+            return 0;
+        }
+    }
+
+    if (event.key == T.C0_ESC or event.key == ('c' | T.KEYC_CTRL))
+        return 1;
+    if ((pd.flags & POPUP_CLOSEANYKEY) != 0 and
+        !T.keycIsMouse(event.key) and !T.keycIsPaste(event.key))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+/// Job output hook (tmux `popup_job_update_cb`). PTY popup jobs not wired; stub.
+pub fn popup_job_update_cb(_: ?*anyopaque) void {}
+
+/// Job exit hook (tmux `popup_job_complete_cb`). Stub.
+pub fn popup_job_complete_cb(_: ?*anyopaque) void {}
+
+pub fn popup_editor_free(pe: *PopupEditor) void {
+    if (pe.path) |p| {
+        std.fs.cwd().deleteFile(p) catch {};
+        xm.allocator.free(p);
+    }
+    xm.allocator.destroy(pe);
+}
+
+/// Close callback for editor popups (tmux `popup_editor_close_cb`). File read + `popup_display` path stub.
+pub fn popup_editor_close_cb(exit_status: i32, arg: ?*anyopaque) void {
+    const pe: *PopupEditor = @ptrCast(@alignCast(arg orelse return));
+    if (exit_status != 0) {
+        if (pe.cb) |cb| cb(null, 0, pe.arg);
+        popup_editor_free(pe);
+        return;
+    }
+    if (pe.cb) |cb| cb(null, 0, pe.arg);
+    popup_editor_free(pe);
+}
+
+/// External editor in a popup (tmux `popup_editor`). Not implemented.
+pub fn popup_editor(_: *T.Client, _: []const u8, _: usize, _: ?PopupFinishEditCb, _: ?*anyopaque) i32 {
+    return -1;
 }
 
 pub fn render_overlay_payload_region(

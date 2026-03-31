@@ -1412,3 +1412,106 @@ test "tty_keys_winsz: character mode" {
     try std.testing.expectEqual(@as(u32, 80), r.?.v1); // sx
     try std.testing.expectEqual(@as(u32, 24), r.?.v2); // sy
 }
+
+test "tty_keys_device_attributes2: secondary DA" {
+    var size: usize = 0;
+    var params: [16]u32 = undefined;
+    var n: usize = 0;
+    // \033[>77;30802;0c — mintty identity (type=77, version=30802)
+    const r = tty_keys_device_attributes2("\x1b[>77;30802;0c", &size, false, &params, &n);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expect(n >= 2);
+    try std.testing.expectEqual(@as(u32, 77), params[0]); // terminal type
+    try std.testing.expectEqual(@as(u32, 30802), params[1]); // version
+}
+
+test "tty_keys_device_attributes2: already received" {
+    var size: usize = 0;
+    var params: [16]u32 = undefined;
+    var n: usize = 0;
+    // With have_da2=true, should return no_match.
+    const r = tty_keys_device_attributes2("\x1b[>77;30802;0c", &size, true, &params, &n);
+    try std.testing.expectEqual(ParseResult.no_match, r);
+}
+
+test "tty_keys_extended_device_attributes: XDA/XTVERSION" {
+    var size: usize = 0;
+    var tmp: [256]u8 = undefined;
+    // \033P>|foot(1.18.1)\033\\ — foot terminal identity
+    const r = tty_keys_extended_device_attributes("\x1bP>|foot(1.18.1)\x1b\\", &size, false, &tmp);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expect(size > 0);
+    const name = std.mem.sliceTo(&tmp, 0);
+    try std.testing.expect(std.mem.indexOf(u8, name, "foot") != null);
+}
+
+test "tty_keys_colours: OSC 10 foreground colour" {
+    var size: usize = 0;
+    var tmp: [128]u8 = undefined;
+    // \033]10;rgb:ffff/ffff/ffff\033\\ — white foreground
+    const r = tty_keys_colours("\x1b]10;rgb:ffff/ffff/ffff\x1b\\", &size, true, &tmp);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expect(size > 0);
+    const colour_str = std.mem.sliceTo(&tmp, 0);
+    try std.testing.expect(colour_str.len > 0);
+}
+
+test "tty_keys_colours: OSC 11 background colour BEL-terminated" {
+    var size: usize = 0;
+    var tmp: [128]u8 = undefined;
+    // \033]11;rgb:0000/0000/0000\007 — black background
+    const r = tty_keys_colours("\x1b]11;rgb:0000/0000/0000\x07", &size, false, &tmp);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expect(size > 0);
+}
+
+test "tty_keys_palette: OSC 4 palette response" {
+    var size: usize = 0;
+    var tmp: [128]u8 = undefined;
+    // \033]4;1;rgb:cccc/0000/0000\033\\ — palette entry 1 = red
+    const r = tty_keys_palette("\x1b]4;1;rgb:cccc/0000/0000\x1b\\", &size, &tmp);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expect(size > 0);
+    const colour_str = std.mem.sliceTo(&tmp, 0);
+    try std.testing.expect(colour_str.len > 0);
+}
+
+test "tty_keys_winsz: pixel mode" {
+    var size: usize = 0;
+    const r = tty_keys_winsz("\x1b[4;768;1024t", &size);
+    try std.testing.expect(r != null);
+    try std.testing.expectEqual(WinszKind.pixels, r.?.kind);
+    try std.testing.expectEqual(@as(u32, 1024), r.?.v1); // xpixel
+    try std.testing.expectEqual(@as(u32, 768), r.?.v2); // ypixel
+}
+
+test "tty_keys_clipboard: OSC 52 ST-terminated" {
+    var size: usize = 0;
+    var clip: u8 = 0;
+    var data: ?[]u8 = null;
+    defer if (data) |d| xm.allocator.free(d);
+    // \033]52;p;dGVzdA==\033\\ → "test"
+    const r = tty_keys_clipboard("\x1b]52;p;dGVzdA==\x1b\\", &size, &clip, &data);
+    try std.testing.expectEqual(ParseResult.match, r);
+    try std.testing.expectEqual(@as(u8, 'p'), clip);
+    try std.testing.expect(data != null);
+    if (data) |d| {
+        try std.testing.expectEqualStrings("test", d);
+    }
+}
+
+test "partial sequences return partial" {
+    var size: usize = 0;
+    var params: [16]u32 = undefined;
+    var n: usize = 0;
+    // Partial DA1: just \033[?
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_device_attributes("\x1b[?", &size, false, &params, &n));
+    // Partial DA2: just \033[>
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_device_attributes2("\x1b[>", &size, false, &params, &n));
+    // Partial XDA: just \033P>|
+    var tmp: [256]u8 = undefined;
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_extended_device_attributes("\x1bP>|", &size, false, &tmp));
+    // Partial colour: just \033]10;
+    var ctmp: [128]u8 = undefined;
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_colours("\x1b]10;", &size, true, &ctmp));
+}

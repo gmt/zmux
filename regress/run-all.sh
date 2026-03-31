@@ -46,7 +46,12 @@ cleanup() {
 trap cleanup 0 1 2 3 15
 
 reap_smoke_processes() {
-    pids=$(ps -eo pid=,args= | awk '
+    # Kill leftover processes from previous tests.  Exclude our own PID
+    # and the harness RUN_DIR to avoid hitting processes that belong to
+    # the currently-executing test or the harness itself.
+    pids=$(ps -eo pid=,args= | awk -v me="$$" -v rundir="$RUN_DIR" '
+        $1 == me { next }
+        index($0, rundir) { next }
         index($0, "/tmp/zmux-") || index($0, "/tmp/zmux-smoke-") { print $1 }
     ')
     if [ -n "$pids" ]; then

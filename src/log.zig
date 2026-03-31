@@ -45,7 +45,7 @@ pub fn log_open(name: []const u8) void {
 
     var buf: [256]u8 = undefined;
     const pid = std.os.linux.getpid();
-    const path = std.fmt.bufPrintZ(&buf, "zmux-{s}-{d}.log", .{ name, pid }) catch return;
+    const path = std.fmt.bufPrintZ(&buf, "/tmp/zmux-{s}-{d}.log", .{ name, pid }) catch return;
     log_file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch null;
 }
 

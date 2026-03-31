@@ -93,7 +93,7 @@ pub fn status_redraw(c: *T.Client) bool {
     const width = c.tty.sx;
     const screen = c.status.screen orelse return false;
     if (screen.grid.sx != width or screen.grid.sy != lines) {
-        screen_mod.screen_resize(screen, width, lines);
+        screen_mod.screen_resize(screen, width, lines, false);
         force = true;
     }
 

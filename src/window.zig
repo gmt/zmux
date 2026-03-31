@@ -815,24 +815,30 @@ pub fn window_resize(w: *T.Window, sx: u32, sy: u32, _xpixel: i32, _ypixel: i32)
         w.ypixel = if (_ypixel == 0) T.DEFAULT_YPIXEL else @intCast(_ypixel);
 }
 
-pub fn window_pane_resize(wp: *T.WindowPane, sx: ?u32, sy: ?u32) void {
-    const w = wp.window;
-    if (sx) |new_sx| {
-        const clamped = @max(@as(u32, 1), @min(new_sx, w.sx));
-        wp.sx = clamped;
-        if (w.panes.items.len == 1) {
-            w.sx = clamped;
-            w.manual_sx = clamped;
-        }
-    }
-    if (sy) |new_sy| {
-        const clamped = @max(@as(u32, 1), @min(new_sy, w.sy));
-        wp.sy = clamped;
-        if (w.panes.items.len == 1) {
-            w.sy = clamped;
-            w.manual_sy = clamped;
-        }
-    }
+pub fn window_pane_resize(wp: *T.WindowPane, sx_in: u32, sy_in: u32) void {
+    const sx = @max(@as(u32, 1), sx_in);
+    const sy = @max(@as(u32, 1), sy_in);
+
+    if (sx == wp.sx and sy == wp.sy)
+        return;
+
+    const screen_write = @import("screen-write.zig");
+    screen_write.screen_write_stop_sync(wp);
+
+    // Queue the resize so server_client_check_pane_resize can
+    // batch and send TIOCSWINSZ to the pty later.
+    wp.resize_queue.append(xm.allocator, .{
+        .osx = wp.sx,
+        .osy = wp.sy,
+        .sx = sx,
+        .sy = sy,
+    }) catch return;
+
+    wp.sx = sx;
+    wp.sy = sy;
+
+    log.log_debug("window_pane_resize: %%{d} resize {d}x{d}", .{ wp.id, sx, sy });
+    screen_mod.screen_resize(&wp.base, sx, sy, wp.base.saved_grid == null);
 
     if (window_pane_mode(wp)) |wme| {
         const clock_mod = @import("window-clock.zig");
@@ -1162,8 +1168,7 @@ fn find_gap_absorber(w: *T.Window, removed: PaneGeometry) ?*T.WindowPane {
 fn apply_pane_geometry(wp: *T.WindowPane, geometry: PaneGeometry) void {
     wp.xoff = geometry.xoff;
     wp.yoff = geometry.yoff;
-    wp.sx = geometry.sx;
-    wp.sy = geometry.sy;
+    window_pane_resize(wp, geometry.sx, geometry.sy);
 }
 
 pub const PaneDrawBounds = struct {

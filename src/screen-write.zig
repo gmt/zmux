@@ -887,11 +887,12 @@ pub fn clearcharacter(ctx: *T.ScreenWriteCtx, nx: u32) void {
     erase_characters(ctx, nx);
 }
 
-/// Write raw escape string to the terminal. No-op stub in zmux since we
-/// don't have a TTY layer that forwards raw sequences (screen_write_rawstring).
+/// Write raw escape string to the terminal.  Queues the bytes on the
+/// pane's passthrough buffer; they are drained to attached clients
+/// during the next render cycle.
 pub fn rawstring(ctx: *T.ScreenWriteCtx, str: []const u8) void {
-    _ = ctx;
-    _ = str;
+    const wp = ctx.wp orelse return;
+    wp.passthrough_pending.appendSlice(xm.allocator, str) catch return;
 }
 
 /// Set clipboard selection. No-op stub in zmux (screen_write_setselection).

@@ -959,6 +959,9 @@ pub const WindowPane = struct {
     pipe_flags: u8 = 0,
     pipe_offset: WindowPaneOffset = .{},
 
+    // DCS passthrough: raw bytes to forward to attached clients.
+    passthrough_pending: std.ArrayListUnmanaged(u8) = .{},
+
     // Resize queue (ported from tmux's TAILQ-based resize_queue)
     resize_queue: std.ArrayListUnmanaged(WindowPaneResize) = .{},
     resize_timer: ?*c.libevent.event = null,

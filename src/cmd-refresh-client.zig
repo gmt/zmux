@@ -400,7 +400,7 @@ test "refresh-client redraws the target client instead of the queue client" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
     tty_mod.tty_set_size(&queue_client.tty, 80, 24, 0, 0);
@@ -409,7 +409,7 @@ test "refresh-client redraws the target client instead of the queue client" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
     tty_mod.tty_set_size(&target_client.tty, 90, 30, 0, 0);
@@ -437,7 +437,7 @@ test "refresh-client ignores a stray adjustment unless pan mode is active" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -445,7 +445,7 @@ test "refresh-client ignores a stray adjustment unless pan mode is active" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -473,7 +473,7 @@ test "refresh-client -S uses the shared status-only redraw path for the target c
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -481,7 +481,7 @@ test "refresh-client -S uses the shared status-only redraw path for the target c
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -509,7 +509,7 @@ test "refresh-client -f and -F route client flags to the target client" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -517,7 +517,7 @@ test "refresh-client -f and -F route client flags to the target client" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -543,7 +543,7 @@ test "refresh-client applies -F before -f when both are present" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -571,7 +571,7 @@ test "refresh-client -C resizes only control clients" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -579,7 +579,7 @@ test "refresh-client -C resizes only control clients" {
         .name = "control",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL,
     };
     target_client.tty.client = &target_client;
@@ -616,7 +616,7 @@ test "refresh-client -C stores and clears per-window control sizes" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -624,7 +624,7 @@ test "refresh-client -C stores and clears per-window control sizes" {
         .name = "control",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL,
     };
     defer target_client.client_windows.deinit(xm.allocator);
@@ -678,7 +678,7 @@ test "refresh-client -l emits a clipboard query for the target tty" {
         .name = "plain",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .term_caps = caps[0..],
     };
     tty_mod.tty_init(&target_client.tty, &target_client);
@@ -733,7 +733,7 @@ test "refresh-client rejects control-only flags on non-control clients" {
         .name = "plain",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -822,7 +822,7 @@ test "refresh-client -A tracks control pane state and emits pause transitions" {
         .name = "control",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
@@ -912,7 +912,7 @@ test "refresh-client -B stores and removes control subscriptions" {
         .name = "control",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL,
     };
     defer control_subscriptions.control_subscriptions_deinit(&target_client);
@@ -944,7 +944,7 @@ test "refresh-client -B parses pane and window subscription targets" {
         .name = "control",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL,
     };
     defer control_subscriptions.control_subscriptions_deinit(&target_client);
@@ -1029,7 +1029,7 @@ test "refresh-client -B emits %subscription-changed for control clients" {
         .name = "control",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
@@ -1117,7 +1117,7 @@ test "refresh-client -r stores OSC report colours on the target pane" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -1125,7 +1125,7 @@ test "refresh-client -r stores OSC report colours on the target pane" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -1188,7 +1188,7 @@ test "refresh-client -r ignores malformed reports and missing panes" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target_client.tty.client = &target_client;
 
@@ -1255,7 +1255,7 @@ test "refresh-client pan commands update and clear the target client viewport" {
         .name = "queue",
         .environ = &queue_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     queue_client.tty.client = &queue_client;
 
@@ -1263,7 +1263,7 @@ test "refresh-client pan commands update and clear the target client viewport" {
         .name = "target",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
         .session = session,
     };

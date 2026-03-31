@@ -254,7 +254,7 @@ fn detach_test_client(name: []const u8, session: ?*T.Session) T.Client {
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = if (session != null) T.CLIENT_ATTACHED else 0,
         .session = session,
     };

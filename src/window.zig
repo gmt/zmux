@@ -44,6 +44,7 @@ const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
 const server_client_mod = @import("server-client.zig");
 const control_mod = @import("control.zig");
+const tty_mod = @import("tty.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -697,6 +698,8 @@ pub fn window_set_active_pane(w: *T.Window, wp: *T.WindowPane, _notify: bool) bo
         window_pane_update_focus(w.active);
     }
 
+    if (client_registry.clients.items.len > 0)
+        tty_mod.tty_update_window_offset(w);
     window_mark_viewing_clients_for_active_pane_change(w);
     if (_notify and w.winlinks.items.len != 0)
         notify.notify_window("window-pane-changed", w);

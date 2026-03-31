@@ -372,6 +372,7 @@ test "alerts_queue marks activity on unattached current window" {
 }
 
 test "alerts_reset_all re-arms silence timer and timer callback sets silence" {
+    const cmdq = @import("cmd-queue.zig");
     const os_mod = @import("os/linux.zig");
     const old_base = proc_mod.libevent;
     proc_mod.libevent = os_mod.osdep_event_init();
@@ -379,6 +380,8 @@ test "alerts_reset_all re-arms silence timer and timer callback sets silence" {
         if (proc_mod.libevent) |base| c.libevent.event_base_free(base);
         proc_mod.libevent = old_base;
     }
+
+    cmdq.cmdq_reset_for_tests();
 
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -398,6 +401,10 @@ test "alerts_reset_all re-arms silence timer and timer callback sets silence" {
     defer env_mod.environ_free(env_mod.global_environ);
 
     const s = sess.session_create(null, "alerts-silence", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    // Flush the command queue after session destroy but before the libevent
+    // base is freed, so queued notify items don't outlive the event base
+    // their windows' timers are registered on.
+    defer cmdq.cmdq_reset_for_tests();
     defer sess.session_destroy(s, false, "test");
 
     const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);

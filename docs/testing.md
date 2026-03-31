@@ -14,15 +14,6 @@ Testing lanes:
 - `zig build smoke-soak`
   Heavy end-to-end soak coverage for long-lived or stress-oriented behavior.
 
-- `python3 regress/test-watchdog.py`
-  Wraps `zig build test` with hang detection. Adaptive timeout based on
-  historical runtime data (starts at 120s, converges to mean+3sigma after
-  5 runs). On hang: escalates SIGINT/SIGTERM/SIGKILL, then does a
-  diagnostic re-run to identify the specific hanging test.
-
-- `zig build test-compile`
-  Compile unit tests without running. Useful with `test-watchdog.py --direct`.
-
 - `zig build fuzz -Dfuzzing=true`
   Fuzz target build.
 

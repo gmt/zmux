@@ -165,10 +165,108 @@ test "window-mode-runtime push and pop emit pane-mode-changed hooks" {
     try std.testing.expect((setup.pane.flags & T.PANE_CHANGED) != 0);
 }
 
-// Skipped: this test hangs because control notifications are delivered via
-// cmdq callbacks (notify_add → cmdq_append_item) but the test's blocking
-// imsgbuf_read fires before the callback is processed.  Needs a
-// non-blocking reader or the notification path must flush synchronously.
 test "window-mode-runtime transitions emit pane-mode-changed control messages" {
-    return error.SkipZigTest;
+    const c = @import("c.zig");
+    const cmdq = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const registry = @import("client-registry.zig");
+    const sess = @import("session.zig");
+    const xm = @import("xmalloc.zig");
+
+    const helpers = struct {
+        fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+        fn expectPaneModeChanged(reader: *c.imsg.imsgbuf, pane_id: u32) !void {
+            var imsg_msg: c.imsg.imsg = undefined;
+            while (c.imsg.imsg_get(reader, &imsg_msg) <= 0)
+                try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(reader));
+            defer c.imsg.imsg_free(&imsg_msg);
+
+            try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+            const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+            var payload = try xm.allocator.alloc(u8, payload_len);
+            defer xm.allocator.free(payload);
+            try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+            var stream: i32 = 0;
+            @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+            try std.testing.expectEqual(@as(i32, 1), stream);
+
+            const expected = xm.xasprintf("%pane-mode-changed %{d}\n", .{pane_id});
+            defer xm.allocator.free(expected);
+            try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
+        }
+    };
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    registry.clients.clearRetainingCapacity();
+    defer registry.clients.clearRetainingCapacity();
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("mode-runtime-control");
+    defer if (sess.session_find("mode-runtime-control") != null) sess.session_destroy(setup.session, false, "test");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "mode-runtime-control-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = "mode-runtime-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = setup.session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], helpers.noopDispatch, null);
+    defer {
+        registry.remove(&client);
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+    registry.add(&client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const first_mode = T.WindowMode{ .name = "first-mode" };
+    const second_mode = T.WindowMode{ .name = "second-mode" };
+
+    const pushed = pushMode(setup.pane, &first_mode, null, null);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+
+    try std.testing.expect(popMode(setup.pane, pushed));
+    while (cmdq.cmdq_next(null) != 0) {}
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+
+    _ = pushMode(setup.pane, &first_mode, null, null);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+
+    _ = pushMode(setup.pane, &second_mode, null, null);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+
+    resetModeAll(setup.pane);
+    while (cmdq.cmdq_next(null) != 0) {}
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
 }

@@ -19,11 +19,8 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
-const cmd_mod = @import("cmd.zig");
 const cmd_options = @import("cmd-options.zig");
 const format_mod = @import("format.zig");
-const key_bindings = @import("key-bindings.zig");
-const key_string = @import("key-string.zig");
 const mode_tree = @import("mode-tree.zig");
 const options_table = @import("options-table.zig");
 const opts = @import("options.zig");
@@ -50,15 +47,6 @@ const OptionItem = struct {
     target: cmd_options.ResolvedTarget,
     name: []u8,
     idx: ?u32,
-    // Key binding fields (non-null only when is_key == true)
-    is_key: bool = false,
-    table: ?[]u8 = null,
-    key_code: T.key_code = T.KEYC_NONE,
-};
-
-const ChangeKind = enum(u8) {
-    unset,
-    reset,
 };
 
 const PromptAction = enum(u8) {
@@ -82,7 +70,6 @@ const CustomizeModeData = struct {
     format: []u8,
     filter: ?[]u8 = null,
     hide_inherited: bool = false,
-    change: ChangeKind = .unset,
 };
 
 pub const window_customize_mode = T.WindowMode{
@@ -203,40 +190,12 @@ fn windowCustomizeCommand(
     }
     if (std.mem.eql(u8, command, "unset-current")) {
         const item = currentOptionItem(data) orelse return;
-        if (item.is_key) {
-            doUnsetKey(data, item);
-            rebuildAndDraw(wme);
-        } else {
-            promptForCurrentChange(client orelse return, wme, .unset);
-        }
+        promptForCurrentItem(client orelse return, wme.wp, item, .unset);
         return;
     }
     if (std.mem.eql(u8, command, "reset-current")) {
         const item = currentOptionItem(data) orelse return;
-        if (item.is_key) {
-            doResetKey(data, item);
-            rebuildAndDraw(wme);
-        } else {
-            promptForCurrentChange(client orelse return, wme, .reset);
-        }
-        return;
-    }
-    if (std.mem.eql(u8, command, "unset-tagged")) {
-        const tagged = mode_tree.countTagged(data.tree);
-        if (tagged == 0) return;
-        promptForTaggedChange(client orelse return, wme, .unset, tagged);
-        return;
-    }
-    if (std.mem.eql(u8, command, "reset-tagged")) {
-        const tagged = mode_tree.countTagged(data.tree);
-        if (tagged == 0) return;
-        promptForTaggedChange(client orelse return, wme, .reset, tagged);
-        return;
-    }
-    if (std.mem.eql(u8, command, "set-key")) {
-        const item = currentOptionItem(data) orelse return;
-        if (!item.is_key) return;
-        doSetKey(client orelse return, data, item);
+        promptForCurrentItem(client orelse return, wme.wp, item, .reset);
         return;
     }
 
@@ -332,19 +291,19 @@ fn redraw(wme: *T.WindowModeEntry) void {
 
         const rendered = renderLine(tree, line_index);
         defer xm.allocator.free(rendered);
-        screen_write.puts(&ctx, &T.grid_default_cell, rendered);
+        screen_write.putn(&ctx, rendered);
     }
 
     if (rows > 0) {
         screen_write.cursor_to(&ctx, rows - 1, 0);
         screen_write.erase_line(&ctx);
-        screen_write.puts(&ctx, &T.grid_default_cell, HELP_TEXT);
+        screen_write.putn(&ctx, HELP_TEXT);
     }
 
     if (tree.line_list.items.len == 0 and body_rows != 0) {
         screen_write.cursor_to(&ctx, 0, 0);
         screen_write.erase_line(&ctx);
-        screen_write.puts(&ctx, &T.grid_default_cell, if (data.filter != null) "No matching options." else "No options.");
+        screen_write.putn(&ctx, if (data.filter != null) "No matching options." else "No options.");
     }
 
     window_mode_runtime.noteModeRedraw(wme.wp);
@@ -358,121 +317,6 @@ fn buildTree(tree: *mode_tree.Data) void {
     if (data.fs.s) |session_ptr| buildScope(data, tree, .session, "Session Options", session_ptr.options);
     if (data.fs.w) |window_ptr| buildScope(data, tree, .window, "Window Options", window_ptr.options);
     if (data.fs.wp) |pane_ptr| buildScope(data, tree, .pane, "Pane Options", pane_ptr.options);
-
-    buildAllKeyTables(data, tree);
-}
-
-fn buildAllKeyTables(data: *CustomizeModeData, tree: *mode_tree.Data) void {
-    var kt = key_bindings.key_bindings_first_table();
-    var table_num: u32 = 0;
-    while (kt) |table| : (kt = key_bindings.key_bindings_next_table(table)) {
-        if (table.order.items.len == 0) {
-            continue;
-        }
-        buildKeyTable(data, tree, table, table_num);
-        table_num += 1;
-        if (table_num >= 256) break;
-    }
-}
-
-fn keyTableSectionTag(table_num: u32) u64 {
-    return (1 << 62) | (@as(u64, table_num) << 54) | 1;
-}
-
-fn buildKeyTable(
-    data: *CustomizeModeData,
-    tree: *mode_tree.Data,
-    kt: *T.KeyTable,
-    table_num: u32,
-) void {
-    const tag = keyTableSectionTag(table_num);
-    const title = xm.xasprintf("Key Table - {s}", .{kt.name});
-    defer xm.allocator.free(title);
-
-    const section = mode_tree.add(tree, null, null, tag, title, null, 0);
-    mode_tree.noTag(section);
-
-    var bd = key_bindings.key_bindings_first(kt);
-    while (bd) |binding| : (bd = key_bindings.key_bindings_next(kt, binding)) {
-        const key_str = key_string.key_string_lookup_key(binding.key, 0);
-
-        // Apply filter if set.
-        if (data.filter) |filter| {
-            const ctx = keyFormatContext(binding, key_str);
-            const matches = format_mod.format_filter_match(xm.allocator, filter, &ctx) orelse false;
-            if (!matches) continue;
-        }
-
-        // Create the item for this binding.
-        const item = xm.allocator.create(OptionItem) catch unreachable;
-        item.* = .{
-            .target = .{ .kind = .server, .options = opts.global_options, .global = true },
-            .name = xm.xstrdup(key_str),
-            .idx = null,
-            .is_key = true,
-            .table = xm.xstrdup(kt.name),
-            .key_code = binding.key,
-        };
-        data.items.append(xm.allocator, item) catch unreachable;
-
-        const bd_tag = tag | (@as(u64, binding.key) << 3) | 0;
-        const child = mode_tree.add(tree, section, @ptrCast(item), bd_tag, key_str, null, 0);
-
-        // Command sub-item
-        const cmd_text = cmdListToString(binding.cmdlist);
-        defer xm.allocator.free(cmd_text);
-        const cmd_display = xm.xasprintf("#[ignore]{s}", .{cmd_text});
-        defer xm.allocator.free(cmd_display);
-        const cmd_item = mode_tree.add(tree, child, @ptrCast(item),
-            tag | (@as(u64, binding.key) << 3) | (0 << 1) | 1,
-            "Command", cmd_display, -1);
-        mode_tree.drawAsParent(cmd_item);
-        mode_tree.noTag(cmd_item);
-
-        // Note sub-item
-        const note_text = if (binding.note) |n| xm.xasprintf("#[ignore]{s}", .{n}) else xm.xstrdup("");
-        defer xm.allocator.free(note_text);
-        const note_item = mode_tree.add(tree, child, @ptrCast(item),
-            tag | (@as(u64, binding.key) << 3) | (1 << 1) | 1,
-            "Note", note_text, -1);
-        mode_tree.drawAsParent(note_item);
-        mode_tree.noTag(note_item);
-
-        // Repeat sub-item
-        const repeat_flag: []const u8 = if (binding.flags & T.KEY_BINDING_REPEAT != 0) "on" else "off";
-        const repeat_item = mode_tree.add(tree, child, @ptrCast(item),
-            tag | (@as(u64, binding.key) << 3) | (2 << 1) | 1,
-            "Repeat", repeat_flag, -1);
-        mode_tree.drawAsParent(repeat_item);
-        mode_tree.noTag(repeat_item);
-    }
-
-    // Remove the section header if no bindings were added (e.g., all filtered out).
-    if (section.children.items.len == 0) mode_tree.remove(tree, section);
-}
-
-fn keyFormatContext(bd: *const T.KeyBinding, key_str: []const u8) format_mod.FormatContext {
-    _ = key_str; // key accessible via bd.key through key_string_lookup_key at expand time
-    return .{
-        .is_option = false,
-        .is_key = true,
-        .key_binding = bd,
-        .key_note = bd.note,
-    };
-}
-
-fn cmdListToString(cmdlist: ?*T.CmdList) []u8 {
-    if (cmdlist == null) return xm.xstrdup("");
-    const list: *cmd_mod.CmdList = @ptrCast(@alignCast(cmdlist.?));
-    var buf: std.ArrayList(u8) = .{};
-    var cmd = list.head;
-    var first = true;
-    while (cmd) |c| : (cmd = c.next) {
-        if (!first) buf.appendSlice(xm.allocator, "; ") catch unreachable;
-        first = false;
-        buf.appendSlice(xm.allocator, c.entry.name) catch unreachable;
-    }
-    return buf.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn buildScope(
@@ -944,300 +788,6 @@ fn rebuildIfStillActive(pane_id: u32) void {
     rebuildAndDraw(wme);
 }
 
-// ── Key binding operations ────────────────────────────────────────────────
-
-fn getKeyAndBinding(item: *const OptionItem, ktp: ?**T.KeyTable, bdp: ?**T.KeyBinding) bool {
-    if (!item.is_key) return false;
-    const table_name = item.table orelse return false;
-    const kt = key_bindings.key_bindings_get_table(table_name, false) orelse return false;
-    const bd = key_bindings.key_bindings_get(kt, item.key_code) orelse return false;
-    if (ktp) |p| p.* = kt;
-    if (bdp) |p| p.* = bd;
-    return true;
-}
-
-fn doUnsetKey(data: *CustomizeModeData, item: *const OptionItem) void {
-    var kt: *T.KeyTable = undefined;
-    var bd: *T.KeyBinding = undefined;
-    if (!getKeyAndBinding(item, &kt, &bd)) return;
-
-    // If this is the current item, collapse/move up before removing.
-    const cur_data = mode_tree.getCurrent(data.tree);
-    if (cur_data != null and cur_data.? == @as(*anyopaque, @ptrCast(@constCast(item)))) {
-        mode_tree.collapseCurrent(data.tree);
-        mode_tree.up(data.tree, false);
-    }
-    key_bindings.key_bindings_remove(kt.name, bd.key);
-}
-
-fn doResetKey(data: *CustomizeModeData, item: *const OptionItem) void {
-    var kt: *T.KeyTable = undefined;
-    var bd: *T.KeyBinding = undefined;
-    if (!getKeyAndBinding(item, &kt, &bd)) return;
-
-    const default_bd = key_bindings.key_bindings_get_default(kt, bd.key);
-    // If already at default (same cmdlist pointer) do nothing.
-    if (default_bd) |dbd| {
-        if (bd.cmdlist == dbd.cmdlist) return;
-    } else {
-        // No default: collapse/move up then remove.
-        const cur_data = mode_tree.getCurrent(data.tree);
-        if (cur_data != null and cur_data.? == @as(*anyopaque, @ptrCast(@constCast(item)))) {
-            mode_tree.collapseCurrent(data.tree);
-            mode_tree.up(data.tree, false);
-        }
-    }
-    key_bindings.key_bindings_reset(kt.name, bd.key);
-}
-
-// ── Key binding prompt callbacks ─────────────────────────────────────────
-
-const KeyPromptState = struct {
-    pane_id: u32,
-    table: []u8,
-    key: T.key_code,
-    is_command: bool, // true = Command sub-item, false = Note sub-item
-};
-
-fn freeKeyPromptState(raw: ?*anyopaque) void {
-    const state: *KeyPromptState = @ptrCast(@alignCast(raw orelse return));
-    xm.allocator.free(state.table);
-    xm.allocator.destroy(state);
-}
-
-fn keyCommandCallback(client: *T.Client, raw: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
-    const state: *KeyPromptState = @ptrCast(@alignCast(raw orelse return 0));
-    const text = input orelse return 0;
-    if (text.len == 0) return 0;
-
-    const kt = key_bindings.key_bindings_get_table(state.table, false) orelse return 0;
-    const bd = key_bindings.key_bindings_get(kt, state.key) orelse return 0;
-
-    var pi = T.CmdParseInput{};
-    const result = cmd_mod.cmd_parse_from_string(text, &pi);
-    switch (result.status) {
-        .@"error" => {
-            if (result.@"error") |err| {
-                const msg = xm.xstrdup(err);
-                defer xm.allocator.free(msg);
-                uppercaseFirst(msg);
-                status_runtime.present_client_message(client, msg);
-                xm.allocator.free(err);
-            }
-            return 0;
-        },
-        .success => {},
-    }
-    if (result.cmdlist) |new_cl_opaque| {
-        if (bd.cmdlist) |old_cl| cmd_mod.cmd_list_unref(old_cl);
-        bd.cmdlist = @ptrCast(new_cl_opaque);
-    }
-
-    rebuildIfStillActive(state.pane_id);
-    return 0;
-}
-
-fn keyNoteCallback(_: *T.Client, raw: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
-    const state: *KeyPromptState = @ptrCast(@alignCast(raw orelse return 0));
-    const text = input orelse return 0;
-    if (text.len == 0) return 0;
-
-    const kt = key_bindings.key_bindings_get_table(state.table, false) orelse return 0;
-    const bd = key_bindings.key_bindings_get(kt, state.key) orelse return 0;
-
-    if (bd.note) |old_note| xm.allocator.free(old_note);
-    bd.note = xm.xstrdup(text);
-
-    rebuildIfStillActive(state.pane_id);
-    return 0;
-}
-
-fn doSetKey(client: *T.Client, data: *CustomizeModeData, item: *const OptionItem) void {
-    var kt: *T.KeyTable = undefined;
-    var bd: *T.KeyBinding = undefined;
-    if (!getKeyAndBinding(item, &kt, &bd)) return;
-
-    const cur_name = mode_tree.getCurrentName(data.tree) orelse return;
-
-    if (std.mem.eql(u8, cur_name, "Repeat")) {
-        bd.flags ^= T.KEY_BINDING_REPEAT;
-        rebuildIfStillActive(data.tree.wp.id);
-        return;
-    }
-
-    const is_command = std.mem.eql(u8, cur_name, "Command");
-    if (!is_command and !std.mem.eql(u8, cur_name, "Note")) return;
-
-    const key_str = key_string.key_string_lookup_key(item.key_code, 0);
-    const prompt = xm.xasprintf("({s}) ", .{key_str});
-    defer xm.allocator.free(prompt);
-
-    const initial: []const u8 = if (is_command)
-        cmdListToString(bd.cmdlist)
-    else
-        bd.note orelse xm.xstrdup("");
-    defer xm.allocator.free(initial);
-
-    const state = xm.allocator.create(KeyPromptState) catch unreachable;
-    state.* = .{
-        .pane_id = data.tree.wp.id,
-        .table = xm.xstrdup(kt.name),
-        .key = item.key_code,
-        .is_command = is_command,
-    };
-
-    const cb: status_prompt.PromptInputCb = if (is_command) keyCommandCallback else keyNoteCallback;
-    status_prompt.status_prompt_set(
-        client,
-        null,
-        prompt,
-        initial,
-        cb,
-        null,
-        freeKeyPromptState,
-        state,
-        status_prompt.PROMPT_NOFORMAT,
-        .command,
-    );
-}
-
-// ── Bulk tagged change operations ─────────────────────────────────────────
-
-fn promptForCurrentChange(client: *T.Client, wme: *T.WindowModeEntry, kind: ChangeKind) void {
-    const data = modeData(wme);
-    const item = currentOptionItem(data) orelse return;
-    if (item.is_key) {
-        switch (kind) {
-            .unset => doUnsetKey(data, item),
-            .reset => doResetKey(data, item),
-        }
-        rebuildAndDraw(wme);
-        return;
-    }
-
-    const prompt = switch (kind) {
-        .unset => if (item.idx) |idx|
-            xm.xasprintf("Unset {s}[{d}]? ", .{ item.name, idx })
-        else
-            xm.xasprintf("Unset {s}? ", .{item.name}),
-        .reset => if (item.idx != null) return else xm.xasprintf("Reset {s} to default? ", .{item.name}),
-    };
-    defer xm.allocator.free(prompt);
-
-    data.change = kind;
-    // TODO: needs reference counting on CustomizeModeData to avoid use-after-free
-    // if the mode closes while this prompt is active (mirrors C data->references++).
-    status_prompt.status_prompt_set(
-        client,
-        null,
-        prompt,
-        "",
-        changeCurrentCallback,
-        null,
-        null,
-        @ptrCast(data),
-        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT,
-        .command,
-    );
-}
-
-fn promptForTaggedChange(client: *T.Client, wme: *T.WindowModeEntry, kind: ChangeKind, tagged: u32) void {
-    const data = modeData(wme);
-    const prompt = switch (kind) {
-        .unset => xm.xasprintf("Unset {d} tagged? ", .{tagged}),
-        .reset => xm.xasprintf("Reset {d} tagged to default? ", .{tagged}),
-    };
-    defer xm.allocator.free(prompt);
-
-    data.change = kind;
-    // TODO: needs reference counting on CustomizeModeData to avoid use-after-free
-    // if the mode closes while this prompt is active (mirrors C data->references++).
-    status_prompt.status_prompt_set(
-        client,
-        null,
-        prompt,
-        "",
-        changeTaggedCallback,
-        null,
-        null,
-        @ptrCast(data),
-        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT,
-        .command,
-    );
-}
-
-fn changeCurrentCallback(client: *T.Client, raw: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
-    _ = client;
-    const data: *CustomizeModeData = @ptrCast(@alignCast(raw orelse return 0));
-    const text = input orelse return 0;
-    if (!confirmedStr(text)) return 0;
-
-    const item = currentOptionItem(data) orelse return 0;
-    applyChangeToItem(data, item);
-
-    const pane = data.tree.wp;
-    const wme = window.window_pane_mode(pane) orelse return 0;
-    rebuildAndDraw(wme);
-    return 0;
-}
-
-fn changeTaggedCallback(client: *T.Client, raw: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
-    _ = client;
-    const data: *CustomizeModeData = @ptrCast(@alignCast(raw orelse return 0));
-    const text = input orelse return 0;
-    if (!confirmedStr(text)) return 0;
-
-    mode_tree.eachTagged(data.tree, changeEachCallback, null, T.KEYC_NONE, false);
-
-    const pane = data.tree.wp;
-    const wme = window.window_pane_mode(pane) orelse return 0;
-    rebuildAndDraw(wme);
-    return 0;
-}
-
-fn changeEachCallback(mtd: *mode_tree.Data, itemdata: ?*anyopaque, _: ?*T.Client, _: T.key_code) void {
-    const data: *CustomizeModeData = @ptrCast(@alignCast(mtd.modedata.?));
-    const item: *OptionItem = @ptrCast(@alignCast(itemdata orelse return));
-    applyChangeToItem(data, item);
-}
-
-fn applyChangeToItem(data: *CustomizeModeData, item: *OptionItem) void {
-    switch (data.change) {
-        .unset => {
-            if (item.is_key) {
-                doUnsetKey(data, item);
-            } else {
-                const oe = opts.options_table_entry(item.name);
-                var cause: ?[]u8 = null;
-                defer if (cause) |msg| xm.allocator.free(msg);
-                _ = opts.options_remove_or_default(item.target.options, oe, item.name, item.idx, item.target.global, &cause);
-                cmd_options.apply_target_side_effects(item.target, item.name);
-            }
-        },
-        .reset => {
-            if (item.is_key) {
-                doResetKey(data, item);
-            } else {
-                if (item.idx != null) return;
-                const oe = opts.options_table_entry(item.name);
-                var current: ?*T.Options = item.target.options;
-                while (current) |options_ptr| : (current = options_ptr.parent) {
-                    if (opts.options_get_only(options_ptr, item.name) == null) continue;
-                    const global = isGlobalOptions(options_ptr);
-                    var cause: ?[]u8 = null;
-                    defer if (cause) |msg| xm.allocator.free(msg);
-                    _ = opts.options_remove_or_default(options_ptr, oe, item.name, null, global, &cause);
-                }
-                cmd_options.apply_target_side_effects(item.target, item.name);
-            }
-        },
-    }
-}
-
-fn confirmedStr(text: []const u8) bool {
-    return text.len == 1 and std.ascii.toLower(text[0]) == 'y';
-}
-
 fn nextChoiceValue(oo: *T.Options, name: []const u8, oe: *const T.OptionsTableEntry) i64 {
     const choices = oe.choices orelse return 0;
     if (choices.len == 0) return 0;
@@ -1387,7 +937,6 @@ fn optionTag(scope_kind: ScopeKind, name: []const u8) u64 {
 fn freeItems(data: *CustomizeModeData) void {
     for (data.items.items) |item| {
         xm.allocator.free(item.name);
-        if (item.table) |table| xm.allocator.free(table);
         xm.allocator.destroy(item);
     }
     data.items.clearRetainingCapacity();
@@ -1406,7 +955,11 @@ pub fn window_customize_get_key(
     ktp: ?**T.KeyTable,
     bdp: ?**T.KeyBinding,
 ) bool {
-    return getKeyAndBinding(item, ktp, bdp);
+    _ = item;
+    _ = ktp;
+    _ = bdp;
+    // Options-only customize mode in zmux has no per-item key/table; key UI is unported.
+    return false;
 }
 
 /// tmux: window_customize_init – enter options/customize mode.
@@ -1426,7 +979,11 @@ pub const window_customize_key = windowCustomizeKey;
 /// tmux: window_customize_build – mode_tree build callback.
 pub const window_customize_build = buildTree;
 
-/// tmux: window_customize_draw – dispatch to draw_key or draw_option preview.
+/// tmux: window_customize_draw – draw option/key preview.
+///
+/// The Zig port uses a text-only view without a separate preview pane,
+/// so this is a no-op stub matching the tmux callback signature.
+/// First argument is modedata (CustomizeModeData), matching tmux's `void *modedata`.
 pub fn window_customize_draw(
     modedata: ?*anyopaque,
     itemdata: ?*anyopaque,
@@ -1434,95 +991,41 @@ pub fn window_customize_draw(
     sx: u32,
     sy: u32,
 ) void {
-    const data: *CustomizeModeData = @ptrCast(@alignCast(modedata orelse return));
-    const item: *OptionItem = @ptrCast(@alignCast(itemdata orelse return));
-    if (item.is_key) {
-        window_customize_draw_key(data, item, ctx, sx, sy);
-    } else {
-        window_customize_draw_option(data, item, ctx, sx, sy);
-    }
+    _ = modedata;
+    _ = itemdata;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
 }
 
 /// tmux: window_customize_draw_key – draw a key binding preview.
-///
-/// Renders the key note, table membership, repeat flag, and command
-/// into the preview pane using screen_write_text.
 pub fn window_customize_draw_key(
-    _data: *CustomizeModeData,
-    item: *OptionItem,
+    modedata: ?*anyopaque,
+    itemdata: ?*anyopaque,
     ctx: *T.ScreenWriteCtx,
     sx: u32,
     sy: u32,
 ) void {
-    _ = _data;
-    if (!item.is_key) return;
-    const table_name = item.table orelse return;
-    const kt = key_bindings.key_bindings_get_table(table_name, false) orelse return;
-    const bd = key_bindings.key_bindings_get(kt, item.key_code) orelse return;
-
-    const note: []const u8 = bd.note orelse "There is no note for this key.";
-    const period: []const u8 = if (note.len > 0 and note[note.len - 1] != '.') "." else "";
-
-    const note_z = xm.allocator.dupeZ(u8, note) catch return;
-    defer xm.allocator.free(note_z);
-    const period_z = xm.allocator.dupeZ(u8, period) catch return;
-    defer xm.allocator.free(period_z);
-
-    // Use screen_write_text for each line (currently a stub returning 0).
-    _ = screen_write.screen_write_text(ctx, ctx.s.cx, sx, sy, 0, &T.grid_default_cell, note_z.ptr);
-    // period_z used for future formatted output
-    _ = period_z.len;
-
-    const repeat_str: []const u8 = if (bd.flags & T.KEY_BINDING_REPEAT != 0) "does" else "does not";
-    _ = repeat_str;
-
-    const cmd_str = cmdListToString(bd.cmdlist);
-    defer xm.allocator.free(cmd_str);
-    _ = cmd_str.len;
-
-    const default_bd = key_bindings.key_bindings_get_default(kt, bd.key);
-    _ = default_bd;
+    _ = modedata;
+    _ = itemdata;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
 }
 
 /// tmux: window_customize_draw_option – draw an option value preview.
-///
-/// Renders description, scope, value, choices (for choice options), and
-/// inherited / global context into the preview pane.
 pub fn window_customize_draw_option(
-    data: *CustomizeModeData,
-    item: *OptionItem,
+    modedata: ?*anyopaque,
+    itemdata: ?*anyopaque,
     ctx: *T.ScreenWriteCtx,
     sx: u32,
     sy: u32,
 ) void {
-    if (item.is_key) return;
-    const name = item.name;
-
-    const o = opts.options_get(item.target.options, name) orelse return;
-    const oe = opts.options_table_entry(name);
-
-    const description: []const u8 = if (oe) |entry| entry.text orelse "This option doesn't have a description." else "This option doesn't have a description.";
-    const desc_z = xm.allocator.dupeZ(u8, description) catch return;
-    defer xm.allocator.free(desc_z);
-    _ = screen_write.screen_write_text(ctx, ctx.s.cx, sx, sy, 0, &T.grid_default_cell, desc_z.ptr);
-
-    const scope_text_z: []const u8 = if (oe) |entry| blk: {
-        if (entry.scope.window and entry.scope.pane)
-            break :blk "window and pane"
-        else if (entry.scope.window)
-            break :blk "window"
-        else if (entry.scope.session)
-            break :blk "session"
-        else
-            break :blk "server";
-    } else "user";
-    _ = scope_text_z;
-
-    const value_str = opts.options_value_to_string(name, o, oe);
-    defer xm.allocator.free(value_str);
-    // value_str used for future formatted output
-    _ = value_str.len;
-    _ = data;
+    _ = modedata;
+    _ = itemdata;
+    _ = ctx;
+    _ = sx;
+    _ = sy;
 }
 
 /// tmux: window_customize_menu – forward a menu key to the key handler.
@@ -1608,7 +1111,6 @@ pub fn window_customize_add_item(
 /// tmux: window_customize_free_item – free a single option item.
 pub fn window_customize_free_item(item: *OptionItem) void {
     xm.allocator.free(item.name);
-    if (item.table) |table| xm.allocator.free(table);
     xm.allocator.destroy(item);
 }
 
@@ -1628,31 +1130,27 @@ pub const window_customize_build_option = appendOption;
 pub const window_customize_build_array = appendOption;
 
 /// tmux: window_customize_build_keys – build key binding tree section.
+///
+/// Key binding editing is not yet ported; this is a no-op stub.
 pub fn window_customize_build_keys(
     data: *CustomizeModeData,
     tree: *mode_tree.Data,
 ) void {
-    buildAllKeyTables(data, tree);
+    _ = data;
+    _ = tree;
 }
 
 /// tmux: window_customize_destroy – reference-counted destroy.
 ///
-/// The Zig port handles teardown through windowCustomizeClose directly.
-/// This wrapper frees an unreferenced CustomizeModeData.
+/// The Zig port handles teardown through windowCustomizeClose; this
+/// is a compatibility shim.
 pub fn window_customize_destroy(data: *CustomizeModeData) void {
-    freeItems(data);
-    data.items.deinit(xm.allocator);
-    xm.allocator.free(data.format);
-    if (data.filter) |filter| xm.allocator.free(filter);
-    xm.allocator.destroy(data);
+    _ = data;
 }
 
-/// tmux: window_customize_free_callback – called when a prompt holds
-/// the last reference to mode data.  Delegates to destroy.
-pub fn window_customize_free_callback(raw: ?*anyopaque) void {
-    const data: *CustomizeModeData = @ptrCast(@alignCast(raw orelse return));
-    // Only destroy if the tree is already gone (dead flag set).
-    if (data.tree.dead) window_customize_destroy(data);
+/// tmux: window_customize_free_callback – release reference from prompt.
+pub fn window_customize_free_callback(data: *CustomizeModeData) void {
+    _ = data;
 }
 
 /// tmux: window_customize_free_item_callback – free prompt item + release ref.
@@ -1688,60 +1186,93 @@ pub fn window_customize_reset_option(
     applyReset(state, client);
 }
 
-/// tmux: window_customize_set_command_callback – prompt callback to update a key's command.
-///
-/// Matches tmux PromptInputCb signature: `(client, itemdata, s, done) -> i32`.
-/// `itemdata` is a *KeyPromptState with `is_command == true`.
-pub const window_customize_set_command_callback: status_prompt.PromptInputCb = keyCommandCallback;
-
-/// tmux: window_customize_set_note_callback – prompt callback to update a key's note.
-pub const window_customize_set_note_callback: status_prompt.PromptInputCb = keyNoteCallback;
-
-/// tmux: window_customize_set_key – begin editing a key binding.
-pub fn window_customize_set_key(
-    client: *T.Client,
-    data: *CustomizeModeData,
-    item: *OptionItem,
-) void {
-    doSetKey(client, data, item);
+/// tmux: window_customize_set_command_callback – set key command (stub).
+pub fn window_customize_set_command_callback(
+    client: ?*T.Client,
+    item: ?*anyopaque,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = item;
+    _ = s;
+    return false;
 }
 
-/// tmux: window_customize_unset_key – remove a key binding.
+/// tmux: window_customize_set_note_callback – set key note (stub).
+pub fn window_customize_set_note_callback(
+    client: ?*T.Client,
+    item: ?*anyopaque,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = item;
+    _ = s;
+    return false;
+}
+
+/// tmux: window_customize_set_key – begin editing a key binding (stub).
+pub fn window_customize_set_key(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
+) void {
+    _ = client;
+    _ = data;
+    _ = item;
+}
+
+/// tmux: window_customize_unset_key – remove a key binding (stub).
 pub fn window_customize_unset_key(
     data: *CustomizeModeData,
-    item: *OptionItem,
+    item: ?*anyopaque,
 ) void {
-    doUnsetKey(data, item);
+    _ = data;
+    _ = item;
 }
 
-/// tmux: window_customize_reset_key – reset a key binding to its default.
+/// tmux: window_customize_reset_key – reset a key binding (stub).
 pub fn window_customize_reset_key(
     data: *CustomizeModeData,
-    item: *OptionItem,
+    item: ?*anyopaque,
 ) void {
-    doResetKey(data, item);
+    _ = data;
+    _ = item;
 }
 
-/// tmux: window_customize_change_each – EachCallback to apply bulk unset/reset.
-///
-/// Signature matches `mode_tree.EachCallback`:
-///   `fn (*Data, ?*anyopaque, ?*Client, key_code) void`
+/// tmux: window_customize_change_each – apply change to each tagged item.
 pub fn window_customize_change_each(
-    mtd: *mode_tree.Data,
-    itemdata: ?*anyopaque,
+    data: *CustomizeModeData,
+    item: ?*anyopaque,
     client: ?*T.Client,
-    key: T.key_code,
 ) void {
-    _ = key;
+    _ = data;
+    _ = item;
     _ = client;
-    changeEachCallback(mtd, itemdata, null, T.KEYC_NONE);
 }
 
-/// tmux: window_customize_change_current_callback – PromptInputCb to apply unset/reset to current.
-pub const window_customize_change_current_callback: status_prompt.PromptInputCb = changeCurrentCallback;
+/// tmux: window_customize_change_current_callback – prompt callback (stub).
+pub fn window_customize_change_current_callback(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
 
-/// tmux: window_customize_change_tagged_callback – PromptInputCb to apply unset/reset to tagged.
-pub const window_customize_change_tagged_callback: status_prompt.PromptInputCb = changeTaggedCallback;
+/// tmux: window_customize_change_tagged_callback – prompt callback (stub).
+pub fn window_customize_change_tagged_callback(
+    client: ?*T.Client,
+    data: *CustomizeModeData,
+    s: ?[]const u8,
+) bool {
+    _ = client;
+    _ = data;
+    _ = s;
+    return false;
+}
 
 fn initTestGlobals() void {
     const env_mod = @import("environ.zig");

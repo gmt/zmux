@@ -2353,8 +2353,12 @@ pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
     // are blocked (off), resume when at least one can consume data (on).
     // In C this is bufferevent_disable/enable(wp->event, EV_READ); here we
     // use plain event_del/event_add since zmux uses non-buffered events.
+    //
+    // Do not re-arm events during server shutdown: EVLOOP_ONCE would block
+    // indefinitely waiting for data from a shell that nobody is killing yet.
+    const srv = @import("server.zig");
     if (wp.event) |ev| {
-        if (off)
+        if (off or srv.server_exit)
             _ = c.libevent.event_del(ev)
         else
             _ = c.libevent.event_add(ev, null);

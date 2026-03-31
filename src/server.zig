@@ -558,6 +558,9 @@ pub fn server_status_window(w: *T.Window) void {
 test "server status helpers mark attached clients for status-only redraw" {
     const env_mod = @import("environ.zig");
 
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     client_registry.clients.clearRetainingCapacity();
     defer client_registry.clients.clearRetainingCapacity();
 
@@ -594,7 +597,7 @@ test "server status helpers mark attached clients for status-only redraw" {
     var client1 = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s1,
     };
@@ -604,7 +607,7 @@ test "server status helpers mark attached clients for status-only redraw" {
     var client2 = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s2,
     };
@@ -614,7 +617,7 @@ test "server status helpers mark attached clients for status-only redraw" {
     var client3 = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s3,
     };
@@ -644,6 +647,9 @@ test "server status helpers mark attached clients for status-only redraw" {
 }
 
 test "server loop keeps server alive while shared jobs still run" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     client_registry.clients.clearRetainingCapacity();
     defer client_registry.clients.clearRetainingCapacity();
     defer job_mod.job_reset_all();
@@ -679,6 +685,9 @@ test "server loop keeps server alive while shared jobs still run" {
 test "server SIGTERM drains sessions and leaves the loop to exit naturally" {
     const env_mod = @import("environ.zig");
 
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     client_registry.clients.clearRetainingCapacity();
     defer client_registry.clients.clearRetainingCapacity();
 
@@ -706,7 +715,7 @@ test "server SIGTERM drains sessions and leaves the loop to exit naturally" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = shutdown_session,
     };
@@ -729,6 +738,9 @@ test "server SIGTERM drains sessions and leaves the loop to exit naturally" {
 
 test "server SIGUSR1 reopens the socket and restores attached execute bits" {
     const env_mod = @import("environ.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -815,6 +827,9 @@ test "server SIGUSR2 toggles server proc logging" {
 test "server session-group redraw and status helpers fan out across grouped sessions" {
     const env_mod = @import("environ.zig");
 
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     client_registry.clients.clearRetainingCapacity();
 
     opts.global_options = opts.options_create(null);
@@ -853,7 +868,7 @@ test "server session-group redraw and status helpers fan out across grouped sess
     var leader_client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = leader,
     };
@@ -863,7 +878,7 @@ test "server session-group redraw and status helpers fan out across grouped sess
     var peer_client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = peer,
     };
@@ -873,7 +888,7 @@ test "server session-group redraw and status helpers fan out across grouped sess
     var outsider_client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = outsider,
     };
@@ -904,6 +919,9 @@ test "server session-group redraw and status helpers fan out across grouped sess
 
 test "server border redraw helper only marks attached clients viewing the target window" {
     const env_mod = @import("environ.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     client_registry.clients.clearRetainingCapacity();
     defer client_registry.clients.clearRetainingCapacity();
@@ -941,9 +959,9 @@ test "server border redraw helper only marks attached clients viewing the target
     const env3 = env_mod.environ_create();
     defer env_mod.environ_free(env3);
 
-    var client1 = T.Client{ .environ = env1, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = T.CLIENT_ATTACHED };
-    var client2 = T.Client{ .environ = env2, .tty = undefined, .status = .{ .screen = undefined }, .session = s2, .flags = T.CLIENT_ATTACHED };
-    var client3 = T.Client{ .environ = env3, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = 0 };
+    var client1 = T.Client{ .environ = env1, .tty = undefined, .status = .{}, .session = s1, .flags = T.CLIENT_ATTACHED };
+    var client2 = T.Client{ .environ = env2, .tty = undefined, .status = .{}, .session = s2, .flags = T.CLIENT_ATTACHED };
+    var client3 = T.Client{ .environ = env3, .tty = undefined, .status = .{}, .session = s1, .flags = 0 };
     client_registry.clients.append(xm.allocator, &client1) catch unreachable;
     client_registry.clients.append(xm.allocator, &client2) catch unreachable;
     client_registry.clients.append(xm.allocator, &client3) catch unreachable;
@@ -957,6 +975,9 @@ test "server border redraw helper only marks attached clients viewing the target
 
 test "server pane redraw helper only marks attached clients viewing the target pane window" {
     const env_mod = @import("environ.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
 
     client_registry.clients.clearRetainingCapacity();
     defer client_registry.clients.clearRetainingCapacity();
@@ -996,9 +1017,9 @@ test "server pane redraw helper only marks attached clients viewing the target p
     const env3 = env_mod.environ_create();
     defer env_mod.environ_free(env3);
 
-    var client1 = T.Client{ .environ = env1, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = T.CLIENT_ATTACHED };
-    var client2 = T.Client{ .environ = env2, .tty = undefined, .status = .{ .screen = undefined }, .session = s2, .flags = T.CLIENT_ATTACHED };
-    var client3 = T.Client{ .environ = env3, .tty = undefined, .status = .{ .screen = undefined }, .session = s1, .flags = 0 };
+    var client1 = T.Client{ .environ = env1, .tty = undefined, .status = .{}, .session = s1, .flags = T.CLIENT_ATTACHED };
+    var client2 = T.Client{ .environ = env2, .tty = undefined, .status = .{}, .session = s2, .flags = T.CLIENT_ATTACHED };
+    var client3 = T.Client{ .environ = env3, .tty = undefined, .status = .{}, .session = s1, .flags = 0 };
     client_registry.clients.append(xm.allocator, &client1) catch unreachable;
     client_registry.clients.append(xm.allocator, &client2) catch unreachable;
     client_registry.clients.append(xm.allocator, &client3) catch unreachable;

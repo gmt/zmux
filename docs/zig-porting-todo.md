@@ -113,16 +113,17 @@ zmux has the `enable_sixel` build option but no runtime implementation.
   reduced coverage.
 - `format_defaults` / `format_defaults_pane` / `format_create` use a
   struct-based context rather than tmux's RB-tree of key-value pairs.
-  This means `format_add` (arbitrary key insertion) is not available;
-  window-copy mode cannot populate its format variables
-  (`copy_cursor_x`, `scroll_position`, etc.) until this is wired.
+  `format_add` (arbitrary key insertion via `FormatExtras`) is wired;
+  window-copy mode populates its format variables through
+  `window_copy_formats`.
 
 ### Zig vs. C note
 
 tmux's format system uses an RB-tree of string key-value pairs with
 lazy callback evaluation. zmux uses a static resolver table with
-direct struct field access, which is more type-safe and avoids
-allocation for lookups but cannot support dynamic key insertion.
+direct struct field access plus a `FormatExtras` hash map for
+dynamic keys. Copy-mode variables are evaluated eagerly in
+`window_copy_formats` rather than via lazy callbacks.
 
 ## Server-Client
 
@@ -136,19 +137,14 @@ allocation for lookups but cannot support dynamic key insertion.
 
 ## Window Copy Mode
 
-- Format callbacks (`window_copy_cursor_word_cb`,
-  `window_copy_cursor_line_cb`, `window_copy_cursor_hyperlink_cb`,
-  `window_copy_search_match_cb`) return null; require
-  `format_add` / `format_get_pane` infrastructure.
-- `window_copy_formats` is a no-op; needs `format_add` to populate
-  `scroll_position`, `copy_cursor_x/y`, `selection_active`, etc.
-- Regex search functions (`window_copy_search_lr_regex`,
-  `window_copy_search_rl_regex`, `window_copy_search_back_overlap`)
-  return false / are no-ops. zmux has a C regex bridge
-  (`zmux-regex.c`) used for pane search but has not wired it into
-  copy-mode search.
-- Search mark management: `CopyModeData` lacks a `searchmark[]` array.
-  Functions that highlight, clear, or walk search matches are stubs.
+- `window_copy_cursor_hyperlink_cb` is wired but `format_add_cb` is
+  not implemented; the copy-mode format variables are populated eagerly
+  in `window_copy_formats` instead.
+- Regex search (`window_copy_search_lr_regex`,
+  `window_copy_search_rl_regex`, `window_copy_search_back_overlap`,
+  `window_copy_last_regex`) is wired via the `zmux-regex.c` bridge;
+  `window_copy_search_jump` still falls back to plain search for the
+  regex path.
 
 ## Window Modes
 

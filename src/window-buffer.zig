@@ -22,10 +22,10 @@
 const std = @import("std");
 const T = @import("types.zig");
 const args_mod = @import("arguments.zig");
-const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const editor_handoff = @import("editor-handoff.zig");
 const format_mod = @import("format.zig");
+const menu_mod = @import("menu.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const paste_mod = @import("paste.zig");
@@ -39,6 +39,22 @@ const status_runtime = @import("status-runtime.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
+
+/// Context-menu items for buffer mode (tmux `window_buffer_menu_items`).
+const window_buffer_menu_items = [_]menu_mod.MenuItemTemplate{
+    .{ .name = "Paste", .key = 'p' },
+    .{ .name = "Paste Tagged", .key = 'P' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Tag", .key = 't' },
+    .{ .name = "Tag All", .key = '\x14' }, // Ctrl-T
+    .{ .name = "Tag None", .key = 'T' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Delete", .key = 'd' },
+    .{ .name = "Delete Tagged", .key = 'D' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Cancel", .key = 'q' },
+    .{}, // sentinel
+};
 
 const DEFAULT_COMMAND = "paste-buffer -p -b '%%'";
 const DEFAULT_FORMAT = "#{t/p:buffer_created}: #{buffer_sample}";
@@ -131,6 +147,7 @@ pub fn enterMode(
         .modedata = @ptrCast(data),
         .preview = previewModeFromArgs(args),
         .zoom = args.has('Z'),
+        .menu = &window_buffer_menu_items,
         .buildcb = buildTree,
         .searchcb = searchItem,
         .menucb = modeTreeMenuCallback,
@@ -416,11 +433,13 @@ fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
 }
 
 fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client, session: *T.Session, wl: *T.Winlink) void {
+    _ = session;
+    _ = wl;
     const data = modeData(wme);
     const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
     const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
 
-    runCommand(client, session, wl, data.command, item.name);
+    mode_tree.runCommand(client, null, data.command, item.name);
     _ = window_mode_runtime.resetMode(wme.wp);
 }
 
@@ -504,7 +523,7 @@ fn pasteTaggedCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, client: ?*T
     const data: *BufferModeData = @ptrCast(@alignCast(tree.modedata.?));
     const item_ptr = itemdata orelse return;
     const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
-    runCommand(client, data.fs.s.?, data.fs.wl.?, data.command, item.name);
+    mode_tree.runCommand(client, null, data.command, item.name);
 }
 
 fn deleteItem(data: *BufferModeData, item_ptr: *anyopaque) void {
@@ -524,35 +543,6 @@ fn rebuildAfterDelete(wme: *T.WindowModeEntry) void {
     rebuildAndDraw(wme);
 }
 
-fn runCommand(client: ?*T.Client, session: *T.Session, wl: *T.Winlink, template: []const u8, buffer_name: []const u8) void {
-    const cl = client orelse return;
-    const expanded = templateReplace(template, buffer_name, 1);
-    defer xm.allocator.free(expanded);
-    if (expanded.len == 0) return;
-
-    var input = T.CmdParseInput{
-        .c = cl,
-        .fs = .{
-            .s = session,
-            .wl = wl,
-            .w = wl.window,
-            .wp = wl.window.active,
-            .idx = wl.idx,
-        },
-    };
-    const parsed = cmd_mod.cmd_parse_from_string(expanded, &input);
-    switch (parsed.status) {
-        .success => {
-            const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(parsed.cmdlist.?));
-            cmdq.cmdq_append(cl, cmdlist);
-        },
-        .@"error" => {
-            const err = parsed.@"error" orelse xm.xstrdup("parse error");
-            defer xm.allocator.free(err);
-            status_runtime.present_client_message(cl, err);
-        },
-    }
-}
 
 fn dispatchEditCommand(client: *T.Client, command: []const u8) void {
     if (edit_dispatch_hook) |hook| {
@@ -633,52 +623,6 @@ fn finishEdit(ed: *EditData) void {
     xm.allocator.destroy(ed);
 }
 
-fn templateReplace(template: []const u8, replacement: []const u8, idx: usize) []u8 {
-    if (std.mem.indexOfScalar(u8, template, '%') == null) return xm.xstrdup(template);
-
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(xm.allocator);
-
-    var i: usize = 0;
-    var replaced = false;
-    while (i < template.len) {
-        if (template[i] != '%') {
-            out.append(xm.allocator, template[i]) catch unreachable;
-            i += 1;
-            continue;
-        }
-        if (i + 1 >= template.len) {
-            out.append(xm.allocator, '%') catch unreachable;
-            i += 1;
-            continue;
-        }
-
-        const next = template[i + 1];
-        const matches_idx = next >= '1' and next <= '9' and (next - '0') == idx;
-        const matches_escaped = next == '%' and !replaced;
-        if (!matches_idx and !matches_escaped) {
-            out.append(xm.allocator, '%') catch unreachable;
-            i += 1;
-            continue;
-        }
-
-        i += 2;
-        var quoted = false;
-        if (i < template.len and template[i] == '%') {
-            quoted = true;
-            i += 1;
-        }
-        if (matches_escaped) replaced = true;
-
-        for (replacement) |ch| {
-            if (quoted and std.mem.indexOfScalar(u8, "\"\\$;~", ch) != null)
-                out.append(xm.allocator, '\\') catch unreachable;
-            out.append(xm.allocator, ch) catch unreachable;
-        }
-    }
-
-    return out.toOwnedSlice(xm.allocator) catch unreachable;
-}
 
 fn tagForBuffer(pb: *paste_mod.PasteBuffer) u64 {
     return @intFromPtr(pb);
@@ -947,11 +891,13 @@ pub fn window_buffer_do_paste(
     session: *T.Session,
     wl: *T.Winlink,
 ) void {
+    _ = session;
+    _ = wl;
     const data = modeData(wme);
     const item_ptr = mode_tree.getCurrent(data.tree) orelse return;
     const item: *BufferItem = @ptrCast(@alignCast(item_ptr));
     if (paste_mod.paste_get_name(item.name) != null)
-        runCommand(client, session, wl, data.command, item.name);
+        mode_tree.runCommand(client, null, data.command, item.name);
 }
 
 pub fn window_buffer_start_edit(

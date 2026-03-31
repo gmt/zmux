@@ -23,6 +23,7 @@ const cmdq = @import("cmd-queue.zig");
 const grid = @import("grid.zig");
 const job_mod = @import("job.zig");
 const layout_mod = @import("layout.zig");
+const menu_mod = @import("menu.zig");
 const opts_mod = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -47,6 +48,28 @@ pub const PopupCloseCb = *const fn (i32, ?*anyopaque) void;
 
 /// Matches tmux `BOX_LINES_NONE` / zmux display-popup `-B` (see cmd-display-menu.zig).
 pub const POPUP_BORDER_NONE: u32 = 6;
+
+/// Context-menu items for standard popups (tmux `popup_menu_items`).
+const popup_menu_items = [_]menu_mod.MenuItemTemplate{
+    .{ .name = "Close", .key = 'q' },
+    .{ .name = "#{?buffer_name,Paste #[underscore]#{buffer_name},}", .key = 'p' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Fill Space", .key = 'F' },
+    .{ .name = "Centre", .key = 'C' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "To Horizontal Pane", .key = 'h' },
+    .{ .name = "To Vertical Pane", .key = 'v' },
+    .{}, // sentinel
+};
+
+/// Context-menu items for internal popups (tmux `popup_internal_menu_items`).
+const popup_internal_menu_items = [_]menu_mod.MenuItemTemplate{
+    .{ .name = "Close", .key = 'q' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Fill Space", .key = 'F' },
+    .{ .name = "Centre", .key = 'C' },
+    .{}, // sentinel
+};
 
 /// Subset of tmux `tty_ctx` used by overlay hooks (`popup_set_client_cb`, `popup_redraw_cb`).
 pub const PopupTtyCtx = struct {
@@ -649,7 +672,7 @@ pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) 
             T.mouseButtons(m.b) == T.MOUSE_BUTTON_3 and
             (border == .left or border == .top))
         {
-            // Context menu: stub (`popup_menu_done` not wired).
+            popupDisplayMenu(c, pd, m);
             return 0;
         }
         if (((m.b & T.MOUSE_MASK_MODIFIERS) == T.MOUSE_MASK_META) or
@@ -674,6 +697,30 @@ pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) 
         return 1;
     }
     return 0;
+}
+
+/// Build and display the popup context menu (tmux `popup_key_cb` menu: label).
+fn popupDisplayMenu(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
+    const items: []const menu_mod.MenuItemTemplate = if ((pd.flags & POPUP_INTERNAL) != 0)
+        &popup_internal_menu_items
+    else
+        &popup_menu_items;
+
+    const menu = menu_mod.menu_create("");
+    menu_mod.menu_add_items(menu, items);
+
+    var x: u32 = m.x;
+    const half = (menu.width + 4) / 2;
+    if (x >= half)
+        x -= half
+    else
+        x = 0;
+
+    if (menu_mod.menu_display(menu, 0, 0, null, x, m.y, c, 0, null, null, null, null) != 0) {
+        menu.deinit();
+    } else {
+        c.flags |= T.CLIENT_REDRAWOVERLAY;
+    }
 }
 
 /// Job output hook (tmux `popup_job_update_cb`).

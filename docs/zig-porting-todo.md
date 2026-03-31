@@ -4,13 +4,14 @@ Functional gaps where zmux does not yet match tmux behavior.
 
 ## TTY Query/Response Routing
 
-- `tty_send_requests` / `tty_repeat_requests` are disabled because
-  terminal query responses (DA, colour, XTVERSION) leak into panes
-  as raw escape text. The responses arrive on the client fd but are
-  read by `pane_read_cb` instead of being consumed by the tty-keys
-  decoder. tmux routes these through `tty_keys_next` → DA/palette
-  response parsers in `tty-keys.c`. zmux's `tty_keys_next` dispatch
-  loop exists (T6-4) but the client read callback doesn't use it.
+- `tty_keys_next_inner` now contains the full tmux dispatch chain:
+  clipboard, DA1/DA2/XDA, colour, palette, mouse, extended key,
+  and winsz parsers all run before falling back to input-keys.zig.
+  Client stdin is routed through `tty.in_buf` → `tty_keys_next`.
+- `tty_send_requests` / `tty_repeat_requests` remain disabled pending
+  interactive verification that responses are consumed without ANSI
+  spam. The parsers are wired; the queries just need to be re-enabled
+  and tested in a real terminal.
 
 ## SGR Attribute Rendering
 

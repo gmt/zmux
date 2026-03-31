@@ -320,25 +320,35 @@ pub fn fileFree(cf: *ClientFile) void {
     xm.allocator.destroy(cf);
 }
 
-/// Fire the done callback directly. (tmux: file_fire_done_cb)
+/// Event callback that fires the done callback. (tmux: file_fire_done_cb)
 ///
-/// In tmux this is an event_once timeout callback.  We invoke it
-/// synchronously since zmux does not yet use libevent event_once.
-pub fn fireDoneCb(cf: *ClientFile) void {
+/// Invoked by event_base_once on the next event loop iteration (zero-timeout
+/// timer).  Fires the user callback when the file is closed or has no client,
+/// then releases the file reference.
+export fn fireDoneCb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
     if (cf.cb) |cb| {
-        if (cf.closed or cf.client == null) {
+        const client_dead = if (cf.client) |cl| (cl.flags & T.CLIENT_DEAD) != 0 else false;
+        if (cf.closed or cf.client == null or client_dead) {
             cb(cf.client, if (cf.path) |p| p else null, cf.@"error", 1, cf.buffer.items, cf.data);
         }
     }
     fileFree(cf);
 }
 
-/// Schedule the done callback. (tmux: file_fire_done)
+/// Schedule the done callback via a zero-timeout libevent timer.
+/// (tmux: file_fire_done)
 ///
-/// In tmux this uses event_once(-1, EV_TIMEOUT, ...) for deferred
-/// execution.  Without libevent integration we call it synchronously.
+/// Uses event_base_once so the callback fires on the next event-loop
+/// iteration, matching tmux's deferred-execution pattern.
 pub fn fireDone(cf: *ClientFile) void {
-    fireDoneCb(cf);
+    if (proc_mod.libevent) |base| {
+        _ = c.libevent.event_base_once(base, -1, c.libevent.EV_TIMEOUT, fireDoneCb, cf, null);
+    } else {
+        fireDoneCb(-1, 0, cf);
+    }
 }
 
 /// Fire the read callback. (tmux: file_fire_read)
@@ -443,9 +453,10 @@ pub fn fileCancel(cf: *ClientFile) void {
 
 /// Push unwritten data to the client for a file. (tmux: file_push)
 ///
-/// Stub: In tmux this drains the evbuffer by sending MSG_WRITE chunks
-/// and uses event_once for retry.  Full implementation requires libevent
-/// bufferevent integration.
+/// Drains the buffer by sending MSG_WRITE chunks to the peer.  If the
+/// buffer cannot be fully drained (e.g. the imsg socket is full), schedules
+/// a retry via event_base_once with a zero-timeout timer, mirroring tmux's
+/// event_once(-1, EV_TIMEOUT, file_push_cb, cf, NULL) pattern.
 pub fn filePush(cf: *ClientFile) void {
     const peer = cf.peer orelse return;
 
@@ -469,8 +480,16 @@ pub fn filePush(cf: *ClientFile) void {
     }
 
     if (cf.buffer.items.len != 0) {
+        // Buffer not fully drained — schedule a retry on the next event-loop
+        // iteration (tmux: event_once(-1, EV_TIMEOUT, file_push_cb, cf, NULL)).
         cf.references += 1;
         log.log_debug("file {d} push deferred, {d} bytes remain", .{ cf.stream, cf.buffer.items.len });
+        if (proc_mod.libevent) |base| {
+            _ = c.libevent.event_base_once(base, -1, c.libevent.EV_TIMEOUT, filePushCb, cf, null);
+        } else {
+            // No event loop yet — release the reference and give up.
+            cf.references -= 1;
+        }
     } else if (cf.stream > 2) {
         const close_msg = protocol.MsgWriteClose{ .stream = cf.stream };
         _ = proc_mod.proc_send(peer, .write_close, -1, std.mem.asBytes(&close_msg).ptr, @sizeOf(protocol.MsgWriteClose));
@@ -478,13 +497,17 @@ pub fn filePush(cf: *ClientFile) void {
     }
 }
 
-/// Push callback, fired if there is more writing to do. (tmux: file_push_cb)
+/// Event callback that retries pushing buffered data. (tmux: file_push_cb)
 ///
-/// Stub: requires libevent event_once for deferred scheduling.
-pub fn filePushCb(cf: *ClientFile) void {
-    if (cf.client == null) {
+/// Fires on the next event-loop iteration when filePush could not drain the
+/// buffer in one pass.  Skips the push if the client has died.
+export fn filePushCb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
+    const client_dead = if (cf.client) |cl| (cl.flags & T.CLIENT_DEAD) != 0 else false;
+    if (cf.client == null or !client_dead)
         filePush(cf);
-    }
     fileFree(cf);
 }
 
@@ -561,12 +584,39 @@ pub fn fileReadErrorCallback(cf: *ClientFile) void {
     fileFree(cf);
 }
 
-/// Client file read callback. (tmux: file_read_callback)
-///
-/// Stub: requires libevent bufferevent.  Reads data from the
-/// bufferevent input and sends MSG_READ chunks to the peer.
+/// Read available data from `cf.fd` and send MSG_READ chunks to the peer.
+/// (tmux: file_read_callback)
 pub fn fileReadCallback(cf: *ClientFile) void {
-    log.log_debug("read callback file {d} (stub)", .{cf.stream});
+    const peer = cf.peer orelse return;
+    if (cf.fd < 0) return;
+
+    // Single allocation for header + payload, reused across loop iterations.
+    const msg_buf_len = @sizeOf(protocol.MsgReadData) + max_stream_payload;
+    var msg_buf: [msg_buf_len]u8 = undefined;
+    const header_size = @sizeOf(protocol.MsgReadData);
+    const header = protocol.MsgReadData{ .stream = cf.stream };
+    @memcpy(msg_buf[0..header_size], std.mem.asBytes(&header));
+
+    while (true) {
+        const data_buf = msg_buf[header_size..];
+        const got = c.posix_sys.read(cf.fd, @ptrCast(data_buf.ptr), data_buf.len);
+        if (got < 0) {
+            const errno_value = std.c._errno().*;
+            if (errno_value == @intFromEnum(std.posix.E.INTR)) continue;
+            if (errno_value == @intFromEnum(std.posix.E.AGAIN) or
+                errno_value == @intFromEnum(std.posix.E.WOULDBLOCK)) break;
+            fileReadErrorCallback(cf);
+            return;
+        }
+        if (got == 0) {
+            fileReadErrorCallback(cf);
+            return;
+        }
+
+        const chunk: usize = @intCast(got);
+        log.log_debug("read {d} from file {d}", .{ chunk, cf.stream });
+        _ = proc_mod.proc_send(peer, .read, -1, @ptrCast(&msg_buf), header_size + chunk);
+    }
 }
 
 // ── tmux `file.c` entry-point names (server/client imsg dispatch) ─────────

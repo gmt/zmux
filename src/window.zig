@@ -38,6 +38,12 @@ const proc_mod = @import("proc.zig");
 const session_mod = @import("session.zig");
 const alerts = @import("alerts.zig");
 const layout_mod = @import("layout.zig");
+const input_mod = @import("input.zig");
+const server_fn = @import("server-fn.zig");
+const cmdq = @import("cmd-queue.zig");
+const file_mod = @import("file.zig");
+const server_client_mod = @import("server-client.zig");
+const control_mod = @import("control.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -1367,32 +1373,73 @@ pub fn window_pane_send_resize(wp: *T.WindowPane, sx: u32, sy: u32) void {
     _ = c.posix_sys.ioctl(wp.fd, c.posix_sys.TIOCSWINSZ, &ws);
 }
 
-/// Stub: set up the event watchers for a pane's pty fd.
-/// In zmux, pane I/O is handled differently (pane-io.zig); this stub exists
-/// for API parity with tmux.
-pub fn window_pane_set_event(_: *T.WindowPane) void {
-    // Stub – zmux uses pane_io.zig for event-based I/O.
+/// Set up event watchers for a pane's pty fd. (tmux: window_pane_set_event)
+pub fn window_pane_set_event(wp: *T.WindowPane) void {
+    if (wp.fd < 0) return;
+
+    const flags = std.c.fcntl(wp.fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (flags >= 0) {
+        const O_NONBLOCK: c_int = 0x800;
+        _ = std.c.fcntl(wp.fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+    }
+
+    input_mod.input_init(wp, null);
+    pane_io.pane_io_start(wp);
 }
 
-/// Stub: start reading client input into a pane.
-/// Returns 0 on success, -1 on error, 1 if the client is not suitable.
-pub fn window_pane_start_input(_: *T.WindowPane, _cause: *?[]u8) i32 {
-    _cause.* = null;
-    return 1;
+/// Start reading stdin from a client into a pane. (tmux: window_pane_start_input)
+///
+/// Returns 0 on success (read started), -1 on error (fills `cause`), or 1
+/// when the client is not suitable (dead, already attached, has a session).
+/// The zmux version takes an `item` parameter (like tmux) so the caller can
+/// be resumed when the read completes.
+pub fn window_pane_start_input(wp: *T.WindowPane, item: *cmdq.CmdqItem, cause: *?[]u8) i32 {
+    const cl = cmdq.cmdq_get_client(item) orelse return 1;
+
+    if (wp.flags & T.PANE_EMPTY == 0) {
+        cause.* = xm.xstrdup("pane is not empty");
+        return -1;
+    }
+    if (cl.flags & (T.CLIENT_DEAD | T.CLIENT_EXIT) != 0)
+        return 1;
+    if (cl.session != null)
+        return 1;
+
+    const cdata = xm.allocator.create(WindowPaneInputData) catch {
+        cause.* = xm.xstrdup("out of memory");
+        return -1;
+    };
+    cdata.* = .{ .item = item, .client = cl, .wp_id = wp.id };
+    cl.references += 1;
+
+    switch (file_mod.startRemoteRead(cl, "-", window_pane_input_callback, cdata)) {
+        .wait => return 0,
+        .err => |errno_v| {
+            server_client_mod.server_client_unref(cl);
+            xm.allocator.destroy(cdata);
+            cause.* = xm.xstrdup(file_mod.strerror(errno_v));
+            return -1;
+        },
+    }
 }
 
-/// Stub: get pointer to new (unprocessed) data in the pane's input buffer.
+/// Pointer to unprocessed data in the pane's input buffer.
+/// (tmux: window_pane_get_new_data)
 pub fn window_pane_get_new_data(wp: *T.WindowPane, wpo: *T.WindowPaneOffset, size: *usize) []const u8 {
-    _ = wp;
-    _ = wpo;
-    size.* = 0;
-    return &.{};
+    const used = wpo.used -| wp.base_offset;
+    const available = wp.input_pending.items.len;
+    size.* = if (used < available) available - used else 0;
+    if (size.* == 0) return &.{};
+    return wp.input_pending.items[used..];
 }
 
-/// Stub: mark data as consumed in a pane's input buffer.
-pub fn window_pane_update_used_data(_wp: *T.WindowPane, wpo: *T.WindowPaneOffset, size: usize) void {
-    _ = _wp;
-    wpo.used += size;
+/// Mark `size` bytes as consumed; clamps to available data.
+/// (tmux: window_pane_update_used_data)
+pub fn window_pane_update_used_data(wp: *T.WindowPane, wpo: *T.WindowPaneOffset, size: usize) void {
+    const used = wpo.used -| wp.base_offset;
+    const available = wp.input_pending.items.len;
+    const clamped = if (used < available) @min(size, available - used) else 0;
+    wpo.used += clamped;
 }
 
 // ── Mode management ──────────────────────────────────────────────────────
@@ -1770,16 +1817,15 @@ pub fn window_pane_choose_best(list: []const *T.WindowPane) ?*T.WindowPane {
     return best;
 }
 
-/// Stub: pane error callback (libevent bufferevent error handler).
-/// In tmux this sets PANE_EXITED and conditionally destroys the pane.
-/// zmux handles pane I/O differently via pane-io.zig.
+/// Pane error callback — pty fd error or EOF. (tmux: window_pane_error_callback)
+///
+/// Sets PANE_EXITED and, when the pane is ready to be torn down, delegates
+/// to server_destroy_pane which fires the notify and handles layout cleanup.
 pub fn window_pane_error_callback(wp: *T.WindowPane) void {
     log.log_debug("window_pane_error_callback: %%{d} error", .{wp.id});
     wp.flags |= T.PANE_EXITED;
-    if (window_pane_destroy_ready(wp)) {
-        const w = wp.window;
-        window_remove_pane(w, wp);
-    }
+    if (window_pane_destroy_ready(wp))
+        server_fn.server_destroy_pane(wp, true);
 }
 
 /// Compute the full size and offset of a pane including scrollbar area.
@@ -1805,11 +1851,45 @@ pub fn window_pane_full_size_offset(wp: *T.WindowPane) PaneGeometry {
     return result;
 }
 
-/// Stub: pane input callback (libevent client file read handler).
-/// In tmux this processes piped client input into a pane.
-/// zmux handles this differently; this stub exists for API parity.
-pub fn window_pane_input_callback(_wp: *T.WindowPane) void {
-    _ = _wp;
+/// Per-pane input state allocated by window_pane_start_input.
+const WindowPaneInputData = struct {
+    item: *cmdq.CmdqItem,
+    client: *T.Client,
+    wp_id: u32,
+};
+
+/// Pane stdin read-done callback. (tmux: window_pane_input_callback)
+///
+/// This is a zmux `ReadDoneCallback` (`path`, `errno_v`, `data`, `cbdata`).
+/// It is invoked when the remote read of stdin completes (either with data or
+/// with an error/close).  Feeds the received bytes into the pane's input
+/// parser and resumes the queued command item.
+fn window_pane_input_callback(
+    path: []const u8,
+    errno_v: c_int,
+    data: []const u8,
+    cbdata: ?*anyopaque,
+) void {
+    _ = path;
+    const cdata: *WindowPaneInputData = @ptrCast(@alignCast(cbdata orelse return));
+    defer {
+        server_client_mod.server_client_unref(cdata.client);
+        xm.allocator.destroy(cdata);
+    }
+
+    const wp = window_pane_find_by_id(cdata.wp_id);
+
+    if (wp == null) {
+        cdata.client.retval = 1;
+        cdata.client.flags |= T.CLIENT_EXIT;
+        return;
+    }
+
+    if ((cdata.client.flags & T.CLIENT_DEAD) == 0) {
+        if (errno_v == 0 and data.len > 0)
+            input_mod.input_parse_buffer(wp.?, data);
+        cmdq.cmdq_continue(cdata.item);
+    }
 }
 
 /// Get the next pane by number, cycling forward n times through the
@@ -1864,11 +1944,23 @@ pub fn window_pane_previous_by_number(w: *T.Window, wp: *T.WindowPane, n: u32) *
     return current;
 }
 
-/// Stub: pane read callback (libevent bufferevent read handler).
-/// In tmux this processes data from the pty into the pane's screen.
-/// zmux handles pane I/O differently via pane-io.zig.
-pub fn window_pane_read_callback(_wp: *T.WindowPane) void {
-    _ = _wp;
+/// Pane read callback — data available on the pty fd. (tmux: window_pane_read_callback)
+///
+/// In tmux this reads from a bufferevent, pipes new data to any pipe-pane
+/// and control-mode clients, then calls input_parse_pane.
+/// zmux's equivalent live-path is pane_read_cb in pane-io.zig which feeds
+/// pane_io_feed; that covers the pty read and display update.
+///
+/// This function is retained for API parity.  Callers on the event-loop
+/// path (e.g. integration tests) can invoke it to trigger a control-client
+/// flush for any pending input_pending data.
+pub fn window_pane_read_callback(wp: *T.WindowPane) void {
+    log.log_debug("window_pane_read_callback: %%{d} has {d} bytes", .{ wp.id, wp.input_pending.items.len });
+    for (client_registry.clients.items) |cl| {
+        if (cl.session != null and (cl.flags & T.CLIENT_CONTROL) != 0)
+            control_mod.control_write_output(cl, wp);
+    }
+    input_mod.input_parse_pane(wp);
 }
 
 /// Push a pane onto a pane stack (e.g. window's last_panes).

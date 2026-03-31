@@ -56,9 +56,9 @@ pub fn status_init(c: *T.Client) void {
     }
     const lines = resize_mod.status_line_size(c);
     if (lines == 0) {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0).*;
+        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0);
     } else {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0).*;
+        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0);
     }
     c.status.timer = null;
 }

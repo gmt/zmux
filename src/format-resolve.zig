@@ -677,7 +677,7 @@ fn mouse_mode_flag(alloc: std.mem.Allocator, ctx: *const FormatContext, flag: i3
     return alloc.dupe(u8, if ((current.mode & flag) != 0) "1" else "0") catch unreachable;
 }
 
-pub const GridStorageUsage = struct {
+const GridStorageUsage = struct {
     lines: usize = 0,
     line_bytes: usize = 0,
     cells: usize = 0,
@@ -685,7 +685,7 @@ pub const GridStorageUsage = struct {
     extended_cells: usize = 0,
     extended_bytes: usize = 0,
 
-    pub fn totalBytes(self: GridStorageUsage) usize {
+    fn totalBytes(self: GridStorageUsage) usize {
         return self.line_bytes + self.cell_bytes + self.extended_bytes;
     }
 };
@@ -706,7 +706,7 @@ fn pane_display_screen(wp: *T.WindowPane) *T.Screen {
 // The current grid runtime only materializes the stored backing it actually
 // owns, so the history byte counters describe live backing storage rather than
 // reconstructing scrolled-off lines that the reduced grid does not retain.
-pub fn grid_storage_usage(gd: *const T.Grid) GridStorageUsage {
+fn grid_storage_usage(gd: *const T.Grid) GridStorageUsage {
     var usage = GridStorageUsage{
         .lines = gd.linedata.len,
         .line_bytes = gd.linedata.len * @sizeOf(T.GridLine),
@@ -880,14 +880,14 @@ fn resolve_client_tty(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 fn resolve_client_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
-    // Return tty.sx directly; 0 for clients without an active tty (matches tmux).
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sx});
 }
 
 fn resolve_client_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
-    // Return tty.sy directly; 0 for clients without an active tty (matches tmux).
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sy});
 }
 

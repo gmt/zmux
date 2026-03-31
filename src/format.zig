@@ -487,21 +487,16 @@ fn eval_expr(alloc: std.mem.Allocator, expr: []const u8, ctx: *const FormatConte
     if (expr.len == 0) return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
 
     if (expr[0] == '?') {
-        // Multi-pair conditional: tmux format.c format_replace() lines 5224-5291.
-        // Walk (condition, value) pairs; trailing unpaired arg is the default.
-        const parts = split_top_level_all(alloc, expr[1..], ',') orelse
-            return unresolved_expr(alloc, expr);
-        defer alloc.free(parts);
-        var i: usize = 0;
-        while (i + 1 < parts.len) : (i += 2) {
-            const cond = expand_value_expr(alloc, parts[i], ctx, depth + 1);
-            defer alloc.free(cond.text);
-            if (cond.complete and format_truthy(cond.text))
-                return expand_template(alloc, parts[i + 1], ctx, depth + 1);
-        }
-        if (parts.len % 2 == 1)
-            return expand_template(alloc, parts[parts.len - 1], ctx, depth + 1);
-        return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
+        const parts = split_top_level_3(expr[1..], ',') orelse return unresolved_expr(alloc, expr);
+        const cond = expand_value_expr(alloc, parts.a, ctx, depth + 1);
+        defer alloc.free(cond.text);
+        const branch = if (!cond.complete)
+            unresolved_expr(alloc, expr)
+        else if (format_truthy(cond.text))
+            expand_template(alloc, parts.b, ctx, depth + 1)
+        else
+            expand_template(alloc, parts.c, ctx, depth + 1);
+        return branch;
     }
 
     if (build_modifiers(alloc, expr)) |parsed| {
@@ -1148,31 +1143,8 @@ fn eval_loop_expr(
             const s = ctx_session(ctx) orelse return unresolved_expr(alloc, original_expr);
             const items = sort_mod.sorted_winlinks_session(s, sort_crit);
             defer alloc.free(items);
-            for (items, 0..) |entry, loop_idx| {
-                var child = child_context_for_winlink(ctx, s, entry, loop_idx + 1 == items.len);
-                // Neighbor window variables – tmux format.c lines 4584-4592.
-                const after_active = loop_idx > 0 and items[loop_idx - 1] == s.curw;
-                const before_active = loop_idx + 1 < items.len and items[loop_idx + 1] == s.curw;
-                format_add(&child, "window_after_active", if (after_active) "1" else "0");
-                format_add(&child, "window_before_active", if (before_active) "1" else "0");
-                if (loop_idx + 1 < items.len) {
-                    const next = items[loop_idx + 1];
-                    const next_idx_str = std.fmt.allocPrint(xm.allocator, "{d}", .{next.idx}) catch unreachable;
-                    defer xm.allocator.free(next_idx_str);
-                    format_add(&child, "next_window_index", next_idx_str);
-                    format_add(&child, "next_window_active", if (next == s.curw) "1" else "0");
-                }
-                if (loop_idx > 0) {
-                    const prev = items[loop_idx - 1];
-                    const prev_idx_str = std.fmt.allocPrint(xm.allocator, "{d}", .{prev.idx}) catch unreachable;
-                    defer xm.allocator.free(prev_idx_str);
-                    format_add(&child, "prev_window_index", prev_idx_str);
-                    format_add(&child, "prev_window_active", if (prev == s.curw) "1" else "0");
-                }
-                defer if (child.extras != null and child.extras != ctx.extras) {
-                    child.extras.?.deinit();
-                    xm.allocator.destroy(child.extras.?);
-                };
+            for (items, 0..) |entry, idx| {
+                var child = child_context_for_winlink(ctx, s, entry, idx + 1 == items.len);
                 const use_template = if (active_template != null and s.curw == entry) active_template.? else all_template;
                 const rendered = expand_template(alloc, use_template, &child, depth + 1);
                 defer alloc.free(rendered.text);

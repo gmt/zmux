@@ -227,7 +227,7 @@ fn switchClientTestMakeClient(name: []const u8, session: ?*T.Session) T.Client {
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = if (session != null) T.CLIENT_ATTACHED else 0,
         .session = session,
     };

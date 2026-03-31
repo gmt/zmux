@@ -1004,7 +1004,7 @@ test "window-copy startDrag keeps the cursor under reduced mouse drags" {
         .name = "copy-mode-drag-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     client.tty = .{ .client = &client };
@@ -1210,7 +1210,7 @@ test "unsupported window-copy commands surface a status message" {
         .name = "copy-mode-status-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     client.tty = .{ .client = &client };

@@ -277,7 +277,7 @@ test "status runtime arms and clears a timed message overlay" {
         .name = "status-runtime-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -321,7 +321,7 @@ test "present_client_message routes control clients through the shared %message 
         .name = "control-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
     client.tty.client = &client;

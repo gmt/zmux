@@ -1037,7 +1037,7 @@ fn makeClient(session: *T.Session, name: []const u8, ttyname: []const u8) T.Clie
         .ttyname = xm.xstrdup(ttyname),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };

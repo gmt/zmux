@@ -41,14 +41,10 @@ const SixelChunk = struct {
     pattern: u8 = 0,
     next_pattern: u8 = 0,
 
-    data: std.ArrayList(u8),
-
-    fn init(alloc: std.mem.Allocator) SixelChunk {
-        return .{ .data = std.ArrayList(u8).init(alloc) };
-    }
+    data: std.ArrayListUnmanaged(u8) = .{},
 
     fn deinit(self: *SixelChunk) void {
-        self.data.deinit();
+        self.data.deinit(xm.allocator);
     }
 };
 
@@ -512,16 +508,16 @@ pub fn sixel_scale(
 // ── RLE sixel serialiser ──────────────────────────────────────────────────
 
 /// Append `slen` bytes of `s` into an `ArrayList(u8)`, growing as needed.
-fn sixel_print_add(buf: *std.ArrayList(u8), s: []const u8) void {
-    buf.appendSlice(s) catch unreachable;
+fn sixel_print_add(buf: *std.ArrayListUnmanaged(u8), s: []const u8) void {
+    buf.appendSlice(xm.allocator, s) catch unreachable;
 }
 
 /// Append a repeat run of `count` copies of `ch` into `buf`.
-fn sixel_print_repeat(buf: *std.ArrayList(u8), count: u32, ch: u8) void {
+fn sixel_print_repeat(buf: *std.ArrayListUnmanaged(u8), count: u32, ch: u8) void {
     if (count == 0) return;
     if (count <= 3) {
         var i: u32 = 0;
-        while (i < count) : (i += 1) buf.append(ch) catch unreachable;
+        while (i < count) : (i += 1) buf.append(xm.allocator, ch) catch unreachable;
     } else {
         const tmp = std.fmt.allocPrint(xm.allocator, "!{}{c}", .{ count, ch }) catch unreachable;
         defer xm.allocator.free(tmp);
@@ -592,8 +588,8 @@ pub fn sixel_print(si: *const T.SixelImage, map: ?*const T.SixelImage) ?[]u8 {
     const used_colours = si.used_colours;
     if (used_colours == 0) return null;
 
-    var buf = std.ArrayList(u8).init(xm.allocator);
-    defer buf.deinit();
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(xm.allocator);
 
     // DCS header.
     const hdr = std.fmt.allocPrint(xm.allocator, "\x1bP0;{d}q", .{si.p2}) catch unreachable;
@@ -624,7 +620,7 @@ pub fn sixel_print(si: *const T.SixelImage, map: ?*const T.SixelImage) ?[]u8 {
         for (chunks) |*ch| ch.deinit();
         xm.allocator.free(chunks);
     }
-    for (chunks) |*ch| ch.* = SixelChunk.init(xm.allocator);
+    for (chunks) |*ch| ch.* = SixelChunk{};
 
     const active_list = xm.allocator.alloc(u32, used_colours) catch unreachable;
     defer xm.allocator.free(active_list);
@@ -664,7 +660,7 @@ pub fn sixel_print(si: *const T.SixelImage, map: ?*const T.SixelImage) ?[]u8 {
 
     sixel_print_add(&buf, "\x1b\\");
 
-    return buf.toOwnedSlice() catch unreachable;
+    return buf.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

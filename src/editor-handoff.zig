@@ -181,7 +181,7 @@ test "editor handoff returns file content to the unlock callback" {
         .id = 7,
         .environ = environ,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     client.tty = .{ .client = &client };
 
@@ -226,7 +226,7 @@ test "editor handoff reports a failed editor exit as no save" {
         .id = 9,
         .environ = environ,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     client.tty = .{ .client = &client };
 

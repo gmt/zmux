@@ -58,7 +58,7 @@ test "clipboard export requires clipboard feature truth" {
     var client = T.Client{
         .environ = undefined,
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .peer = &peer,
     };

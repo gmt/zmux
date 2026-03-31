@@ -413,7 +413,7 @@ test "loaded reduced terminfo drives outer tty feature truth" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     try std.testing.expect(supportsClient(&client, .mouse));
@@ -428,7 +428,7 @@ test "explicit client feature bits augment reduced terminfo truth" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
         .term_features = featureBit(.bpaste) | featureBit(.mouse),
     };
@@ -441,7 +441,7 @@ test "feature bits synthesize tty capability strings" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_features = featureBit(.title) | featureBit(.focus) | featureBit(.clipboard),
     };
 
@@ -469,7 +469,7 @@ test "empty reduced terminfo disables unsupported outer modes" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = &.{},
     };
     try std.testing.expect(!supportsClient(&client, .mouse));
@@ -481,7 +481,7 @@ test "missing capability context preserves the legacy always-emit fallback" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     try std.testing.expect(supportsClient(&client, .mouse));
 }
@@ -494,7 +494,7 @@ test "COLORTERM is not treated as a tty-features default" {
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
 
     try std.testing.expect(effectiveFeatures(&client) == null);

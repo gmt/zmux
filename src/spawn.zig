@@ -393,6 +393,15 @@ fn build_child_environment(
     const pane_id = std.fmt.bufPrint(&pane_buf, "%{d}", .{wp.id}) catch unreachable;
     env_mod.environ_set(child, "ZMUX_PANE", 0, pane_id);
     env_mod.environ_set(child, "SHELL", 0, shell);
+
+    // Set TERM to default-terminal (tmux-256color), overriding any
+    // inherited value from the outer terminal (e.g. TERM=alacritty).
+    if (@import("options.zig").options_ready) {
+        const term = @import("options.zig").options_get_string(
+            @import("options.zig").global_options, "default-terminal",
+        );
+        env_mod.environ_set(child, "TERM", 0, term);
+    }
     return child;
 }
 

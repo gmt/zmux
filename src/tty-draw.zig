@@ -27,6 +27,7 @@ const opts = @import("options.zig");
 const style_mod = @import("style.zig");
 const tty_acs = @import("tty-acs.zig");
 const utf8 = @import("utf8.zig");
+const sixel = @import("image-sixel.zig");
 
 pub const WindowRenderResult = struct {
     payload: []u8 = &.{},
@@ -132,6 +133,8 @@ pub fn tty_draw_pane_offset(
         }
     }
 
+    try append_sixel_images(&out, screen, wp, row_offset, 0, 0);
+
     const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
         @min(sx, scrollbar.?.width + scrollbar.?.pad)
     else
@@ -210,6 +213,8 @@ pub fn tty_draw_render_window_region(
             );
             try out.appendSlice(xm.allocator, rendered);
         }
+
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y);
     }
 
     if (w.active) |active| {
@@ -287,6 +292,8 @@ pub fn tty_draw_render_dirty_panes_region(
             );
             try out.appendSlice(xm.allocator, rendered);
         }
+
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y);
     }
 
     return out.toOwnedSlice(xm.allocator);
@@ -438,6 +445,29 @@ fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
     const move = try std.fmt.allocPrint(xm.allocator, "\x1b[{d};{d}H", .{ row, col });
     defer xm.allocator.free(move);
     try out.appendSlice(xm.allocator, move);
+}
+
+/// Append sixel image fallback placeholders for all images on a screen.
+fn append_sixel_images(
+    out: *std.ArrayList(u8),
+    screen: *T.Screen,
+    wp: *T.WindowPane,
+    row_offset: u32,
+    view_x: u32,
+    view_y: u32,
+) !void {
+    for (screen.images.items) |im| {
+        const abs_x = wp.xoff + im.px;
+        const abs_y = wp.yoff + im.py;
+        if (abs_x < view_x or abs_y < view_y) continue;
+        const x = abs_x - view_x;
+        const y = abs_y - view_y;
+
+        if (im.fallback) |fb| {
+            try append_move(out, row_offset + y + 1, x + 1);
+            try out.appendSlice(xm.allocator, fb);
+        }
+    }
 }
 
 const CellStyle = struct {

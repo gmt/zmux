@@ -809,8 +809,8 @@ test "build_client_draw_payload keeps multi-pane status-only redraw off the full
     right.yoff = 0;
     w.active = right;
 
-    pane_io.pane_io_feed(left, "L1\nL2");
-    pane_io.pane_io_feed(right, "R1\nR2");
+    pane_io.pane_io_feed(left, "L1\r\nL2");
+    pane_io.pane_io_feed(right, "R1\r\nR2");
 
     var client = T.Client{
         .environ = env_mod.environ_create(),
@@ -867,8 +867,8 @@ test "build_client_draw_payload crops a panned multi-pane viewport" {
     right.yoff = 0;
     w.active = right;
 
-    pane_io.pane_io_feed(left, "L1\nL2");
-    pane_io.pane_io_feed(right, "R1\nR2");
+    pane_io.pane_io_feed(left, "L1\r\nL2");
+    pane_io.pane_io_feed(right, "R1\r\nR2");
 
     var client = T.Client{
         .environ = env_mod.environ_create(),
@@ -922,8 +922,8 @@ test "build_client_draw_payload keeps border-only redraw off the full-clear body
     right.yoff = 0;
     w.active = right;
 
-    pane_io.pane_io_feed(left, "L1\nL2");
-    pane_io.pane_io_feed(right, "R1\nR2");
+    pane_io.pane_io_feed(left, "L1\r\nL2");
+    pane_io.pane_io_feed(right, "R1\r\nR2");
 
     var client = T.Client{
         .environ = env_mod.environ_create(),
@@ -1026,8 +1026,8 @@ test "build_client_draw_payload can redraw only dirty panes without clearing the
     right.yoff = 0;
     w.active = right;
 
-    pane_io.pane_io_feed(left, "L1\nL2");
-    pane_io.pane_io_feed(right, "R1\nR2");
+    pane_io.pane_io_feed(left, "L1\r\nL2");
+    pane_io.pane_io_feed(right, "R1\r\nR2");
     right.flags |= T.PANE_REDRAW;
 
     var client = T.Client{

@@ -2,16 +2,13 @@
 
 Functional gaps where zmux does not yet match tmux behavior.
 
-## TTY Query/Response Routing
+## Pane Resize
 
-- `tty_keys_next_inner` now contains the full tmux dispatch chain:
-  clipboard, DA1/DA2/XDA, colour, palette, mouse, extended key,
-  and winsz parsers all run before falling back to input-keys.zig.
-  Client stdin is routed through `tty.in_buf` → `tty_keys_next`.
-- `tty_send_requests` / `tty_repeat_requests` remain disabled pending
-  interactive verification that responses are consumed without ANSI
-  spam. The parsers are wired; the queries just need to be re-enabled
-  and tested in a real terminal.
+- Terminal resize events update the zmux status bar width correctly
+  but panes do not resize. Vim stays at 80x24 when the terminal
+  grows. tmux propagates resize via server_client_check_resize →
+  recalculate_size → window_pane_resize → ioctl(TIOCSWINSZ).
+  One of those links is broken or fudged in zmux.
 
 ## SGR Attribute Rendering
 

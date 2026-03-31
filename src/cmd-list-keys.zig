@@ -293,7 +293,7 @@ test "list-keys command supports format accepts shared sort orders and rejects i
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     client.tty.client = &client;
@@ -429,7 +429,7 @@ test "list-keys -1 shows a single binding through the shared status runtime" {
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     client.tty.client = &client;
@@ -472,7 +472,7 @@ test "list-keys single-result without a target client logs through the shared st
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     client.tty.client = &client;

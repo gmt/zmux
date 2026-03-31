@@ -1117,7 +1117,7 @@ pub const MouseClickState = enum {
 };
 
 pub const StatusLine = struct {
-    screen: ?*Screen = null,
+    screen: Screen,
     active: ?*Screen = null,
     references: u32 = 0,
     timer: ?*c.libevent.event = null,

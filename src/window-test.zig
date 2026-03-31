@@ -254,7 +254,7 @@ test "window_detach_pane clears client-local active pane references" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     defer {
         client_registry.remove(&client);
@@ -325,7 +325,7 @@ test "window_set_active_pane updates active metadata, focus hooks, and redraw fl
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED | T.CLIENT_TERMINAL | T.CLIENT_FOCUSED,
         .session = s,
     };

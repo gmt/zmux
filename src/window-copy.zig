@@ -2193,7 +2193,7 @@ pub fn window_copy_free(wme: *T.WindowModeEntry) void {
 
 pub fn window_copy_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
     const data = modeData(wme);
-    screen.screen_resize(data.backing, sx, sy);
+    screen.screen_resize(data.backing, sx, sy, false);
     redraw(wme);
 }
 

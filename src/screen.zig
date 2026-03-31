@@ -70,13 +70,8 @@ pub fn screen_reset(s: *T.Screen) void {
     screen_reset_hyperlinks(s);
 }
 
-pub fn screen_resize(s: *T.Screen, sx: u32, sy: u32) void {
-    _ = sx;
-    _ = sy;
-    // Reduced for now: window/pane resize still owns geometry truth.
-    if (s.cx >= s.grid.sx) s.cx = if (s.grid.sx == 0) 0 else s.grid.sx - 1;
-    if (s.cy >= s.grid.sy) s.cy = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
-    s.rlower = if (s.grid.sy == 0) 0 else s.grid.sy - 1;
+pub fn screen_resize(s: *T.Screen, sx: u32, sy: u32, reflow: bool) void {
+    screen_resize_cursor(s, sx, sy, reflow, true, true);
 }
 
 pub fn screen_reset_active(s: *T.Screen) void {

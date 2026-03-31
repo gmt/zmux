@@ -278,8 +278,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             w.sx = sx;
             w.sy = sy;
             for (w.panes.items) |wp| {
-                wp.sx = sx;
-                wp.sy = sy;
+                win_mod.window_pane_resize(wp, sx, sy);
             }
             // Persist dimensions as the session default so new-window inherits them.
             const size_str = xm.xasprintf("{d}x{d}", .{ sx, sy });

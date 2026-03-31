@@ -1404,8 +1404,7 @@ fn apply_panes(lc: *Cell) void {
         const wp = lc.wp orelse return;
         wp.xoff = lc.xoff;
         wp.yoff = lc.yoff;
-        wp.sx = lc.sx;
-        wp.sy = lc.sy;
+        win.window_pane_resize(wp, lc.sx, lc.sy);
         return;
     }
 
@@ -1419,8 +1418,7 @@ fn apply_panes_skip(lc: *Cell, skip: ?*T.WindowPane) void {
         if (skip) |s| if (s == wp) return;
         wp.xoff = lc.xoff;
         wp.yoff = lc.yoff;
-        wp.sx = lc.sx;
-        wp.sy = lc.sy;
+        win.window_pane_resize(wp, lc.sx, lc.sy);
         return;
     }
 

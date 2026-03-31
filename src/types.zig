@@ -962,6 +962,7 @@ pub const WindowPane = struct {
     // Resize queue (ported from tmux's TAILQ-based resize_queue)
     resize_queue: std.ArrayListUnmanaged(WindowPaneResize) = .{},
     resize_timer: ?*c.libevent.event = null,
+    ground_timer: ?*c.libevent.event = null,
 
     // Input request queue — pending outer-terminal queries (DA, clipboard, palette).
     // Mirrors tmux's per-input_ctx request TAILQ.  Each element is a heap pointer

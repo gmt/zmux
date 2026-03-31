@@ -34,6 +34,7 @@ const screen_mod = @import("screen.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const c = @import("c.zig");
 const utf8 = @import("utf8.zig");
+const proc_mod = @import("proc.zig");
 const session_mod = @import("session.zig");
 const alerts = @import("alerts.zig");
 const layout_mod = @import("layout.zig");
@@ -629,13 +630,17 @@ pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
     if (w.references == 0) {
         _ = windows.remove(w.id);
         if (w.alerts_timer) |ev| {
-            _ = c.libevent.event_del(ev);
-            c.libevent.event_free(ev);
+            if (proc_mod.libevent != null) {
+                _ = c.libevent.event_del(ev);
+                c.libevent.event_free(ev);
+            }
             w.alerts_timer = null;
         }
         if (w.name_event) |ev| {
-            _ = c.libevent.event_del(ev);
-            c.libevent.event_free(ev);
+            if (proc_mod.libevent != null) {
+                _ = c.libevent.event_del(ev);
+                c.libevent.event_free(ev);
+            }
             w.name_event = null;
         }
         while (w.panes.items.len > 0) {

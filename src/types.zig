@@ -627,6 +627,56 @@ pub const StyleRange = struct {
 
 pub const StyleRanges = std.ArrayList(StyleRange);
 
+// ── Sixel image types ─────────────────────────────────────────────────────
+
+/// One horizontal band of sixel pixel data.
+/// Mirrors `struct sixel_line` in image-sixel.c.
+pub const SixelLine = struct {
+    x: u32 = 0,
+    data: []u16 = &.{},
+};
+
+/// A decoded sixel image: pixel grid + colour table.
+/// Mirrors `struct sixel_image` in image-sixel.c.
+pub const SixelImage = struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    xpixel: u32 = 0,
+    ypixel: u32 = 0,
+
+    set_ra: u32 = 0,
+    ra_x: u32 = 0,
+    ra_y: u32 = 0,
+
+    colours: []u32 = &.{},
+    ncolours: u32 = 0,
+    used_colours: u32 = 0,
+    p2: u32 = 0,
+
+    /// Current draw cursor (pixels).
+    dx: u32 = 0,
+    dy: u32 = 0,
+    /// Current colour index + 1 (0 means unset).
+    dc: u32 = 0,
+
+    lines: []SixelLine = &.{},
+};
+
+/// A placed image on a screen.
+/// Mirrors `struct image` in image.c.
+pub const Image = struct {
+    s: *Screen,
+    data: *SixelImage,
+    fallback: ?[]u8 = null,
+
+    /// Cell position of top-left corner.
+    px: u32 = 0,
+    py: u32 = 0,
+    /// Size in cells.
+    sx: u32 = 0,
+    sy: u32 = 0,
+};
+
 // ── Screen ────────────────────────────────────────────────────────────────
 
 pub const ScreenCursorStyle = enum {
@@ -698,6 +748,11 @@ pub const Screen = struct {
     input_last_valid: bool = false,
     last_glyph: Utf8Data = std.mem.zeroes(Utf8Data),
     write_list: ?[]ScreenWriteCline = null,
+
+    /// Images placed on this screen (mirrors tmux `struct images`).
+    images: std.ArrayListUnmanaged(*Image) = .{},
+    /// Saved images (for alternate-screen switch).
+    saved_images: std.ArrayListUnmanaged(*Image) = .{},
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────

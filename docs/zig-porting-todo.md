@@ -86,16 +86,21 @@ tmux's `screen-redraw.c` (1100 lines) is not ported. It provides:
   `server_client_check_redraw`; zmux uses a simplified draw path
   that delegates to `tty_draw_pane` directly.
 
-## Image and Sixel (image.c, image-sixel.c -- no zmux equivalent)
+## Image and Sixel
 
-tmux's image layer (~900 lines total) is not ported:
+`src/image.zig` and `src/image-sixel.zig` provide the core image layer.
+Remaining wiring gaps:
 
-- `image.c`: image storage, placement tracking, redraw lifecycle,
-  and a global image list with LRU eviction.
-- `image-sixel.c`: sixel format parser, colour table management,
-  pixel data decode, and cell-grid mapping.
-
-zmux has the `enable_sixel` build option but no runtime implementation.
+- `tty_cmd_sixelimage` is a no-op; needs to call `image_store` and
+  emit the sixel DCS to the outer tty.
+- `screen_write_sixelimage` in `screen-write.zig` needs to call
+  `image_store` when writing sixel data into a screen.
+- `tty_draw_images` in `tty-draw.zig` needs to iterate `s.images` and
+  write the sixel data for each image to the outer tty.
+- `sixel_support` format variable still returns "0"; needs to check
+  the tty feature flag and return "1" when supported.
+- `sixel_to_screen` (fallback cell grid for non-sixel tty) is not yet
+  ported; requires `screen_write_box` wiring.
 
 ## Format
 

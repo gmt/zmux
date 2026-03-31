@@ -252,7 +252,7 @@ test "choose-buffer enters the reduced buffer mode when paste buffers exist" {
         .name = "choose-buffer-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -291,7 +291,7 @@ test "choose-buffer accepts custom key format" {
         .name = "choose-buffer-key-format-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -382,7 +382,7 @@ test "choose-client enters the reduced client mode when clients exist" {
         .ttyname = xm.xstrdup("/dev/pts/451"),
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -420,7 +420,7 @@ test "choose-client accepts custom key format flags" {
         .name = "choose-client-current",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -432,7 +432,7 @@ test "choose-client accepts custom key format flags" {
         .ttyname = xm.xstrdup("/dev/pts/452"),
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -474,7 +474,7 @@ test "choose-client accepts preview and zoom flags" {
         .name = "choose-client-preview-current",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -486,7 +486,7 @@ test "choose-client accepts preview and zoom flags" {
         .ttyname = xm.xstrdup("/dev/pts/453"),
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -532,7 +532,7 @@ test "choose-tree enters the reduced window-tree mode" {
         .name = "choose-tree-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -572,7 +572,7 @@ test "choose-tree -Z passes zoom through to the reduced tree mode" {
         .name = "choose-tree-zoom-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -610,7 +610,7 @@ test "choose-tree rejects invalid sort order before the reduced mode error" {
         .name = "choose-tree-sort-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -647,7 +647,7 @@ test "choose-tree accepts custom key format" {
         .name = "choose-tree-key-format-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };

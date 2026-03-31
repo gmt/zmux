@@ -166,6 +166,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run Zig unit tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
+    const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
+    test_compile_step.dependOn(&unit_tests.step);
+
     const stress_build_options = addBuildOptions(b, .{
         .target = target,
         .opt_systemd = opt_systemd,

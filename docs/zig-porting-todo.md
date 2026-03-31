@@ -4,19 +4,18 @@ Functional gaps where zmux does not yet match tmux behavior.
 
 ## Sixel Draw Path
 
-- `tty_cmd_sixelimage` has the real sixel output path (calls
-  `sixel_scale` + `sixel_print`) but `tty_draw_images` /
-  `append_sixel_images` in tty-draw.zig still emit fallback
-  text (`im.fallback`) instead of real sixel data. The TtyCtx
-  needs to carry `im.data` as `ctx.si` through the draw dispatch.
+- `tty_draw_images` / `append_sixel_images` in tty-draw.zig emit
+  fallback text (`im.fallback`) instead of real sixel data. The
+  TtyCtx needs to carry `im.data` as `ctx.si` through the draw
+  dispatch so `tty_cmd_sixelimage` can call `sixel_print`.
 - `sixel_to_screen` (fallback cell grid for non-sixel terminals)
-  is not yet ported.
+  is not ported.
 
-## Input Timers (stubs)
+## Input Request Queue
 
-- `input_start_ground_timer` (4 callers): DCS/OSC/APC/rename
-  ground timeout needs libevent timer integration.
-- `input_start_request_timer` (2 callers): request timeout
-  needs libevent timer integration.
-- `input_request_reply` (2 callers): tty-keys clipboard/palette
-  reply forwarding needs client request queue infrastructure.
+- The request timer and request reply functions require a TAILQ
+  of `InputRequest` structs on both `WindowPane` (input context)
+  and `Client`. tmux uses this to match incoming terminal replies
+  (palette, clipboard) against outstanding queries and dispatch
+  them in order. ~150 lines of infrastructure to port from
+  tmux-museum/src/input.c (lines 3294-3480).

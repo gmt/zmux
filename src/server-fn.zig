@@ -819,7 +819,7 @@ test "server_client_handle_key uses prefix table and queues bound commands" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -876,7 +876,7 @@ test "server_client_handle_key routes default keys through the active pane mode 
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -941,7 +941,7 @@ test "server_client_handle_key forwards unbound keys to pane" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -990,7 +990,7 @@ test "server_client_handle_key records reported client theme before overlays" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1051,7 +1051,7 @@ test "server_client_handle_key routes through the status-message runtime before 
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1128,7 +1128,7 @@ test "server_client_handle_key mirrors unbound keys to synchronized panes" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1214,7 +1214,7 @@ test "server_client_handle_key routes raw mouse events through the shared pane m
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1266,7 +1266,7 @@ test "server_client_handle_key encodes pane mouse events when no mode owns them"
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };

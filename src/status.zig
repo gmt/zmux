@@ -56,9 +56,9 @@ pub fn status_init(c: *T.Client) void {
     }
     const lines = resize_mod.status_line_size(c);
     if (lines == 0) {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0);
+        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0).*;
     } else {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0);
+        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0).*;
     }
     c.status.timer = null;
 }
@@ -91,13 +91,14 @@ pub fn status_redraw(c: *T.Client) bool {
     }
 
     const width = c.tty.sx;
-    if (c.status.screen.grid.sx != width or c.status.screen.grid.sy != lines) {
-        screen_mod.screen_resize(&c.status.screen, width, lines);
+    const screen = c.status.screen orelse return false;
+    if (screen.grid.sx != width or screen.grid.sy != lines) {
+        screen_mod.screen_resize(screen, width, lines);
         force = true;
     }
 
     var changed = false;
-    var ctx = T.ScreenWriteCtx{ .s = &c.status.screen };
+    var ctx = T.ScreenWriteCtx{ .s = screen };
 
     var row: u32 = 0;
     while (row < lines) : (row += 1) {
@@ -268,6 +269,11 @@ pub fn status_free(c: *T.Client) void {
         entry.expanded = null;
         entry.ranges.deinit(xm.allocator);
         entry.ranges = .{};
+    }
+    if (c.status.screen) |screen| {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+        c.status.screen = null;
     }
 }
 
@@ -648,7 +654,7 @@ test "status render draws reduced status line and utf8 prompt overlay" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -718,7 +724,7 @@ test "status persists translated ranges for hit-test consumers" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer {
@@ -775,7 +781,7 @@ test "status message overlay respects multiline status rows and message-line" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer {
@@ -841,7 +847,7 @@ test "status timer reuses the shared redraw path and suppresses overlay churn" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer {
@@ -909,7 +915,7 @@ test "status_init allocates screen and status_redraw detects style changes" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer {
@@ -920,7 +926,7 @@ test "status_init allocates screen and status_redraw detects style changes" {
 
     status_init(&client);
 
-    try std.testing.expect(client.status.screen.grid.sx == 20);
+    try std.testing.expect(client.status.screen.?.grid.sx == 20);
 
     // First redraw should always return true (forced)
     const first = status_redraw(&client);
@@ -981,8 +987,7 @@ test "status_prompt_load_history reads typed history from a temp file" {
     {
         const file = std.fs.cwd().createFile(abs_path, .{ .truncate = true }) catch return;
         defer file.close();
-        const writer = file.writer();
-        writer.writeAll("command:hello\nsearch:world\ncommand:foo\n") catch return;
+        file.writeAll("command:hello\nsearch:world\ncommand:foo\n") catch return;
     }
 
     opts.options_set_string(opts.global_options, false, "history-file", abs_path);

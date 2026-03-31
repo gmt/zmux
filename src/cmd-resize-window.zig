@@ -239,7 +239,7 @@ test "resize-window picks smallest and largest attached client sizes" {
         .name = "big",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(big.environ);
     big.tty = .{ .client = &big, .sx = 120, .sy = 40, .xpixel = 17, .ypixel = 34 };
@@ -249,7 +249,7 @@ test "resize-window picks smallest and largest attached client sizes" {
         .name = "small",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(small.environ);
     small.tty = .{ .client = &small, .sx = 90, .sy = 30, .xpixel = 18, .ypixel = 36 };

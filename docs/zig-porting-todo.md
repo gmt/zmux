@@ -10,6 +10,13 @@ Functional gaps where zmux does not yet match tmux behavior.
   per-pane redraw dispatch that tmux uses. The screen-redraw
   module needs to be wired into server-client's redraw path.
 
+## TTY Feature Requests
+
+- `tty_send_requests` and `tty_repeat_requests` are implemented
+  but never called from `server-client.zig`. Terminal feature
+  probing (colours, cursor shape, clipboard support) is never
+  initiated from the server side for connected clients.
+
 ## TTY Write Callback
 
 - `tty_write_callback` is an export stub that ignores all
@@ -132,6 +139,14 @@ Functional gaps where zmux does not yet match tmux behavior.
 - `window_copy_vadd` ignores the `parse` flag.
   `input_parse_screen` exists but is not wired; view-mode output
   renders ANSI escapes as raw text.
+- `window_copy_search_marks` is called from `doSearch` but 9 of
+  10 tmux callers were fudged out: `scroll1`, `pageup1`,
+  `pagedown1`, `size_changed`, `cmd_history_bottom`,
+  `cmd_history_top`, `scroll_to`, `scroll_up`, `scroll_down`.
+  Search mark highlighting is only updated on direct search,
+  not on scroll or navigation.
+- `window_copy_formats` is missing the `top_line_time` format
+  variable.
 
 ## Commands
 

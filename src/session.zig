@@ -357,12 +357,12 @@ pub fn session_update_history(s: *T.Session) void {
     }
 }
 
-pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
-    _ = _notify;
-    _ = _from;
-    log.log_debug("destroy session $%{d} {s}", .{ s.id, s.name });
+pub fn session_destroy(s: *T.Session, do_notify: bool, from: []const u8) void {
+    log.log_debug("destroy session $%{d} {s} ({s})", .{ s.id, s.name, from });
+
     _ = sessions.remove(s.name);
-    notify.notify_session("session-closed", s);
+    if (do_notify)
+        notify.notify_session("session-closed", s);
     session_group_remove(s);
 
     var window_counts = std.AutoHashMap(*T.Window, u32).init(xm.allocator);
@@ -392,11 +392,12 @@ pub fn session_destroy(s: *T.Session, _notify: bool, _from: []const u8) void {
 
     s.lastw.deinit(xm.allocator);
     s.windows.deinit();
-    opts.options_free(s.options);
-    env_mod.environ_free(s.environ);
-    xm.allocator.free(s.name);
     xm.allocator.free(@constCast(s.cwd));
-    xm.allocator.destroy(s);
+
+    // Drop the creation reference.  session_free runs when refcount
+    // reaches zero — notifications may still hold refs that keep the
+    // session alive until they are processed or the queue is cleared.
+    session_remove_ref(s, "session_destroy");
 }
 
 /// Check a proposed session name for validity.  Returns null if invalid.

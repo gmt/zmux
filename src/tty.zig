@@ -57,7 +57,10 @@ pub fn tty_set_size(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) voi
 }
 
 pub fn tty_resize(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void {
-    tty_set_size(tty, sx, sy, xpixel, ypixel);
+    // Convert total pixel dimensions to per-cell (matching tmux tty_resize).
+    const cw = if (sx > 0 and xpixel > 0) xpixel / sx else 0;
+    const ch = if (sy > 0 and ypixel > 0) ypixel / sy else 0;
+    tty_set_size(tty, sx, sy, cw, ch);
     tty_invalidate(tty);
 }
 

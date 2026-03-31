@@ -377,7 +377,7 @@ test "window_set_active_pane updates active metadata, focus hooks, and redraw fl
     try std.testing.expectEqualStrings("focus-window", env_mod.environ_find(env_mod.global_environ, "WINDOW_HOOK").?.value.?);
 }
 
-test "window_pane_resize clamps to window bounds and updates sole pane window size" {
+test "window_pane_resize queues resize and updates screen" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
@@ -398,11 +398,19 @@ test "window_pane_resize clamps to window bounds and updates sole pane window si
     }
 
     const wp = win.window_add_pane(w, null, 80, 24);
-    win.window_pane_resize(wp, 120, 12);
-    try std.testing.expectEqual(@as(u32, 80), wp.sx);
+    win.window_pane_resize(wp, 60, 12);
+    // Pane dimensions updated
+    try std.testing.expectEqual(@as(u32, 60), wp.sx);
     try std.testing.expectEqual(@as(u32, 12), wp.sy);
-    try std.testing.expectEqual(@as(u32, 80), w.sx);
-    try std.testing.expectEqual(@as(u32, 12), w.sy);
+    // Resize queued for TIOCSWINSZ delivery
+    try std.testing.expectEqual(@as(usize, 1), wp.resize_queue.items.len);
+    try std.testing.expectEqual(@as(u32, 80), wp.resize_queue.items[0].osx);
+    try std.testing.expectEqual(@as(u32, 24), wp.resize_queue.items[0].osy);
+    try std.testing.expectEqual(@as(u32, 60), wp.resize_queue.items[0].sx);
+    try std.testing.expectEqual(@as(u32, 12), wp.resize_queue.items[0].sy);
+    // No-op when size unchanged
+    win.window_pane_resize(wp, 60, 12);
+    try std.testing.expectEqual(@as(usize, 1), wp.resize_queue.items.len);
 }
 
 test "window_rotate_panes rotates order and active pane" {

@@ -1556,16 +1556,10 @@ pub fn screen_write_collect_end(ctx: *T.ScreenWriteCtx) void {
     if (s.cy < wl.len) {
         const cl = &wl[s.cy];
         if (cl.data) |data| {
-            var i: u32 = 0;
-            while (i < ci.used) : (i += 1) {
-                if (ci.x + i < data.len) {
-                    var cell = ci.gc;
-                    cell.data.data[0] = data[ci.x + i];
-                    cell.data.size = 1;
-                    cell.data.width = 1;
-                    cell.data.have = 1;
-                    grid.set_cell(s.grid, s.cy, s.cx + i, &cell);
-                }
+            const start = ci.x;
+            const end = @min(start + ci.used, @as(u32, @intCast(data.len)));
+            if (end > start) {
+                grid.set_cells(s.grid, s.cy, s.cx, &ci.gc, data[start..end]);
             }
         }
     }

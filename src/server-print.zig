@@ -256,7 +256,7 @@ test "server_client_print appends parsed output in the shared view mode" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -348,7 +348,7 @@ test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -391,7 +391,7 @@ test "server_client_print keeps detached non-utf8 direct output on the shared sa
         .name = "direct-print-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = 0,
     };
     client.tty.client = &client;
@@ -429,7 +429,7 @@ test "server_client_print keeps direct control-client output on the shared sanit
         .name = "control-print-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL,
     };
     client.tty.client = &client;
@@ -510,7 +510,7 @@ test "server_client_print preserves utf8 payloads on the shared attached view-mo
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -597,7 +597,7 @@ test "server_client_print raw attached output uses the shared escaped-byte write
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };

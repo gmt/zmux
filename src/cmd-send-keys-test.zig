@@ -492,7 +492,7 @@ test "send-keys -K dispatches through a named target client key table" {
         .name = xm.xstrdup("remote"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -557,7 +557,7 @@ test "send-keys -K forwards unbound keys to the named client pane" {
         .name = xm.xstrdup("named-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -623,7 +623,7 @@ test "send-keys with -c still writes directly to the target pane unless -K is se
         .name = xm.xstrdup("direct-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -695,8 +695,6 @@ test "send-keys -K without a dispatchable client is a no-op" {
 }
 
 test "send-keys dispatches active mode table bindings instead of writing to the pane" {
-    cmdq.cmdq_reset_for_tests();
-    defer cmdq.cmdq_reset_for_tests();
     key_bindings.key_bindings_init();
 
     const setup = try test_session_with_empty_pane("send-mode-table");
@@ -707,7 +705,7 @@ test "send-keys dispatches active mode table bindings instead of writing to the 
     _ = window_mod.window_pane_push_mode(setup.wp, &test_mode_table, null, null);
 
     var cause: ?[]u8 = null;
-    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-mode-table", "-n", "bound" }, null, &cause);
+    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-mode-table:0", "-n", "bound" }, null, &cause);
     key_bindings.key_bindings_add("send-keys-mode", 'x', null, false, @ptrCast(bound));
 
     const cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-mode-table:0.0", "x" }, null, &cause);
@@ -730,8 +728,6 @@ test "send-keys dispatches active mode table bindings instead of writing to the 
 }
 
 test "send-keys preserves mode binding queue order across multiple keys" {
-    cmdq.cmdq_reset_for_tests();
-    defer cmdq.cmdq_reset_for_tests();
     key_bindings.key_bindings_init();
 
     const setup = try test_session_with_empty_pane("send-mode-order");
@@ -758,9 +754,6 @@ test "send-keys preserves mode binding queue order across multiple keys" {
 }
 
 test "send-keys mode bindings inherit the target pane state" {
-    cmdq.cmdq_reset_for_tests();
-    defer cmdq.cmdq_reset_for_tests();
-
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
@@ -836,7 +829,7 @@ test "send-keys routes active mode keys through the target client instead of wri
         .name = xm.xstrdup("mode-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.s,
     };
@@ -885,7 +878,7 @@ test "send-keys falls back to an active mode key handler when the mode table has
         .name = xm.xstrdup("mode-fallback-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.s,
     };
@@ -934,7 +927,7 @@ test "send-keys -M routes mouse events through active mode keys" {
         .name = xm.xstrdup("mode-mouse-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.s,
     };
@@ -1103,7 +1096,7 @@ test "send-keys rejects read-only target clients before writing" {
         .name = xm.xstrdup("readonly-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED | T.CLIENT_READONLY,
         .session = s,
     };
@@ -1263,7 +1256,7 @@ test "send-keys -K replays the triggering key through the target client" {
         .name = xm.xstrdup("replay-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1403,9 +1396,6 @@ test "send-keys treats Any as a special key and quietly skips pane output" {
 }
 
 test "send-keys -K dispatches Any through target-client wildcard bindings" {
-    cmdq.cmdq_reset_for_tests();
-    defer cmdq.cmdq_reset_for_tests();
-
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
@@ -1437,7 +1427,7 @@ test "send-keys -K dispatches Any through target-client wildcard bindings" {
     var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     _ = spawn.spawn_window(&sc, &cause).?;
 
-    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-k-any", "-n", "wildcard" }, null, &cause);
+    const bound = try cmd_mod.cmd_parse_from_argv_with_cause(&.{ "new-window", "-d", "-t", "send-k-any:0", "-n", "wildcard" }, null, &cause);
     key_bindings.key_bindings_add("root", T.KEYC_ANY, null, false, @ptrCast(bound));
 
     const env = env_mod.environ_create();
@@ -1446,7 +1436,7 @@ test "send-keys -K dispatches Any through target-client wildcard bindings" {
         .name = xm.xstrdup("wildcard-client"),
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };

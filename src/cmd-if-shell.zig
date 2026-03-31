@@ -252,7 +252,7 @@ fn testSetup(name: []const u8) TestSetup {
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };

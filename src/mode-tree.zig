@@ -984,9 +984,9 @@ const ModeTreeMenu = struct {
     line: u32,
 };
 
-/// `menu.ChoiceCb` adapter: receives (menu_ptr, idx, key, data) from menu.zig
+/// `menu.MenuChoiceCb` adapter: receives (menu, choice, key, data) from menu.zig
 /// and delegates to the mode-tree `menucb`.  Matches C's `mode_tree_menu_callback`.
-fn modeTreeMenuChoiceCb(_: ?*anyopaque, _: u32, key: T.key_code, data: ?*anyopaque) void {
+fn modeTreeMenuChoiceCb(_: *menu_mod.Menu, _: i32, key: T.key_code, data: ?*anyopaque) void {
     const mtm: *ModeTreeMenu = @ptrCast(@alignCast(data orelse return));
     const mtd = mtm.mtd;
     defer {

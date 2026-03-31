@@ -318,7 +318,7 @@ pub fn format_draw_ranges(
 
     const target_x = ctx.s.cx;
     const target_y = ctx.s.cy;
-    const temp_width: u32 = @intCast(@max(expanded.len, 1));
+    const temp_width: u32 = @max(utf8.utf8_cstrwidth(expanded), 1);
 
     var screens: [segment_count]*T.Screen = undefined;
     var seg_ctx: [segment_count]T.ScreenWriteCtx = undefined;

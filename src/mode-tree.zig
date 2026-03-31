@@ -20,12 +20,18 @@
 //! mode-tree.zig – shared reduced tree-mode state substrate.
 
 const std = @import("std");
+const cmd_mod = @import("cmd.zig");
+const cmdq = @import("cmd-queue.zig");
 const format_draw = @import("format-draw.zig");
 const key_string = @import("key-string.zig");
+const menu_mod = @import("menu.zig");
+const popup_mod = @import("popup.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server = @import("server.zig");
 const sort_mod = @import("sort.zig");
+const status_prompt_mod = @import("status-prompt.zig");
+const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
 const xm = @import("xmalloc.zig");
@@ -33,6 +39,23 @@ const xm = @import("xmalloc.zig");
 pub const SearchDir = enum {
     forward,
     backward,
+};
+
+/// Static descriptor for a menu item, matching tmux `struct menu_item`.
+/// A null `name` terminates the array; an empty or "-" name is a separator.
+pub const MenuItemDesc = struct {
+    name: ?[]const u8,
+    key: T.key_code,
+    command: ?[]const u8 = null,
+};
+
+/// Default menu items shown when right-clicking outside the tree list,
+/// matching tmux's static `mode_tree_menu_items[]`.
+pub const default_menu_items = [_]MenuItemDesc{
+    .{ .name = "Scroll Left", .key = '<' },
+    .{ .name = "Scroll Right", .key = '>' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Cancel", .key = 'q' },
 };
 
 pub const Preview = enum {
@@ -95,6 +118,9 @@ pub const Config = struct {
     swapcb: ?SwapCallback = null,
     sortcb: ?SortCallback = null,
     helpcb: ?HelpCallback = null,
+    /// Mode-specific context menu items (NULL-terminated descriptor slice).
+    /// Corresponds to tmux's `const struct menu_item *menu` parameter.
+    menu: ?[]const MenuItemDesc = null,
 };
 
 pub const Data = struct {
@@ -103,6 +129,8 @@ pub const Data = struct {
 
     wp: *T.WindowPane,
     modedata: ?*anyopaque,
+    /// Mode-specific context menu descriptor slice (matches tmux `mtd->menu`).
+    menu: ?[]const MenuItemDesc = null,
 
     sort_crit: T.SortCriteria = .{},
 
@@ -227,6 +255,7 @@ pub fn start(wp: *T.WindowPane, config: Config) *Data {
     mtd.* = .{
         .wp = wp,
         .modedata = config.modedata,
+        .menu = config.menu,
         .buildcb = config.buildcb,
         .drawcb = config.drawcb,
         .searchcb = config.searchcb,
@@ -910,26 +939,256 @@ pub fn handleKey(mtd: *Data, client: ?*T.Client, key_val: *T.key_code, mouse: ?*
     return false;
 }
 
-pub fn runCommand(client: ?*T.Client, template: []const u8, name: []const u8) void {
-    _ = client;
-    _ = template;
-    _ = name;
-    // Stub: requires cmd_parse_and_append / cmdq_new_state from full runtime.
+/// Shared `mode_tree_run_command` — expand a template with `name` and
+/// append the resulting command to the client's command queue.
+/// Matches tmux's `mode_tree_run_command(c, fs, template, name)`.
+pub fn runCommand(client: ?*T.Client, fs: ?*const T.CmdFindState, template: []const u8, name: []const u8) void {
+    const cl = client orelse return;
+
+    const command = templateReplace(template, name, 1);
+    defer xm.allocator.free(command);
+    if (command.len == 0) return;
+
+    var pi = T.CmdParseInput{
+        .c = cl,
+        .fs = if (fs) |state| state.* else .{},
+    };
+    const parsed = cmd_mod.cmd_parse_from_string(command, &pi);
+    switch (parsed.status) {
+        .success => {
+            const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(parsed.cmdlist.?));
+            cmdq.cmdq_append(cl, cmdlist);
+        },
+        .@"error" => {
+            const err = parsed.@"error" orelse xm.xstrdup("parse error");
+            defer xm.allocator.free(err);
+            // Capitalise first letter, matching C's `*error = toupper(...)`.
+            var msg_buf: [1024]u8 = undefined;
+            const msg = if (err.len > 0) blk: {
+                const copy = std.fmt.bufPrint(&msg_buf, "{c}{s}", .{
+                    std.ascii.toUpper(err[0]),
+                    err[1..],
+                }) catch err;
+                break :blk copy;
+            } else err;
+            status_runtime.status_message_set(cl, -1, true, false, false, "{s}", .{msg});
+        },
+    }
+}
+
+/// Context carried through the menu callback closure, matching C's
+/// `struct mode_tree_menu { data, c, line }`.
+const ModeTreeMenu = struct {
+    mtd: *Data,
+    client: ?*T.Client,
+    line: u32,
+};
+
+/// `menu.MenuChoiceCb` adapter: receives (menu, choice, key, data) from menu.zig
+/// and delegates to the mode-tree `menucb`.  Matches C's `mode_tree_menu_callback`.
+fn modeTreeMenuChoiceCb(_: *menu_mod.Menu, _: i32, key: T.key_code, data: ?*anyopaque) void {
+    const mtm: *ModeTreeMenu = @ptrCast(@alignCast(data orelse return));
+    const mtd = mtm.mtd;
+    defer {
+        removeRef(mtd);
+        xm.allocator.destroy(mtm);
+    }
+    if (mtd.dead or key == T.KEYC_NONE) return;
+    if (mtm.line >= mtd.line_list.items.len) return;
+    mtd.current = mtm.line;
+    if (mtd.menucb) |menucb| menucb(mtd, mtm.client, key);
+}
+
+/// Build a `menu.Menu` from a `MenuItemDesc` slice, computing the display
+/// width as we go.  Title ownership is transferred to the returned `Menu`.
+fn buildMenuFromDescs(title: []u8, descs: []const MenuItemDesc) *menu_mod.Menu {
+    var items = std.ArrayList(menu_mod.MenuItem).init(xm.allocator);
+    defer items.deinit();
+
+    var width: u32 = 0;
+    for (descs) |d| {
+        const name = d.name orelse break; // null terminates
+        if (name.len == 0 or std.mem.eql(u8, name, "-")) {
+            items.append(.{ .separator = true }) catch unreachable;
+            continue;
+        }
+        const display = xm.xstrdup(name);
+        const w: u32 = @intCast(name.len); // simple width approximation
+        if (w > width) width = w;
+        const item_key = d.key;
+        items.append(.{
+            .display_text = display,
+            .key = item_key,
+            .command = if (d.command) |cmd| xm.xstrdup(cmd) else null,
+        }) catch unreachable;
+    }
+
+    const menu = xm.allocator.create(menu_mod.Menu) catch unreachable;
+    menu.* = .{
+        .title = title,
+        .items = xm.allocator.dupe(menu_mod.MenuItem, items.items) catch unreachable,
+        .width = @max(width, @as(u32, @intCast(title.len)) -| 12), // strip style tags approx
+    };
+    return menu;
 }
 
 pub fn displayMenu(mtd: *Data, client: ?*T.Client, x: u32, y: u32, outside: bool) void {
-    _ = mtd;
-    _ = client;
-    _ = x;
-    _ = y;
-    _ = outside;
-    // Stub: requires menu_create / menu_display from full runtime.
+    const cl = client orelse return;
+    if (mtd.line_list.items.len == 0) return;
+
+    // Determine which line is targeted.
+    const line: u32 = if (mtd.offset + y > mtd.line_list.items.len -| 1)
+        mtd.current
+    else
+        mtd.offset + y;
+    const mti = mtd.line_list.items[line].item;
+
+    // Pick item list and build title.
+    const descs: []const MenuItemDesc = if (!outside)
+        mtd.menu orelse &default_menu_items
+    else
+        &default_menu_items;
+
+    const title: []u8 = if (!outside)
+        xm.xasprintf("#[align=centre]{s}", .{mti.name})
+    else
+        xm.xstrdup("");
+
+    const menu = buildMenuFromDescs(title, descs);
+
+    // Build callback context.
+    const mtm = xm.allocator.create(ModeTreeMenu) catch {
+        menu.deinit();
+        return;
+    };
+    mtm.* = .{ .mtd = mtd, .client = client, .line = line };
+    mtd.references += 1;
+
+    // Adjust x so the menu is centred, matching C's offset logic.
+    const half = (menu.width + 4) / 2;
+    const adj_x: u32 = if (x >= half) x - half else 0;
+
+    if (menu_mod.menu_display(
+        menu,
+        0,
+        0,
+        null,
+        adj_x,
+        y,
+        cl,
+        1, // BOX_LINES_DEFAULT
+        null,
+        null,
+        null,
+        null,
+        modeTreeMenuChoiceCb,
+        mtm,
+    ) != 0) {
+        removeRef(mtd);
+        xm.allocator.destroy(mtm);
+        menu.deinit();
+    }
 }
 
+/// Help text constants matching C's `mode_tree_help_start` / `mode_tree_help_end`.
+const help_text_start = [_][]const u8{
+    "\r\x1b[1m      Up, k \x1b[0m\x0ex\x0f \x1b[0mMove cursor up\n",
+    "\r\x1b[1m    Down, j \x1b[0m\x0ex\x0f \x1b[0mMove cursor down\n",
+    "\r\x1b[1m          g \x1b[0m\x0ex\x0f \x1b[0mGo to top\n",
+    "\r\x1b[1m          G \x1b[0m\x0ex\x0f \x1b[0mGo to bottom\n",
+    "\r\x1b[1m PPage, C-b \x1b[0m\x0ex\x0f \x1b[0mPage up\n",
+    "\r\x1b[1m NPage, C-f \x1b[0m\x0ex\x0f \x1b[0mPage down\n",
+    "\r\x1b[1m    Left, h \x1b[0m\x0ex\x0f \x1b[0mCollapse %1\n",
+    "\r\x1b[1m   Right, l \x1b[0m\x0ex\x0f \x1b[0mExpand %1\n",
+    "\r\x1b[1m        M-- \x1b[0m\x0ex\x0f \x1b[0mCollapse all %1s\n",
+    "\r\x1b[1m        M-+ \x1b[0m\x0ex\x0f \x1b[0mExpand all %1s\n",
+    "\r\x1b[1m          t \x1b[0m\x0ex\x0f \x1b[0mToggle %1 tag\n",
+    "\r\x1b[1m          T \x1b[0m\x0ex\x0f \x1b[0mUntag all %1s\n",
+    "\r\x1b[1m        C-t \x1b[0m\x0ex\x0f \x1b[0mTag all %1s\n",
+    "\r\x1b[1m        C-s \x1b[0m\x0ex\x0f \x1b[0mSearch forward\n",
+    "\r\x1b[1m        C-r \x1b[0m\x0ex\x0f \x1b[0mSearch backward\n",
+    "\r\x1b[1m          n \x1b[0m\x0ex\x0f \x1b[0mRepeat search forward\n",
+    "\r\x1b[1m          N \x1b[0m\x0ex\x0f \x1b[0mRepeat search backward\n",
+    "\r\x1b[1m          f \x1b[0m\x0ex\x0f \x1b[0mFilter %1s\n",
+    "\r\x1b[1m          O \x1b[0m\x0ex\x0f \x1b[0mChange sort order\n",
+    "\r\x1b[1m          r \x1b[0m\x0ex\x0f \x1b[0mReverse sort order\n",
+    "\r\x1b[1m          v \x1b[0m\x0ex\x0f \x1b[0mToggle preview\n",
+};
+const help_text_end = [_][]const u8{
+    "\r\x1b[1m  q, Escape \x1b[0m\x0ex\x0f \x1b[0mExit mode\x1b[H",
+};
+const MODE_TREE_HELP_DEFAULT_WIDTH: u32 = 39;
+
 pub fn displayHelp(mtd: *Data, client: ?*T.Client) void {
-    _ = mtd;
-    _ = client;
-    // Stub: requires popup_display / popup_write from full runtime.
+    const cl = client orelse return;
+    const s = cl.session orelse return;
+
+    // Determine width and item label; invoke helpcb if available.
+    var w: u32 = 0;
+    var item_name: []const u8 = "item";
+    var extra_lines: ?[*]const ?[*:0]const u8 = null;
+
+    if (mtd.helpcb) |helpcb| {
+        extra_lines = helpcb(&w, &item_name);
+    }
+    if (w < MODE_TREE_HELP_DEFAULT_WIDTH) w = MODE_TREE_HELP_DEFAULT_WIDTH;
+
+    // Count lines.
+    var h: u32 = @intCast(help_text_start.len + help_text_end.len);
+    if (extra_lines) |el| {
+        var i: usize = 0;
+        while (el[i] != null) : (i += 1) h += 1;
+    }
+
+    if (cl.tty.sx < w or cl.tty.sy < h) return;
+    const px = (cl.tty.sx - w) / 2;
+    const py = (cl.tty.sy - h) / 2;
+
+    if (popup_mod.popup_display(
+        popup_mod.POPUP_CLOSEANYKEY | popup_mod.POPUP_NOJOB,
+        1, // BOX_LINES_DEFAULT
+        null,
+        px,
+        py,
+        w,
+        h,
+        "",
+        cl,
+        s,
+        null,
+        null,
+        "",
+    ) != 0) return;
+
+    // Write escape sequence to clear screen and set cursor.
+    popup_mod.popup_write(cl, "\x1b[H\x1b[?25l\x1b[?7l\x1b)0");
+
+    // Write help_text_start lines (with %1 replaced by item_name).
+    for (help_text_start) |line| {
+        const replaced = templateReplace(line, item_name, 1);
+        defer xm.allocator.free(replaced);
+        popup_mod.popup_write(cl, replaced);
+    }
+
+    // Write caller-provided extra lines.
+    if (extra_lines) |el| {
+        var i: usize = 0;
+        while (el[i]) |raw_line| : (i += 1) {
+            const line = std.mem.span(raw_line);
+            const replaced = templateReplace(line, item_name, 1);
+            defer xm.allocator.free(replaced);
+            popup_mod.popup_write(cl, replaced);
+        }
+    }
+
+    // Write help_text_end lines.
+    for (help_text_end) |line| {
+        const replaced = templateReplace(line, item_name, 1);
+        defer xm.allocator.free(replaced);
+        popup_mod.popup_write(cl, replaced);
+    }
+
+    popup_mod.popup_write(cl, "\x1b[H");
 }
 
 pub fn menuCallback(mtd: *Data, client: ?*T.Client, key_val: T.key_code) void {
@@ -961,17 +1220,69 @@ pub fn removeRef(mtd: *Data) void {
         xm.allocator.destroy(mtd);
 }
 
+/// PromptInputCb adapter for the search prompt.
+/// Called by status_prompt when the user types; s==null means cancelled.
+fn searchPromptInputCb(c: *T.Client, data: ?*anyopaque, s: ?[]const u8, _: bool) i32 {
+    _ = c;
+    const mtd: *Data = @ptrCast(@alignCast(data orelse return 0));
+    searchCallbackInternal(mtd, s);
+    return 0;
+}
+
+/// PromptFreeCb for the search prompt — release the reference held for the prompt.
+fn searchPromptFreeCb(data: ?*anyopaque) void {
+    removeRef(@ptrCast(@alignCast(data orelse return)));
+}
+
+/// PromptInputCb adapter for the filter prompt.
+fn filterPromptInputCb(c: *T.Client, data: ?*anyopaque, s: ?[]const u8, _: bool) i32 {
+    _ = c;
+    const mtd: *Data = @ptrCast(@alignCast(data orelse return 0));
+    filterCallbackInternal(mtd, s);
+    return 0;
+}
+
+/// PromptFreeCb for the filter prompt.
+fn filterPromptFreeCb(data: ?*anyopaque) void {
+    removeRef(@ptrCast(@alignCast(data orelse return)));
+}
+
 fn searchCallback(mtd: *Data, client: ?*T.Client) void {
-    _ = client;
-    // Stub: in tmux this calls status_prompt_set with mode_tree_search_callback.
-    // For now, release the reference taken by the caller.
-    removeRef(mtd);
+    const cl = client orelse {
+        removeRef(mtd);
+        return;
+    };
+    status_prompt_mod.status_prompt_set(
+        cl,
+        null,
+        "(search) ",
+        "",
+        searchPromptInputCb,
+        null, // no completecb
+        searchPromptFreeCb,
+        mtd,
+        status_prompt_mod.PROMPT_NOFORMAT,
+        .search,
+    );
 }
 
 fn filterCallback(mtd: *Data, client: ?*T.Client) void {
-    _ = client;
-    // Stub: in tmux this calls status_prompt_set with mode_tree_filter_callback.
-    removeRef(mtd);
+    const cl = client orelse {
+        removeRef(mtd);
+        return;
+    };
+    status_prompt_mod.status_prompt_set(
+        cl,
+        null,
+        "(filter) ",
+        mtd.filter,
+        filterPromptInputCb,
+        null, // no completecb
+        filterPromptFreeCb,
+        mtd,
+        status_prompt_mod.PROMPT_NOFORMAT,
+        .search,
+    );
 }
 
 fn isLowercase(ptr: []const u8) bool {
@@ -979,6 +1290,47 @@ fn isLowercase(ptr: []const u8) bool {
         if (ch != std.ascii.toLower(ch)) return false;
     }
     return true;
+}
+
+/// Expand `%<idx>` in `template` with `replacement`, matching tmux's
+/// `cmd_template_replace(template, replacement, idx)`.
+/// The caller must free the returned slice.
+fn templateReplace(template: []const u8, replacement: []const u8, idx: usize) []u8 {
+    if (std.mem.indexOfScalar(u8, template, '%') == null) return xm.xstrdup(template);
+
+    var out = std.ArrayList(u8).init(xm.allocator);
+    defer out.deinit();
+
+    var i: usize = 0;
+    var replaced = false;
+    while (i < template.len) {
+        if (template[i] != '%') {
+            out.append(template[i]) catch unreachable;
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= template.len) {
+            out.append('%') catch unreachable;
+            i += 1;
+            continue;
+        }
+        const next = template[i + 1];
+        const matches_idx = next >= '1' and next <= '9' and (next - '0') == idx;
+        const matches_escaped = next == '%' and !replaced;
+        if (matches_idx) {
+            out.appendSlice(replacement) catch unreachable;
+            replaced = true;
+            i += 2;
+        } else if (matches_escaped) {
+            out.appendSlice(replacement) catch unreachable;
+            replaced = true;
+            i += 2;
+        } else {
+            out.append('%') catch unreachable;
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice() catch unreachable;
 }
 
 fn findItem(items: *const std.ArrayList(*Item), tag: u64) ?*Item {

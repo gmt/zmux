@@ -252,6 +252,51 @@ pub fn status_prompt_area(c: *T.Client, area_x: *u32, area_w: *u32) void {
     area_w.* = area.width;
 }
 
+/// Return the screen row where the status bar starts, or null if no status bar.
+pub fn status_prompt_row(c: *T.Client) ?u32 {
+    const at = status_at_line(c);
+    if (at < 0) return null;
+    return @intCast(at);
+}
+
+/// Geometry of the text-input portion of the prompt — i.e. right of the prefix.
+/// Returns null if the prompt is not active or the prefix already fills the area.
+pub const PromptInputGeometry = struct {
+    /// First column of the input area (after the prompt prefix).
+    input_x: u32,
+    /// Width of the input area.
+    input_width: u32,
+    /// Row index within the status bar.
+    line: u32,
+};
+
+pub fn status_prompt_input_geometry(c: *T.Client) ?PromptInputGeometry {
+    if (!status_prompt.status_prompt_active(c)) return null;
+    const s = c.session orelse return null;
+    const message = status_prompt.status_prompt_message(c) orelse return null;
+    const rows = overlay_rows(c);
+    const area = message_area(c, rows);
+    if (area.width == 0) return null;
+
+    const command_prompt = status_prompt.status_prompt_command_mode(c);
+    var ctx = format_context(c);
+    ctx.message_text = message;
+    ctx.command_prompt = command_prompt;
+
+    const fmt = opts.options_get_string(s.options, "message-format");
+    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
+    defer xm.allocator.free(expanded);
+
+    const prefix_width = @min(format_draw.format_width(expanded), area.width);
+    if (prefix_width >= area.width) return null;
+
+    return .{
+        .input_x = area.x + prefix_width,
+        .input_width = area.width - prefix_width,
+        .line = area.line,
+    };
+}
+
 /// Escape '#' characters so `format_draw` treats them as literal text
 /// (port of tmux status_prompt_escape).
 pub fn status_prompt_escape(s: []const u8) []u8 {
@@ -511,7 +556,7 @@ fn render_message(screen: *T.Screen, c: *T.Client, rows: u32, message: []const u
 
 fn message_area(c: *T.Client, rows: u32) Area {
     const s = c.session orelse return .{ .x = 0, .width = c.tty.sx, .line = 0 };
-    const sy = style_mod.style_from_option(s.options, "message-style");
+    const sy = style_mod.style_from_option(s.options, "message-style", null);
 
     var width = c.tty.sx;
     if (sy) |style| {
@@ -539,7 +584,7 @@ fn message_area(c: *T.Client, rows: u32) Area {
 }
 
 fn message_fill_colour(oo: *T.Options, style_name: []const u8) i32 {
-    if (style_mod.style_from_option(oo, style_name)) |sy| {
+    if (style_mod.style_from_option(oo, style_name, null)) |sy| {
         if (sy.fill != 8) return sy.fill;
         return sy.gc.bg;
     }

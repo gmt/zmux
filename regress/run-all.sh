@@ -145,6 +145,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/list-and-display.sh" \
         "$SCRIPT_DIR/formatter-smoke.sh" \
         "$SCRIPT_DIR/kill-server-cleanup.sh" \
+        "$SCRIPT_DIR/sixel-roundtrip.sh" \
     ; do
         [ -f "$f" ] && run_sh_test "$(basename "$f" .sh)" "$bin" "$f"
     done

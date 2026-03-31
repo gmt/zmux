@@ -283,7 +283,11 @@ test "split-window -b inserts before target and -d preserves active pane" {
     var cause: ?[]u8 = null;
     var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&first_ctx, &cause).?;
-    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .flags = T.SPAWN_EMPTY };
+    const first = wl.window.active.?;
+
+    // Split the layout so the second pane gets a proper layout cell.
+    const lc2 = layout_mod.layout_split_pane(first, .topbottom, -1, 0).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = lc2, .flags = T.SPAWN_EMPTY };
     const second = spawn.spawn_pane(&second_ctx, &cause).?;
     s.curw = wl;
     _ = win.window_set_active_pane(wl.window, second, true);
@@ -618,7 +622,16 @@ test "split-window -Z preserves the zoom flag across the new split" {
     var root_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const wl = spawn.spawn_window(&root_ctx, &cause).?;
     s.curw = wl;
-    wl.window.flags |= T.WINDOW_ZOOMED;
+    const first = wl.window.active.?;
+
+    // Create a second pane with a proper layout cell so we can zoom.
+    const lc2 = layout_mod.layout_split_pane(first, .topbottom, -1, 0).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = lc2, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_pane(&second_ctx, &cause).?;
+
+    // Zoom via the proper API (requires >= 2 panes).
+    try std.testing.expect(win.window_zoom(first));
+    try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
 
     var parse_cause: ?[]u8 = null;
     const zoom_cmd = try cmd_mod.cmd_parse_one(&.{ "split-window", "-Z", "-t", "split-zoom:0.0" }, null, &parse_cause);
@@ -628,5 +641,5 @@ test "split-window -Z preserves the zoom flag across the new split" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(zoom_cmd, &item));
     try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
     try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_WASZOOMED);
-    try std.testing.expectEqual(@as(usize, 2), wl.window.panes.items.len);
+    try std.testing.expectEqual(@as(usize, 3), wl.window.panes.items.len);
 }

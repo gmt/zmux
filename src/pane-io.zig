@@ -237,7 +237,7 @@ test "pane_io_feed handles newline and scrolls when reaching the bottom" {
     }
 
     const wp = win.window_add_pane(w, null, 4, 2);
-    pane_io_feed(wp, "one\ntwo\ntri");
+    pane_io_feed(wp, "one\r\ntwo\r\ntri");
     try std.testing.expectEqual(@as(u8, 't'), grid.ascii_at(wp.base.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 't'), grid.ascii_at(wp.base.grid, 1, 0));
     try std.testing.expectEqual(@as(u8, 'r'), grid.ascii_at(wp.base.grid, 1, 1));

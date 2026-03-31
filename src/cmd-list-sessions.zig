@@ -53,6 +53,7 @@ fn session_context(s: *T.Session) format_mod.FormatContext {
         .winlink = s.curw,
         .window = if (s.curw) |wl| wl.window else null,
         .pane = if (s.curw) |wl| wl.window.active else null,
+        .format_type = .session,
     };
 }
 

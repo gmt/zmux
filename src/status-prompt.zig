@@ -1164,14 +1164,15 @@ pub fn status_prompt_save_history() void {
 
     const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
     defer file.close();
-    const writer = file.writer();
 
     for (0..prompt_type_count) |type_idx| {
         const prompt_type: PromptType = @enumFromInt(@as(u8, @intCast(type_idx)));
         const type_str = status_prompt_type_string(prompt_type);
         const history = &prompt_histories[type_idx];
         for (history.items) |item| {
-            writer.print("{s}:{s}\n", .{ type_str, item }) catch {};
+            var buf: [4096]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "{s}:{s}\n", .{ type_str, item }) catch continue;
+            file.writeAll(line) catch {};
         }
     }
 }
@@ -1677,7 +1678,7 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
 pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
     if (word.len == 0 and !at_start) return null;
 
-    var list = std.ArrayList([]const u8).init(xm.allocator);
+    var list: std.ArrayList([]const u8) = .{};
     defer {
         list.deinit(xm.allocator);
     }

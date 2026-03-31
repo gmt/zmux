@@ -34,13 +34,8 @@ rather than a table entry.
 
 ## TTY
 
-- `tty_block_maybe` (output throttling based on evbuffer watermarks)
-  returns 0; tmux blocks output when the client evbuffer is too full.
-- `tty_window_bigger` / `tty_window_offset` (client-vs-window size
-  comparisons for offset rendering) return 0; the "bigger window"
-  code path is dead.
-- `tty_set_client_cb` / `tty_client_ready` (per-client dispatch
-  callbacks) return 0; needed for multi-client overlay rendering.
+- `tty_block_maybe`, `tty_window_bigger`, `tty_window_offset`,
+  `tty_set_client_cb`, and `tty_client_ready` are implemented (T5-20).
 - `tty_cmd_sixelimage` is a no-op; requires image/sixel runtime.
 - `tty_send_requests` and `tty_repeat_requests` are implemented and
   send DA1/DA2/XTVERSION queries and FG/BG colour queries to
@@ -143,13 +138,12 @@ dynamic keys. Copy-mode variables are evaluated eagerly in
 
 ## Server-Client
 
-- Overlay open/clear paths do not call `window_update_focus`. The
-  function exists in `window.zig` but the server-client overlay
-  lifecycle does not invoke it (marked TODO in source).
-- `server_client_check_modes` is a stub; does not invoke mode update
-  callbacks on status redraw.
-- Pane buffer management uses `input_pending` (ArrayList) instead of
-  libevent bufferevents; backpressure is not wired.
+- `window_update_focus` is called on overlay open/clear (T5-21).
+- `server_client_check_modes` invokes mode `update` callbacks (T5-21).
+- Pane backpressure wired: `event_del`/`event_add` on `wp.event`
+  when all attached control clients are blocked (T5-21).
+- `server_client_unref` implements reference counting; `server_client_free`
+  is called when refs reach zero (T5-21).
 
 ## Window Copy Mode
 
@@ -215,20 +209,17 @@ All blocked on live PTY-backed popup job runtime (tmux uses
 
 ## Control Mode
 
-- `control_read_callback` is a stub; tmux reads lines from the
-  client bufferevent and dispatches them as commands. zmux handles
-  command dispatch through the peer/proc layer instead, but the
-  control protocol line-reading path is not exercised.
-- Timer-driven subscription polling is a thin wrapper.
+- `control_read_callback` is implemented; reads lines and dispatches
+  commands via `server_client_dispatch_commands` (T5-23).
+- Notifications are now delivered synchronously in the event loop
+  rather than being delayed until queue drain (T5-23).
 
 ## File I/O
 
-- `filePush` does synchronous sends in a loop rather than using
-  event-driven retry with `event_once`.
-- `filePushCb`, `fileWriteErrorCallback`, `fileReadCallback`,
-  `fileReadDoneCallback`, `fileWriteDoneCallback` are stubs that
-  log and clean up but do not implement the full libevent bufferevent
-  lifecycle.
+- `filePush`, `filePushCb`, `fileWriteErrorCallback`, `fileReadCallback`,
+  `fileReadDoneCallback`, `fileWriteDoneCallback`, `window_pane_set_event`,
+  `window_pane_start_input`, and related pane I/O callbacks are
+  implemented (T5-22).
 
 ## Job Runtime
 
@@ -251,7 +242,7 @@ tmux's `cmd-detach-client.c` is not ported. It provides:
 
 ### display-panes
 
-- Paints text badges instead of tmux's large digit art overlays.
+- Large digit art overlays implemented (T5-24).
 
 ### display-popup
 
@@ -260,8 +251,8 @@ tmux's `cmd-detach-client.c` is not ported. It provides:
 
 ### buffer commands
 
-- `set-buffer -w` / `load-buffer -w` does not render the `Ms`
-  (modified selection) escape template.
+- `set-buffer -w` / `load-buffer -w` renders the `Ms` (modified
+  selection) escape template (T5-24).
 
 ### Other command gaps
 
@@ -298,48 +289,36 @@ between operations for incremental updates.
 - Multiline status (up to STATUS_LINES_LIMIT = 5) is structurally
   supported.
 - `status_get_range` is implemented for mouse hit-testing.
-- Prompt mouse consumers (click-to-position cursor in the prompt
-  input line) are missing.
-- Context menus triggered from status-line ranges work for basic
-  cases but full menu infrastructure (nested menus, dynamic menu
-  generation from format strings) is incomplete.
+- Prompt mouse click-to-position cursor is implemented (T5-26).
+- Nested menus and dynamic menu generation from format strings
+  are implemented (T5-26).
 
 ## Colour
 
-- The X11 colour-name table has 20 entries; tmux has ~560. Colours
-  like "DarkGoldenrod", "LightSteelBlue", "MediumOrchid1", etc.
-  are not recognised.
-
-### Zig vs. C note
-
-zmux uses comptime inline loops over colour-name arrays, making
-lookups zero-allocation. Expanding the table is just adding entries.
+- The X11 colour-name table is expanded to ~560 entries (T5-19),
+  matching tmux's full colour table.
 
 ## Style
 
 - `style.zig` parses style strings including ranges, alignment,
   padding, width, and push/set/pop defaults.
-- `#{...}` expansion within style strings (format interpolation
-  inside style attribute values) is not performed at parse time;
-  callers must pre-expand.
+- `#{...}` expansion within style attribute values is now performed
+  at parse time via `format_expand` (T5-25).
 
 ## Miscellaneous
 
-- `colour.zig` X11 table as noted above.
 - Pane output uses synchronous writes.
 - Lock/unlock uses local mode swap instead of capability-driven
   handoff.
-- `server_client_unref` is a stub (logs only).
 
 ## Window Pane I/O
 
-- `window_pane_set_event` is a stub (zmux uses `pane-io.zig`).
-- `window_pane_start_input` is a stub.
-- `window_pane_get_new_data` / `window_pane_update_used_data` are
-  stubs; zmux uses `input_pending` ArrayList directly.
-- `window_pane_input_callback` and `window_pane_read_callback`
-  require libevent bufferevent integration for PTY I/O.
-- `window_pane_error_callback` is a stub.
+- `window_pane_set_event`, `window_pane_start_input`,
+  `window_pane_get_new_data`, `window_pane_update_used_data`,
+  `window_pane_input_callback`, `window_pane_read_callback`, and
+  `window_pane_error_callback` are implemented (T5-22).
+- zmux uses `pane-io.zig` backed by plain libevent read events
+  (not bufferevents); functional equivalence is maintained.
 
 ## Grid and Screen
 

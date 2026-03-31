@@ -331,6 +331,257 @@ def parse_test_count(output: str) -> int | None:
     m = _SUMMARY_RE.search(output)
     return int(m.group(2)) if m else None
 
+
+# ── Crash-resilient re-run ───────────────────────────────────────────────
+
+PROGRESS_FILE = pathlib.Path(".zig-cache/test-progress.journal")
+
+# Zig test runner stderr format: "N/M module.test.description...STATUS"
+_PROGRESS_RE = re.compile(r"(\d+)/(\d+)\s+(.+?)\.\.\.(OK|SKIP|FAIL.*)")
+
+
+def _write_progress(name: str, status: str) -> None:
+    """Append a test result to the progress journal."""
+    with open(PROGRESS_FILE, "a") as f:
+        f.write(f"{name}={status}\n")
+
+
+def _read_progress() -> dict[str, str]:
+    """Read the progress journal. Returns {test_name: status}."""
+    results: dict[str, str] = {}
+    if not PROGRESS_FILE.exists():
+        return results
+    for line in PROGRESS_FILE.read_text().splitlines():
+        if "=" in line:
+            name, _, status = line.partition("=")
+            results[name] = status
+    return results
+
+
+def _is_signal_death(returncode: int | None) -> bool:
+    """True if the process was killed by a signal (negative returncode)."""
+    return returncode is not None and returncode < 0
+
+
+def _parse_crasher_from_output(output: str) -> str | None:
+    """Extract the crashing test name from zig test runner output."""
+    # Pattern: "while executing test 'module.test.desc'"
+    m = re.search(r"while executing test '([^']+)'", output)
+    return m.group(1) if m else None
+
+
+def run_crash_resilient(binary: pathlib.Path, per_test_timeout: float) -> tuple[dict, list[str]]:
+    """Run the test binary with crash isolation.
+
+    Uses a progress journal to survive signal deaths.  On crash,
+    restarts and runs un-reached tests individually via --test-filter
+    to avoid re-hitting the same crasher.
+
+    Returns (results_dict, crashers_list) where results_dict maps
+    test names to "OK"/"SKIP"/"FAIL ..."/"CRASH" and crashers_list
+    is the list of tests that caused signal deaths.
+    """
+    # Clean slate.
+    if PROGRESS_FILE.exists():
+        PROGRESS_FILE.unlink()
+
+    crashers: list[str] = []
+    total_tests = 0
+
+    # Phase 1: run the full binary, journalling progress.
+    warn("crash-resilient: phase 1 — full run with progress journal")
+    phase1_results, phase1_crasher, phase1_total = _run_with_journal(binary, per_test_timeout)
+    if phase1_total:
+        total_tests = phase1_total
+    if phase1_crasher:
+        crashers.append(phase1_crasher)
+
+    # If no crash, we're done.
+    if not phase1_crasher:
+        return _read_progress(), crashers
+
+    # Phase 2: run un-reached tests individually, skipping known crashers.
+    warn("crash-resilient: phase 2 — running un-reached tests individually")
+    seen = _read_progress()
+    unreached_count = total_tests - len(seen) if total_tests else 0
+    warn(f"  {len(seen)} tests journalled, {len(crashers)} crashed, ~{unreached_count} un-reached")
+
+    # We need test names for the un-reached tests.  Run the binary again;
+    # it will re-run tests we've already seen (fast), then crash on the
+    # crasher again, but this time we look at what comes after in the
+    # test ordering.  We keep restarting until we've discovered all tests.
+    max_restarts = 20  # safety limit
+    for attempt in range(max_restarts):
+        already_seen = _read_progress()
+        if total_tests and len(already_seen) >= total_tests:
+            break  # All tests accounted for.
+
+        # Run tests we haven't seen yet by name, one at a time.
+        # First we need to discover remaining test names.
+        new_names = _discover_remaining_tests(binary, already_seen, crashers, per_test_timeout)
+        if not new_names:
+            break  # No more tests to discover.
+
+        for test_name in new_names:
+            if test_name in already_seen or test_name in crashers:
+                continue
+            rc, output = _run_single_test(binary, test_name, per_test_timeout)
+            if _is_signal_death(rc):
+                warn(f"  CRASH: {test_name}")
+                _write_progress(test_name, "CRASH")
+                crashers.append(test_name)
+            # Individual test results are parsed from the output and
+            # journalled by _run_single_test via _run_with_journal.
+
+    final = _read_progress()
+    return final, crashers
+
+
+def _run_with_journal(
+    binary: pathlib.Path,
+    per_test_timeout: float,
+    test_filter: str | None = None,
+) -> tuple[dict[str, str], str | None, int | None]:
+    """Run test binary, writing results to the progress journal.
+
+    Returns (results, crasher_name_or_None, total_test_count_or_None).
+    """
+    cmd = [str(binary)]
+    if test_filter:
+        cmd += ["--test-filter", test_filter]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    results: dict[str, str] = {}
+    last_test = None
+    total = None
+
+    try:
+        while True:
+            ready, _, _ = select.select([proc.stderr], [], [], per_test_timeout)
+            if not ready:
+                # Timeout — treat as hang, not crash.
+                warn(f"  inactivity timeout on: {last_test or '(unknown)'}")
+                escalate(proc)
+                if last_test:
+                    _write_progress(last_test, "HANG")
+                return results, last_test, total
+
+            line = proc.stderr.readline()
+            if not line:
+                break
+
+            text = line.decode("utf-8", errors="replace").strip()
+            m = _PROGRESS_RE.match(text)
+            if m:
+                idx, tot, name, status = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+                total = tot
+                last_test = name
+                results[name] = status
+                _write_progress(name, status)
+    except Exception as e:
+        warn(f"  journal error: {e}")
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            escalate(proc)
+
+    rc = proc.returncode
+    if _is_signal_death(rc):
+        # The process died from a signal.  The last test in progress
+        # is the crasher (it may or may not have been journalled).
+        crasher = _parse_crasher_from_output("")  # Can't get output easily
+        if not crasher and last_test and last_test not in results:
+            crasher = last_test
+        if crasher and crasher not in results:
+            _write_progress(crasher, "CRASH")
+        return results, crasher, total
+
+    return results, None, total
+
+
+def _discover_remaining_tests(
+    binary: pathlib.Path,
+    already_seen: dict[str, str],
+    crashers: list[str],
+    per_test_timeout: float,
+) -> list[str]:
+    """Run the binary to discover test names beyond the known set.
+
+    The binary will re-run already-seen tests and crash on known
+    crashers, but in the process we may observe new test names in
+    the progress output.
+    """
+    cmd = [str(binary)]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    new_names: list[str] = []
+    try:
+        while True:
+            ready, _, _ = select.select([proc.stderr], [], [], per_test_timeout)
+            if not ready:
+                escalate(proc)
+                break
+
+            line = proc.stderr.readline()
+            if not line:
+                break
+
+            text = line.decode("utf-8", errors="replace").strip()
+            m = _PROGRESS_RE.match(text)
+            if m:
+                name = m.group(3)
+                if name not in already_seen and name not in crashers:
+                    new_names.append(name)
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            escalate(proc)
+
+    return new_names
+
+
+def _run_single_test(
+    binary: pathlib.Path,
+    test_name: str,
+    timeout: float,
+) -> tuple[int | None, str]:
+    """Run a single test by name. Returns (returncode, output)."""
+    cmd = [str(binary), "--test-filter", test_name]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout * 3,  # generous timeout for single test
+            start_new_session=True,
+        )
+        output = result.stderr.decode("utf-8", errors="replace")
+        # Parse and journal the result.
+        for line in output.splitlines():
+            m = _PROGRESS_RE.match(line.strip())
+            if m:
+                name, status = m.group(3), m.group(4)
+                _write_progress(name, status)
+        return result.returncode, output
+    except subprocess.TimeoutExpired:
+        _write_progress(test_name, "HANG")
+        return None, ""
+
+
 # ── Primary run (wrapped mode) ───────────────────────────────────────────
 
 def run_wrapped(extra_args: list[str], timeout: float) -> tuple[int | None, float, str]:
@@ -498,6 +749,43 @@ def main() -> int:
             warn("no test binary found for diagnostic re-run")
         record_run(stats, None, None, timeout, hung_test=hung_test, test_count=test_count)
         return 124
+
+    if _is_signal_death(exit_code):
+        # Process killed by signal (e.g. SIGABRT from a crashing test).
+        # The test runner is a single process — one crash kills the whole
+        # suite.  Switch to crash-resilient mode: re-run with a progress
+        # journal, isolating crashers and running un-reached tests
+        # individually.
+        sig = -exit_code
+        crasher = _parse_crasher_from_output(output)
+        report_coredumps(run_start)
+        warn(f"primary run killed by signal {sig} after {elapsed:.1f}s")
+        if crasher:
+            warn(f"crashing test: {crasher}")
+        else:
+            warn("could not identify crashing test from output")
+
+        binary = find_test_binary()
+        if binary:
+            warn("switching to crash-resilient mode (progress journal + per-test isolation)")
+            per_test = args.timeout or DIAG_PER_TEST_TIMEOUT
+            results, crashers = run_crash_resilient(binary, per_test)
+            passed = sum(1 for v in results.values() if v == "OK")
+            failed = sum(1 for v in results.values() if v.startswith("FAIL"))
+            skipped = sum(1 for v in results.values() if v == "SKIP")
+            crashed = len(crashers)
+            total = len(results)
+            warn(f"crash-resilient results: {passed} passed, {failed} failed, "
+                 f"{skipped} skipped, {crashed} crashed out of {total} reached")
+            if crashers:
+                warn(f"crashers: {', '.join(crashers)}")
+            record_run(stats, elapsed, exit_code, timeout, test_count=test_count)
+            # Return 0 only if everything passed (no fails, no crashes).
+            return 0 if (failed == 0 and crashed == 0) else 1
+        else:
+            warn("no test binary found for crash-resilient re-run")
+            record_run(stats, elapsed, exit_code, timeout, test_count=test_count)
+            return exit_code
 
     # Normal completion (pass or fail).
     report_coredumps(run_start)

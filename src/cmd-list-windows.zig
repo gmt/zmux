@@ -88,6 +88,7 @@ fn window_context(s: *T.Session, wl: *T.Winlink) format_mod.FormatContext {
         .winlink = wl,
         .window = wl.window,
         .pane = wl.window.active,
+        .format_type = .window,
     };
 }
 

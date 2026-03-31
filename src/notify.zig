@@ -462,7 +462,7 @@ test "notify hooks from client queue run after the client tail" {
     var cl = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(cl.environ);
     cl.tty = .{ .client = &cl };
@@ -531,7 +531,7 @@ test "notify_window emits %layout-change to matching control clients" {
         .name = "layout-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
@@ -638,7 +638,7 @@ test "session_set_current emits %session-window-changed to control clients" {
         .name = "session-window-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };

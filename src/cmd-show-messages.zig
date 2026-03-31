@@ -216,7 +216,7 @@ test "show-messages renders reduced terminal capability reports from shared tty-
         .name = "tty-client",
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_name = try std.testing.allocator.dupe(u8, "xterm-256color"),
         .term_features = tty_features.featureBit(.bpaste),
         .term_caps = caps[0..],

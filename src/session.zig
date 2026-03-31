@@ -581,11 +581,16 @@ pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
     if (!session_has_live_winlink_ptr(s, wl)) return false;
     if (s.curw == wl) return true;
     session_remove_lastw_reference(s, wl);
-    if (s.curw) |old| {
-        session_remove_lastw_reference(s, old);
-        s.lastw.insert(xm.allocator, 0, old) catch unreachable;
+    const old = s.curw;
+    if (old) |o| {
+        session_remove_lastw_reference(s, o);
+        s.lastw.insert(xm.allocator, 0, o) catch unreachable;
     }
     s.curw = wl;
+    if (opts.options_get_number(opts.global_options, "focus-events") != 0) {
+        if (old) |o| win.window_update_focus(o.window);
+        win.window_update_focus(wl.window);
+    }
     notify.notify_session("session-window-changed", s);
     return true;
 }

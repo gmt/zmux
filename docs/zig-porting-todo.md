@@ -11,9 +11,13 @@ tables). The reduced parser handles the common CSI, OSC, DCS, and ESC
 sequences but has these gaps:
 
 - Request/reply machinery (DA, clipboard query, colour query, palette
-  query, theme report) requires a PTY write-back path so the parser can
-  emit responses to the outer terminal. tmux uses `input_reply` for
-  this; zmux silently consumes these sequences.
+  query, theme report) has a request queue (`InputRequest`,
+  `input_add_request`, `input_request_reply`, `input_cancel_requests`
+  in `input.zig`).  The write-back path (`input_send_reply`) writes
+  directly to the pane's pty fd; a full libevent bufferevent path
+  (backpressure, partial writes) remains TODO.
+- Palette reply dispatch calls a log stub; `input_osc_colour_reply`
+  is not yet ported (needed before palette queries give real results).
 - DCS passthrough (`tmux;` sequences) is consumed silently; tmux
   honours the `allow-passthrough` option and emits `rawstring` output.
 - DCS DECRQSS is consumed silently; tmux replies through the tty.
@@ -42,9 +46,10 @@ rather than a table entry.
 - `tty_set_client_cb` / `tty_client_ready` (per-client dispatch
   callbacks) return 0; needed for multi-client overlay rendering.
 - `tty_cmd_sixelimage` is a no-op; requires image/sixel runtime.
-- tty request/buffer/query machinery is absent: tmux uses a request
-  queue (`input_request`) to match DA/colour/clipboard replies from
-  the outer terminal. zmux has no equivalent.
+- `tty_send_requests` and `tty_repeat_requests` are implemented and
+  send DA1/DA2/XTVERSION queries and FG/BG colour queries to
+  VT100-like terminals.  The start timer fires after `TTY_QUERY_TIMEOUT`
+  seconds and calls `tty_send_requests`.
 - Local raw-mode/alternate-screen takeover lives in `client.zig`
   rather than being capability-driven from `tty.zig`.
 

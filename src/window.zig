@@ -36,6 +36,7 @@ const c = @import("c.zig");
 const utf8 = @import("utf8.zig");
 const session_mod = @import("session.zig");
 const alerts = @import("alerts.zig");
+const layout_mod = @import("layout.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
 
@@ -966,13 +967,31 @@ pub fn window_zoom(wp: *T.WindowPane) bool {
     if (w.flags & T.WINDOW_ZOOMED != 0) return false;
     if (window_count_panes(w) <= 1) return false;
     if (w.active != wp) _ = window_set_active_pane(w, wp, true);
+
+    for (w.panes.items) |wp1| {
+        wp1.saved_layout_cell = wp1.layout_cell;
+        wp1.layout_cell = null;
+    }
+
+    w.saved_layout_root = w.layout_root;
+    layout_mod.layout_init(w, wp);
     w.flags |= T.WINDOW_ZOOMED;
     return true;
 }
 
 pub fn window_unzoom(w: *T.Window) bool {
     if (w.flags & T.WINDOW_ZOOMED == 0) return false;
+
     w.flags &= ~@as(u32, T.WINDOW_ZOOMED);
+    layout_mod.layout_free(w);
+    w.layout_root = w.saved_layout_root;
+    w.saved_layout_root = null;
+
+    for (w.panes.items) |wp| {
+        wp.layout_cell = wp.saved_layout_cell;
+        wp.saved_layout_cell = null;
+    }
+    layout_mod.layout_fix_panes(w, null);
     return true;
 }
 

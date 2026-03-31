@@ -1725,22 +1725,495 @@ pub fn layout_resize_pane_shrink(w: *T.Window, lc: *T.LayoutCell, type_: T.Layou
     return resize_pane_shrink(lc, type_, needed);
 }
 
+/// Calculate the new pane size for resized parent.
+/// Ported from tmux layout_new_pane_size.
 pub fn layout_new_pane_size(
-    _: *T.Window,
-    _: u32,
-    _: *T.LayoutCell,
-    _: T.LayoutType,
-    _: u32,
-    _: u32,
-    _: u32,
+    w: *T.Window,
+    previous: u32,
+    lc: *T.LayoutCell,
+    type_: T.LayoutType,
+    size: u32,
+    count_left: u32,
+    size_left: u32,
 ) u32 {
-    return T.PANE_MINIMUM;
+    // If this is the last cell, it can take all of the remaining size.
+    if (count_left == 1)
+        return size_left;
+
+    // How much is available in this parent?
+    const available = layout_resize_check(w, lc, type_);
+
+    // Work out the minimum size of this cell and the new size
+    // proportionate to the previous size.
+    var min: u32 = (T.PANE_MINIMUM + 1) * (count_left - 1);
+    var new_size: u32 = undefined;
+    switch (type_) {
+        .leftright => {
+            const floor = lc.sx -| available;
+            if (floor > min) min = floor;
+            new_size = if (previous == 0) T.PANE_MINIMUM else (lc.sx * size) / previous;
+        },
+        .topbottom => {
+            const floor = lc.sy -| available;
+            if (floor > min) min = floor;
+            new_size = if (previous == 0) T.PANE_MINIMUM else (lc.sy * size) / previous;
+        },
+        .windowpane => return T.PANE_MINIMUM,
+    }
+
+    // Check against the maximum and minimum size.
+    const max = size_left -| min;
+    if (new_size > max)
+        new_size = max;
+    if (new_size < T.PANE_MINIMUM)
+        new_size = T.PANE_MINIMUM;
+    return new_size;
 }
 
-pub fn layout_set_size_check(_: *T.Window, _: *T.LayoutCell, _: T.LayoutType, _: i32) bool {
+/// Check if the cell and all its children can be resized to a specific size.
+/// Ported from tmux layout_set_size_check.
+pub fn layout_set_size_check(w: *T.Window, lc: *T.LayoutCell, type_: T.LayoutType, size: i32) bool {
+    const usize_val: u32 = if (size < 0) return false else @intCast(size);
+
+    if (lc.type == .windowpane)
+        return usize_val >= T.PANE_MINIMUM;
+
+    var available_space = usize_val;
+    const count: u32 = @intCast(lc.cells.items.len);
+    if (count == 0) return true;
+
+    if (lc.type == type_) {
+        if (available_space < (count * 2) - 1)
+            return false;
+
+        const previous: u32 = switch (type_) {
+            .leftright => lc.sx,
+            .topbottom => lc.sy,
+            .windowpane => return false,
+        };
+
+        for (lc.cells.items, 0..) |child, idx| {
+            const new_child_size = layout_new_pane_size(
+                w,
+                previous,
+                child,
+                type_,
+                usize_val,
+                count - @as(u32, @intCast(idx)),
+                available_space,
+            );
+            if (idx == count - 1) {
+                if (new_child_size > available_space)
+                    return false;
+                available_space -= new_child_size;
+            } else {
+                if (new_child_size + 1 > available_space)
+                    return false;
+                available_space -= new_child_size + 1;
+            }
+            if (!layout_set_size_check(w, child, type_, @intCast(new_child_size)))
+                return false;
+        }
+    } else {
+        for (lc.cells.items) |child| {
+            if (child.type == .windowpane)
+                continue;
+            if (!layout_set_size_check(w, child, type_, size))
+                return false;
+        }
+    }
+
     return true;
 }
 
-pub fn layout_split_pane(_: *T.WindowPane, _: T.LayoutType, _: i32, _: i32, _: i32, _: i32) ?*T.LayoutCell {
-    return null;
+/// Resize all child cells to fit within the current cell.
+/// Ported from tmux layout_resize_child_cells.
+fn layout_resize_child_cells(w: *T.Window, lc: *T.LayoutCell) void {
+    if (lc.type == .windowpane)
+        return;
+
+    var count: u32 = 0;
+    var previous: u32 = 0;
+    for (lc.cells.items) |child| {
+        count += 1;
+        if (lc.type == .leftright)
+            previous += child.sx
+        else if (lc.type == .topbottom)
+            previous += child.sy;
+    }
+    if (count > 0)
+        previous += (count - 1);
+
+    var available: u32 = 0;
+    if (lc.type == .leftright)
+        available = lc.sx
+    else if (lc.type == .topbottom)
+        available = lc.sy;
+
+    for (lc.cells.items, 0..) |child, idx| {
+        if (lc.type == .topbottom) {
+            child.sx = lc.sx;
+            child.xoff = lc.xoff;
+        } else {
+            child.sx = layout_new_pane_size(w, previous, child, lc.type, lc.sx, count - @as(u32, @intCast(idx)), available);
+            available -|= (child.sx + 1);
+        }
+        if (lc.type == .leftright) {
+            child.sy = lc.sy;
+        } else {
+            child.sy = layout_new_pane_size(w, previous, child, lc.type, lc.sy, count - @as(u32, @intCast(idx)), available);
+            available -|= (child.sy + 1);
+        }
+        layout_resize_child_cells(w, child);
+    }
+}
+
+/// Split a pane into two. size is a hint, or -1 for default half/half split.
+/// This must be followed by layout_assign_pane before much else happens!
+/// Ported from tmux layout_split_pane.
+pub fn layout_split_pane(wp: *T.WindowPane, type_: T.LayoutType, size_arg: i32, flags: i32) ?*T.LayoutCell {
+    if (type_ != .leftright and type_ != .topbottom)
+        return null;
+
+    const full_size = (flags & @as(i32, @intCast(T.SPAWN_FULLSIZE))) != 0;
+    const before = (flags & @as(i32, @intCast(T.SPAWN_BEFORE))) != 0;
+
+    // If full_size is specified, add a new cell at the top of the window
+    // layout. Otherwise, split the cell for the current pane.
+    const lc: *T.LayoutCell = if (full_size)
+        wp.window.layout_root orelse return null
+    else
+        wp.layout_cell orelse return null;
+
+    const sx = lc.sx;
+    const sy = lc.sy;
+    const xoff = lc.xoff;
+    const yoff = lc.yoff;
+
+    const minimum: u32 = T.PANE_MINIMUM * 2 + 1;
+    switch (type_) {
+        .leftright => if (sx < minimum) return null,
+        .topbottom => if (sy < minimum) return null,
+        .windowpane => return null,
+    }
+
+    // Calculate new cell sizes. size is the target size or -1 for middle
+    // split, size1 is the size of the top/left and size2 the bottom/right.
+    const saved_size: u32 = if (type_ == .leftright) sx else sy;
+    var size: i32 = size_arg;
+    var size2: u32 = if (size < 0)
+        ((saved_size + 1) / 2) - 1
+    else if (before)
+        saved_size -| @as(u32, @intCast(size)) -| 1
+    else
+        @intCast(size);
+
+    if (size2 < T.PANE_MINIMUM)
+        size2 = T.PANE_MINIMUM
+    else if (size2 > saved_size - 2)
+        size2 = saved_size - 2;
+    const size1: u32 = saved_size - 1 - size2;
+
+    const new_size: u32 = if (before) size2 else size1;
+    if (full_size and !layout_set_size_check(wp.window, lc, type_, @intCast(new_size)))
+        return null;
+
+    var lcnew: *T.LayoutCell = undefined;
+    var resize_first: bool = false;
+
+    if (lc.parent != null and lc.parent.?.type == type_) {
+        // If the parent exists and is of the same type as the split,
+        // create a new cell and insert it after this one.
+        const lcparent = lc.parent.?;
+        lcnew = layout_create_cell(lcparent);
+        const lc_idx = child_index(lcparent, lc) orelse return null;
+        if (before) {
+            lcparent.cells.insert(xm.allocator, lc_idx, lcnew) catch unreachable;
+        } else {
+            lcparent.cells.insert(xm.allocator, lc_idx + 1, lcnew) catch unreachable;
+        }
+    } else if (full_size and lc.parent == null and lc.type == type_) {
+        // If the new full size pane is the same type as the root split,
+        // insert the new pane under the existing root cell instead of
+        // creating a new root cell. The existing layout must be resized
+        // before inserting the new cell.
+        if (type_ == .leftright) {
+            lc.sx = new_size;
+            layout_resize_child_cells(wp.window, lc);
+            lc.sx = saved_size;
+        } else if (type_ == .topbottom) {
+            lc.sy = new_size;
+            layout_resize_child_cells(wp.window, lc);
+            lc.sy = saved_size;
+        }
+        resize_first = true;
+        lcnew = layout_create_cell(lc);
+        size = @as(i32, @intCast(saved_size)) - 1 - @as(i32, @intCast(new_size));
+        if (type_ == .leftright)
+            layout_set_size(lcnew, @intCast(size), sy, 0, 0)
+        else if (type_ == .topbottom)
+            layout_set_size(lcnew, sx, @intCast(size), 0, 0);
+        if (before)
+            lc.cells.insert(xm.allocator, 0, lcnew) catch unreachable
+        else
+            lc.cells.append(xm.allocator, lcnew) catch unreachable;
+    } else {
+        // New parent: wrap lc and lcnew under a fresh container.
+        const lcparent = layout_create_cell(lc.parent);
+        layout_make_node(lcparent, type_);
+        layout_set_size(lcparent, sx, sy, xoff, yoff);
+        if (lc.parent == null) {
+            wp.window.layout_root = lcparent;
+        } else {
+            const grandparent = lc.parent.?;
+            const lc_idx = child_index(grandparent, lc) orelse return null;
+            grandparent.cells.items[lc_idx] = lcparent;
+        }
+
+        lc.parent = lcparent;
+        lcparent.cells.append(xm.allocator, lc) catch unreachable;
+
+        lcnew = layout_create_cell(lcparent);
+        if (before)
+            lcparent.cells.insert(xm.allocator, 0, lcnew) catch unreachable
+        else
+            lcparent.cells.append(xm.allocator, lcnew) catch unreachable;
+    }
+
+    const lc1: *T.LayoutCell = if (before) lcnew else lc;
+    const lc2: *T.LayoutCell = if (before) lc else lcnew;
+
+    // Set new cell sizes. size1 is the size of the top/left and size2 the
+    // bottom/right.
+    if (!resize_first and type_ == .leftright) {
+        layout_set_size(lc1, size1, sy, xoff, yoff);
+        layout_set_size(lc2, size2, sy, xoff + lc1.sx + 1, yoff);
+    } else if (!resize_first and type_ == .topbottom) {
+        layout_set_size(lc1, sx, size1, xoff, yoff);
+        layout_set_size(lc2, sx, size2, xoff, yoff + lc1.sy + 1);
+    }
+    if (full_size) {
+        if (!resize_first)
+            layout_resize_child_cells(wp.window, lc);
+        layout_fix_offsets(wp.window);
+    } else {
+        layout_make_leaf(lc, wp);
+    }
+
+    return lcnew;
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn test_setup_window(sx: u32, sy: u32) *T.Window {
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+    return win.window_create(sx, sy, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+}
+
+fn test_teardown_window(w: *T.Window) void {
+    if (w.saved_layout_root) |saved| {
+        layout_free_cell(saved);
+        w.saved_layout_root = null;
+    }
+    while (w.panes.items.len > 0) {
+        const wp = w.panes.items[w.panes.items.len - 1];
+        win.window_remove_pane(w, wp);
+    }
+    w.panes.deinit(xm.allocator);
+    w.last_panes.deinit(xm.allocator);
+    opts.options_free(w.options);
+    xm.allocator.free(w.name);
+    _ = win.windows.remove(w.id);
+    xm.allocator.destroy(w);
+}
+
+test "layout_split_pane splits a single pane vertically" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lcnew = layout_split_pane(wp, .topbottom, -1, 0) orelse
+        return error.SplitFailed;
+
+    try testing.expect(lcnew.type == .windowpane);
+    try testing.expect(wp.layout_cell != null);
+    try testing.expect(wp.layout_cell.?.parent != null);
+    try testing.expectEqual(T.LayoutType.topbottom, wp.layout_cell.?.parent.?.type);
+
+    // Sizes should add up: size1 + 1 (border) + size2 = 24.
+    const lc_orig = wp.layout_cell.?;
+    try testing.expectEqual(@as(u32, 24), lc_orig.sy + 1 + lcnew.sy);
+    try testing.expectEqual(@as(u32, 80), lc_orig.sx);
+    try testing.expectEqual(@as(u32, 80), lcnew.sx);
+}
+
+test "layout_split_pane splits a single pane horizontally" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lcnew = layout_split_pane(wp, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+
+    try testing.expect(lcnew.type == .windowpane);
+    const lc_orig = wp.layout_cell.?;
+    try testing.expectEqual(T.LayoutType.leftright, lc_orig.parent.?.type);
+    try testing.expectEqual(@as(u32, 80), lc_orig.sx + 1 + lcnew.sx);
+    try testing.expectEqual(@as(u32, 24), lc_orig.sy);
+    try testing.expectEqual(@as(u32, 24), lcnew.sy);
+}
+
+test "layout_split_pane with explicit size" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lcnew = layout_split_pane(wp, .leftright, 20, 0) orelse
+        return error.SplitFailed;
+
+    const lc_orig = wp.layout_cell.?;
+    // size2 = 20, size1 = 80 - 1 - 20 = 59
+    try testing.expectEqual(@as(u32, 59), lc_orig.sx);
+    try testing.expectEqual(@as(u32, 20), lcnew.sx);
+}
+
+test "layout_split_pane with SPAWN_BEFORE inserts before the target" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const before_flags: i32 = @intCast(T.SPAWN_BEFORE);
+    const lcnew = layout_split_pane(wp, .topbottom, -1, before_flags) orelse
+        return error.SplitFailed;
+
+    const parent = wp.layout_cell.?.parent.?;
+    try testing.expect(parent.cells.items.len == 2);
+    try testing.expectEqual(lcnew, parent.cells.items[0]);
+    try testing.expectEqual(wp.layout_cell.?, parent.cells.items[1]);
+}
+
+test "layout_split_pane rejects split when too small" {
+    const w = test_setup_window(2, 2);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 2, 2);
+    layout_init(w, wp);
+
+    // 2x2 is too small for PANE_MINIMUM*2+1 = 3.
+    try testing.expectEqual(@as(?*T.LayoutCell, null), layout_split_pane(wp, .topbottom, -1, 0));
+    try testing.expectEqual(@as(?*T.LayoutCell, null), layout_split_pane(wp, .leftright, -1, 0));
+}
+
+test "layout_split_pane merges into existing same-type parent" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    // First split: creates a topbottom parent.
+    const lc2 = layout_split_pane(wp1, .topbottom, -1, 0) orelse
+        return error.SplitFailed;
+
+    // Assign the second pane to the new cell.
+    const wp2 = win.window_add_pane(w, null, 80, 12);
+    layout_assign_pane(lc2, wp2, 0);
+
+    _ = layout_split_pane(wp1, .topbottom, -1, 0) orelse
+        return error.SplitFailed;
+
+    const parent = wp1.layout_cell.?.parent.?;
+    try testing.expectEqual(@as(usize, 3), parent.cells.items.len);
+}
+
+test "layout_set_size_check validates minimum sizes" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lc = wp.layout_cell.?;
+    try testing.expect(layout_set_size_check(w, lc, .leftright, @intCast(T.PANE_MINIMUM)));
+    try testing.expect(!layout_set_size_check(w, lc, .leftright, 0));
+}
+
+test "layout_new_pane_size gives remaining space to last cell" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lc = wp.layout_cell.?;
+    try testing.expectEqual(@as(u32, 42), layout_new_pane_size(w, 80, lc, .leftright, 80, 1, 42));
+}
+
+test "layout_close_pane removes a cell and restores space" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const lc2 = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 40, 24);
+    layout_assign_pane(lc2, wp2, 0);
+
+    layout_close_pane(wp2);
+
+    const root = w.layout_root.?;
+    try testing.expectEqual(T.LayoutType.windowpane, root.type);
+    try testing.expectEqual(@as(u32, 80), root.sx);
+    try testing.expectEqual(@as(u32, 24), root.sy);
+}
+
+test "zoom saves and restores layout" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const lc2 = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 40, 24);
+    layout_assign_pane(lc2, wp2, 0);
+
+    const orig_sx1 = wp1.layout_cell.?.sx;
+    const orig_sx2 = wp2.layout_cell.?.sx;
+
+    // Zoom on wp1.
+    try testing.expect(win.window_zoom(wp1));
+    try testing.expect(w.flags & T.WINDOW_ZOOMED != 0);
+    try testing.expect(w.saved_layout_root != null);
+
+    // After zoom, wp1 should have a fresh single-pane layout.
+    try testing.expect(wp1.layout_cell != null);
+    try testing.expectEqual(@as(u32, 80), wp1.layout_cell.?.sx);
+    try testing.expectEqual(@as(u32, 24), wp1.layout_cell.?.sy);
+
+    // Unzoom.
+    try testing.expect(win.window_unzoom(w));
+    try testing.expectEqual(@as(u32, 0), w.flags & T.WINDOW_ZOOMED);
+    try testing.expect(w.saved_layout_root == null);
+
+    // Layout should be restored.
+    try testing.expect(wp1.layout_cell != null);
+    try testing.expect(wp2.layout_cell != null);
+    try testing.expectEqual(orig_sx1, wp1.layout_cell.?.sx);
+    try testing.expectEqual(orig_sx2, wp2.layout_cell.?.sx);
 }

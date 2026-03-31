@@ -50,10 +50,9 @@ pub fn resize_window(w: *T.Window, sx_: u32, sy_: u32, xpixel: i32, ypixel: i32)
     // When there is no layout tree, panes follow the whole-window size.
     if (w.layout_root == null) {
         for (w.panes.items) |wp| {
-            wp.sx = sx;
-            wp.sy = sy;
             wp.xoff = 0;
             wp.yoff = 0;
+            win.window_pane_resize(wp, sx, sy);
         }
     }
 
@@ -126,8 +125,6 @@ pub fn recalculate_size(w: *T.Window, now: bool) void {
         return;
     }
 
-    // Reduced seam: tmux can defer this until server-client's resize pass;
-    // zmux applies it immediately because that later pass is not ported yet.
     resize_window(w, sx, sy, @intCast(xpixel), @intCast(ypixel));
 }
 

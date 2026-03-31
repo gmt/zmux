@@ -21,29 +21,18 @@ const std = @import("std");
 const T = @import("types.zig");
 const cmdq = @import("cmd-queue.zig");
 const grid = @import("grid.zig");
-const job_mod = @import("job.zig");
-const layout_mod = @import("layout.zig");
-const opts_mod = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
-const server_client = @import("server-client.zig");
-const server_fn = @import("server-fn.zig");
 const status = @import("status.zig");
 const style_mod = @import("style.zig");
 const tty_acs = @import("tty-acs.zig");
 const tty_draw = @import("tty-draw.zig");
 const utf8 = @import("utf8.zig");
-const window_mod = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
 pub const POPUP_CLOSEANYKEY: i32 = 0x1;
 pub const POPUP_CLOSEEXIT: i32 = 0x2;
 pub const POPUP_CLOSEEXITZERO: i32 = 0x4;
-pub const POPUP_INTERNAL: i32 = 0x20;
-pub const POPUP_NOJOB: i32 = 0x10;
-
-/// tmux `popup_close_cb` — called when the popup exits (status, user data).
-pub const PopupCloseCb = *const fn (i32, ?*anyopaque) void;
 
 /// Matches tmux `BOX_LINES_NONE` / zmux display-popup `-B` (see cmd-display-menu.zig).
 pub const POPUP_BORDER_NONE: u32 = 6;
@@ -103,19 +92,9 @@ pub const PopupData = struct {
     defaults: T.GridCell = T.grid_default_cell,
     border_cell: T.GridCell = T.grid_default_cell,
     border_lines: u32 = 1,
-    /// Colour palette (tmux `pd->palette`).
-    palette: T.ColourPalette = .{},
     screen: ?*T.Screen = null,
     content: std.ArrayList(u8) = .{},
-    /// Exit status of the popup job (tmux `pd->status`).
     command_status: i32 = 0,
-    /// PTY-backed job for interactive popups (tmux `pd->job`).
-    job: ?*job_mod.Job = null,
-    /// Completion callback invoked on exit (tmux `pd->cb` / `pd->arg`).
-    close_cb: ?PopupCloseCb = null,
-    close_cb_arg: ?*anyopaque = null,
-    /// Pending overlay close requested from job/menu (tmux `pd->close`).
-    close_pending: bool = false,
     px: u32 = 0,
     py: u32 = 0,
     sx: u32 = 0,
@@ -144,7 +123,6 @@ pub const PopupData = struct {
             screen_mod.screen_free(screen);
             xm.allocator.destroy(screen);
         }
-        if (self.job) |j| job_mod.job_free(j);
         if (self.title) |title| xm.allocator.free(title);
         if (self.style) |style| xm.allocator.free(style);
         if (self.border_style) |border_style| xm.allocator.free(border_style);
@@ -419,59 +397,11 @@ pub fn popup_check_cb(
     return &pd.overlay_ranges;
 }
 
-/// Draw the popup into the client (tmux `popup_draw_cb`).
-pub fn popup_draw_cb(c: *T.Client, data: ?*anyopaque, _: *PopupScreenRedrawCtx) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
-    const tty = &c.tty;
+/// Draw the popup into the client (tmux `popup_draw_cb`). Full tty pipeline not ported; stub.
+pub fn popup_draw_cb(_: *T.Client, _: ?*anyopaque, _: *PopupScreenRedrawCtx) void {}
 
-    popup_reapply_styles(pd);
-
-    const s = screen_mod.screen_init(pd.sx, pd.sy, 0);
-    defer {
-        screen_mod.screen_free(s);
-        xm.allocator.destroy(s);
-    }
-    s.cursor_visible = false;
-
-    fill_rect(s.grid, 0, 0, pd.sx, pd.sy, &pd.defaults);
-    if (pd.border_lines == POPUP_BORDER_NONE) {
-        if (pd.screen) |inner| blit_screen(s.grid, 0, 0, inner);
-    } else if (pd.sx > 2 and pd.sy > 2) {
-        fill_rect(s.grid, 0, 0, pd.sx, pd.sy, &pd.border_cell);
-        fill_rect(s.grid, 1, 1, pd.sx - 2, pd.sy - 2, &pd.defaults);
-        draw_border(pd, s);
-        draw_title(pd, s);
-        if (pd.screen) |inner| blit_screen(s.grid, 1, 1, inner);
-    }
-
-    var defaults = pd.defaults;
-    if (defaults.fg == 8) defaults.fg = pd.palette.fg;
-    if (defaults.bg == 8) defaults.bg = pd.palette.bg;
-
-    for (0..pd.sy) |i| {
-        tty_draw.tty_draw_line(tty, s, 0, @intCast(i), pd.sx, pd.px, pd.py + @as(u32, @intCast(i)), &defaults, &pd.palette);
-    }
-}
-
-/// Tear down overlay-owned state (tmux `popup_free_cb`).
-pub fn popup_free_cb(c: *T.Client, data: ?*anyopaque) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
-
-    if (pd.close_cb) |cb| cb(pd.command_status, pd.close_cb_arg);
-
-    if (pd.item) |item| {
-        if (cmdq.cmdq_get_client(item)) |item_client| {
-            if (item_client.session == null)
-                item_client.retval = pd.command_status;
-        }
-        cmdq.cmdq_continue(item);
-    }
-
-    server_client.server_client_unref(c);
-
-    pd.deinit();
-    xm.allocator.destroy(pd);
-}
+/// Tear down overlay-owned state (tmux `popup_free_cb`). zmux uses [`clear_overlay`] for lifecycle; stub.
+pub fn popup_free_cb(_: *T.Client, _: ?*anyopaque) void {}
 
 /// Adjust popup geometry on tty resize (tmux `popup_resize_cb`).
 pub fn popup_resize_cb(_: *T.Client, data: ?*anyopaque) void {
@@ -499,74 +429,11 @@ pub fn popup_resize_cb(_: *T.Client, data: ?*anyopaque) void {
     pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
 }
 
-/// Promote popup PTY into a split pane (tmux `popup_make_pane`).
-pub fn popup_make_pane(pd: *PopupData, layout_type: PopupLayoutType) void {
-    const c = pd.client;
-    const s = c.session orelse return;
-    const wl = s.curw orelse return;
-    const w = wl.window;
-    const wp = w.active orelse return;
+/// Promote popup PTY into a split pane (tmux `popup_make_pane`). Needs window/layout runtime; stub.
+pub fn popup_make_pane(_: *PopupData, _: PopupLayoutType) void {}
 
-    _ = window_mod.window_unzoom(w);
-
-    const zig_type: T.LayoutType = switch (layout_type) {
-        .leftright => .leftright,
-        .topbottom => .topbottom,
-    };
-
-    const lc = layout_mod.layout_split_pane(wp, zig_type, -1, 0, 0, 0) orelse return;
-
-    const new_wp = window_mod.window_add_pane(w, null, lc.sx, lc.sy);
-    layout_mod.layout_assign_pane(lc, new_wp, 0);
-
-    if (pd.job) |j| {
-        new_wp.fd = j.fd;
-        new_wp.pid = j.pid;
-        j.fd = -1;
-        pd.job = null;
-    }
-
-    if (pd.screen) |ps| {
-        if (ps.title) |t| _ = screen_mod.screen_set_title(&new_wp.base, t);
-        screen_mod.screen_free(&new_wp.base);
-        new_wp.base = ps.*;
-        screen_mod.screen_resize(&new_wp.base, new_wp.sx, new_wp.sy);
-        pd.screen = screen_mod.screen_init(1, 1, 0);
-    }
-
-    window_mod.window_pane_set_event(new_wp);
-    _ = window_mod.window_set_active_pane(w, new_wp, true);
-    new_wp.flags |= T.PANE_CHANGED;
-
-    pd.close_pending = true;
-}
-
-/// Context menu selection (tmux `popup_menu_done`).
-pub fn popup_menu_done(_menu: ?*anyopaque, _choice: u32, key: T.key_code, data: ?*anyopaque) void {
-    _ = _menu;
-    _ = _choice;
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
-    const c = pd.client;
-
-    server_fn.server_redraw_client(c);
-
-    switch (key) {
-        'F' => {
-            pd.sx = c.tty.sx;
-            pd.sy = c.tty.sy;
-            pd.px = 0;
-            pd.py = 0;
-        },
-        'C' => {
-            pd.px = c.tty.sx / 2 - pd.sx / 2;
-            pd.py = c.tty.sy / 2 - pd.sy / 2;
-        },
-        'h' => popup_make_pane(pd, .leftright),
-        'v' => popup_make_pane(pd, .topbottom),
-        'q' => pd.close_pending = true,
-        else => {},
-    }
-}
+/// Context menu selection (tmux `popup_menu_done`). Menu + job integration not wired; stub.
+pub fn popup_menu_done(_: ?*anyopaque, _: u32, _: T.key_code, _: ?*anyopaque) void {}
 
 /// Mouse move/resize drag (tmux `popup_handle_drag`).
 pub fn popup_handle_drag(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
@@ -675,148 +542,35 @@ pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) 
     return 0;
 }
 
-/// Job output hook (tmux `popup_job_update_cb`).
-/// Full input parsing (ictx + bufferevent) is not yet wired; mark dirty so
-/// any content written via popup_write is visible.
-pub fn popup_job_update_cb(data: ?*anyopaque) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
-    pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
-}
+/// Job output hook (tmux `popup_job_update_cb`). PTY popup jobs not wired; stub.
+pub fn popup_job_update_cb(_: ?*anyopaque) void {}
 
-/// Job exit hook (tmux `popup_job_complete_cb`).
-pub fn popup_job_complete_cb(data: ?*anyopaque) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
-    const j = pd.job orelse return;
-
-    const raw_status = j.status;
-    if (std.c.WIFEXITED(raw_status)) {
-        pd.command_status = std.c.WEXITSTATUS(raw_status);
-    } else if (std.c.WIFSIGNALED(raw_status)) {
-        pd.command_status = std.c.WTERMSIG(raw_status);
-    } else {
-        pd.command_status = 0;
-    }
-    pd.job = null;
-
-    if ((pd.flags & POPUP_CLOSEEXIT) != 0 or
-        ((pd.flags & POPUP_CLOSEEXITZERO) != 0 and pd.command_status == 0))
-    {
-        server_client.server_client_clear_overlay(pd.client);
-    }
-}
+/// Job exit hook (tmux `popup_job_complete_cb`). Stub.
+pub fn popup_job_complete_cb(_: ?*anyopaque) void {}
 
 pub fn popup_editor_free(pe: *PopupEditor) void {
     if (pe.path) |p| {
-        std.fs.deleteFileAbsolute(p) catch {};
+        std.fs.cwd().deleteFile(p) catch {};
         xm.allocator.free(p);
     }
     xm.allocator.destroy(pe);
 }
 
-/// Close callback for editor popups (tmux `popup_editor_close_cb`).
+/// Close callback for editor popups (tmux `popup_editor_close_cb`). File read + `popup_display` path stub.
 pub fn popup_editor_close_cb(exit_status: i32, arg: ?*anyopaque) void {
     const pe: *PopupEditor = @ptrCast(@alignCast(arg orelse return));
-
     if (exit_status != 0) {
         if (pe.cb) |cb| cb(null, 0, pe.arg);
         popup_editor_free(pe);
         return;
     }
-
-    const path = pe.path orelse {
-        if (pe.cb) |cb| cb(null, 0, pe.arg);
-        popup_editor_free(pe);
-        return;
-    };
-
-    var buf: ?[]u8 = null;
-    var len: usize = 0;
-
-    read_file: {
-        const f = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch break :read_file;
-        defer f.close();
-        const stat = f.stat() catch break :read_file;
-        const file_len = stat.size;
-        if (file_len == 0) break :read_file;
-        const raw = xm.allocator.alloc(u8, @intCast(file_len)) catch break :read_file;
-        const n = f.readAll(raw) catch {
-            xm.allocator.free(raw);
-            break :read_file;
-        };
-        if (n != @as(usize, @intCast(file_len))) {
-            xm.allocator.free(raw);
-            break :read_file;
-        }
-        buf = raw;
-        len = n;
-    }
-
-    if (pe.cb) |cb| cb(buf, len, pe.arg);
+    if (pe.cb) |cb| cb(null, 0, pe.arg);
     popup_editor_free(pe);
 }
 
-/// External editor in a popup (tmux `popup_editor`).
-pub fn popup_editor(c: *T.Client, buf: []const u8, len: usize, cb: ?PopupFinishEditCb, arg: ?*anyopaque) i32 {
-    _ = len; // buf.len is authoritative
-
-    const editor = opts_mod.options_get_string(opts_mod.global_options, "editor");
-    if (editor.len == 0) return -1;
-
-    var tmp_path_buf: [64]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/zmux.{d}", .{std.os.linux.getpid()}) catch return -1;
-
-    write_tmp: {
-        const f = std.fs.createFileAbsolute(tmp_path, .{ .truncate = true }) catch return -1;
-        defer f.close();
-        f.writeAll(buf) catch break :write_tmp;
-        break :write_tmp;
-    }
-
-    const pe = xm.allocator.create(PopupEditor) catch {
-        std.fs.deleteFileAbsolute(tmp_path) catch {};
-        return -1;
-    };
-    pe.* = .{
-        .path = xm.xstrdup(tmp_path),
-        .cb = cb,
-        .arg = arg,
-    };
-
-    const sx = c.tty.sx * 9 / 10;
-    const sy = c.tty.sy * 9 / 10;
-    const px = c.tty.sx / 2 - sx / 2;
-    const py = c.tty.sy / 2 - sy / 2;
-
-    const cmd = std.fmt.allocPrint(xm.allocator, "{s} {s}", .{ editor, tmp_path }) catch {
-        popup_editor_free(pe);
-        return -1;
-    };
-    defer xm.allocator.free(cmd);
-
-    const rc = popup_display(
-        POPUP_INTERNAL | POPUP_CLOSEEXIT,
-        1, // BOX_LINES_DEFAULT mapped to single border
-        null,
-        px,
-        py,
-        sx,
-        sy,
-        editor,
-        c,
-        null,
-        null,
-        null,
-        cmd,
-    );
-    if (rc != 0) {
-        popup_editor_free(pe);
-        return -1;
-    }
-    if (state(c)) |pd| {
-        pd.close_cb = popup_editor_close_cb;
-        pd.close_cb_arg = pe;
-    }
-    return 0;
+/// External editor in a popup (tmux `popup_editor`). Not implemented.
+pub fn popup_editor(_: *T.Client, _: []const u8, _: usize, _: ?PopupFinishEditCb, _: ?*anyopaque) i32 {
+    return -1;
 }
 
 pub fn render_overlay_payload_region(

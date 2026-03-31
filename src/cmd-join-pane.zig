@@ -26,6 +26,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
+const layout_mod = @import("layout.zig");
 const xm = @import("xmalloc.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
@@ -65,21 +66,16 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.has('b')) spawn_flags |= T.SPAWN_BEFORE;
     if (args.has('f')) spawn_flags |= T.SPAWN_FULLSIZE;
 
-    const plan = win.window_plan_split(dst_wp, type_, size, spawn_flags) catch |err| switch (err) {
-        error.FullSizeNeedsLayout => {
-            cmdq.cmdq_error(item, "full-size split still needs layout support", .{});
-            return .@"error";
-        },
-        error.NoSpace => {
-            cmdq.cmdq_error(item, "create pane failed: pane too small", .{});
-            return .@"error";
-        },
+    const lcnew = layout_mod.layout_split_pane(dst_wp, type_, size, @intCast(spawn_flags)) orelse {
+        cmdq.cmdq_error(item, "create pane failed: pane too small", .{});
+        return .@"error";
     };
 
     const source_was_last = win.window_count_panes(src_w) == 1;
+    layout_mod.layout_close_pane(src_wp);
     _ = win.window_detach_pane(src_w, src_wp);
     win.window_adopt_pane_before(dst_w, src_wp, insertion_anchor(dst_w, dst_wp, args.has('b')));
-    win.window_apply_split_plan(dst_wp, src_wp, plan);
+    layout_mod.layout_assign_pane(lcnew, src_wp, 0);
 
     if (!args.has('d')) {
         _ = win.window_set_active_pane(dst_w, src_wp, true);
@@ -383,7 +379,7 @@ test "join-pane applies horizontal sizing flags and closes the source gap" {
     try std.testing.expectEqual(@as(u32, 55), moved.xoff);
 }
 
-test "join-pane accepts reduced full-size sizing on a single-pane target and rejects it otherwise" {
+test "join-pane -f full-size sizing succeeds on both single-pane and multi-pane targets" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");
     const sess = @import("session.zig");
@@ -429,25 +425,25 @@ test "join-pane accepts reduced full-size sizing on a single-pane target and rej
     var ok_item = cmdq.CmdqItem{ .client = null, .cmdlist = &ok_list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(ok_cmd, &ok_item));
 
-    const still_src = dst_wl.window.panes.items[0];
-    var extra_ctx: T.SpawnContext = .{ .s = s, .wl = dst_wl, .flags = T.SPAWN_EMPTY };
-    const extra = spawn.spawn_pane(&extra_ctx, &cause).?;
-    const dst_plan = try win.window_plan_split(still_src, .topbottom, -1, 0);
-    win.window_apply_split_plan(still_src, extra, dst_plan);
+    // After the full-size join the destination window has two panes.
+    try std.testing.expectEqual(@as(usize, 2), dst_wl.window.panes.items.len);
 
+    // A second full-size join into the same (now multi-pane) target also works.
     var second_src_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const second_src_wl = spawn.spawn_window(&second_src_ctx, &cause).?;
     const second_moved = second_src_wl.window.active.?;
 
+    const still_dst = dst_wl.window.panes.items[0];
     const second_src_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{second_moved.id}) catch unreachable;
     defer xm_local.allocator.free(second_src_target);
-    const same_dst_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{still_src.id}) catch unreachable;
+    const same_dst_target = std.fmt.allocPrint(xm_local.allocator, "%{d}", .{still_dst.id}) catch unreachable;
     defer xm_local.allocator.free(same_dst_target);
 
     parse_cause = null;
-    const fail_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-f", "-s", second_src_target, "-t", same_dst_target }, null, &parse_cause);
-    defer cmd_mod.cmd_free(fail_cmd);
-    var fail_list: cmd_mod.CmdList = .{};
-    var fail_item = cmdq.CmdqItem{ .client = null, .cmdlist = &fail_list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(fail_cmd, &fail_item));
+    const also_ok_cmd = try cmd_mod.cmd_parse_one(&.{ "join-pane", "-f", "-s", second_src_target, "-t", same_dst_target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(also_ok_cmd);
+    var also_ok_list: cmd_mod.CmdList = .{};
+    var also_ok_item = cmdq.CmdqItem{ .client = null, .cmdlist = &also_ok_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(also_ok_cmd, &also_ok_item));
+    try std.testing.expectEqual(@as(usize, 3), dst_wl.window.panes.items.len);
 }

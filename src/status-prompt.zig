@@ -1164,15 +1164,14 @@ pub fn status_prompt_save_history() void {
 
     const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
     defer file.close();
+    const writer = file.writer();
 
     for (0..prompt_type_count) |type_idx| {
         const prompt_type: PromptType = @enumFromInt(@as(u8, @intCast(type_idx)));
         const type_str = status_prompt_type_string(prompt_type);
         const history = &prompt_histories[type_idx];
         for (history.items) |item| {
-            var buf: [4096]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "{s}:{s}\n", .{ type_str, item }) catch continue;
-            file.writeAll(line) catch {};
+            writer.print("{s}:{s}\n", .{ type_str, item }) catch {};
         }
     }
 }
@@ -1678,7 +1677,7 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
 pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
     if (word.len == 0 and !at_start) return null;
 
-    var list: std.ArrayList([]const u8) = .{};
+    var list = std.ArrayList([]const u8).init(xm.allocator);
     defer {
         list.deinit(xm.allocator);
     }
@@ -1815,7 +1814,7 @@ test "status-prompt stores multibyte input through the shared cell buffer" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
     const capture = xm.allocator.create(PromptCapture) catch unreachable;
@@ -1863,7 +1862,7 @@ test "status-prompt enter callback sees reconstructed utf8 text" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
     const capture = xm.allocator.create(PromptCapture) catch unreachable;
@@ -1904,7 +1903,7 @@ test "status-prompt supports cursor edits, history traversal, completion, and re
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -1977,7 +1976,7 @@ test "status-prompt cursor edits stay on the shared status-only redraw path" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -2015,7 +2014,7 @@ test "status-prompt word motion and delete-word use the shared cell reader" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -2074,7 +2073,7 @@ test "status-prompt vi command mode and quote-next render through the shared cel
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
     };
     client.tty.client = &client;

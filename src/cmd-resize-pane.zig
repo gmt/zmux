@@ -605,7 +605,7 @@ test "resize-pane -M installs the mouse drag callback and resizes the border pat
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     defer env_mod.environ_free(client.environ);

@@ -2928,14 +2928,44 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     log.log_debug("tty_cmd_sixelimage: fallback={}, clamp ({d},{d})-({d},{d})",
         .{ fallback, i, j, rx, ry });
 
-    // Both paths currently emit the pre-rendered fallback text from ctx.ptr.
-    // The sixel-capable path will call sixel_scale/sixel_print here instead.
-    const data = ctx.ptr orelse return;
     tty_region_off(tty);
     tty_margin_off(tty);
     tty_cursor(tty, x, y);
     tty.flags |= @as(i32, @intCast(T.TTY_NOBLOCK));
-    tty_add(tty, data, ctx.num);
+
+    if (!fallback) {
+        // Sixel-capable terminal: scale the image to the visible region
+        // and emit real sixel DCS data.
+        const sixel_mod = @import("image-sixel.zig");
+        const si: *T.SixelImage = @ptrCast(@alignCast(ctx.si orelse {
+            // No sixel data available — fall through to fallback text.
+            const data = ctx.ptr orelse return;
+            tty_add(tty, data, ctx.num);
+            tty_invalidate(tty);
+            return;
+        }));
+        const scaled = sixel_mod.sixel_scale(si, i, j, rx -| i, ry -| j,
+            rx -| i, ry -| j, false) orelse {
+            // Scale failed — use fallback text.
+            const data = ctx.ptr orelse return;
+            tty_add(tty, data, ctx.num);
+            tty_invalidate(tty);
+            return;
+        };
+        defer sixel_mod.sixel_free(scaled);
+        const printed = sixel_mod.sixel_print(scaled, null) orelse {
+            const data = ctx.ptr orelse return;
+            tty_add(tty, data, ctx.num);
+            tty_invalidate(tty);
+            return;
+        };
+        defer xm.allocator.free(printed);
+        tty_add(tty, printed.ptr, printed.len);
+    } else {
+        // Non-sixel terminal: emit pre-rendered fallback text.
+        const data = ctx.ptr orelse return;
+        tty_add(tty, data, ctx.num);
+    }
     tty_invalidate(tty);
 }
 

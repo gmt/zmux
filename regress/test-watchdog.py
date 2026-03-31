@@ -37,6 +37,7 @@ import os
 import pathlib
 import re
 import select
+import shutil
 import signal
 import statistics
 import subprocess
@@ -168,6 +169,95 @@ def escalate(proc: subprocess.Popen) -> None:
         proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
         pass
+
+# ── Coredump collection ──────────────────────────────────────────────────
+
+def _have_coredumpctl() -> bool:
+    return shutil.which("coredumpctl") is not None
+
+
+def collect_coredumps(since: float, exe_hint: str | None = None) -> list[dict]:
+    """Query coredumpctl for crashes since *since* (UNIX timestamp).
+
+    Returns a list of dicts with keys: pid, signal, exe, backtrace.
+    """
+    if not _have_coredumpctl():
+        return []
+
+    since_dt = datetime.datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M:%S")
+    # List matching coredumps as JSON.
+    try:
+        result = subprocess.run(
+            ["coredumpctl", "list", "--since", since_dt, "--no-pager"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    # Parse PIDs from the listing.
+    pids: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        # Typical line: "Mon 2026-03-30 17:43:00 PDT 1913401 1000 1000 SIGABRT ..."
+        # Filter by executable hint if provided.
+        if exe_hint and exe_hint not in line:
+            continue
+        for part in parts:
+            if part.isdigit() and len(part) >= 4:
+                pids.append(part)
+                break
+
+    dumps: list[dict] = []
+    for pid in pids[-3:]:  # At most 3 most recent.
+        try:
+            info = subprocess.run(
+                ["coredumpctl", "info", pid, "--no-pager"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if info.returncode != 0:
+            continue
+
+        # Extract signal and backtrace.
+        sig = ""
+        bt_lines: list[str] = []
+        in_bt = False
+        for line in info.stdout.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("Signal:"):
+                sig = line_s.split(":", 1)[1].strip()
+            if "Stack trace" in line_s:
+                in_bt = True
+                continue
+            if in_bt:
+                if line_s.startswith("#"):
+                    bt_lines.append(line_s)
+                elif bt_lines:
+                    break
+
+        dumps.append({
+            "pid": pid,
+            "signal": sig,
+            "backtrace": bt_lines,
+        })
+
+    return dumps
+
+
+def report_coredumps(since: float) -> None:
+    """Print any coredumps from the test run to stderr."""
+    dumps = collect_coredumps(since, exe_hint="test")
+    if not dumps:
+        return
+    warn(f"found {len(dumps)} coredump(s) from this run:")
+    for dump in dumps:
+        warn(f"  PID {dump['pid']} ({dump['signal']})")
+        for frame in dump["backtrace"][:10]:
+            warn(f"    {frame}")
+        if len(dump["backtrace"]) > 10:
+            warn(f"    ... ({len(dump['backtrace']) - 10} more frames)")
+
 
 # ── Parse test count from zig build test output ──────────────────────────
 
@@ -327,12 +417,14 @@ def main() -> int:
 
     warn(f"timeout: {timeout:.1f}s ({timeout_desc})")
 
+    run_start = time.time()
     exit_code, elapsed, output = run_wrapped(args.extra, timeout)
 
     test_count = parse_test_count(output)
 
     if exit_code is None:
         # Hang detected. Try diagnostic re-run.
+        report_coredumps(run_start)
         warn("primary run timed out, attempting diagnostic re-run...")
         binary = find_test_binary()
         hung_test = None
@@ -344,6 +436,7 @@ def main() -> int:
         return 124
 
     # Normal completion (pass or fail).
+    report_coredumps(run_start)
     warn(f"completed in {elapsed:.1f}s (exit code {exit_code})")
     record_run(stats, elapsed, exit_code, timeout, test_count=test_count)
     return exit_code

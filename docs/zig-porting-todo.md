@@ -10,12 +10,3 @@ Functional gaps where zmux does not yet match tmux behavior.
   dispatch so `tty_cmd_sixelimage` can call `sixel_print`.
 - `sixel_to_screen` (fallback cell grid for non-sixel terminals)
   is not ported.
-
-## Input Request Queue
-
-- The request timer and request reply functions require a TAILQ
-  of `InputRequest` structs on both `WindowPane` (input context)
-  and `Client`. tmux uses this to match incoming terminal replies
-  (palette, clipboard) against outstanding queries and dispatch
-  them in order. ~150 lines of infrastructure to port from
-  tmux-museum/src/input.c (lines 3294-3480).

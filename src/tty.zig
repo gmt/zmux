@@ -117,6 +117,29 @@ pub fn tty_repeat_requests(tty: *T.Tty, force: i32) void {
     tty_start_start_timer(tty);
 }
 
+/// Write raw terminal data directly to the client fd, bypassing the
+/// buffered output path.  Used during tty_stop_tty and server_lock_client
+/// where the event loop may not be running.  Retries up to 5 times on
+/// short writes or EAGAIN, matching tmux tty_raw().
+pub fn tty_raw(tty: *T.Tty, s: []const u8) void {
+    const fd = tty.client.fd;
+    if (fd < 0) return;
+    var buf = s;
+    var i: u32 = 0;
+    while (i < 5) : (i += 1) {
+        const n = std.posix.write(@intCast(fd), buf) catch |err| {
+            if (err == error.WouldBlock) {
+                std.time.sleep(100_000); // 100 us, matches tmux usleep(100)
+                continue;
+            }
+            return;
+        };
+        buf = buf[n..];
+        if (buf.len == 0) break;
+        std.time.sleep(100_000);
+    }
+}
+
 pub fn tty_invalidate(tty: *T.Tty) void {
     tty.cell = T.grid_default_cell;
     tty.last_cell = T.grid_default_cell;
@@ -873,11 +896,29 @@ pub fn tty_reset(tty: *T.Tty) void {
     tty.us = 8;
 }
 
+/// Emit OSC 8 hyperlink escape sequences.  Tracks the current link in
+/// tty.cell.link and only emits when it changes.  Ported from tmux
+/// tty_hyperlink().
+fn tty_hyperlink(tty: *T.Tty, gc: *const T.GridCell, hl: ?*hyperlinks_mod.Hyperlinks) void {
+    if (gc.link == tty.cell.link) return;
+    tty.cell.link = gc.link;
+
+    const h = hl orelse return;
+
+    var uri: []const u8 = "";
+    var id: []const u8 = "";
+    if (gc.link != 0 and hyperlinks_mod.hyperlinks_get(h, gc.link, &uri, null, &id)) {
+        tty_putcode_ss(tty, "Hls", id, uri);
+    } else {
+        tty_putcode_ss(tty, "Hls", "", "");
+    }
+}
+
 /// Apply text attributes (bold, dim, italic, underline, strikethrough, etc.)
 /// and colours to the terminal. Tracks current state in tty.cell to only
 /// emit changes when attributes differ.
 /// Ported from tmux tty_attributes().
-pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell) void {
+pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell, hl: ?*hyperlinks_mod.Hyperlinks) void {
     var gc2 = gc.*;
     const tc = &tty.cell;
 
@@ -959,6 +1000,9 @@ pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.Gri
     if ((changed & T.GRID_ATTR_CHARSET) != 0)
         tty_putcode(tty, "smacs");
 
+    // Set hyperlink if any.
+    tty_hyperlink(tty, gc, hl);
+
     tty.last_cell = gc2;
 }
 
@@ -966,13 +1010,13 @@ pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.Gri
 /// characters and single-byte vs multi-byte output. Uses tty_attributes for
 /// attribute/colour state and tty_putc/tty_putn for character emission.
 /// Ported from tmux tty_cell().
-pub fn tty_cell(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell) void {
+pub fn tty_cell(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.GridCell, hl: ?*hyperlinks_mod.Hyperlinks) void {
     // If this is a padding character, do nothing.
     if ((gc.flags & T.GRID_FLAG_PADDING) != 0)
         return;
 
     // Apply attributes and colours.
-    tty_attributes(tty, gc, defaults);
+    tty_attributes(tty, gc, defaults, hl);
 
     // If it is a single-byte character, write with putc.
     if (gc.data.size == 1) {
@@ -1829,10 +1873,13 @@ pub fn tty_block_maybe(tty: *T.Tty) i32 {
     return 1;
 }
 
+/// Libevent write-readiness callback for the tty fd.  Calls
+/// tty_block_maybe to maintain flow-control bookkeeping.
 export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = _arg;
+    const tty: *T.Tty = @ptrCast(@alignCast(_arg orelse return));
+    _ = tty_block_maybe(tty);
 }
 
 // tty_start_timer_callback — replaced by tty_start_timer_fire (above).
@@ -2290,11 +2337,11 @@ pub fn tty_default_attributes(
     defaults: *const T.GridCell,
     _: ?*T.ColourPalette,
     bg: u32,
-    _: ?*hyperlinks_mod.Hyperlinks,
+    hl: ?*hyperlinks_mod.Hyperlinks,
 ) void {
     var gc = T.grid_default_cell;
     gc.bg = @intCast(bg);
-    tty_attributes(tty, &gc, defaults);
+    tty_attributes(tty, &gc, defaults, hl);
 }
 
 pub fn tty_set_selection(tty: *T.Tty, clip: ?[*:0]const u8, buf: ?[*]const u8, len: usize) void {
@@ -2592,7 +2639,7 @@ pub fn tty_cmd_alignmenttest(tty: *T.Tty, ctx: *const T.TtyCtx) void {
         return;
     }
 
-    tty_attributes(tty, &T.grid_default_cell, &ctx.defaults);
+    tty_attributes(tty, &T.grid_default_cell, &ctx.defaults, null);
     tty_region_pane_ctx(tty, ctx, 0, ctx.sy -| 1);
     tty_margin_off(tty);
 
@@ -2608,7 +2655,6 @@ pub fn tty_cmd_alignmenttest(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 pub fn tty_cmd_cell(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     const gcp = ctx.cell orelse return;
     const s = ctx.s orelse return;
-    _ = s;
 
     const px = ctx.xoff + ctx.ocx -| ctx.wox;
     const py = ctx.yoff + ctx.ocy -| ctx.woy;
@@ -2625,7 +2671,7 @@ pub fn tty_cmd_cell(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 
     tty_margin_off(tty);
     tty_cursor_pane_unless_wrap_ctx(tty, ctx, ctx.ocx, ctx.ocy);
-    tty_cell(tty, gcp, &ctx.defaults);
+    tty_cell(tty, gcp, &ctx.defaults, s.hyperlinks);
 
     if (ctx.num == 1) tty_invalidate(tty);
 }
@@ -2656,7 +2702,7 @@ pub fn tty_cmd_cells(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     tty_margin_off(tty);
     tty_cursor_pane_unless_wrap_ctx(tty, ctx, ctx.ocx, ctx.ocy);
     if (ctx.cell) |gc| {
-        tty_attributes(tty, gc, &ctx.defaults);
+        tty_attributes(tty, gc, &ctx.defaults, if (ctx.s) |s| s.hyperlinks else null);
     }
 
     const px = ctx.xoff + ctx.ocx -| ctx.wox;
@@ -2721,6 +2767,28 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     tty.flags |= @as(i32, @intCast(T.TTY_NOBLOCK));
     tty_add(tty, data, ctx.num);
     tty_invalidate(tty);
+}
+
+/// Write a tty command to a single client (not all clients).  Used by
+/// tty_draw_images to render sixel images to the originating client only.
+/// Ported from tmux tty_write_one(); gated on ENABLE_SIXEL in tmux.
+fn tty_write_one(
+    cmdfn: *const fn (*T.Tty, *const T.TtyCtx) void,
+    c: *T.Client,
+    ctx: *T.TtyCtx,
+) void {
+    const set_cb = ctx.set_client_cb orelse return;
+    if (set_cb(ctx, c) == 1)
+        cmdfn(&c.tty, ctx);
+}
+
+/// Iterate the sixel image list on screen `s` and redraw each one via
+/// tty_write_one → tty_cmd_sixelimage.  Called from screen_redraw_draw_pane
+/// after pane content is drawn.  Gated on ENABLE_SIXEL in tmux; zmux does
+/// not yet have an Image type, so this is a no-op placeholder that
+/// preserves the call interface.
+pub fn tty_draw_images(_: *T.Client, _: *T.WindowPane, _: *T.Screen) void {
+    // Sixel image support is not yet ported; nothing to iterate.
 }
 
 pub fn tty_cmd_syncstart(tty: *T.Tty, ctx: *const T.TtyCtx) void {

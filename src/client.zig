@@ -230,6 +230,10 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             }
             proc_mod.proc_exit(client_proc.?);
         },
+        .shutdown => {
+            client_exitreason = .lost_server;
+            proc_mod.proc_exit(client_proc.?);
+        },
         .write => {
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
             if (data_len <= @sizeOf(i32) or imsg_msg.data == null) return;

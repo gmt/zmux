@@ -1247,29 +1247,47 @@ fn apply_sgr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
 
 /// SGR entry point that works on the raw CSI parameter bytes.
 /// Handles both semicolon-separated and colon-separated (ISO 8613-6) forms.
+///
+/// Plain semicolon-separated parameters (e.g. "38;2;255;128;0") must be
+/// collected into a single array so that multi-param sequences like
+/// 38;2;R;G;B are consumed correctly.  Colon-separated segments (e.g.
+/// "38:2::255:128:0") are self-contained and handled independently.
 fn apply_sgr_raw(ctx: *T.ScreenWriteCtx, raw: []const u8) void {
     if (raw.len == 0) {
         apply_sgr(ctx, &[_]u32{});
         return;
     }
 
-    // Split by semicolons into segments; each segment may itself be
-    // colon-separated (ISO 8613-6 sub-parameters).
+    var buf: [24]u32 = [_]u32{0} ** 24;
+    var count: usize = 0;
+
     var start: usize = 0;
     while (start <= raw.len) {
         const end = std.mem.indexOfScalarPos(u8, raw, start, ';') orelse raw.len;
         const seg = raw[start..end];
 
         if (std.mem.indexOfScalar(u8, seg, ':') != null) {
+            // Flush accumulated plain params before the colon segment.
+            if (count > 0) {
+                apply_sgr(ctx, buf[0..count]);
+                count = 0;
+            }
             apply_sgr_colon(ctx, seg);
         } else {
-            var buf: [24]u32 = [_]u32{0} ** 24;
-            const parsed = parse_csi_params(seg, &buf);
-            apply_sgr(ctx, buf[0..parsed.count]);
+            // Parse numeric value and accumulate into the shared buffer.
+            const val = std.fmt.parseInt(u32, seg, 10) catch 0;
+            if (count < buf.len) {
+                buf[count] = val;
+                count += 1;
+            }
         }
 
         if (end >= raw.len) break;
         start = end + 1;
+    }
+
+    if (count > 0) {
+        apply_sgr(ctx, buf[0..count]);
     }
 }
 

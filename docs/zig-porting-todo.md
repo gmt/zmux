@@ -159,6 +159,18 @@ Functional gaps where zmux does not yet match tmux behavior.
 - `job_run_child` hardcodes `/bin/sh`. The `default-shell`
   session option is not consulted when `JOB_DEFAULTSHELL` is set.
 
+## Popup
+
+- `popup_make_pane` calls `layout_split_pane` with 6 arguments
+  but the function takes 4. This is a latent compile error
+  hidden by Zig lazy compilation (function has no callers).
+
+## Command Queue
+
+- `cmdq_merge_formats` does not add the `command` format
+  variable. tmux adds it so that `#{command}` resolves in
+  hook templates.
+
 ## Image and Sixel
 
 - `sixel_parse` call in `input_dcs_dispatch` is stubbed

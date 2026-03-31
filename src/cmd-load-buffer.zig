@@ -189,7 +189,7 @@ test "load-buffer reads a named buffer from a relative path using client cwd" {
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var cause: ?[]u8 = null;
@@ -238,7 +238,7 @@ test "load-buffer reads a named buffer from session cwd when client cwd is missi
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
     };
 
@@ -312,7 +312,7 @@ test "load-buffer reads stdin when path is dash" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -417,7 +417,7 @@ test "load-buffer ignores target-client without clipboard export" {
         .name = "clip",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     target.session = &session;
     client_registry.add(&target);
@@ -426,7 +426,7 @@ test "load-buffer ignores target-client without clipboard export" {
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var cause: ?[]u8 = null;
@@ -471,7 +471,7 @@ test "load-buffer write flag is a no-op without a sessionful target client" {
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var cause: ?[]u8 = null;
@@ -531,7 +531,7 @@ test "load-buffer write flag exports selection for an attached target client" {
         .name = "clip",
         .environ = &target_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .term_features = tty_features.featureBit(.clipboard),
     };
@@ -550,7 +550,7 @@ test "load-buffer write flag exports selection for an attached target client" {
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var cause: ?[]u8 = null;

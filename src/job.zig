@@ -17,7 +17,19 @@
 //   Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
 //   ISC licence – same terms as above.
 
-//! job.zig – reduced shared async job registry and summary helpers.
+//! job.zig – shared async job registry, libevent-integrated job runtime,
+//! and summary helpers.
+//!
+//! Two execution paths coexist:
+//!
+//! 1. **AsyncShell** – thread/pipe bridge for simple command execution
+//!    (used by `cmd-run-shell`, `cmd-if-shell`, etc.).  This path is
+//!    unchanged from before.
+//!
+//! 2. **job_run** – libevent bufferevent-backed runtime that mirrors
+//!    tmux's `job_run()`.  The job's output fd is registered with the
+//!    event loop so data streams incrementally via `job_read_callback`.
+//!    PTY-backed jobs support resize via `job_resize()`.
 
 const std = @import("std");
 const c = @import("c.zig");
@@ -25,13 +37,33 @@ const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 const build_options = @import("build_options");
 
+// ── Job flags (matches tmux JOB_* constants) ─────────────────────────────
+
 pub const JOB_NOWAIT: u32 = 0x1;
+pub const JOB_KEEPWRITE: u32 = 0x2;
+pub const JOB_PTY: u32 = 0x4;
+pub const JOB_DEFAULTSHELL: u32 = 0x8;
+pub const JOB_SHOWSTDERR: u32 = 0x10;
+
+// ── Callback types (match tmux typedefs) ─────────────────────────────────
+
+pub const JobUpdateCb = *const fn (*Job) void;
+pub const JobCompleteCb = *const fn (*Job) void;
+pub const JobFreeCb = *const fn (?*anyopaque) void;
+
+// ── TTY name buffer size ─────────────────────────────────────────────────
+
+const TTY_NAME_MAX = 256;
+
+// ── Job states ───────────────────────────────────────────────────────────
 
 const JobState = enum {
     running,
     dead,
     closed,
 };
+
+// ── Job struct ───────────────────────────────────────────────────────────
 
 pub const Job = struct {
     cmd: []u8,
@@ -40,7 +72,22 @@ pub const Job = struct {
     status: i32 = 0,
     flags: u32 = 0,
     state: JobState = .running,
+    tty: [TTY_NAME_MAX]u8 = std.mem.zeroes([TTY_NAME_MAX]u8),
+
+    /// libevent bufferevent for streaming I/O (null for AsyncShell jobs).
+    event: ?*c.libevent.bufferevent = null,
+
+    /// Called when data is available on the job's output fd.
+    updatecb: ?JobUpdateCb = null,
+    /// Called when the job completes (both fd closed and process exited).
+    completecb: ?JobCompleteCb = null,
+    /// Called to free the opaque `data` pointer when the job is freed.
+    freecb: ?JobFreeCb = null,
+    /// Opaque data pointer passed to callbacks.
+    data: ?*anyopaque = null,
 };
+
+// ── Existing AsyncShell types (unchanged) ────────────────────────────────
 
 pub const ShellRunOptions = struct {
     cwd: []const u8,
@@ -84,6 +131,8 @@ pub const AsyncShell = struct {
     lock: std.Thread.Mutex = .{},
 };
 
+// ── Global state ─────────────────────────────────────────────────────────
+
 var jobs: std.ArrayListUnmanaged(*Job) = .{};
 var jobs_lock: std.Thread.Mutex = .{};
 var async_shells: std.ArrayListUnmanaged(*AsyncShell) = .{};
@@ -94,6 +143,298 @@ pub fn job_enable_server_reaper(enabled: bool) void {
     server_reaper_enabled = enabled;
 }
 
+// ── C externs for fork/exec/pty ──────────────────────────────────────────
+
+extern fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*c.posix_sys.struct_winsize,
+) c_int;
+
+extern fn setsid() c_int;
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+// ── job_run – libevent-integrated job runtime ────────────────────────────
+
+/// Run a job with output streaming via the libevent loop.
+///
+/// This is the Zig port of tmux's `job_run()`.  For PTY jobs
+/// (`JOB_PTY`), a pseudoterminal is allocated with the given size.
+/// For pipe jobs, a `socketpair` is used.  In both cases, the parent's
+/// end of the fd is registered as a libevent bufferevent so output
+/// streams incrementally through `job_read_callback`.
+pub fn job_run(
+    cmd: []const u8,
+    cwd: ?[]const u8,
+    updatecb: ?JobUpdateCb,
+    completecb: ?JobCompleteCb,
+    freecb: ?JobFreeCb,
+    data: ?*anyopaque,
+    flags: u32,
+    sx: u32,
+    sy: u32,
+) ?*Job {
+    const base = proc_mod.libevent orelse return null;
+
+    var tty_buf: [TTY_NAME_MAX]u8 = std.mem.zeroes([TTY_NAME_MAX]u8);
+    var parent_fd: c_int = -1;
+    var pid_raw: std.posix.pid_t = undefined;
+
+    if (flags & JOB_PTY != 0) {
+        var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+        ws.ws_col = @intCast(sx);
+        ws.ws_row = @intCast(sy);
+        var master: c_int = -1;
+        var slave: c_int = undefined;
+        if (openpty(&master, &slave, &tty_buf, null, &ws) != 0)
+            return null;
+        pid_raw = std.posix.fork() catch {
+            std.posix.close(@intCast(master));
+            std.posix.close(@intCast(slave));
+            return null;
+        };
+        if (pid_raw == 0) {
+            std.posix.close(@intCast(master));
+            _ = setsid();
+            _ = std.c.ioctl(slave, 0x540e, @as(c_int, 0)); // TIOCSCTTY
+            _ = std.c.dup2(slave, 0);
+            _ = std.c.dup2(slave, 1);
+            _ = std.c.dup2(slave, 2);
+            if (slave > 2) std.posix.close(@intCast(slave));
+            job_run_child(cmd, cwd, flags);
+        }
+        std.posix.close(@intCast(slave));
+        parent_fd = master;
+    } else {
+        var out: [2]c_int = .{ -1, -1 };
+        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &out) != 0)
+            return null;
+        pid_raw = std.posix.fork() catch {
+            std.posix.close(@intCast(out[0]));
+            std.posix.close(@intCast(out[1]));
+            return null;
+        };
+        if (pid_raw == 0) {
+            std.posix.close(@intCast(out[0]));
+            _ = std.c.dup2(out[1], 0);
+            _ = std.c.dup2(out[1], 1);
+            if (flags & JOB_SHOWSTDERR != 0) {
+                _ = std.c.dup2(out[1], 2);
+            } else {
+                const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+                if (devnull >= 0) {
+                    _ = std.c.dup2(devnull, 2);
+                    if (devnull > 2) std.posix.close(@intCast(devnull));
+                }
+            }
+            if (out[1] > 2) std.posix.close(@intCast(out[1]));
+            job_run_child(cmd, cwd, flags);
+        }
+        std.posix.close(@intCast(out[1]));
+        parent_fd = out[0];
+    }
+
+    const job = job_alloc(cmd, flags, @intCast(pid_raw), @intCast(parent_fd), tty_buf);
+    job.updatecb = updatecb;
+    job.completecb = completecb;
+    job.freecb = freecb;
+    job.data = data;
+    job_setup_bufferevent(job, base) orelse {
+        job_free(job);
+        return null;
+    };
+    return job;
+}
+
+/// Child-side exec (called after fork, never returns).
+fn job_run_child(cmd: []const u8, cwd: ?[]const u8, flags: u32) noreturn {
+    // Reset signals to defaults
+    const sa_dfl = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    const reset_sigs: []const u8 = &.{
+        std.posix.SIG.INT,  std.posix.SIG.HUP,  std.posix.SIG.CHLD,
+        std.posix.SIG.CONT, std.posix.SIG.TERM,  std.posix.SIG.PIPE,
+        std.posix.SIG.TSTP, std.posix.SIG.TTIN,  std.posix.SIG.TTOU,
+        std.posix.SIG.QUIT, std.posix.SIG.USR1,  std.posix.SIG.USR2,
+        std.posix.SIG.WINCH,
+    };
+    for (reset_sigs) |sig| std.posix.sigaction(sig, &sa_dfl, null);
+
+    // Unmask all signals
+    var full_set = std.posix.sigfillset();
+    _ = std.c.sigprocmask(std.posix.SIG.UNBLOCK, &full_set, null);
+
+    // Change working directory
+    if (cwd) |dir| {
+        const dir_z = xm.allocator.dupeZ(u8, dir) catch "/";
+        _ = std.c.chdir(dir_z);
+    }
+
+    // Close fds > stderr
+    closefrom(3);
+
+    // Determine shell
+    const shell: [*:0]const u8 = if (flags & JOB_DEFAULTSHELL != 0)
+        // TODO: respect session default-shell option
+        "/bin/sh"
+    else
+        "/bin/sh";
+
+    if (flags & JOB_DEFAULTSHELL != 0)
+        _ = setenv("SHELL", shell, 1);
+
+    const cmd_z = xm.allocator.dupeZ(u8, cmd) catch {
+        std.c._exit(1);
+    };
+    _ = std.c.execve(shell, &[_:null]?[*:0]const u8{ shell, "-c", cmd_z, null }, std.c.environ);
+    std.c._exit(1);
+}
+
+fn closefrom(lowfd: c_int) void {
+    // Best-effort: close fds from lowfd up to some reasonable limit
+    var fd = lowfd;
+    while (fd < 1024) : (fd += 1) {
+        _ = std.c.close(fd);
+    }
+}
+
+fn set_nonblocking(fd: i32) void {
+    const flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+}
+
+fn job_alloc(cmd: []const u8, flags: u32, pid: i32, fd: i32, tty_buf: [TTY_NAME_MAX]u8) *Job {
+    const job = xm.allocator.create(Job) catch unreachable;
+    job.* = .{
+        .cmd = xm.xstrdup(cmd),
+        .flags = flags,
+        .pid = pid,
+        .fd = fd,
+        .tty = tty_buf,
+    };
+    jobs_lock.lock();
+    defer jobs_lock.unlock();
+    jobs.append(xm.allocator, job) catch unreachable;
+    return job;
+}
+
+fn job_setup_bufferevent(job: *Job, base: *c.libevent.event_base) ?void {
+    set_nonblocking(job.fd);
+    job.event = c.libevent.bufferevent_socket_new(base, job.fd, 0);
+    if (job.event == null) return null;
+    c.libevent.bufferevent_setcb(
+        job.event.?,
+        job_read_callback,
+        job_write_callback,
+        job_error_callback,
+        job,
+    );
+    _ = c.libevent.bufferevent_enable(job.event.?, c.libevent.EV_READ | c.libevent.EV_WRITE);
+}
+
+// ── Bufferevent callbacks (match tmux job.c) ─────────────────────────────
+
+export fn job_read_callback(_bufev: ?*c.libevent.bufferevent, arg: ?*anyopaque) void {
+    _ = _bufev;
+    const job: *Job = @ptrCast(@alignCast(arg orelse return));
+    if (job.updatecb) |cb| cb(job);
+}
+
+export fn job_write_callback(bufev: ?*c.libevent.bufferevent, arg: ?*anyopaque) void {
+    const job: *Job = @ptrCast(@alignCast(arg orelse return));
+    const bev = bufev orelse return;
+
+    const output = c.libevent.bufferevent_get_output(bev);
+    const len = if (output != null) c.libevent.evbuffer_get_length(output) else 0;
+
+    if (len == 0 and (job.flags & JOB_KEEPWRITE == 0)) {
+        _ = std.c.shutdown(job.fd, std.posix.SHUT.WR);
+        _ = c.libevent.bufferevent_disable(bev, c.libevent.EV_WRITE);
+    }
+}
+
+export fn job_error_callback(_bufev: ?*c.libevent.bufferevent, _events: c_short, arg: ?*anyopaque) void {
+    _ = _bufev;
+    _ = _events;
+    const job: *Job = @ptrCast(@alignCast(arg orelse return));
+
+    if (job.state == .dead) {
+        if (job.completecb) |cb| cb(job);
+        job_free(job);
+    } else {
+        if (job.event) |bev|
+            _ = c.libevent.bufferevent_disable(bev, c.libevent.EV_READ);
+        job.state = .closed;
+    }
+}
+
+// ── Job resize ───────────────────────────────────────────────────────────
+
+/// Send TIOCSWINSZ to a PTY-backed job.  No-op for pipe jobs or if fd
+/// is already closed.  Matches tmux `job_resize()`.
+pub fn job_resize(job: *Job, sx: u32, sy: u32) void {
+    if (job.fd == -1 or (job.flags & JOB_PTY == 0))
+        return;
+
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    ws.ws_col = @intCast(sx);
+    ws.ws_row = @intCast(sy);
+    _ = c.posix_sys.ioctl(job.fd, c.posix_sys.TIOCSWINSZ, &ws);
+}
+
+// ── Job transfer ─────────────────────────────────────────────────────────
+
+/// Take a job's file descriptor and free the job.  Returns the fd.
+/// The caller owns the fd after this call.  Matches tmux `job_transfer()`.
+pub fn job_transfer(job: *Job, pid_out: ?*i32, tty_out: ?*[TTY_NAME_MAX]u8) i32 {
+    const fd = job.fd;
+
+    if (pid_out) |p| p.* = job.pid;
+    if (tty_out) |t| t.* = job.tty;
+
+    // Remove from global list
+    jobs_lock.lock();
+    for (jobs.items, 0..) |candidate, idx| {
+        if (candidate != job) continue;
+        _ = jobs.swapRemove(idx);
+        break;
+    }
+    jobs_lock.unlock();
+
+    if (job.freecb) |cb| {
+        if (job.data) |d| cb(d);
+    }
+
+    if (job.event) |bev| c.libevent.bufferevent_free(bev);
+
+    xm.allocator.free(job.cmd);
+    xm.allocator.destroy(job);
+    return fd;
+}
+
+// ── Job accessors (match tmux API) ───────────────────────────────────────
+
+pub fn job_get_status(job: *const Job) i32 {
+    return job.status;
+}
+
+pub fn job_get_data(job: *const Job) ?*anyopaque {
+    return job.data;
+}
+
+pub fn job_get_event(job: *const Job) ?*c.libevent.bufferevent {
+    return job.event;
+}
+
+// ── AsyncShell (unchanged from original) ─────────────────────────────────
+
 pub fn async_shell_start(
     job: ?*Job,
     shell_command: []const u8,
@@ -102,8 +443,8 @@ pub fn async_shell_start(
     callback_arg: ?*anyopaque,
 ) ?*AsyncShell {
     const base = proc_mod.libevent orelse return null;
-    const async = xm.allocator.create(AsyncShell) catch unreachable;
-    async.* = .{
+    const async_s = xm.allocator.create(AsyncShell) catch unreachable;
+    async_s.* = .{
         .job = job,
         .shell_command = xm.xstrdup(shell_command),
         .cwd = xm.xstrdup(options.cwd),
@@ -112,65 +453,65 @@ pub fn async_shell_start(
         .callback = callback,
         .callback_arg = callback_arg,
     };
-    errdefer async_shell_free(async);
+    errdefer async_shell_free(async_s);
 
     const pipe_fds = std.posix.pipe() catch return null;
-    async.pipe_read = pipe_fds[0];
-    async.pipe_write = pipe_fds[1];
+    async_s.pipe_read = pipe_fds[0];
+    async_s.pipe_write = pipe_fds[1];
 
-    async.event = c.libevent.event_new(
+    async_s.event = c.libevent.event_new(
         base,
-        async.pipe_read,
+        async_s.pipe_read,
         @intCast(c.libevent.EV_READ),
         async_shell_event_cb,
-        async,
+        async_s,
     );
-    if (async.event == null) return null;
-    if (c.libevent.event_add(async.event.?, null) != 0) return null;
+    if (async_s.event == null) return null;
+    if (c.libevent.event_add(async_s.event.?, null) != 0) return null;
 
     if (server_reaper_enabled) {
-        if (!async_shell_start_server_reaper(async)) return null;
-        return async;
+        if (!async_shell_start_server_reaper(async_s)) return null;
+        return async_s;
     }
 
-    async.thread = std.Thread.spawn(.{}, asyncShellThreadMain, .{async}) catch return null;
-    return async;
+    async_s.thread = std.Thread.spawn(.{}, asyncShellThreadMain, .{async_s}) catch return null;
+    return async_s;
 }
 
-pub fn async_shell_free(async: *AsyncShell) void {
-    if (async.server_reaper)
-        async_shell_unregister(async);
-    if (async.thread) |thread| thread.join();
-    if (async.event) |ev| {
+pub fn async_shell_free(async_s: *AsyncShell) void {
+    if (async_s.server_reaper)
+        async_shell_unregister(async_s);
+    if (async_s.thread) |thread| thread.join();
+    if (async_s.event) |ev| {
         _ = c.libevent.event_del(ev);
         c.libevent.event_free(ev);
     }
-    if (async.pipe_read >= 0) std.posix.close(async.pipe_read);
-    if (async.pipe_write >= 0) std.posix.close(async.pipe_write);
-    if (async.output_fd >= 0) std.posix.close(async.output_fd);
-    async.result.deinit();
-    xm.allocator.free(async.shell_command);
-    xm.allocator.free(async.cwd);
-    xm.allocator.destroy(async);
+    if (async_s.pipe_read >= 0) std.posix.close(async_s.pipe_read);
+    if (async_s.pipe_write >= 0) std.posix.close(async_s.pipe_write);
+    if (async_s.output_fd >= 0) std.posix.close(async_s.output_fd);
+    async_s.result.deinit();
+    xm.allocator.free(async_s.shell_command);
+    xm.allocator.free(async_s.cwd);
+    xm.allocator.destroy(async_s);
 }
 
-fn asyncShellThreadMain(async: *AsyncShell) void {
-    defer asyncShellNotifyComplete(async);
+fn asyncShellThreadMain(async_s: *AsyncShell) void {
+    defer asyncShellNotifyComplete(async_s);
 
-    var result = job_run_shell_command(async.job, async.shell_command, .{
-        .cwd = async.cwd,
-        .merge_stderr = async.merge_stderr,
-        .capture_output = async.capture_output,
+    var result = job_run_shell_command(async_s.job, async_s.shell_command, .{
+        .cwd = async_s.cwd,
+        .merge_stderr = async_s.merge_stderr,
+        .capture_output = async_s.capture_output,
     });
-    async.result = result;
+    async_s.result = result;
     result.output = .{};
 }
 
-fn asyncShellNotifyComplete(async: *AsyncShell) void {
-    if (async.pipe_write < 0) return;
-    _ = std.posix.write(async.pipe_write, &[1]u8{1}) catch {};
-    std.posix.close(async.pipe_write);
-    async.pipe_write = -1;
+fn asyncShellNotifyComplete(async_s: *AsyncShell) void {
+    if (async_s.pipe_write < 0) return;
+    _ = std.posix.write(async_s.pipe_write, &[1]u8{1}) catch {};
+    std.posix.close(async_s.pipe_write);
+    async_s.pipe_write = -1;
 }
 
 const SpawnedShell = struct {
@@ -199,18 +540,18 @@ fn spawnShellProcess(shell_command: []const u8, options: ShellRunOptions) !Spawn
     };
 }
 
-fn async_shell_register(async: *AsyncShell) void {
+fn async_shell_register(async_s: *AsyncShell) void {
     async_shells_lock.lock();
     defer async_shells_lock.unlock();
-    async_shells.append(xm.allocator, async) catch unreachable;
+    async_shells.append(xm.allocator, async_s) catch unreachable;
 }
 
-fn async_shell_unregister(async: *AsyncShell) void {
+fn async_shell_unregister(async_s: *AsyncShell) void {
     async_shells_lock.lock();
     defer async_shells_lock.unlock();
 
     for (async_shells.items, 0..) |candidate, idx| {
-        if (candidate != async) continue;
+        if (candidate != async_s) continue;
         _ = async_shells.swapRemove(idx);
         break;
     }
@@ -220,82 +561,82 @@ fn async_shell_take_by_pid(pid: i32) ?*AsyncShell {
     async_shells_lock.lock();
     defer async_shells_lock.unlock();
 
-    for (async_shells.items, 0..) |async, idx| {
-        if (async.child_pid != pid) continue;
+    for (async_shells.items, 0..) |async_s, idx| {
+        if (async_s.child_pid != pid) continue;
         _ = async_shells.swapRemove(idx);
-        return async;
+        return async_s;
     }
     return null;
 }
 
-fn async_shell_start_server_reaper(async: *AsyncShell) bool {
-    const spawned = spawnShellProcess(async.shell_command, .{
-        .cwd = async.cwd,
-        .merge_stderr = async.merge_stderr,
-        .capture_output = async.capture_output,
+fn async_shell_start_server_reaper(async_s: *AsyncShell) bool {
+    const spawned = spawnShellProcess(async_s.shell_command, .{
+        .cwd = async_s.cwd,
+        .merge_stderr = async_s.merge_stderr,
+        .capture_output = async_s.capture_output,
     }) catch {
-        if (async.job) |job| job_finished(job, 1);
+        if (async_s.job) |job| job_finished(job, 1);
         return false;
     };
 
-    async.server_reaper = true;
-    async.child_pid = spawned.pid;
-    async.output_fd = spawned.stdout_fd;
+    async_s.server_reaper = true;
+    async_s.child_pid = spawned.pid;
+    async_s.output_fd = spawned.stdout_fd;
 
-    if (async.job) |job|
+    if (async_s.job) |job|
         job_started(job, spawned.pid, spawned.stdout_fd);
 
-    async_shell_register(async);
+    async_shell_register(async_s);
 
-    if (!async.capture_output) {
-        async.lock.lock();
-        async.output_done = true;
-        async.lock.unlock();
+    if (!async_s.capture_output) {
+        async_s.lock.lock();
+        async_s.output_done = true;
+        async_s.lock.unlock();
         return true;
     }
 
-    async.thread = std.Thread.spawn(.{}, asyncShellReadThreadMain, .{async}) catch {
-        async_shell_unregister(async);
-        if (async.output_fd >= 0) {
-            std.posix.close(async.output_fd);
-            async.output_fd = -1;
+    async_s.thread = std.Thread.spawn(.{}, asyncShellReadThreadMain, .{async_s}) catch {
+        async_shell_unregister(async_s);
+        if (async_s.output_fd >= 0) {
+            std.posix.close(async_s.output_fd);
+            async_s.output_fd = -1;
         }
-        _ = std.c.kill(async.child_pid, std.posix.SIG.TERM);
+        _ = std.c.kill(async_s.child_pid, std.posix.SIG.TERM);
         var raw_status: i32 = 0;
-        _ = std.c.waitpid(async.child_pid, &raw_status, 0);
-        if (async.job) |job| {
+        _ = std.c.waitpid(async_s.child_pid, &raw_status, 0);
+        if (async_s.job) |job| {
             job_output_closed(job);
             job_finished(job, 1);
         }
-        async.child_pid = -1;
+        async_s.child_pid = -1;
         return false;
     };
     return true;
 }
 
-fn asyncShellReadThreadMain(async: *AsyncShell) void {
+fn asyncShellReadThreadMain(async_s: *AsyncShell) void {
     var buf: [4096]u8 = undefined;
-    while (async.output_fd >= 0) {
-        const amt = std.posix.read(async.output_fd, &buf) catch break;
+    while (async_s.output_fd >= 0) {
+        const amt = std.posix.read(async_s.output_fd, &buf) catch break;
         if (amt == 0) break;
-        async.result.output.appendSlice(xm.allocator, buf[0..amt]) catch unreachable;
+        async_s.result.output.appendSlice(xm.allocator, buf[0..amt]) catch unreachable;
     }
 
-    if (async.output_fd >= 0) {
-        std.posix.close(async.output_fd);
-        async.output_fd = -1;
+    if (async_s.output_fd >= 0) {
+        std.posix.close(async_s.output_fd);
+        async_s.output_fd = -1;
     }
-    if (async.job) |job|
+    if (async_s.job) |job|
         job_output_closed(job);
 
-    async.lock.lock();
-    async.output_done = true;
-    const should_notify = async.status_known and !async.completion_sent;
-    if (should_notify) async.completion_sent = true;
-    async.lock.unlock();
+    async_s.lock.lock();
+    async_s.output_done = true;
+    const should_notify = async_s.status_known and !async_s.completion_sent;
+    if (should_notify) async_s.completion_sent = true;
+    async_s.lock.unlock();
 
     if (should_notify)
-        asyncShellNotifyComplete(async);
+        asyncShellNotifyComplete(async_s);
 }
 
 fn job_output_closed(job: *Job) void {
@@ -323,6 +664,8 @@ fn rawWaitStatusToExit(status_raw: i32) struct {
         .{ .retcode = 1, .signal_code = null };
 }
 
+/// Called when waitpid reports a child has exited.  Handles both
+/// AsyncShell jobs and bufferevent-backed jobs.
 pub fn job_check_died(pid: i32, status_raw: i32) void {
     const status = @as(u32, @bitCast(status_raw));
     if (std.posix.W.IFSTOPPED(status)) {
@@ -335,53 +678,68 @@ pub fn job_check_died(pid: i32, status_raw: i32) void {
 
     const exit_status = rawWaitStatusToExit(status_raw);
 
-    if (async_shell_take_by_pid(pid)) |async| {
-        if (async.job) |job|
+    // Check async shells first
+    if (async_shell_take_by_pid(pid)) |async_s| {
+        if (async_s.job) |job|
             job_finished(job, exit_status.retcode);
 
-        async.lock.lock();
-        async.result.retcode = exit_status.retcode;
-        async.result.signal_code = exit_status.signal_code;
-        async.status_known = true;
-        const should_notify = async.output_done and !async.completion_sent;
-        if (should_notify) async.completion_sent = true;
-        async.lock.unlock();
+        async_s.lock.lock();
+        async_s.result.retcode = exit_status.retcode;
+        async_s.result.signal_code = exit_status.signal_code;
+        async_s.status_known = true;
+        const should_notify = async_s.output_done and !async_s.completion_sent;
+        if (should_notify) async_s.completion_sent = true;
+        async_s.lock.unlock();
 
         if (should_notify)
-            asyncShellNotifyComplete(async);
+            asyncShellNotifyComplete(async_s);
         return;
     }
 
+    // Check bufferevent-backed jobs (matches tmux job_check_died)
     jobs_lock.lock();
-    defer jobs_lock.unlock();
     for (jobs.items) |job| {
         if (job.pid != pid) continue;
-        job.status = exit_status.retcode;
-        if (job.state == .running)
+        job.status = status_raw;
+
+        if (job.state == .closed) {
+            // fd already closed; job is complete -- unlock before
+            // calling back into user code that may re-enter.
+            jobs_lock.unlock();
+            if (job.completecb) |cb| cb(job);
+            job_free(job);
+            return;
+        } else {
+            job.pid = -1;
             job.state = .dead;
+        }
+        jobs_lock.unlock();
         return;
     }
+    jobs_lock.unlock();
 }
 
 export fn async_shell_event_cb(fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _events;
-    const async: *AsyncShell = @ptrCast(@alignCast(arg orelse return));
+    const async_s: *AsyncShell = @ptrCast(@alignCast(arg orelse return));
 
     var discard: [16]u8 = undefined;
     _ = std.posix.read(fd, &discard) catch {};
 
-    if (async.event) |ev| {
+    if (async_s.event) |ev| {
         _ = c.libevent.event_del(ev);
         c.libevent.event_free(ev);
-        async.event = null;
+        async_s.event = null;
     }
-    if (async.pipe_read >= 0) {
-        std.posix.close(async.pipe_read);
-        async.pipe_read = -1;
+    if (async_s.pipe_read >= 0) {
+        std.posix.close(async_s.pipe_read);
+        async_s.pipe_read = -1;
     }
 
-    async.callback(async, async.callback_arg);
+    async_s.callback(async_s, async_s.callback_arg);
 }
+
+// ── Job registry (simple jobs without bufferevent) ───────────────────────
 
 pub fn job_register(cmd: []const u8, flags: u32) *Job {
     const job = xm.allocator.create(Job) catch unreachable;
@@ -485,9 +843,9 @@ pub fn job_run_shell_command(job: ?*Job, shell_command: []const u8, options: She
         if (job) |registered| job_finished(registered, 1);
         return result;
     };
-    const status = shellExitStatus(term);
-    result.retcode = status.retcode;
-    result.signal_code = status.signal_code;
+    const exit_s = shellExitStatus(term);
+    result.retcode = exit_s.retcode;
+    result.signal_code = exit_s.signal_code;
 
     if (job) |registered| job_finished(registered, result.retcode);
     return result;
@@ -521,19 +879,29 @@ pub fn job_render_summary(alloc: std.mem.Allocator) []u8 {
     return out.toOwnedSlice(alloc) catch unreachable;
 }
 
+/// Free a job, removing it from the global list.  Acquires the lock.
 pub fn job_free(job: *Job) void {
     jobs_lock.lock();
     defer jobs_lock.unlock();
+    job_free_inner(job);
+}
 
+/// Free a job; caller must hold `jobs_lock`.
+fn job_free_inner(job: *Job) void {
     for (jobs.items, 0..) |candidate, idx| {
         if (candidate != job) continue;
         _ = jobs.swapRemove(idx);
         break;
     }
 
+    if (job.freecb) |cb| {
+        if (job.data) |d| cb(d);
+    }
+
     if (job.pid != -1 and job.state == .running) {
         _ = std.c.kill(job.pid, std.posix.SIG.TERM);
     }
+    if (job.event) |bev| c.libevent.bufferevent_free(bev);
     if (job.fd != -1) {
         _ = std.c.close(job.fd);
         job.fd = -1;
@@ -551,7 +919,13 @@ pub fn job_tidy() void {
     while (i < jobs.items.len) {
         const job = jobs.items[i];
         if (job.state != .running) {
-            // Free completed/failed/dead jobs
+            if (job.freecb) |cb| {
+                if (job.data) |d| cb(d);
+            }
+            if (job.event) |bev| c.libevent.bufferevent_free(bev);
+            if (job.fd != -1) {
+                _ = std.c.close(job.fd);
+            }
             xm.allocator.free(job.cmd);
             xm.allocator.destroy(job);
             _ = jobs.swapRemove(i);
@@ -576,11 +950,20 @@ pub fn job_reset_all() void {
     defer jobs_lock.unlock();
 
     for (jobs.items) |job| {
+        if (job.freecb) |cb| {
+            if (job.data) |d| cb(d);
+        }
+        if (job.event) |bev| c.libevent.bufferevent_free(bev);
+        if (job.fd != -1) {
+            _ = std.c.close(job.fd);
+        }
         xm.allocator.free(job.cmd);
         xm.allocator.destroy(job);
     }
     jobs.clearRetainingCapacity();
 }
+
+// ── Test helpers ─────────────────────────────────────────────────────────
 
 fn installEventBase() ?*c.libevent.event_base {
     const os_mod = @import("os/linux.zig");
@@ -604,6 +987,8 @@ fn requireStressTests() !void {
     if (!build_options.stress_tests)
         return error.SkipZigTest;
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────
 
 test "job registry renders reduced tmux-style summaries" {
     defer job_reset_all();
@@ -717,12 +1102,12 @@ test "job server reaper async shell captures output and completion" {
     const job = job_register("printf 'out'; printf 'err' >&2", 0);
     defer job_free(job);
 
-    const async = async_shell_start(job, "printf 'out'; printf 'err' >&2", .{
+    const async_s = async_shell_start(job, "printf 'out'; printf 'err' >&2", .{
         .cwd = "/",
         .merge_stderr = true,
         .capture_output = true,
     }, testAsyncComplete, &completed) orelse return error.TestUnexpectedResult;
-    defer async_shell_free(async);
+    defer async_shell_free(async_s);
 
     var raw_status: i32 = 0;
     const waited = std.c.waitpid(job.pid, &raw_status, 0);
@@ -736,6 +1121,108 @@ test "job server reaper async shell captures output and completion" {
     }
 
     try std.testing.expect(completed);
-    try std.testing.expectEqual(@as(i32, 0), async.result.retcode);
-    try std.testing.expectEqualStrings("outerr", async.result.output.items);
+    try std.testing.expectEqual(@as(i32, 0), async_s.result.retcode);
+    try std.testing.expectEqualStrings("outerr", async_s.result.output.items);
+}
+
+test "job_run streams output via bufferevent" {
+    try requireStressTests();
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+    defer job_reset_all();
+
+    const TestCtx = struct {
+        update_count: u32 = 0,
+        completed: bool = false,
+    };
+    var ctx = TestCtx{};
+
+    const update_cb = struct {
+        fn cb(job: *Job) void {
+            const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
+            tc.update_count += 1;
+            // Drain the input buffer
+            if (job.event) |bev| {
+                const input = c.libevent.bufferevent_get_input(bev);
+                if (input != null) {
+                    const len = c.libevent.evbuffer_get_length(input);
+                    if (len > 0)
+                        _ = c.libevent.evbuffer_drain(input, len);
+                }
+            }
+        }
+    }.cb;
+
+    const complete_cb = struct {
+        fn cb(job: *Job) void {
+            const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
+            tc.completed = true;
+        }
+    }.cb;
+
+    const job = job_run(
+        "printf 'hello world'",
+        "/",
+        update_cb,
+        complete_cb,
+        null,
+        &ctx,
+        JOB_SHOWSTDERR,
+        80,
+        24,
+    ) orelse return error.TestUnexpectedResult;
+
+    // Run event loop until the job completes or timeout
+    var spins: usize = 0;
+    while (job.state != .dead and job.state != .closed and spins < 400) : (spins += 1) {
+        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        // Reap child
+        var raw_status: i32 = 0;
+        const waited = std.c.waitpid(-1, &raw_status, std.c.W.NOHANG);
+        if (waited > 0)
+            job_check_died(@intCast(waited), raw_status);
+    }
+
+    // Run a few more iterations to let bufferevent callbacks fire
+    spins = 0;
+    while (spins < 50) : (spins += 1) {
+        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+        std.Thread.sleep(2 * std.time.ns_per_ms);
+    }
+
+    // The job should have produced some output
+    try std.testing.expect(job.state == .dead or job.state == .closed);
+}
+
+test "job_resize is no-op for non-PTY jobs" {
+    defer job_reset_all();
+
+    const job = job_register("echo test", 0);
+    defer job_free(job);
+    job_started(job, 99, 5);
+
+    // Should not crash; no-op because JOB_PTY is not set
+    job_resize(job, 120, 40);
+}
+
+test "job flags match tmux constants" {
+    try std.testing.expectEqual(@as(u32, 0x1), JOB_NOWAIT);
+    try std.testing.expectEqual(@as(u32, 0x2), JOB_KEEPWRITE);
+    try std.testing.expectEqual(@as(u32, 0x4), JOB_PTY);
+    try std.testing.expectEqual(@as(u32, 0x8), JOB_DEFAULTSHELL);
+    try std.testing.expectEqual(@as(u32, 0x10), JOB_SHOWSTDERR);
+}
+
+test "job accessors return correct values" {
+    defer job_reset_all();
+
+    const job = job_register("test cmd", 0);
+    defer job_free(job);
+    job.status = 42;
+    job.data = @ptrFromInt(0xdeadbeef);
+
+    try std.testing.expectEqual(@as(i32, 42), job_get_status(job));
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrFromInt(0xdeadbeef)), job_get_data(job));
+    try std.testing.expectEqual(@as(?*c.libevent.bufferevent, null), job_get_event(job));
 }

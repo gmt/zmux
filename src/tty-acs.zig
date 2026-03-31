@@ -235,7 +235,7 @@ fn makeClient(flags: u64) struct {
     const client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = flags,
     };
     return .{ .env = env, .client = client };

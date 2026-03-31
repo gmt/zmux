@@ -70,3 +70,21 @@ natural in Zig.
   heap-allocates. `status_free` now frees the screen when
   non-null. All test clients that construct `StatusLine` use
   the default `.screen = null`.
+
+## Stale Comments
+
+- `control.zig` labels several sections as "stubs" but the
+  functions are implemented via the peer-based IPC model.
+- `server-client.zig:815` says "window-copy mode is not yet
+  ported" but window-copy IS ported; the real issue is that
+  `server_client_output_mode` doesn't dispatch to it.
+
+## Unused Imports
+
+- `format.zig:30` imports `utf8.zig` but never uses it.
+- `options.zig:40` imports `utf8.zig` but never uses it.
+
+## Potential Uninitialized Variable
+
+- `server-client.zig:1650`: `var py: u32 = undefined` — may
+  be used before assignment depending on control flow.

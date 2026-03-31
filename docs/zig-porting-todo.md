@@ -10,18 +10,18 @@ tmux's full VT100 state machine (17 named states with transition
 tables). The reduced parser handles the common CSI, OSC, DCS, and ESC
 sequences but has these gaps:
 
-- Request/reply machinery (DA, clipboard query, colour query, palette
-  query, theme report) requires a PTY write-back path so the parser can
-  emit responses to the outer terminal. tmux uses `input_reply` for
-  this; zmux silently consumes these sequences.
-- DCS passthrough (`tmux;` sequences) is consumed silently; tmux
-  honours the `allow-passthrough` option and emits `rawstring` output.
-- DCS DECRQSS is consumed silently; tmux replies through the tty.
+- DA/colour/clipboard reply machinery: `input_reply` writes to the pane
+  pty fd. DA1/DA2 CSI queries are consumed silently (no reply); theme
+  report (`CSI ? 996 n`) is likewise silently consumed.
+- DCS DECRQSS replies with cursor-style via `input_replyf`; other DECRQSS
+  subcommands return DCS 0 $ r ST.
 - Sixel image data inside DCS is consumed silently; tmux parses it
   into an `image` object and renders via `tty_cmd_sixelimage`.
-- OSC 4 / 10 / 11 / 12 / 52 / 104 / 110 / 111 / 112 / 133 are
-  swallowed; tmux processes many of these (palette changes, clipboard
-  set, semantic prompt markers).
+- OSC 4 query (`?`) replies are sent directly to pane fd when the palette
+  entry is already cached; the request-queue path (INPUT_REQUEST_PALETTE)
+  for forwarding to the outer terminal is not yet implemented.
+- OSC 52 query with `get-clipboard=2` (async clipboard request) is not
+  yet implemented.
 - Ground timer requires libevent `evtimer` or Zig async timer.
 
 ### Zig vs. C note

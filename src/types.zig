@@ -1117,7 +1117,7 @@ pub const MouseClickState = enum {
 };
 
 pub const StatusLine = struct {
-    screen: ?*Screen = null,
+    screen: Screen,
     active: ?*Screen = null,
     references: u32 = 0,
     timer: ?*c.libevent.event = null,
@@ -1448,6 +1448,12 @@ pub const CmdParseInput = struct {
     c: ?*Client = null,
     fs: CmdFindState = .{},
 };
+
+// cmd_parse flags (matching tmux tmux.h values)
+pub const CMD_PARSE_PARSEONLY: u32 = 0x2;
+pub const CMD_PARSE_ONEGROUP: u32 = 0x10;
+pub const CMD_PARSE_VERBOSE: u32 = 0x20;
+pub const CMD_PARSE_NOALIAS: u32 = 0x40;
 
 pub const CMDQ_STATE_REPEAT: u32 = 0x1;
 pub const CMDQ_STATE_CONTROL: u32 = 0x2;

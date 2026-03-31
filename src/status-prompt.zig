@@ -1815,7 +1815,7 @@ test "status-prompt stores multibyte input through the shared cell buffer" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
     const capture = xm.allocator.create(PromptCapture) catch unreachable;
@@ -1863,7 +1863,7 @@ test "status-prompt enter callback sees reconstructed utf8 text" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
     const capture = xm.allocator.create(PromptCapture) catch unreachable;
@@ -1904,7 +1904,7 @@ test "status-prompt supports cursor edits, history traversal, completion, and re
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -1977,7 +1977,7 @@ test "status-prompt cursor edits stay on the shared status-only redraw path" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -2015,7 +2015,7 @@ test "status-prompt word motion and delete-word use the shared cell reader" {
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.tty.client = &client;
 
@@ -2074,7 +2074,7 @@ test "status-prompt vi command mode and quote-next render through the shared cel
     var client = T.Client{
         .environ = &environ,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
     };
     client.tty.client = &client;

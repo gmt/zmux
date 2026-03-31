@@ -406,7 +406,6 @@ pub const entry_start: cmd_mod.CmdEntry = .{
 };
 
 fn new_session_test_init() void {
-    cmdq.cmdq_reset_for_tests();
     client_registry.clients.clearRetainingCapacity();
 
     opts.global_options = opts.options_create(null);
@@ -423,7 +422,6 @@ fn new_session_test_init() void {
 }
 
 fn new_session_test_finish() void {
-    cmdq.cmdq_reset_for_tests();
     client_registry.clients.clearRetainingCapacity();
     env_mod.environ_free(env_mod.global_environ);
     opts.options_free(opts.global_options);
@@ -463,7 +461,7 @@ fn new_session_test_client(name: []const u8, session: ?*T.Session) T.Client {
             .xpixel = T.DEFAULT_XPIXEL,
             .ypixel = T.DEFAULT_YPIXEL,
         },
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_TERMINAL | if (session != null) T.CLIENT_ATTACHED else 0,
         .session = session,
     };

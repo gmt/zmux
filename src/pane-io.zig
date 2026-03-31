@@ -23,6 +23,8 @@ const xm = @import("xmalloc.zig");
 const c = @import("c.zig");
 const proc_mod = @import("proc.zig");
 const server_mod = @import("server.zig");
+const server_fn = @import("server-fn.zig");
+const window_mod = @import("window.zig");
 const input_mod = @import("input.zig");
 const alerts = @import("alerts.zig");
 
@@ -82,15 +84,22 @@ export fn pane_read_cb(fd: c_int, _: c_short, arg: ?*anyopaque) void {
                     std.posix.close(wp.fd);
                     wp.fd = -1;
                 }
+                wp.flags |= T.PANE_EXITED;
+                if (window_mod.window_pane_destroy_ready(wp))
+                    server_fn.server_destroy_pane(wp, true);
                 return;
             },
         };
         if (n == 0) {
+            // EOF — shell exited. Mark pane and trigger cleanup.
             pane_io_stop(wp);
             if (wp.fd >= 0) {
                 std.posix.close(wp.fd);
                 wp.fd = -1;
             }
+            wp.flags |= T.PANE_EXITED;
+            if (window_mod.window_pane_destroy_ready(wp))
+                server_fn.server_destroy_pane(wp, true);
             return;
         }
         pane_io_feed(wp, buf[0..n]);

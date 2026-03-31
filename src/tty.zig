@@ -58,7 +58,6 @@ pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
 pub fn tty_close(tty: *T.Tty) void {
     tty_stop_tty(tty);
     freeClipboardTimer(tty);
-    freeStartTimer(tty);
     tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
 }
 
@@ -66,50 +65,11 @@ pub fn tty_start_tty(tty: *T.Tty) void {
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) return;
     tty.flags |= @intCast(T.TTY_STARTED);
     tty_invalidate(tty);
-    tty_start_start_timer(tty);
 }
 
 pub fn tty_stop_tty(tty: *T.Tty) void {
     cancelClipboardQuery(tty);
-    cancelStartTimer(tty);
     tty.flags &= ~@as(i32, @intCast(T.TTY_STARTED | T.TTY_BLOCK));
-}
-
-/// Send initial DA/XDA queries to discover what the outer terminal supports.
-/// Mirrors tmux tty_send_requests (tty.c).
-pub fn tty_send_requests(tty: *T.Tty) void {
-    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
-    // Send DA1, DA2, and XTVERSION to a VT100-like terminal if we have not
-    // already received the corresponding responses.
-    if (tty_term.isVt100Like(tty)) {
-        if ((tty.flags & @as(i32, @intCast(T.TTY_HAVEDA))) == 0)
-            tty_puts_str(tty, "\x1b[c");
-        if ((tty.flags & @as(i32, @intCast(T.TTY_HAVEDA2))) == 0)
-            tty_puts_str(tty, "\x1b[>c");
-        if ((tty.flags & @as(i32, @intCast(T.TTY_HAVEXDA))) == 0)
-            tty_puts_str(tty, "\x1b[>q");
-        tty_puts_str(tty, "\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
-        tty.flags |= @intCast(T.TTY_WAITBG | T.TTY_WAITFG);
-    } else {
-        // Terminal does not look VT100-like; treat all requests as satisfied.
-        tty.flags |= @intCast(T.TTY_ALL_REQUEST_FLAGS);
-    }
-    tty.last_requests = std.time.timestamp();
-}
-
-/// Repeat the foreground/background colour queries if enough time has elapsed.
-/// Mirrors tmux tty_repeat_requests (tty.c).
-pub fn tty_repeat_requests(tty: *T.Tty, force: i32) void {
-    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
-    const t = std.time.timestamp();
-    const n: i64 = t - tty.last_requests;
-    if (force == 0 and n <= @as(i64, T.TTY_REQUEST_LIMIT)) return;
-    tty.last_requests = t;
-    if (tty_term.isVt100Like(tty)) {
-        tty_puts_str(tty, "\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
-        tty.flags |= @intCast(T.TTY_WAITBG | T.TTY_WAITFG);
-    }
-    tty_start_start_timer(tty);
 }
 
 pub fn tty_invalidate(tty: *T.Tty) void {
@@ -990,7 +950,7 @@ pub fn tty_putcode(tty: *T.Tty, name: []const u8) void {
 }
 
 /// Emit a terminfo string capability with two string parameters.
-pub fn tty_putcode_ss(tty: *T.Tty, name: []const u8, a: []const u8, b: []const u8) void {
+fn tty_putcode_ss(tty: *T.Tty, name: []const u8, a: []const u8, b: []const u8) void {
     const template = tty_term.stringCapability(tty, name) orelse return;
     if (template.len == 0) return;
     const expanded = expand_tparm_ss(template, a, b) catch return;
@@ -1662,50 +1622,6 @@ fn formatClipboardCapability(template: []const u8, clip: []const u8, value: []co
     return out.toOwnedSlice(xm.allocator) catch null;
 }
 
-/// Arm the start timer that fires TTY_QUERY_TIMEOUT seconds later and calls
-/// tty_send_requests.  Mirrors tmux tty_start_start_timer.
-fn tty_start_start_timer(tty: *T.Tty) void {
-    const base = proc_mod.libevent orelse return;
-    if (tty.start_timer == null) {
-        tty.start_timer = c_zig.libevent.event_new(
-            base,
-            -1,
-            @intCast(c_zig.libevent.EV_TIMEOUT),
-            tty_start_timer_fire,
-            tty,
-        );
-    }
-    if (tty.start_timer) |ev| {
-        var tv = std.posix.timeval{ .sec = T.TTY_QUERY_TIMEOUT, .usec = 0 };
-        _ = c_zig.libevent.event_del(ev);
-        _ = c_zig.libevent.event_add(ev, @ptrCast(&tv));
-    }
-}
-
-fn cancelStartTimer(tty: *T.Tty) void {
-    if (tty.start_timer) |ev| _ = c_zig.libevent.event_del(ev);
-}
-
-fn freeStartTimer(tty: *T.Tty) void {
-    cancelStartTimer(tty);
-    if (tty.start_timer) |ev| {
-        c_zig.libevent.event_free(ev);
-        tty.start_timer = null;
-    }
-}
-
-export fn tty_start_timer_fire(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
-    _ = _fd;
-    _ = _events;
-    const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
-    tty_send_requests(tty);
-}
-
-/// Write a Zig slice to the tty (helper used by tty_send_requests and similar).
-fn tty_puts_str(tty: *T.Tty, s: []const u8) void {
-    tty_write(tty, s);
-}
-
 fn armClipboardTimer(tty: *T.Tty) void {
     const base = proc_mod.libevent orelse return;
 
@@ -1802,7 +1718,11 @@ export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
     _ = _arg;
 }
 
-// tty_start_timer_callback — replaced by tty_start_timer_fire (above).
+export fn tty_start_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    _ = _arg;
+}
 
 
 

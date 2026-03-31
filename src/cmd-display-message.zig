@@ -56,6 +56,7 @@ pub fn target_context(target: *const T.CmdFindState) format_mod.FormatContext {
         .winlink = target.wl,
         .window = target.w,
         .pane = target.wp,
+        .format_type = format_mod.infer_format_type(target.s, target.wl, target.wp),
     };
 }
 

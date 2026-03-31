@@ -36,6 +36,7 @@ const popup = @import("popup.zig");
 const server_client = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const status = @import("status.zig");
+const tty_mod = @import("tty.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const env_mod = @import("environ.zig");
@@ -457,6 +458,13 @@ fn popup_dimension(
     return @intCast(value);
 }
 
+const PopupPositionContext = struct {
+    tc: *T.Client,
+    wp: ?*const T.WindowPane,
+    event: *const T.key_event,
+    top: u32,
+};
+
 fn parse_popup_position(
     raw: ?[]const u8,
     default_value: u32,
@@ -465,9 +473,19 @@ fn parse_popup_position(
     item: *cmdq.CmdqItem,
     label: []const u8,
     vertical: bool,
+    pctx: PopupPositionContext,
 ) ?u32 {
     const value = raw orelse return default_value;
     if (std.mem.eql(u8, value, "C")) return default_value;
+
+    // Handle single-letter position codes matching tmux behaviour.
+    if (value.len == 1 and std.ascii.isAlphabetic(value[0])) {
+        const resolved = resolve_popup_letter(value[0], vertical, size, pctx) orelse {
+            cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, value });
+            return null;
+        };
+        return clamp_popup_position(resolved, size, limit, vertical);
+    }
 
     const parsed = std.fmt.parseInt(i64, value, 10) catch {
         cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, value });
@@ -478,17 +496,78 @@ fn parse_popup_position(
         return null;
     }
 
-    var absolute: i64 = parsed;
+    return clamp_popup_position(parsed, size, limit, vertical);
+}
+
+fn clamp_popup_position(raw: i64, size: u32, limit: u32, vertical: bool) u32 {
+    var absolute = raw;
+    if (absolute < 0) absolute = 0;
     if (vertical) {
         if (absolute < size)
             absolute = 0
         else
             absolute -= size;
     }
-
     const max_start: i64 = @max(@as(i64, 0), @as(i64, @intCast(limit)) - @as(i64, @intCast(size)));
     if (absolute > max_start) absolute = max_start;
     return @intCast(absolute);
+}
+
+/// Resolve a single-letter popup position code (P, R, M, S) to a
+/// coordinate, mirroring tmux's popup_pane_* / popup_mouse_* format
+/// variables.  `popup_size` is the popup dimension in the relevant axis
+/// (width for horizontal, height for vertical).
+fn resolve_popup_letter(ch: u8, vertical: bool, popup_size: u32, pctx: PopupPositionContext) ?i64 {
+    var ox: u32 = undefined;
+    var oy: u32 = undefined;
+    var sx: u32 = undefined;
+    var sy: u32 = undefined;
+    _ = tty_mod.tty_window_offset(&pctx.tc.tty, &ox, &oy, &sx, &sy);
+
+    if (!vertical) {
+        return switch (ch) {
+            'P' => blk: {
+                const wp = pctx.wp orelse break :blk null;
+                break :blk @as(i64, @intCast(wp.xoff)) - @as(i64, @intCast(ox));
+            },
+            'R' => blk: {
+                const wp = pctx.wp orelse break :blk null;
+                const n = @as(i64, @intCast(wp.xoff)) + @as(i64, @intCast(wp.sx)) - @as(i64, @intCast(ox)) - @as(i64, @intCast(popup_size));
+                break :blk if (n < 0) @as(i64, 0) else n;
+            },
+            'M' => blk: {
+                if (!pctx.event.m.valid) break :blk null;
+                const n = @as(i64, @intCast(pctx.event.m.x)) - @as(i64, @intCast(popup_size / 2));
+                break :blk if (n < 0) @as(i64, 0) else n;
+            },
+            else => null,
+        };
+    } else {
+        return switch (ch) {
+            'P' => blk: {
+                const wp = pctx.wp orelse break :blk null;
+                break :blk @as(i64, @intCast(pctx.top)) + @as(i64, @intCast(wp.yoff)) + @as(i64, @intCast(wp.sy)) - @as(i64, @intCast(oy));
+            },
+            'M' => blk: {
+                if (!pctx.event.m.valid) break :blk null;
+                const n = @as(i64, @intCast(pctx.event.m.y)) + @as(i64, @intCast(popup_size));
+                const tty_sy: i64 = @intCast(pctx.tc.tty.sy);
+                break :blk if (n >= tty_sy) tty_sy - 1 else n;
+            },
+            'S' => blk: {
+                const lines = status.overlay_rows(pctx.tc);
+                const position = opts.options_get_number(
+                    (pctx.tc.session orelse break :blk null).options,
+                    "status-position",
+                );
+                break :blk if (position == 0)
+                    @as(i64, @intCast(lines)) + @as(i64, @intCast(popup_size))
+                else
+                    @as(i64, @intCast(pctx.tc.tty.sy)) - @as(i64, @intCast(lines));
+            },
+            else => null,
+        };
+    }
 }
 
 fn popup_title(args: *const args_mod.Arguments, target: *const T.CmdFindState) []u8 {
@@ -699,8 +778,15 @@ fn exec_display_popup(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const popup_limit_h: u32 = @intCast(available_popup_height(tc));
     const popup_h = popup_dimension(args, 'h', @max(@as(u32, 1), if (popup_limit_h == 0) @as(u32, 1) else popup_limit_h / 2), popup_limit_h, item, "height") orelse return .@"error";
     const popup_w = popup_dimension(args, 'w', @max(@as(u32, 1), @divTrunc(tc.tty.sx, 2)), tc.tty.sx, item, "width") orelse return .@"error";
-    const popup_y = parse_popup_position(args.get('y'), if (popup_limit_h > popup_h) (popup_limit_h - popup_h) / 2 else 0, popup_h, popup_limit_h, item, "y", true) orelse return .@"error";
-    const popup_x = parse_popup_position(args.get('x'), if (tc.tty.sx > popup_w) (tc.tty.sx - popup_w) / 2 else 0, popup_w, tc.tty.sx, item, "x", false) orelse return .@"error";
+    const event = cmdq.cmdq_get_event(item);
+    const pctx = PopupPositionContext{
+        .tc = tc,
+        .wp = target.wp,
+        .event = event,
+        .top = status.pane_row_offset(tc),
+    };
+    const popup_y = parse_popup_position(args.get('y'), if (popup_limit_h > popup_h) (popup_limit_h - popup_h) / 2 else 0, popup_h, popup_limit_h, item, "y", true, pctx) orelse return .@"error";
+    const popup_x = parse_popup_position(args.get('x'), if (tc.tty.sx > popup_w) (tc.tty.sx - popup_w) / 2 else 0, popup_w, tc.tty.sx, item, "x", false, pctx) orelse return .@"error";
 
     const cwd = popup_working_directory(args, &target, tc, session);
     defer xm.allocator.free(cwd);

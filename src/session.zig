@@ -587,7 +587,9 @@ pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
         s.lastw.insert(xm.allocator, 0, o) catch unreachable;
     }
     s.curw = wl;
-    if (opts.options_get_number(opts.global_options, "focus-events") != 0) {
+    if (opts.options_ready and
+        opts.options_get_number(opts.global_options, "focus-events") != 0)
+    {
         if (old) |o| win.window_update_focus(o.window);
         win.window_update_focus(wl.window);
     }

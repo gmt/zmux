@@ -213,7 +213,7 @@ test "copy-mode enters the reduced window-copy runtime" {
         .name = "copy-mode-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -254,7 +254,7 @@ test "clock-mode enters the shared window clock mode" {
         .name = "clock-mode-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -292,7 +292,7 @@ test "copy-mode -M is a quiet no-op when the mouse pane is in another session" {
         .name = "copy-mode-mouse-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = local.session,
     };
@@ -345,7 +345,7 @@ test "copy-mode -M starts reduced cursor drag tracking on the mouse pane" {
         .name = "copy-mode-drag-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };

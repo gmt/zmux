@@ -576,7 +576,7 @@ test "split-window -I feeds detached stdin into a new empty pane" {
     var client = T.Client{
         .environ = env_mod_local.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod_local.environ_free(client.environ);
 

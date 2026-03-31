@@ -78,7 +78,7 @@ test "format_expand resolves mouse pane keys from queued item state" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -133,7 +133,7 @@ test "format_expand resolves mouse status range from explicit mouse context" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     client.tty = .{
         .client = &client,
@@ -359,7 +359,7 @@ test "format_expand resolves pane runtime keys" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -1178,7 +1178,7 @@ test "format_expand resolves session, window, and global parity extras" {
         .name = xm.xstrdup("alpha"),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = primary,
     };
     defer {
@@ -1191,7 +1191,7 @@ test "format_expand resolves session, window, and global parity extras" {
         .name = xm.xstrdup("beta"),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = primary,
     };
     defer {
@@ -1204,7 +1204,7 @@ test "format_expand resolves session, window, and global parity extras" {
         .name = xm.xstrdup("gamma"),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = peer,
     };
     defer {
@@ -1299,7 +1299,7 @@ test "format_expand resolves tmux-style client metadata keys" {
             .ypixel = 24,
             .flags = @as(i32, @intCast(T.TTY_STARTED)),
         },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED |
             T.CLIENT_FOCUSED |
             T.CLIENT_CONTROL |

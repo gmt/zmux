@@ -33,6 +33,7 @@ const sort_mod = @import("sort.zig");
 const status_prompt_mod = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
+const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
@@ -663,8 +664,9 @@ pub fn draw(mtd: *Data) void {
     const alignlen = alignlen_buf[0..@min(max_depth_idx, 64)];
     for (mtd.line_list.items) |line| {
         const mti = line.item;
-        if (mti.@"align" != 0 and mti.name.len > alignlen[@min(line.depth, alignlen.len - 1)])
-            alignlen[@min(line.depth, alignlen.len - 1)] = mti.name.len;
+        const name_width = utf8.utf8_cstrwidth(mti.name);
+        if (mti.@"align" != 0 and name_width > alignlen[@min(line.depth, alignlen.len - 1)])
+            alignlen[@min(line.depth, alignlen.len - 1)] = name_width;
     }
 
     for (mtd.line_list.items, 0..) |line, i| {
@@ -707,8 +709,9 @@ pub fn draw(mtd: *Data) void {
 
         const al_idx = @min(line.depth, @as(u32, @intCast(alignlen.len -| 1)));
         const al = alignlen[al_idx];
-        if (mti.@"align" > 0 and al > mti.name.len) {
-            var pad = al - mti.name.len;
+        const mti_name_width = utf8.utf8_cstrwidth(mti.name);
+        if (mti.@"align" > 0 and al > mti_name_width) {
+            var pad = al - mti_name_width;
             while (pad > 0) : (pad -= 1) text_buf.append(xm.allocator, ' ') catch unreachable;
         }
 
@@ -721,9 +724,11 @@ pub fn draw(mtd: *Data) void {
         }
 
         screen_write.erase_to_eol(&ctx);
-        const max_write: u32 = @min(@as(u32, @intCast(text_buf.items.len)), w);
-        if (max_write > 0)
-            screen_write.putn(&ctx, text_buf.items[0..max_write]);
+        if (text_buf.items.len > 0) {
+            const trimmed_text = utf8.utf8_trim_left(text_buf.items, w);
+            defer xm.allocator.free(trimmed_text);
+            screen_write.putn(&ctx, trimmed_text);
+        }
     }
 
     if (mtd.preview == .off) {
@@ -748,7 +753,7 @@ pub fn draw(mtd: *Data) void {
 
     const name_text = xm.xasprintf(" {s}", .{draw_mti.name});
     defer xm.allocator.free(name_text);
-    if (w >= 2 + name_text.len) {
+    if (w >= 2 + utf8.utf8_cstrwidth(name_text)) {
         screen_write.cursor_to(&ctx, h, 1);
         screen_write.putn(&ctx, name_text);
         screen_write.putn(&ctx, " ");
@@ -1400,7 +1405,7 @@ fn setItemKey(item: *Item, key: T.key_code) void {
     item.key = key;
     if (key != T.KEYC_NONE) {
         item.keystr = xm.xstrdup(key_string.key_string_lookup_key(key, 0));
-        item.keylen = item.keystr.?.len;
+        item.keylen = utf8.utf8_cstrwidth(item.keystr.?);
     } else {
         item.keylen = 0;
     }

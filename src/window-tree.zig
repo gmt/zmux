@@ -33,6 +33,7 @@ const sort_mod = @import("sort.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
+const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
@@ -677,9 +678,10 @@ fn drawVerticalLine(ctx: *T.ScreenWriteCtx, col: u32, top: u32, height: u32) voi
 }
 
 fn drawCenteredText(ctx: *T.ScreenWriteCtx, top: u32, left: u32, width: u32, height: u32, text: []const u8) void {
-    if (width == 0 or height == 0 or text.len > width) return;
+    const text_width = utf8.utf8_cstrwidth(text);
+    if (width == 0 or height == 0 or text_width > width) return;
     const row = top + height / 2;
-    const col = left + (width - @as(u32, @intCast(text.len))) / 2;
+    const col = left + (width - text_width) / 2;
     if (row >= ctx.s.grid.sy or col >= ctx.s.grid.sx) return;
     screen_write.cursor_to(ctx, row, col);
     screen_write.putn(ctx, text);

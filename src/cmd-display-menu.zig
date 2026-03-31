@@ -154,7 +154,7 @@ fn build_menu_item(
         var key_text: ?[]const u8 = null;
         if (key != T.KEYC_UNKNOWN and key != T.KEYC_NONE) {
             const candidate = key_string.key_string_lookup_key(key, 0);
-            const candidate_width: u32 = @intCast(candidate.len + 3);
+            const candidate_width: u32 = utf8.utf8_cstrwidth(candidate) + 3;
             const name_width = @min(format_display_width(expanded_name), max_width_limit);
             if (candidate_width <= max_width_limit / 4)
                 available_width = max_width_limit - candidate_width

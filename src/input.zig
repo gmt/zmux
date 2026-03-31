@@ -708,8 +708,12 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     }
 
     // Sixel: DCS Ps ; ... q <data> ST  (no intermediate, data starts with 'q')
-    // Stub: consume but do not render.
     if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
+        const w = wp.window;
+        const sixel_mod = @import("image-sixel.zig");
+        const si = sixel_mod.sixel_parse(data, dcs.params[1], w.xpixel, w.ypixel) orelse return;
+        const sw = @import("screen-write.zig");
+        sw.screen_write_sixelimage(ctx, si, T.grid_default_cell.bg);
         return;
     }
 

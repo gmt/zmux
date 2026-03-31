@@ -2697,6 +2697,105 @@ pub fn input_parse_buffer(wp: *T.WindowPane, buf: []const u8) void {
     input_parse_screen(wp, buf);
 }
 
+/// Parse ANSI escape sequences directly into a screen write context.
+/// Unlike `input_parse_screen`, this does not require a WindowPane and skips
+/// pane-specific sequences (OSC, DCS, APC).  Suitable for view-mode output
+/// where text with SGR styling needs to render into a backing screen.
+pub fn input_parse_ctx(ctx: *T.ScreenWriteCtx, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (bytes[i] != 0x1b) {
+            const start = i;
+            var end = i;
+            while (end < bytes.len and bytes[end] != 0x1b) : (end += 1) {}
+            const keep_incomplete_tail = end == bytes.len;
+            const consumed = handle_plain_bytes(ctx, bytes[start..end], keep_incomplete_tail);
+            i += consumed;
+            if (consumed < end - start) break;
+            continue;
+        }
+        if (i + 1 >= bytes.len) break;
+        const next = bytes[i + 1];
+        if (next == '[') {
+            const consumed = parse_csi(ctx, bytes[i..]) orelse break;
+            i += consumed;
+            continue;
+        }
+        // Skip pane-specific sequences (OSC, DCS, APC) by consuming until ST.
+        if (next == ']' or next == 'P' or next == '_' or next == 'k' or next == 'X') {
+            const consumed = parse_string_to_st(bytes[i..]) orelse break;
+            i += consumed;
+            continue;
+        }
+        if (next == '7') {
+            screen_write.save_cursor(ctx);
+            i += 2;
+            continue;
+        }
+        if (next == '8') {
+            screen_write.restore_cursor(ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'D') {
+            screen_write.newline(ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'M') {
+            const gd = ctx.s.grid;
+            if (ctx.s.cy == ctx.s.rupper)
+                grid_mod.scroll_down(gd, ctx.s.rupper, @min(ctx.s.rlower, gd.sy -| 1))
+            else if (ctx.s.cy > 0)
+                ctx.s.cy -= 1;
+            i += 2;
+            continue;
+        }
+        if (next == 'E') {
+            screen_write.carriage_return(ctx);
+            screen_write.newline(ctx);
+            i += 2;
+            continue;
+        }
+        if (next == 'c') {
+            input_reset_cell(ctx.s);
+            screen_write.erase_screen(ctx);
+            i += 2;
+            continue;
+        }
+        if (next == '=' or next == '>') {
+            if (next == '=')
+                ctx.s.mode |= T.MODE_KKEYPAD
+            else
+                ctx.s.mode &= ~T.MODE_KKEYPAD;
+            i += 2;
+            continue;
+        }
+        if (next == '(' or next == ')') {
+            if (i + 2 >= bytes.len) break;
+            const charset = bytes[i + 2];
+            if (next == '(') {
+                ctx.s.g0set = if (charset == '0') 1 else 0;
+            } else {
+                ctx.s.g1set = if (charset == '0') 1 else 0;
+            }
+            i += 3;
+            continue;
+        }
+        if (next == '#') {
+            if (i + 2 >= bytes.len) break;
+            if (bytes[i + 2] == '8') {
+                screen_write.alignmenttest(ctx);
+            }
+            i += 3;
+            continue;
+        }
+        // Swallow other ESC sequences.
+        i += 2;
+    }
+}
+
 /// Low-level parse entry point (tmux: `input_parse`).
 /// In tmux this takes an `input_ctx` pointer and drives the state machine.
 /// zmux delegates to `input_parse_screen` when a pane is available.

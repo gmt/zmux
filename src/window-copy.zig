@@ -23,6 +23,7 @@ const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
 const grid = @import("grid.zig");
 const hyperlinks = @import("hyperlinks.zig");
+const input_mod = @import("input.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
@@ -226,6 +227,7 @@ pub fn scrollToMouse(wp: *T.WindowPane, slider_mouse_pos: i32, mouse_y: u32, scr
         _ = window_mode_runtime.resetMode(wp);
         return;
     }
+    refreshSearchMarks(wme, true);
     redraw(wme);
 }
 
@@ -1153,6 +1155,7 @@ fn pageUpMode(wme: *T.WindowModeEntry, half_page: bool) void {
         data.cy = data.cy -| remainder;
     }
     clampCursorX(wme);
+    refreshSearchMarks(wme, true);
 }
 
 fn pageDownMode(wme: *T.WindowModeEntry, half_page: bool, scroll_exit: bool) bool {
@@ -1173,7 +1176,9 @@ fn pageDownMode(wme: *T.WindowModeEntry, half_page: bool, scroll_exit: bool) boo
         data.cy = @min(data.cy + remainder, max_visible);
     }
     clampCursorX(wme);
-    return scroll_exit and data.top == max_top;
+    if (scroll_exit and data.top == max_top) return true;
+    refreshSearchMarks(wme, true);
+    return false;
 }
 
 fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
@@ -2193,7 +2198,13 @@ pub fn window_copy_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
 }
 
 pub fn window_copy_size_changed(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    const had_searchmark = data.searchmark != null;
     window_copy_resize(wme, wme.wp.sx, wme.wp.sy);
+    if (had_searchmark and !data.timeout) {
+        // Use false: after resize, marks need full recomputation, not just refresh.
+        _ = window_copy_search_marks(wme, null, data.searchregex, false);
+    }
 }
 
 pub fn window_copy_get_screen(wme: *T.WindowModeEntry) *T.Screen {
@@ -2247,14 +2258,10 @@ pub fn window_copy_init_ctx_cb(_ctx: ?*anyopaque, _cell: ?*T.GridCell) void {
 // ── Text add (view-mode output) ────────────────────────────────────────────
 
 pub fn window_copy_add(wp: *T.WindowPane, parse: bool, text: []const u8) void {
-    // View-mode add: write text to the backing screen.
-    // The parse parameter is for ANSI escape parsing, which requires
-    // input_parse_screen (not yet ported). For now, write raw text.
     window_copy_vadd(wp, parse, text);
 }
 
-pub fn window_copy_vadd(wp: *T.WindowPane, _parse: bool, text: []const u8) void {
-    _ = _parse;
+pub fn window_copy_vadd(wp: *T.WindowPane, parse: bool, text: []const u8) void {
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
     const data = modeData(wme);
@@ -2265,9 +2272,12 @@ pub fn window_copy_vadd(wp: *T.WindowPane, _parse: bool, text: []const u8) void 
     screen_write.carriage_return(&ctx);
     screen_write.newline(&ctx);
 
-    // Write the text characters
-    for (text) |ch| {
-        screen_write.putc(&ctx, ch);
+    if (parse) {
+        input_mod.input_parse_ctx(&ctx, text);
+    } else {
+        for (text) |ch| {
+            screen_write.putc(&ctx, ch);
+        }
     }
 
     redraw(wme);
@@ -2361,6 +2371,15 @@ fn formatAddNum(ctx: *format_mod.FormatContext, key: []const u8, value: anytype)
 pub fn window_copy_formats(wme: *T.WindowModeEntry, raw_ft: ?*anyopaque) void {
     const ctx: *format_mod.FormatContext = @ptrCast(@alignCast(raw_ft orelse return));
     const data = modeData(wme);
+    const gd = data.backing.grid;
+
+    // top_line_time: timestamp of the grid line at the top of the viewport.
+    if (data.top < gd.hsize + gd.sy) {
+        const gl = grid.grid_get_line(@constCast(gd), data.top);
+        var buf: [24]u8 = undefined;
+        const time_str = std.fmt.bufPrint(&buf, "{d}", .{gl.time}) catch "0";
+        format_mod.format_add(ctx, "top_line_time", time_str);
+    }
 
     formatAddNum(ctx, "scroll_position", data.top);
     format_mod.format_add(ctx, "rectangle_toggle", if (data.rectflag) "1" else "0");
@@ -3031,6 +3050,7 @@ pub fn window_copy_search_down(wme: *T.WindowModeEntry, regex: bool) bool {
     return doSearch(wme, .down, regex);
 }
 
+<<<<<<< HEAD
 pub fn window_copy_search_marks(wme: *T.WindowModeEntry, ssp: ?*T.Screen, regex: bool, visible_only: bool) bool {
     const data = modeData(wme);
     if (data.timeout) return false;
@@ -3115,6 +3135,13 @@ pub fn window_copy_search_marks(wme: *T.WindowModeEntry, ssp: ?*T.Screen, regex:
     }
 
     return true;
+}
+
+/// Re-run search marks if a search is active and has not timed out.
+fn refreshSearchMarks(wme: *T.WindowModeEntry, again: bool) void {
+    const data = modeData(wme);
+    if (data.searchmark != null and !data.timeout)
+        _ = window_copy_search_marks(wme, null, data.searchregex, again);
 }
 
 pub fn window_copy_clear_marks(wme: *T.WindowModeEntry) void {
@@ -3638,10 +3665,12 @@ pub fn window_copy_cursor_prompt(wme: *T.WindowModeEntry, direction: i32, start_
 
 pub fn window_copy_scroll_up(wme: *T.WindowModeEntry, ny: u32) void {
     scrollLines(wme, -@as(i32, @intCast(@min(ny, std.math.maxInt(u31)))));
+    refreshSearchMarks(wme, true);
 }
 
 pub fn window_copy_scroll_down(wme: *T.WindowModeEntry, ny: u32) void {
     _ = scrollViewportDownLines(wme, ny, false);
+    refreshSearchMarks(wme, true);
 }
 
 pub fn window_copy_scroll_to(wme: *T.WindowModeEntry, px: u32, py: u32, no_redraw: bool) void {
@@ -3667,6 +3696,7 @@ pub fn window_copy_scroll_to(wme: *T.WindowModeEntry, px: u32, py: u32, no_redra
 
     data.cx = px;
     clampCursorX(wme);
+    if (!no_redraw) refreshSearchMarks(wme, true);
     _ = window_copy_update_selection(wme, true, false);
     if (!no_redraw) redraw(wme);
 }
@@ -4012,14 +4042,15 @@ pub fn window_copy_cmd_toggle_position(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_history_bottom(cs: *const CmdState) CmdAction {
-    const data = modeData(cs.wme);
-    const backing_rows = rowCount(data.backing);
+    const backing_rows = rowCount(modeData(cs.wme).backing);
     if (backing_rows != 0) setAbsoluteCursorRow(cs.wme, backing_rows - 1);
+    refreshSearchMarks(cs.wme, true);
     return .redraw;
 }
 
 pub fn window_copy_cmd_history_top(cs: *const CmdState) CmdAction {
     setAbsoluteCursorRow(cs.wme, 0);
+    refreshSearchMarks(cs.wme, true);
     return .redraw;
 }
 

@@ -31,6 +31,7 @@ const pane_empty_input = @import("pane-empty-input.zig");
 const spawn_mod = @import("spawn.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
+const layout_mod = @import("layout.zig");
 
 const SPLIT_WINDOW_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
 
@@ -64,15 +65,9 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (args.has('Z')) spawn_flags |= T.SPAWN_ZOOM;
 
     _ = win.window_push_zoom(w, true, args.has('Z'));
-    const plan = win.window_plan_split(wp, type_, size, spawn_flags) catch |err| switch (err) {
-        error.FullSizeNeedsLayout => {
-            cmdq.cmdq_error(item, "full-size split still needs layout support", .{});
-            return .@"error";
-        },
-        error.NoSpace => {
-            cmdq.cmdq_error(item, "no space for new pane", .{});
-            return .@"error";
-        },
+    const lcnew = layout_mod.layout_split_pane(wp, type_, size, @intCast(spawn_flags)) orelse {
+        cmdq.cmdq_error(item, "no space for new pane", .{});
+        return .@"error";
     };
 
     const overlay = cmd_respawn_pane.build_overlay_environment(args, item) catch return .@"error";
@@ -86,6 +81,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         .s = s,
         .wl = wl,
         .wp0 = wp,
+        .lc = lcnew,
         .cwd = args.get('c'),
         .environ = overlay,
         .flags = spawn_flags,
@@ -100,13 +96,12 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         cmdq.cmdq_error(item, "create pane failed: {s}", .{cause orelse "unknown"});
         return .@"error";
     };
-    win.window_apply_split_plan(wp, new_wp, plan);
 
     var wait_for_input = false;
     if (input) {
         switch (pane_empty_input.start(item, new_wp)) {
             .@"error" => {
-                win.window_restore_split_plan(wp, plan);
+                layout_mod.layout_close_pane(new_wp);
                 win.window_remove_pane(w, new_wp);
                 return .@"error";
             },
@@ -595,7 +590,7 @@ test "split-window -I feeds detached stdin into a new empty pane" {
     try std.testing.expectEqual(@as(usize, 0), new_wp.input_pending.items.len);
 }
 
-test "split-window -Z preserves the reduced zoom flag and -f stays honest on multi-pane windows" {
+test "split-window -Z preserves the zoom flag across the new split" {
     const opts = @import("options.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
@@ -633,8 +628,5 @@ test "split-window -Z preserves the reduced zoom flag and -f stays honest on mul
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(zoom_cmd, &item));
     try std.testing.expect(wl.window.flags & T.WINDOW_ZOOMED != 0);
     try std.testing.expectEqual(@as(u32, 0), wl.window.flags & T.WINDOW_WASZOOMED);
-
-    const fullsize_cmd = try cmd_mod.cmd_parse_one(&.{ "split-window", "-f", "-t", "split-zoom:0.0" }, null, &parse_cause);
-    defer cmd_mod.cmd_free(fullsize_cmd);
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(fullsize_cmd, &item));
+    try std.testing.expectEqual(@as(usize, 2), wl.window.panes.items.len);
 }

@@ -855,11 +855,18 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
         return;
     }
 
-    // Sixel: DCS Ps ; ... q <data> ST  (no intermediate, data starts with 'q')
+    // Sixel: DCS Ps ; Ps q <data> ST  (no intermediate, data starts with 'q')
     if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
         const w = wp.window;
         const sixel_mod = @import("image-sixel.zig");
-        const si = sixel_mod.sixel_parse(data, dcs.params[1], w.xpixel, w.ypixel) orelse return;
+        // Second DCS parameter (P2) controls transparent background.
+        // Parse from the raw param string "Ps;P2" — default to 0.
+        const p2: u32 = blk: {
+            const semi = std.mem.indexOfScalar(u8, dcs.params, ';') orelse break :blk 0;
+            if (semi + 1 >= dcs.params.len) break :blk 0;
+            break :blk std.fmt.parseInt(u32, dcs.params[semi + 1 ..], 10) catch 0;
+        };
+        const si = sixel_mod.sixel_parse(data, p2, w.xpixel, w.ypixel) orelse return;
         const sw = @import("screen-write.zig");
         sw.screen_write_sixelimage(ctx, si, T.grid_default_cell.bg);
         return;

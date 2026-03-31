@@ -10,6 +10,23 @@ Functional gaps where zmux does not yet match tmux behavior.
   per-pane redraw dispatch that tmux uses. The screen-redraw
   module needs to be wired into server-client's redraw path.
 
+## TTY Write Callback
+
+- `tty_write_callback` is an export stub that ignores all
+  parameters. tmux uses it for output blocking via
+  `tty_block_maybe`. Without it, zmux never backs off when the
+  output buffer fills.
+
+## TTY Viewport Offsets (dead functions)
+
+- `tty_update_window_offset` was ported but has zero callers.
+  tmux calls it from `resize_window`, `recalculate_size`,
+  `session_set_current`, `window_set_active_pane`, and
+  `screen_write_offset_timer`. Viewport offsets go stale after
+  any layout or session change.
+- `tty_window_bigger` was ported but has zero callers outside
+  format-resolve. tmux calls it from `cmd_select_pane_redraw`.
+
 ## TTY Keys (dead dispatch loop)
 
 - `tty_keys_next1` was ported (T4.18) but the dispatch loop
@@ -67,6 +84,23 @@ Functional gaps where zmux does not yet match tmux behavior.
   `tty_window_bigger` per-client and does a full redraw when the
   window is larger than the terminal; zmux always uses the
   lighter border/status redraw.
+- `server_client_set_session` does not call
+  `tty_update_client_offset`. Viewport offsets may be stale
+  after session switches.
+
+## Window Pane
+
+- `window_pane_start_input` was ported but has zero callers.
+  tmux calls it from `cmd_display_message_exec` and
+  `cmd_split_window_exec` to attach client stdin to a pane.
+
+## Menu Builder
+
+- `menu_create`, `menu_add_item`, and `menu_add_items` were
+  ported but have zero callers. `cmd-display-menu` builds
+  `MenuItem` structs directly, bypassing the builder API.
+  tmux routes through these functions from cmd-display-menu,
+  mode-tree, popup, and status-prompt.
 
 ## Mode-Tree
 

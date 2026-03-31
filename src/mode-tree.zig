@@ -32,6 +32,7 @@ const server = @import("server.zig");
 const sort_mod = @import("sort.zig");
 const status_prompt_mod = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
+const style = @import("style.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
@@ -642,8 +643,7 @@ pub fn draw(mtd: *Data) void {
 
     var gc0 = T.grid_default_cell;
     var gc = T.grid_default_cell;
-    _ = &gc0;
-    _ = &gc;
+    style.style_apply(&gc, mtd.wp.window.options, "mode-style", null);
 
     const w = mtd.width;
     const h = mtd.height;
@@ -723,11 +723,21 @@ pub fn draw(mtd: *Data) void {
             text_buf.appendSlice(xm.allocator, t) catch unreachable;
         }
 
+        if (mti.tagged) {
+            gc.attr ^= T.GRID_ATTR_BRIGHT;
+            gc0.attr ^= T.GRID_ATTR_BRIGHT;
+        }
+
         screen_write.erase_to_eol(&ctx);
-        if (text_buf.items.len > 0) {
-            const trimmed_text = utf8.utf8_trim_left(text_buf.items, w);
-            defer xm.allocator.free(trimmed_text);
-            screen_write.putn(&ctx, trimmed_text);
+        if (i != mtd.current) {
+            screen_write.nputs(&ctx, @intCast(w), &gc0, text_buf.items);
+        } else {
+            screen_write.nputs(&ctx, @intCast(w), &gc, text_buf.items);
+        }
+
+        if (mti.tagged) {
+            gc.attr ^= T.GRID_ATTR_BRIGHT;
+            gc0.attr ^= T.GRID_ATTR_BRIGHT;
         }
     }
 
@@ -755,8 +765,8 @@ pub fn draw(mtd: *Data) void {
     defer xm.allocator.free(name_text);
     if (w >= 2 + utf8.utf8_cstrwidth(name_text)) {
         screen_write.cursor_to(&ctx, h, 1);
-        screen_write.putn(&ctx, name_text);
-        screen_write.putn(&ctx, " ");
+        screen_write.puts(&ctx, &gc0, name_text);
+        screen_write.puts(&ctx, &gc0, " ");
     }
 
     const box_x = w -| 4;

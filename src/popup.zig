@@ -271,6 +271,7 @@ pub fn popup_display(
     rebuild_screen(pd);
 
     client.popup_data = pd;
+    client.references += 1;
     client.tty.flags |= @intCast(T.TTY_FREEZE | T.TTY_NOCURSOR);
     client.flags |= T.CLIENT_REDRAWOVERLAY;
     return 0;

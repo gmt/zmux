@@ -87,8 +87,9 @@ pub fn build(b: *std.Build) void {
     if (opt_utempter) exe.linkSystemLibrary("utempter");
     if (opt_utf8proc) exe.linkSystemLibrary("utf8proc");
 
-    // image.zig and image-sixel.zig are pure Zig; no addCSourceFile needed.
-    // They are conditionally reachable via the enable_sixel build option.
+    if (opt_sixel) {
+        // image-sixel.zig is deferred – acknowledged here for the feature flag
+    }
 
     b.installArtifact(exe);
 

@@ -25,7 +25,6 @@ const cmd_mod = @import("cmd.zig");
 const key_string = @import("key-string.zig");
 const opts = @import("options.zig");
 const server = @import("server.zig");
-const status_mod = @import("status.zig");
 const status_runtime = @import("status-runtime.zig");
 const utf8 = @import("utf8.zig");
 
@@ -875,54 +874,9 @@ pub fn status_prompt_key(c: *T.Client, key: T.key_code) i32 {
     return @intFromBool(status_prompt_handle_key(c, &event));
 }
 
-/// Map a terminal column click to a cursor character index.
-/// `click_col` is relative to the start of the input area; `offset` is the
-/// horizontal scroll amount from `status_prompt_render_state`.
-fn mouse_set_cursor(st: *PromptState, click_col: u32, offset: u32) void {
-    var col: u32 = 0;
-    const target_col = click_col + offset;
-    for (st.input.cells.items, 0..) |cell, idx| {
-        const w = rendered_cell_width(&cell);
-        if (col + w > target_col) {
-            st.cursor = idx;
-            return;
-        }
-        col += w;
-    }
-    st.cursor = st.input.len();
-}
-
 pub fn status_prompt_handle_key(c: *T.Client, event: *const T.key_event) bool {
     const state = find_state(c) orelse return false;
     const masked = event.key & T.KEYC_MASK_KEY;
-
-    // Mouse events must be handled before PROMPT_KEY / PROMPT_NUMERIC so
-    // they don't accidentally finish the prompt with a key-name string.
-    if (T.keycIsMouse(event.key)) {
-        const m = &event.m;
-        if (T.mouseButtons(m.b) == T.MOUSE_BUTTON_1 and
-            !T.mouseRelease(m.b) and !T.mouseDrag(m.b) and !T.mouseWheel(m.b))
-        {
-            if (status_mod.status_prompt_input_geometry(c)) |geom| {
-                if (status_mod.status_prompt_row(c)) |row| {
-                    const prompt_row = row + geom.line;
-                    if (m.y == prompt_row and m.x >= geom.input_x and
-                        m.x < geom.input_x + geom.input_width)
-                    {
-                        const click_col = m.x - geom.input_x;
-                        const cursor_width = rendered_cursor_width(state);
-                        const offset: u32 = if (geom.input_width != 0 and cursor_width >= geom.input_width)
-                            (cursor_width - geom.input_width) + 1
-                        else
-                            0;
-                        mouse_set_cursor(state, click_col, offset);
-                        request_status_redraw(c);
-                    }
-                }
-            }
-        }
-        return true;
-    }
 
     if (state.flags & PROMPT_KEY != 0) {
         prompt_finish(c, state, key_string.key_string_lookup_key(event.key, 0), true);

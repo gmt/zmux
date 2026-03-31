@@ -94,6 +94,7 @@ pub fn server_client_create(fd: i32) *T.Client {
 
 pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
+    cl.flags |= T.CLIENT_DEAD;
     const was_attached = (cl.flags & T.CLIENT_ATTACHED) != 0;
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
@@ -122,7 +123,6 @@ pub fn server_client_lost(cl: *T.Client) void {
         cl.click_timer = null;
     }
     if (cl.cwd) |cwd| xm.allocator.free(@constCast(cwd));
-    if (cl.name) |name| xm.allocator.free(@constCast(name));
     if (cl.term_name) |term_name| xm.allocator.free(term_name);
     if (cl.term_caps) |caps| {
         for (caps) |cap| xm.allocator.free(cap);
@@ -141,7 +141,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     resize_mod.recalculate_sizes();
     srv.server_update_socket();
     env_mod.environ_free(cl.environ);
-    xm.allocator.destroy(cl);
+    server_client_unref(cl);
 }
 
 pub fn server_client_get_client_window(cl: *T.Client, id: u32) ?*T.ClientWindow {
@@ -676,15 +676,20 @@ pub fn server_client_check_exit(cl: *T.Client) void {
 }
 
 /// Check if pane modes need updating during status redraw.
-/// Currently a stub - mode updates are unported in the Zig WindowMode struct
-/// but the can be addeded when a window-copy or window-copy mode is ported.
 pub fn server_client_check_modes(cl: *T.Client) void {
     if (cl.flags & T.CLIENT_CONTROL != 0) return;
     if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
     if (cl.flags & T.CLIENT_REDRAWSTATUS == 0) return;
 
-    // Mode updates will be called when window-copy or other modes
-    // are added mode update support to WindowMode in types.zig.
+    const s = cl.session orelse return;
+    const wl = s.curw orelse return;
+    const w = wl.window;
+
+    for (w.panes.items) |wp| {
+        if (wp.modes.items.len == 0) continue;
+        const wme = wp.modes.items[0];
+        if (wme.mode.update) |update_fn| update_fn(wme);
+    }
 }
 
 /// Check if client needs a redraw and perform it if output buffer is clear.
@@ -1486,7 +1491,7 @@ pub fn server_client_set_overlay(
     if (cl.overlay_mode == null)
         cl.tty.flags |= T.TTY_NOCURSOR;
 
-    // TODO: window_update_focus when ported
+    if (cl.session) |s| if (s.curw) |wl| win_mod.window_update_focus(wl.window);
     server_client_force_redraw(cl);
 }
 
@@ -1509,7 +1514,7 @@ pub fn server_client_clear_overlay(cl: *T.Client) void {
 
     const mask: i32 = @intCast(@as(u32, T.TTY_FREEZE | T.TTY_NOCURSOR));
     cl.tty.flags &= ~mask;
-    // TODO: window_update_focus when ported
+    if (cl.session) |s| if (s.curw) |wl| win_mod.window_update_focus(wl.window);
     server_client_force_redraw(cl);
 }
 
@@ -2343,6 +2348,17 @@ pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
     }
 
     log.log_debug("check_pane_buffer: pane %%{d} is {s}", .{ wp.id, if (off) "off" else "on" });
+
+    // Backpressure: stop reading from the pane fd when all attached clients
+    // are blocked (off), resume when at least one can consume data (on).
+    // In C this is bufferevent_disable/enable(wp->event, EV_READ); here we
+    // use plain event_del/event_add since zmux uses non-buffered events.
+    if (wp.event) |ev| {
+        if (off)
+            _ = c.libevent.event_del(ev)
+        else
+            _ = c.libevent.event_add(ev, null);
+    }
 }
 
 // ── Timer callbacks ───────────────────────────────────────────────────────
@@ -2386,8 +2402,14 @@ export fn server_client_click_timer(_fd: c_int, _events: c_short, arg: ?*anyopaq
 
 // ── Lifecycle functions ───────────────────────────────────────────────────
 
+/// Decrement the client reference count and free when it reaches zero.
+/// The final free is synchronous (zmux has no event_once).
 pub fn server_client_unref(cl: *T.Client) void {
-    log.log_debug("server_client_unref: stub for {*}", .{cl});
+    log.log_debug("server_client_unref: {*} ({d} references)", .{ cl, cl.references });
+    if (cl.references == 0) return;
+    cl.references -= 1;
+    if (cl.references == 0)
+        server_client_free(-1, 0, @ptrCast(cl));
 }
 
 export fn server_client_free(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {

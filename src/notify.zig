@@ -259,7 +259,17 @@ fn dispatchControlNotifications(entry: *const NotifyEntry) void {
 /// the queue item is destroyed without being fired.
 fn freeNotifyEntry(entry: *NotifyEntry) void {
     if (entry.session) |s| sess.session_remove_ref(s, "notify_callback");
-    if (entry.window) |w| win_mod.window_remove_ref(w, "notify_callback");
+    if (entry.window) |w| {
+        // Guard against a dangling window pointer — in test environments a
+        // prior test may have freed a window without draining the notify queue.
+        // Since window_remove_ref removes the window from the global map before
+        // freeing, any live window is present in win_mod.windows by pointer.
+        var vit = win_mod.windows.valueIterator();
+        const valid = while (vit.next()) |wp| {
+            if (wp.* == w) break true;
+        } else false;
+        if (valid) win_mod.window_remove_ref(w, "notify_callback");
+    }
     if (entry.fs.s) |s| sess.session_remove_ref(s, "notify_callback");
     entry.deinit();
     xm.allocator.destroy(entry);
@@ -276,6 +286,7 @@ fn notifyCallback(item: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const entry: *NotifyEntry = @ptrCast(@alignCast(data orelse return .normal));
     defer freeNotifyEntry(entry);
 
+    dispatchControlNotifications(entry);
     notify_insert_hook(item, entry);
     return .normal;
 }
@@ -307,10 +318,6 @@ pub fn notify_add(
     if (session) |s| sess.session_add_ref(s, "notify_add");
     if (window) |w| win_mod.window_add_ref(w, "notify_add");
     if (entry.fs.s) |s| sess.session_add_ref(s, "notify_add");
-
-    // Dispatch control-mode notifications synchronously so control clients
-    // see them immediately, matching tmux's event-loop behaviour.
-    dispatchControlNotifications(entry);
 
     _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback2("notify", notifyCallback, entry, freeNotifyData));
 }

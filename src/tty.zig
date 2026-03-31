@@ -2212,20 +2212,7 @@ pub fn tty_update_window_offset(w: *T.Window) void {
     }
 }
 
-/// Send initial terminal feature requests (DA, DA2, XDA, fg/bg queries).
-/// Stub: terminal feature detection is not yet implemented.
-pub fn tty_send_requests(tty: *T.Tty) void {
-    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0)
-        return;
-}
-
-/// Re-send fg/bg colour queries after a resize or theme change.
-/// Stub: terminal feature detection is not yet implemented.
-pub fn tty_repeat_requests(tty: *T.Tty, force: bool) void {
-    _ = force;
-    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0)
-        return;
-}
+// tty_send_requests and tty_repeat_requests are defined above (line ~93).
 
 pub fn tty_large_region(_: *T.Tty, ctx: *const T.TtyCtx) i32 {
     return if (ctx.orlower -| ctx.orupper >= ctx.sy / 2) @as(i32, 1) else @as(i32, 0);

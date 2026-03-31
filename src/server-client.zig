@@ -1396,11 +1396,22 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     defer mode_payload.deinit(xm.allocator);
     tty_mod.tty_append_mode_update(&cl.tty, mouse_runtime.client_outer_tty_mode(cl), &mode_payload) catch return null;
 
-    if (mode_payload.items.len == 0 and body.payload.len == 0 and border_payload.len == 0 and scrollbar_payload.len == 0 and status_render.payload.len == 0 and overlay_payload == null) return null;
+    // Drain DCS passthrough data from all panes in this window.
+    var passthrough: std.ArrayList(u8) = .{};
+    defer passthrough.deinit(xm.allocator);
+    for (wl.window.panes.items) |pane| {
+        if (pane.passthrough_pending.items.len != 0) {
+            passthrough.appendSlice(xm.allocator, pane.passthrough_pending.items) catch {};
+            pane.passthrough_pending.clearRetainingCapacity();
+        }
+    }
+
+    if (mode_payload.items.len == 0 and body.payload.len == 0 and border_payload.len == 0 and scrollbar_payload.len == 0 and status_render.payload.len == 0 and overlay_payload == null and passthrough.items.len == 0) return null;
 
     var buf: std.ArrayList(u8) = .{};
     errdefer buf.deinit(xm.allocator);
     buf.appendSlice(xm.allocator, mode_payload.items) catch return null;
+    buf.appendSlice(xm.allocator, passthrough.items) catch return null;
     buf.appendSlice(xm.allocator, body.payload) catch return null;
     buf.appendSlice(xm.allocator, scrollbar_payload) catch return null;
     buf.appendSlice(xm.allocator, border_payload) catch return null;

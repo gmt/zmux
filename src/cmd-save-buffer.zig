@@ -178,7 +178,7 @@ test "save-buffer writes and appends a named buffer using client cwd for relativ
         .cwd = cwd,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var list: cmd_mod.CmdList = .{};
@@ -238,7 +238,7 @@ test "save-buffer writes a named buffer using session cwd when client cwd is mis
         .environ = &env,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
     };
 
@@ -280,7 +280,7 @@ test "save-buffer uses the newest automatic buffer when no name is provided" {
         .cwd = cwd,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var cause: ?[]u8 = null;
@@ -338,7 +338,7 @@ test "save-buffer expands the output path through the format context" {
         .environ = &env,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
     };
 
@@ -427,7 +427,7 @@ test "show-buffer renders attached clients in the reduced view mode" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -532,7 +532,7 @@ test "show-buffer attached view preserves shared utf8 grid payloads" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -609,7 +609,7 @@ test "show-buffer attached view mode dismisses on the next key" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -684,7 +684,7 @@ test "show-buffer attached view escapes control bytes instead of replacing them"
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = &session,
         .flags = T.CLIENT_ATTACHED,
     };
@@ -717,7 +717,7 @@ test "show-buffer uses the remote write-open handshake for detached clients" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -788,7 +788,7 @@ test "save-buffer writes detached file paths through write-ready then write-clos
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -882,7 +882,7 @@ test "save-buffer reports bad file descriptor for dash on attached clients" {
         .environ = &env,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var list: cmd_mod.CmdList = .{};
@@ -937,7 +937,7 @@ test "save-buffer reports client-side open errors from write-ready" {
         .environ = &env,
         .cwd = cwd,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -1022,7 +1022,7 @@ test "show-buffer writes raw bytes over the peer transport for control clients" 
         .environ = &env,
         .flags = T.CLIENT_CONTROL,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -1088,7 +1088,7 @@ test "save-buffer reports strerror text for write failures" {
         .cwd = cwd,
         .flags = T.CLIENT_ATTACHED,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var list: cmd_mod.CmdList = .{};

@@ -263,8 +263,8 @@ test "environ_sorted_entries returns alphabetical order" {
 }
 
 test "environ_cmp and first/next iteration order" {
-    var a = T.EnvironEntry{ .name = @constCast("a"), .value = null, .flags = 0 };
-    var b = T.EnvironEntry{ .name = @constCast("b"), .value = null, .flags = 0 };
+    var a = T.EnvironEntry{ .name = "a", .value = null, .flags = 0 };
+    var b = T.EnvironEntry{ .name = "b", .value = null, .flags = 0 };
     try std.testing.expect(environ_cmp(&a, &b) < 0);
     try std.testing.expect(environ_cmp(&b, &a) > 0);
     try std.testing.expectEqual(@as(i32, 0), environ_cmp(&a, &a));

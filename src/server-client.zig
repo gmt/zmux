@@ -2062,6 +2062,17 @@ pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, data: ?*anyopaque) T
         return .normal;
     }
 
+    // Check for focus events.
+    if (key == T.KEYC_FOCUS_OUT) {
+        cl.flags &= ~@as(u64, T.CLIENT_FOCUSED);
+        win_mod.window_update_focus(wl.window);
+        notify.notify_client("client-focus-out", cl);
+    } else if (key == T.KEYC_FOCUS_IN) {
+        cl.flags |= T.CLIENT_FOCUSED;
+        notify.notify_client("client-focus-in", cl);
+        win_mod.window_update_focus(wl.window);
+    }
+
     const client_table_name = if (cl.key_table_name) |name| name else blk: {
         const configured = opts.options_get_string(s.options, "key-table");
         break :blk if (configured.len != 0) configured else "root";

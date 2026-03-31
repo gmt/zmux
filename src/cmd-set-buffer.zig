@@ -232,10 +232,11 @@ test "set-buffer write flag keeps buffer writes even without clipboard transport
     var target = T.Client{
         .name = "clip",
         .environ = &env,
-        .tty = undefined,
+        .tty = undefined, // initialized below once &target is available
         .status = .{},
         .flags = T.CLIENT_ATTACHED,
     };
+    target.tty = T.Tty{ .client = &target }; // flags = 0 → TTY_STARTED unset → tty_set_selection early-returns
     target.session = &session;
     client_registry.add(&target);
 

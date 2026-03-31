@@ -87,6 +87,9 @@ pub const entry: cmd_mod.CmdEntry = .{
 };
 
 test "unbind-key removes a specific key binding" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     key_bindings.key_bindings_init();
     key_bindings.key_bindings_add("root", 'x', null, false, null);
 
@@ -102,6 +105,9 @@ test "unbind-key removes a specific key binding" {
 }
 
 test "unbind-key -a removes a table entirely" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     key_bindings.key_bindings_init();
     key_bindings.key_bindings_add("root", 'x', null, false, null);
     key_bindings.key_bindings_add("root", 'y', null, false, null);
@@ -118,6 +124,9 @@ test "unbind-key -a removes a table entirely" {
 }
 
 test "unbind-key removes explicit built in binding only" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
     key_bindings.key_bindings_init();
 
     var cause: ?[]u8 = null;

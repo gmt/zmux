@@ -443,6 +443,12 @@ pub const GRID_LINE_DEAD: i32 = 0x04;
 pub const GRID_LINE_START_PROMPT: i32 = 0x08;
 pub const GRID_LINE_START_OUTPUT: i32 = 0x10;
 
+pub const GRID_STRING_WITH_SEQUENCES: i32 = 0x1;
+pub const GRID_STRING_ESCAPE_SEQUENCES: i32 = 0x2;
+pub const GRID_STRING_TRIM_SPACES: i32 = 0x4;
+pub const GRID_STRING_USED_ONLY: i32 = 0x8;
+pub const GRID_STRING_EMPTY_CELLS: i32 = 0x10;
+
 // ── Grid cell ─────────────────────────────────────────────────────────────
 
 pub const GridCell = extern struct {

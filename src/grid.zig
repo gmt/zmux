@@ -237,6 +237,29 @@ pub fn set_cell(gd: *T.Grid, row: u32, col: u32, gc: *const T.GridCell) void {
     store_entry(line, &line.celldata[col], gc);
 }
 
+/// Set multiple cells at (row, col) from a byte string, all sharing the same
+/// cell attributes from `gc`.  Each byte in `s` becomes one cell.
+pub fn set_cells(gd: *T.Grid, row: u32, col: u32, gc: *const T.GridCell, s: []const u8) void {
+    if (row >= gd.linedata.len or s.len == 0) return;
+
+    const end_col = col + @as(u32, @intCast(s.len));
+    expand_line(gd, row, end_col, 8);
+
+    const line = &gd.linedata[row];
+    if (end_col > line.cellused) line.cellused = end_col;
+
+    for (s, 0..) |ch, i| {
+        const px = col + @as(u32, @intCast(i));
+        const gce = &line.celldata[px];
+        if (need_extended_cell(gce, gc)) {
+            extended_cell(line, gce, gc);
+            line.extddata[gce.offset_or_data.offset].data = utf8.utf8_build_one(ch);
+        } else {
+            store_cell(gce, gc, ch);
+        }
+    }
+}
+
 pub fn set_padding(gd: *T.Grid, row: u32, col: u32) void {
     set_cell(gd, row, col, &T.grid_padding_cell);
 }
@@ -1426,6 +1449,11 @@ pub fn grid_view_insert_cells(gd: *T.Grid, px: u32, py: u32, nx: u32, bg: u32) v
         grid_move_cells(gd, px + nx, px, py, sx - px - nx, bg);
 }
 
+/// Set multiple cells at a view position (adjusting for hsize).
+pub fn grid_view_set_cells(gd: *T.Grid, px: u32, py: u32, gc: *const T.GridCell, s: []const u8) void {
+    set_cells(gd, py, px, gc, s);
+}
+
 /// Delete cells (shift left) at view position.
 pub fn grid_view_delete_cells(gd: *T.Grid, px: u32, py: u32, nx: u32, bg: u32) void {
     const sx = gd.sx;
@@ -1485,6 +1513,10 @@ pub fn grid_get_cell(gd: *T.Grid, px: u32, py: u32, gc: *T.GridCell) void {
 
 pub fn grid_set_cell(gd: *T.Grid, px: u32, py: u32, gc: *const T.GridCell) void {
     set_cell(gd, py, px, gc);
+}
+
+pub fn grid_set_cells(gd: *T.Grid, px: u32, py: u32, gc: *const T.GridCell, s: []const u8) void {
+    set_cells(gd, py, px, gc, s);
 }
 
 pub fn grid_set_padding(gd: *T.Grid, px: u32, py: u32) void {
@@ -1583,40 +1615,154 @@ pub fn grid_compare(ga: *const T.Grid, gb: *const T.Grid) i32 {
     return 0;
 }
 
-/// tmux `grid_string_cells` (flags / lastgc / screen) — stub; use `string_cells` for Zig callers.
+/// tmux `grid_string_cells` C-compat wrapper.  Delegates to `string_cells`.
 pub fn grid_string_cells(
-    _: *T.Grid,
-    _: u32,
-    _: u32,
-    _: u32,
-    _: ?*?*T.GridCell,
-    _: i32,
-    _: ?*T.Screen,
+    gd: *T.Grid,
+    px: u32,
+    py: u32,
+    nx: u32,
+    lastgc: ?*?*T.GridCell,
+    flags: i32,
+    sc: ?*T.Screen,
 ) []u8 {
-    return xm.xstrdup("");
+    const opts = StringCellsOptions{
+        .trim_trailing_spaces = (flags & T.GRID_STRING_TRIM_SPACES) != 0,
+        .escape_sequences = (flags & T.GRID_STRING_ESCAPE_SEQUENCES) != 0,
+        .with_sequences = (flags & T.GRID_STRING_WITH_SEQUENCES) != 0,
+        .include_empty_cells = (flags & T.GRID_STRING_EMPTY_CELLS) != 0,
+        .screen = sc,
+        .last_cell = if (lastgc) |lp| (if (lp.*) |c| c else null) else null,
+    };
+    _ = px;
+    return string_cells(gd, py, nx, opts);
 }
 
-pub fn grid_string_cells_fg(_: *const T.GridCell, _: []i32) usize {
-    return 0;
+pub fn grid_string_cells_fg(gc: *const T.GridCell, values: []i32) usize {
+    var buf: [8]i32 = undefined;
+    const n = colour_codes(gc, .fg, &buf);
+    for (0..n) |i| values[i] = buf[i];
+    return n;
 }
 
-pub fn grid_string_cells_bg(_: *const T.GridCell, _: []i32) usize {
-    return 0;
+pub fn grid_string_cells_bg(gc: *const T.GridCell, values: []i32) usize {
+    var buf: [8]i32 = undefined;
+    const n = colour_codes(gc, .bg, &buf);
+    for (0..n) |i| values[i] = buf[i];
+    return n;
 }
 
-pub fn grid_string_cells_us(_: *const T.GridCell, _: []i32) usize {
-    return 0;
+pub fn grid_string_cells_us(gc: *const T.GridCell, values: []i32) usize {
+    var buf: [8]i32 = undefined;
+    const n = colour_codes(gc, .us, &buf);
+    for (0..n) |i| values[i] = buf[i];
+    return n;
 }
 
+/// Append an SGR code sequence to a NUL-terminated buffer.
+pub fn grid_string_cells_add_code(
+    buf: []u8,
+    n: usize,
+    s: []const i32,
+    newc: []const i32,
+    oldc: []const i32,
+    flags: i32,
+) void {
+    if (newc.len == 0) return;
+    const reset = n != 0 and s[0] == 0;
+    if (!reset and newc.len == oldc.len and std.mem.eql(i32, newc, oldc)) return;
+    if (reset and (newc[0] == 49 or newc[0] == 39)) return;
+
+    const escape = (flags & T.GRID_STRING_ESCAPE_SEQUENCES) != 0;
+    const cur_len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+    var pos = cur_len;
+
+    const prefix: []const u8 = if (escape) "\\033[" else &[_]u8{ 0x1b, '[' };
+    if (pos + prefix.len > buf.len) return;
+    @memcpy(buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+
+    for (newc, 0..) |code, idx| {
+        var tmp: [32]u8 = undefined;
+        const rendered = std.fmt.bufPrint(&tmp, "{d}", .{code}) catch return;
+        if (pos + rendered.len > buf.len) return;
+        @memcpy(buf[pos .. pos + rendered.len], rendered);
+        pos += rendered.len;
+        if (idx + 1 < newc.len) {
+            if (pos >= buf.len) return;
+            buf[pos] = ';';
+            pos += 1;
+        }
+    }
+    if (pos >= buf.len) return;
+    buf[pos] = 'm';
+    pos += 1;
+    if (pos < buf.len) buf[pos] = 0;
+}
+
+/// Append an OSC 8 hyperlink sequence to a NUL-terminated buffer.
+pub fn grid_string_cells_add_hyperlink(
+    buf: []u8,
+    id: []const u8,
+    uri: []const u8,
+    flags: i32,
+) bool {
+    if (uri.len + id.len + 17 >= buf.len) return false;
+
+    const escape = (flags & T.GRID_STRING_ESCAPE_SEQUENCES) != 0;
+    const cur_len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+    var pos = cur_len;
+
+    const prefix: []const u8 = if (escape) "\\033]8;" else &[_]u8{ 0x1b, ']', '8', ';' };
+    if (pos + prefix.len > buf.len) return false;
+    @memcpy(buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+
+    if (id.len != 0) {
+        const id_prefix = "id=";
+        if (pos + id_prefix.len + id.len + 1 > buf.len) return false;
+        @memcpy(buf[pos .. pos + id_prefix.len], id_prefix);
+        pos += id_prefix.len;
+        @memcpy(buf[pos .. pos + id.len], id);
+        pos += id.len;
+        buf[pos] = ';';
+        pos += 1;
+    } else {
+        if (pos >= buf.len) return false;
+        buf[pos] = ';';
+        pos += 1;
+    }
+
+    if (pos + uri.len > buf.len) return false;
+    @memcpy(buf[pos .. pos + uri.len], uri);
+    pos += uri.len;
+
+    const suffix: []const u8 = if (escape) "\\033\\\\" else &[_]u8{ 0x1b, '\\' };
+    if (pos + suffix.len > buf.len) return false;
+    @memcpy(buf[pos .. pos + suffix.len], suffix);
+    pos += suffix.len;
+
+    if (pos < buf.len) buf[pos] = 0;
+    return true;
+}
+
+/// Build SGR code sequence for transitioning from `lastgc` to `gc`.
 pub fn grid_string_cells_code(
-    _: *const T.GridCell,
-    _: *const T.GridCell,
-    _: []u8,
-    _: usize,
-    _: u32,
-    _: ?*T.Screen,
-    _: *bool,
-) void {}
+    lastgc: *const T.GridCell,
+    gc: *const T.GridCell,
+    buf: []u8,
+    flags: i32,
+    sc: ?*T.Screen,
+    has_link: *bool,
+) void {
+    const escape = (flags & T.GRID_STRING_ESCAPE_SEQUENCES) != 0;
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+    append_rendered_sequence(&out, lastgc, gc, escape, sc, has_link);
+    const written = @min(out.items.len, buf.len -| 1);
+    if (written > 0)
+        @memcpy(buf[0..written], out.items[0..written]);
+    if (written < buf.len) buf[written] = 0;
+}
 
 // ── Grid reflow (ported from tmux grid.c lines 1220-1612) ─────────────────
 //

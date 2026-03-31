@@ -34,6 +34,8 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const cmd_mod = @import("cmd.zig");
+const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
 const log = @import("log.zig");
 const session_mod = @import("session.zig");
@@ -617,11 +619,61 @@ pub fn control_panes_deinit(cl: *T.Client) void {
 // I/O callbacks (stubs – zmux uses peer-based IPC, not bufferevents)
 // ---------------------------------------------------------------------------
 
-/// Stub: libevent read callback.  In tmux this reads lines from the
-/// bufferevent input and dispatches them as commands.  zmux handles
-/// command dispatch through the peer/proc layer instead.
-pub fn control_read_callback(cl: *T.Client) void {
-    _ = cl;
+/// Control-mode error callback: writes a parse-error response to the client.
+/// Mirrors tmux `control_error` in control.c.
+fn control_error_cb(item: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
+    const cl = cmdq.cmdq_get_client(item) orelse return .normal;
+    const err_ptr: *[]u8 = @ptrCast(@alignCast(data orelse return .normal));
+    const err = err_ptr.*;
+    defer xm.allocator.free(err);
+    defer xm.allocator.destroy(err_ptr);
+
+    cmdq.cmdq_guard(item, "begin", 1);
+    control_write(cl, "parse error: {s}", .{err});
+    cmdq.cmdq_guard(item, "error", 1);
+    return .normal;
+}
+
+fn free_control_error_data(data: ?*anyopaque) void {
+    const err_ptr: *[]u8 = @ptrCast(@alignCast(data orelse return));
+    xm.allocator.free(err_ptr.*);
+    xm.allocator.destroy(err_ptr);
+}
+
+/// Read callback: dispatch a single line from the control client as a command.
+/// In tmux this is called from the bufferevent read callback (control.c
+/// `control_read_callback`); in zmux the caller provides the already-read line.
+pub fn control_read_callback(cl: *T.Client, line: []const u8) void {
+    log.log_debug("control_read_callback: {s}: {s}", .{ cl.name orelse "<anon>", line });
+
+    if (line.len == 0) {
+        // Empty line means detach.
+        cl.flags |= T.CLIENT_EXIT;
+        return;
+    }
+
+    var pi: T.CmdParseInput = .{ .c = cl };
+    const result = cmd_mod.cmd_parse_from_string(line, &pi);
+    switch (result.status) {
+        .success => {
+            if (result.cmdlist) |raw| {
+                const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(raw));
+                const state = cmdq.cmdq_new_state(null, null, T.CMDQ_STATE_CONTROL);
+                defer cmdq.cmdq_free_state(state);
+                _ = cmdq.cmdq_append_item(cl, cmdq.cmdq_get_command(@ptrCast(cmdlist), state));
+            }
+        },
+        .@"error" => {
+            if (result.@"error") |err| {
+                const err_ptr = xm.allocator.create([]u8) catch unreachable;
+                err_ptr.* = err;
+                _ = cmdq.cmdq_append_item(
+                    cl,
+                    cmdq.cmdq_get_callback2("control-error", control_error_cb, err_ptr, free_control_error_data),
+                );
+            }
+        },
+    }
 }
 
 /// Stub: libevent error callback.  In tmux this flags the client for exit

@@ -22,7 +22,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
-const file_mod = @import("file.zig");
+const control = @import("control.zig");
 const format_mod = @import("format.zig");
 const xm = @import("xmalloc.zig");
 const registry = @import("client-registry.zig");
@@ -45,16 +45,10 @@ fn session_has_window(s: *T.Session, w: *T.Window) bool {
     return false;
 }
 
+/// Write a control notification line, respecting the output-block queue order.
 fn write_control(cl: *T.Client, comptime fmt: []const u8, args: anytype) void {
     if (!should_notify_client(cl)) return;
-    const msg = xm.xasprintf(fmt, args);
-    defer xm.allocator.free(msg);
-
-    if (cl.peer) |peer| {
-        const line = std.fmt.allocPrint(xm.allocator, "{s}\n", .{msg}) catch unreachable;
-        defer xm.allocator.free(line);
-        _ = file_mod.sendPeerStream(peer, 1, line);
-    }
+    control.control_write(cl, fmt, args);
 }
 
 pub fn control_notify_session_created(_s: *T.Session) void {

@@ -150,6 +150,13 @@ fn render_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) void {
     if (!parse) screen_mod.screen_reset_active(wp.screen);
     wp.screen.cursor_visible = false;
 
+    // View mode renders human-readable text; enable CRLF so that bare LF
+    // characters in the data advance to column 0 of the next line, matching
+    // the expectation callers have when passing plain-text content.
+    const saved_mode = wp.screen.mode;
+    wp.screen.mode |= T.MODE_CRLF;
+    defer wp.screen.mode = saved_mode;
+
     var ctx = T.ScreenWriteCtx{ .s = wp.screen };
     if (parse) {
         screen_write.putn(&ctx, data);

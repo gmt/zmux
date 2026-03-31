@@ -1164,8 +1164,8 @@ test "tty_draw_render_window paints multiple visible panes at shared offsets" {
     right.xoff = 3;
     right.yoff = 0;
 
-    pane_io.pane_io_feed(left, "L1\r\nL2");
-    pane_io.pane_io_feed(right, "R1\r\nR2");
+    pane_io.pane_io_feed(left, "L1\nL2");
+    pane_io.pane_io_feed(right, "R1\nR2");
 
     const rendered = try tty_draw_render_window(w, 6, 2, 0);
     defer xm.allocator.free(rendered.payload);

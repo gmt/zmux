@@ -553,7 +553,7 @@ test "capture-pane helper captures real history rows before visible rows" {
     }
 
     var ctx = T.ScreenWriteCtx{ .s = screen };
-    screen_write.putn(&ctx, "one\r\ntwo\r\nthree");
+    screen_write.putn(&ctx, "one\ntwo\nthree");
 
     const captured = capture_grid(screen, "-", "1", false, false, false, false, false);
     defer xm.allocator.free(captured);

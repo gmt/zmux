@@ -880,14 +880,14 @@ fn resolve_client_tty(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 fn resolve_client_width(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
-    // Return tty.sx directly; 0 for clients without an active tty (matches tmux).
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sx});
 }
 
 fn resolve_client_height(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
     const cl = ctx.client orelse return null;
-    // Return tty.sy directly; 0 for clients without an active tty (matches tmux).
+    if (!client_tty_started(cl)) return null;
     return xm.xasprintf("{d}", .{cl.tty.sy});
 }
 

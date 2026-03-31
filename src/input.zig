@@ -873,8 +873,12 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     }
 
     // Passthrough: DCS tmux; <raw> ST
-    // Stub: would need allow-passthrough option check + rawstring output.
-    if (data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
+    // Check allow-passthrough option, strip prefix, forward raw bytes.
+    const oo = if (wp.options != opts.global_w_options) wp.options else opts.global_w_options;
+    const allow_passthrough = opts.options_get_number(oo, "allow-passthrough");
+    if (allow_passthrough != 0 and data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
+        const sw = @import("screen-write.zig");
+        sw.rawstring(ctx, data[5..]);
         return;
     }
 

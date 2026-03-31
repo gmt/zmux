@@ -515,7 +515,7 @@ pub fn popup_make_pane(pd: *PopupData, layout_type: PopupLayoutType) void {
         .topbottom => .topbottom,
     };
 
-    const lc = layout_mod.layout_split_pane(wp, zig_type, -1, 0, 0, 0) orelse return;
+    const lc = layout_mod.layout_split_pane(wp, zig_type, -1, 0) orelse return;
 
     const new_wp = window_mod.window_add_pane(w, null, lc.sx, lc.sy);
     layout_mod.layout_assign_pane(lc, new_wp, 0);

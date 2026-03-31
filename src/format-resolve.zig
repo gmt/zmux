@@ -104,6 +104,7 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "client_width", .func = resolve_client_width },
     .{ .name = "client_written", .func = resolve_client_written },
 
+    .{ .name = "command", .func = resolve_command },
     .{ .name = "command_alias", .func = resolve_command_alias },
     .{ .name = "command_name", .func = resolve_command_name },
     .{ .name = "command_usage", .func = resolve_command_usage },
@@ -963,6 +964,16 @@ fn resolve_client_user(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u
 fn resolve_client_utf8(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const cl = ctx.client orelse return null;
     return alloc.dupe(u8, if (cl.flags & T.CLIENT_UTF8 != 0) "1" else "0") catch unreachable;
+}
+
+/// Resolve #{command} – the running command name from the cmdq item.
+/// tmux populates this via cmdq_merge_formats(); in zmux we resolve it
+/// directly from the item's cmd entry so hook templates can use it.
+fn resolve_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    const raw = ctx.item orelse return null;
+    const item: *cmdq.CmdqItem = @ptrCast(@alignCast(raw));
+    const cmd = item.cmd orelse return null;
+    return alloc.dupe(u8, cmd.entry.name) catch unreachable;
 }
 
 fn resolve_command_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

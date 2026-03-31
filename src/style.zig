@@ -24,6 +24,8 @@ const attrs = @import("attributes.zig");
 const colour = @import("colour.zig");
 const opts = @import("options.zig");
 const utf8 = @import("utf8.zig");
+const format_mod = @import("format.zig");
+const xm = @import("xmalloc.zig");
 
 threadlocal var style_buf: [256]u8 = undefined;
 
@@ -145,18 +147,37 @@ pub fn style_copy(dst: *T.Style, src: *const T.Style) void {
     dst.* = src.*;
 }
 
-pub fn style_from_option(oo: *T.Options, name: []const u8) ?T.Style {
+/// Look up an option by name and parse it as a Style.  When `ft` is non-null
+/// and the raw option string contains `#{...}` format expressions, the string
+/// is expanded first via `format_expand` before parsing.  This matches the
+/// behaviour of `options_string_to_style` in tmux options.c lines 977-1008.
+pub fn style_from_option(oo: *T.Options, name: []const u8, ft: ?*const format_mod.FormatContext) ?T.Style {
     const raw = opts.options_get_style_string(oo, name) orelse return null;
-    if (std.mem.indexOf(u8, raw, "#{") != null) return null;
+
+    const has_format = std.mem.indexOf(u8, raw, "#{") != null;
+    var expanded_result: ?format_mod.FormatExpandResult = null;
+    defer if (expanded_result) |r| xm.allocator.free(r.text);
+
+    const to_parse: []const u8 = if (has_format and ft != null) blk: {
+        const r = format_mod.format_expand(xm.allocator, raw, ft.?);
+        expanded_result = r;
+        break :blk r.text;
+    } else if (has_format) {
+        // Format context unavailable – cannot expand, skip.
+        return null;
+    } else raw;
 
     var sy = style_default;
-    if (style_parse(&sy, &T.grid_default_cell, raw) != 0) return null;
+    if (style_parse(&sy, &T.grid_default_cell, to_parse) != 0) return null;
     return sy;
 }
 
-pub fn style_add(gc: *T.GridCell, oo: *T.Options, name: []const u8, _ft: ?*anyopaque) void {
-    _ = _ft;
-    const sy = style_from_option(oo, name) orelse style_default;
+pub fn style_add(gc: *T.GridCell, oo: *T.Options, name: []const u8, ft: ?*anyopaque) void {
+    const ft_ctx: ?*const format_mod.FormatContext = if (ft) |p|
+        @ptrCast(@alignCast(p))
+    else
+        null;
+    const sy = style_from_option(oo, name, ft_ctx) orelse style_default;
     if (sy.gc.fg != 8) gc.fg = sy.gc.fg;
     if (sy.gc.bg != 8) gc.bg = sy.gc.bg;
     if (sy.gc.us != 8) gc.us = sy.gc.us;
@@ -169,7 +190,7 @@ pub fn style_apply(gc: *T.GridCell, oo: *T.Options, name: []const u8, ft: ?*anyo
 }
 
 pub fn style_set_scrollbar_style_from_option(sb_style: *T.Style, oo: *T.Options) void {
-    if (style_from_option(oo, "pane-scrollbars-style")) |sy| {
+    if (style_from_option(oo, "pane-scrollbars-style", null)) |sy| {
         style_copy(sb_style, &sy);
         if (sb_style.width < 1) sb_style.width = T.PANE_SCROLLBARS_DEFAULT_WIDTH;
         if (sb_style.pad < 0) sb_style.pad = T.PANE_SCROLLBARS_DEFAULT_PADDING;
@@ -470,17 +491,19 @@ test "style_tostring roundtrips representative subset" {
     );
 }
 
-test "style_from_option rejects dynamic strings and parses static ones" {
+test "style_from_option rejects dynamic strings without context and parses static ones" {
     var oo = initTestOptions();
     defer freeTestOptions(&oo);
 
     try putTestString(&oo, "ok", "fg=red,bright");
     try putTestString(&oo, "dynamic", "#{pane_title}");
 
-    const parsed = style_from_option(&oo, "ok") orelse return error.TestUnexpectedResult;
+    // No format context: static style parses fine.
+    const parsed = style_from_option(&oo, "ok", null) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(i32, 1), parsed.gc.fg);
     try std.testing.expect(parsed.gc.attr & T.GRID_ATTR_BRIGHT != 0);
-    try std.testing.expect(style_from_option(&oo, "dynamic") == null);
+    // No format context: dynamic style cannot be expanded → null.
+    try std.testing.expect(style_from_option(&oo, "dynamic", null) == null);
 }
 
 test "style_apply and scrollbar defaults use grid default cell" {
@@ -510,4 +533,25 @@ test "style_apply and scrollbar defaults use grid default cell" {
     try std.testing.expectEqual(T.PANE_SCROLLBARS_DEFAULT_WIDTH, sb.width);
     try std.testing.expectEqual(@as(i32, 4), sb.pad);
     try std.testing.expectEqual(@as(u8, T.PANE_SCROLLBARS_CHARACTER), sb.gc.data.data[0]);
+}
+
+test "style_from_option with format context expands #{} expressions" {
+    var oo = initTestOptions();
+    defer freeTestOptions(&oo);
+
+    // Store a style with a format expression.
+    try putTestString(&oo, "dynamic", "fg=#{my_colour}");
+
+    // Without context, it can't expand → null.
+    try std.testing.expect(style_from_option(&oo, "dynamic", null) == null);
+
+    // With a FormatContext that provides the variable, it should expand and parse.
+    var extras = format_mod.FormatExtras{};
+    defer extras.deinit();
+    var ft = format_mod.FormatContext{ .extras = &extras };
+    format_mod.format_add(&ft, "my_colour", "red");
+
+    const expanded = style_from_option(&oo, "dynamic", &ft) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, 1), expanded.gc.fg);
 }

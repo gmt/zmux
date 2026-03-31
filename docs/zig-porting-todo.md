@@ -2,6 +2,22 @@
 
 Functional gaps where zmux does not yet match tmux behavior.
 
+## Screen Redraw (dead module)
+
+- `screen_redraw_screen` and `screen_redraw_pane` were ported
+  (T4.17) but have zero callers. `server_client_check_redraw`
+  uses a monolithic `build_client_draw_payload` instead of the
+  per-pane redraw dispatch that tmux uses. The screen-redraw
+  module needs to be wired into server-client's redraw path.
+
+## TTY Keys (dead dispatch loop)
+
+- `tty_keys_next1` was ported (T4.18) but the dispatch loop
+  `tty_keys_next` that tmux calls from `tty_read_callback` does
+  not exist. The entire tty-keys parsing infrastructure (TST key
+  decoder, CSI u, mouse, clipboard, DA parsers) is unreachable
+  from the server's tty read path.
+
 ## Screen Write
 
 - `screen_write_text` returns 0 and renders nothing. Two callers
@@ -9,61 +25,95 @@ Functional gaps where zmux does not yet match tmux behavior.
   empty preview panes.
 - Call sites that tmux routes through `screen_write_puts(ctx, &gc, ...)`
   were fudged to use `putn(ctx, text)` during porting, dropping
-  the `GridCell` styling parameter. Affected call sites: mode-tree
-  item/filter/search display, window-tree labels and navigation
-  arrows, window-clock time rendering. Text renders in default
-  style only.
-- `screen_write_strlen` (text measurement for layout in
-  `screen_write_text`) has no callers because `screen_write_text`
-  is a stub; will be needed when `screen_write_text` is ported.
+  the `GridCell` styling parameter. Affected: mode-tree item
+  display, window-tree labels/arrows, window-clock time rendering.
+- `screen_write_strlen` has no callers; will be needed when
+  `screen_write_text` is ported.
+- `linefeed` is missing `image_scroll_up` / `image_check_line`
+  calls for sixel image scrolling.
+
+## Focus Events
+
+- `KEYC_FOCUS_IN` / `KEYC_FOCUS_OUT` are recognized in
+  `server_client_key_callback` (filtered for assume-paste) but
+  no handler calls `window_update_focus` or sends
+  `client-focus-in`/`client-focus-out` notifications. Terminal
+  focus tracking is non-functional.
+- `session_set_current` does not call `window_update_focus` when
+  switching windows. tmux calls it for both the old and new window
+  when `focus-events` is enabled.
+
+## Format
+
+- `resolve_window_bigger` compares `w.sx > cl.tty.sx` directly.
+  tmux calls `tty_window_offset` which accounts for viewport
+  offset fields (`oox`/`ooy`). Result may differ for offset
+  rendering scenarios.
+- `resolve_window_offset_x` / `resolve_window_offset_y` return
+  `wp.xoff` / `wp.yoff` (pane offset within window). tmux returns
+  `ox` / `oy` from `tty_window_offset` (window viewport offset
+  within terminal). These are different values.
+- `resolve_pane_format`, `resolve_window_format`, and
+  `resolve_session_format` return hardcoded "0". `FormatContext`
+  lacks a type discriminator.
+- Popup position format variables (`popup_pane_top`,
+  `popup_pane_bottom`, etc.) are missing from `cmd-display-menu`.
 
 ## Server-Client
 
 - `server_client_print` drops pane output when the pane has an
-  active mode (copy/view). Should forward to `window_copy_add`
-  for view-mode text accumulation.
+  active mode (copy/view). Should forward to `window_copy_add`.
+- `cmd_select_pane_redraw` is missing. tmux checks
+  `tty_window_bigger` per-client and does a full redraw when the
+  window is larger than the terminal; zmux always uses the
+  lighter border/status redraw.
+
+## Mode-Tree
+
+- `drawcb` callback signature passes `*Data` (entire mode-tree
+  struct) as first argument. tmux passes `mtd->modedata`
+  (mode-specific data). window-customize.zig casts the wrong
+  type, breaking encapsulation.
+- `mode_tree_clear_tagged` is exported but has zero callers
+  (tmux has 2 call sites).
+- `runCommand` callers (window-tree, window-buffer) always pass
+  session+winlink context. tmux sometimes passes `fs=NULL` to
+  let the command resolve context implicitly.
+
+## Window-Tree
+
+- Tree separator lines use `putc('|')` instead of
+  `screen_write.vline()` with box-drawing styling.
 
 ## Session
 
 - `session_lock_timer` logs only. The `lock-after-time` option
-  has no libevent timer wired; session locking is non-functional.
+  has no libevent timer; session locking is non-functional.
 - `session_update_history` sets `gd.hlimit` but does not call
-  `grid_collect_history` (which exists and is implemented).
-  Changing `history-limit` on a live session does not trim
-  existing scrollback.
+  `grid_collect_history` (which exists). Changing `history-limit`
+  does not trim existing scrollback.
 
 ## Window Copy Mode
 
-- `window_copy_vadd` ignores the `parse` flag. `input_parse_screen`
-  exists but is not wired; view-mode output renders ANSI escapes
-  as raw text.
-
-## Format
-
-- `resolve_pane_format`, `resolve_window_format`, and
-  `resolve_session_format` return hardcoded "0". `FormatContext`
-  lacks a type discriminator; tmux returns "1" when the format
-  tree was created with the matching type. Affects conditional
-  format strings like `#{?pane_format,...}`.
+- `window_copy_vadd` ignores the `parse` flag.
+  `input_parse_screen` exists but is not wired; view-mode output
+  renders ANSI escapes as raw text.
 
 ## Commands
 
-- `cmd-list-clients` default template is
-  `#{client_tty} #{client_termname}`. tmux uses a richer template
-  including `client_name`, `session_name`, dimensions, uid, and
-  flags. The format variables exist; the template string needs
-  updating.
+- `cmd-list-clients` default template is too minimal. tmux
+  includes `client_name`, `session_name`, dimensions, uid, and
+  flags. The format variables exist; the template needs updating.
 
 ## Job Runtime
 
-- `job_run_child` hardcodes `/bin/sh`. The `default-shell` session
-  option is defined in the options table but not consulted when
-  `JOB_DEFAULTSHELL` is set.
+- `job_run_child` hardcodes `/bin/sh`. The `default-shell`
+  session option is not consulted when `JOB_DEFAULTSHELL` is set.
 
 ## Image and Sixel
 
-- Image/sixel rendering pipeline stubs (`screen_write_sixelimage`,
-  `tty_cmd_sixelimage`, `tty_draw_images`) have zero callers.
-  Infrastructure exists in `image.zig`, `image-sixel.zig`, and
-  `tty-features.zig` but the wiring from input → storage → tty
-  output is not connected.
+- `sixel_parse` call in `input_dcs_dispatch` is stubbed
+  (silently consumed). `screen_write_sixelimage` is a no-op.
+  `tty_cmd_sixelimage` and `tty_draw_images` have zero callers.
+  The full pipeline from input → sixel_parse → image_store →
+  screen_write_sixelimage → tty output is not connected.

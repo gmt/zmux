@@ -663,8 +663,6 @@ fn exec_display_menu(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         args.get('H'),
         args.get('S'),
         &target,
-        null,
-        null,
     ) != 0) return .normal;
 
     return .wait;

@@ -187,11 +187,13 @@ hooks.
 
 ### mode-tree shared infrastructure
 
-- `runCommand`: requires `cmd_parse_and_append` / `cmdq_new_state`.
-- `menu`: requires `menu_create` / `menu_display`.
-- `popup`: requires `popup_display` / `popup_write`.
-- `search`: requires `status_prompt_set` with search callback.
-- `filter`: requires `status_prompt_set` with filter callback.
+All five items below are implemented as of T3-U9:
+
+- `runCommand`: wired to `cmd_parse_from_string` + `cmdq_append`.
+- `displayMenu`: wired to `menu_display` with `ChoiceCb` callback.
+- `displayHelp`: wired to `popup_display` + `popup_write`.
+- `searchCallback`: wired to `status_prompt_set` with search input/free callbacks.
+- `filterCallback`: wired to `status_prompt_set` with filter input/free callbacks.
 
 ## Popup
 

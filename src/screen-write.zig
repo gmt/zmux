@@ -26,6 +26,8 @@ const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
+const image_mod = @import("image.zig");
+const sixel = @import("image-sixel.zig");
 
 pub fn putc(ctx: *T.ScreenWriteCtx, ch: u8) void {
     const glyph = utf8.Glyph.fromAscii(ch);
@@ -596,6 +598,11 @@ pub fn scrollup(ctx: *T.ScreenWriteCtx, lines: u32) void {
     const top = @min(s.rupper, gd.sy - 1);
     const bottom = @min(s.rlower, gd.sy - 1);
     if (n > bottom - top + 1) n = bottom - top + 1;
+
+    if (image_mod.image_scroll_up(s, n)) {
+        if (ctx.wp) |wp| wp.flags |= T.PANE_REDRAW;
+    }
+
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         if (top == 0 and bottom == gd.sy - 1)
@@ -638,6 +645,16 @@ pub fn linefeed(ctx: *T.ScreenWriteCtx, wrapped: bool) void {
     }
 
     if (s.cy == s.rlower) {
+        if (s.rlower == gd.sy - 1) {
+            if (image_mod.image_scroll_up(s, 1)) {
+                if (ctx.wp) |wp| wp.flags |= T.PANE_REDRAW;
+            }
+        } else {
+            if (image_mod.image_check_line(s, s.rupper, s.rlower - s.rupper)) {
+                if (ctx.wp) |wp| wp.flags |= T.PANE_REDRAW;
+            }
+        }
+
         const top = @min(s.rupper, gd.sy - 1);
         const bottom = @min(s.rlower, gd.sy - 1);
         if (top == 0 and bottom == gd.sy - 1)
@@ -1853,8 +1870,56 @@ pub fn screen_write_box_border_set(lines: i32, cell_type: i32, gc: *T.GridCell) 
     _ = gc;
 }
 
-pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si: ?*anyopaque, bg: u32) void {
-    _ = .{ ctx, si, bg };
+/// Write a sixel image to the screen at the current cursor position.
+/// Mirrors tmux's screen_write_sixelimage.
+pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si_arg: *T.SixelImage, bg: u32) void {
+    const s = ctx.s;
+    const gd = s.grid;
+    const cy = s.cy;
+
+    if (gd.sy <= 1) {
+        sixel.sixel_free(si_arg);
+        return;
+    }
+
+    var si = si_arg;
+
+    var x: u32 = 0;
+    var y: u32 = 0;
+    sixel.sixel_size_in_cells(si, &x, &y);
+    if (x > gd.sx - s.cx or y > gd.sy - 1) {
+        const sx = if (x > gd.sx - s.cx) gd.sx - s.cx else x;
+        const sy = if (y > gd.sy - 1) gd.sy - 1 else y;
+        const new = sixel.sixel_scale(si, 0, 0, 0, y - sy, sx, sy, true) orelse {
+            sixel.sixel_free(si);
+            return;
+        };
+        sixel.sixel_free(si);
+        si = new;
+        sixel.sixel_size_in_cells(si, &x, &y);
+    }
+
+    const sy = gd.sy - cy;
+    if (sy <= y) {
+        const lines = y - sy + 1;
+        if (image_mod.image_scroll_up(s, lines)) {
+            if (ctx.wp) |wp| wp.flags |= T.PANE_REDRAW;
+        }
+        var i: u32 = 0;
+        while (i < lines) : (i += 1) {
+            grid.grid_view_scroll_region_up(gd, 0, gd.sy - 1, bg);
+            screen_write_collect_scroll(ctx, bg);
+        }
+        ctx.scrolled += lines;
+        if (lines > cy)
+            screen_write_set_cursor(ctx, -1, 0)
+        else
+            screen_write_set_cursor(ctx, -1, @intCast(cy - lines));
+    }
+    screen_write_collect_flush(ctx, 0, "screen_write_sixelimage");
+
+    _ = image_mod.image_store(s, si);
+    screen_write_set_cursor(ctx, 0, @intCast(cy + y));
 }
 
 

@@ -173,26 +173,158 @@ export fn input_ground_timer_cb(_: c_int, _: c_short, arg: ?*anyopaque) void {
     input_reset(wp, 0);
 }
 
-/// Start the request timer.
-/// Stub: zmux does not yet have the request queue infrastructure.
-/// In tmux this fires a 100ms timer to flush stale requests.
-pub fn input_start_request_timer(_: *T.WindowPane) void {
-    // TODO: implement when zmux has the request queue
+// ── Input request queue ──────────────────────────────────────────────────
+
+/// Start a 100ms timer that flushes stale requests.
+pub fn input_start_request_timer(wp: *T.WindowPane) void {
+    const base = proc_mod.libevent orelse return;
+    if (wp.input_request_timer == null) {
+        wp.input_request_timer = c_bridge.libevent.event_new(
+            base, -1, 0, input_request_timer_cb, wp,
+        );
+    }
+    const ev = wp.input_request_timer orelse return;
+    _ = c_bridge.libevent.event_del(ev);
+    var tv = std.posix.timeval{ .sec = 0, .usec = 100000 };
+    _ = c_bridge.libevent.event_add(ev, @ptrCast(&tv));
 }
 
-/// Set the global input buffer size limit.
-/// Called from options_push_changes when "input-buffer-size" changes.
-/// Mirrors tmux input_set_buffer_size.
-pub fn input_set_buffer_size(buffer_size: usize) void {
-    log.log_debug("input_set_buffer_size: {d} -> {d}", .{ input_buffer_size, buffer_size });
-    input_buffer_size = buffer_size;
+export fn input_request_timer_cb(_: c_int, _: c_short, arg: ?*anyopaque) void {
+    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
+    log.log_debug("input_request_timer_cb: %%{d} flushing {d} stale requests", .{ wp.id, wp.input_request_list.items.len });
+    while (wp.input_request_list.items.len > 0) {
+        const ir = wp.input_request_list.items[0];
+        if (ir.type == .queue) {
+            if (ir.data) |d| {
+                const bytes: [*]const u8 = @ptrCast(@alignCast(d));
+                // Queued reply data length is stored as the idx field.
+                input_send_reply(wp, bytes[0..@as(usize, @intCast(ir.idx))]);
+            }
+        }
+        input_free_request_at(wp, 0);
+    }
+}
+
+fn input_free_request_at(wp: *T.WindowPane, idx: usize) void {
+    const ir = wp.input_request_list.items[idx];
+    if (ir.c) |cl| {
+        for (cl.input_requests.items, 0..) |cir, ci| {
+            if (cir == ir) {
+                _ = cl.input_requests.orderedRemove(ci);
+                break;
+            }
+        }
+    }
+    wp.input_request_count -|= 1;
+    xm.allocator.destroy(ir);
+    _ = wp.input_request_list.orderedRemove(idx);
+}
+
+/// Add a request to the pane's queue and send the query to the best client.
+pub fn input_add_request(wp: *T.WindowPane, req_type: T.InputRequestType, idx: i32, end: T.InputEndType) i32 {
+    const client_registry = @import("client-registry.zig");
+    const sess = @import("session.zig");
+    const tty_mod = @import("tty.zig");
+
+    var best: ?*T.Client = null;
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & (T.CLIENT_DEAD | T.CLIENT_SUSPENDED) != 0) continue;
+        const s = cl.session orelse continue;
+        if (!sess.session_has_window(s, wp.window)) continue;
+        if ((cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) continue;
+        if (best == null)
+            best = cl
+        else if (cl.activity_time > best.?.activity_time)
+            best = cl;
+    }
+    const cl = best orelse return -1;
+
+    const ir = xm.allocator.create(T.InputRequest) catch return -1;
+    ir.* = .{
+        .wp = wp,
+        .c = cl,
+        .type = req_type,
+        .idx = idx,
+        .end = end,
+        .t = @intCast(@max(std.time.milliTimestamp(), 0)),
+    };
+    wp.input_request_list.append(xm.allocator, ir) catch {
+        xm.allocator.destroy(ir);
+        return -1;
+    };
+    cl.input_requests.append(xm.allocator, ir) catch {};
+    wp.input_request_count += 1;
+
+    if (wp.input_request_count == 1)
+        input_start_request_timer(wp);
+
+    switch (req_type) {
+        .palette => {
+            var buf: [32]u8 = undefined;
+            const query = std.fmt.bufPrint(&buf, "\x1b]4;{d};?\x1b\\", .{idx}) catch return -1;
+            tty_mod.tty_puts_str(&cl.tty, query);
+        },
+        .clipboard => {
+            tty_mod.tty_putcode_ss(&cl.tty, "Ms", "", "?");
+        },
+        .queue => {},
+    }
+    return 0;
 }
 
 /// Handle a reply to a request forwarded from tty-keys.
-/// Stub: zmux does not yet have the client request queue (TAILQ-based).
-/// In tmux this handles palette and clipboard replies from the terminal.
-pub fn input_request_reply(_: *T.Client, _: u32, _: ?*anyopaque) void {
-    // TODO: implement when zmux has client request infrastructure
+pub fn input_request_reply(cl: *T.Client, req_type_raw: u32, data: ?*anyopaque) void {
+    const rtype = std.meta.intToEnum(T.InputRequestType, req_type_raw) catch return;
+    _ = data;
+
+    // Find first matching request on this client.
+    var found: ?*T.InputRequest = null;
+    for (cl.input_requests.items) |ir| {
+        if (ir.type == rtype) {
+            found = ir;
+            break;
+        }
+    }
+    const match = found orelse return;
+    const wp = match.wp orelse return;
+
+    // Process all requests on the pane's queue up to and including the match.
+    while (wp.input_request_list.items.len > 0) {
+        const ir = wp.input_request_list.items[0];
+        const is_match = (ir == match);
+        if (ir.type == .queue) {
+            if (ir.data) |d| {
+                const bytes: [*]const u8 = @ptrCast(@alignCast(d));
+                input_send_reply(wp, bytes[0..@as(usize, @intCast(ir.idx))]);
+            }
+        }
+        input_free_request_at(wp, 0);
+        if (is_match) break;
+    }
+}
+
+/// Cancel all pending requests for a client (called on disconnect).
+pub fn input_cancel_requests(cl: *T.Client) void {
+    while (cl.input_requests.items.len > 0) {
+        const ir = cl.input_requests.items[0];
+        if (ir.wp) |wp| {
+            for (wp.input_request_list.items, 0..) |pir, pi| {
+                if (pir == ir) {
+                    wp.input_request_count -|= 1;
+                    _ = wp.input_request_list.orderedRemove(pi);
+                    break;
+                }
+            }
+        }
+        xm.allocator.destroy(ir);
+        _ = cl.input_requests.orderedRemove(0);
+    }
+}
+
+/// Set the global input buffer size limit.
+pub fn input_set_buffer_size(buffer_size: usize) void {
+    log.log_debug("input_set_buffer_size: {d} -> {d}", .{ input_buffer_size, buffer_size });
+    input_buffer_size = buffer_size;
 }
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {

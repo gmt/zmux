@@ -165,7 +165,8 @@ pub fn putCell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
         return;
 
     if ((s.mode & T.MODE_WRAP) != 0 and s.cx > gd.sx - width) {
-        newline(ctx);
+        linefeed(ctx, true);
+        carriage_return(ctx);
     }
 
     if (s.cx > gd.sx - width or s.cy >= gd.sy) return;
@@ -199,19 +200,8 @@ pub fn tab(ctx: *T.ScreenWriteCtx) void {
 
 pub fn newline(ctx: *T.ScreenWriteCtx) void {
     const s = ctx.s;
-    const gd = s.grid;
-    s.cx = 0;
-    if (s.cy < s.rlower and s.cy + 1 < gd.sy) {
-        s.cy += 1;
-        return;
-    }
-    const top = @min(s.rupper, gd.sy - 1);
-    const bottom = @min(s.rlower, gd.sy - 1);
-    if (top == 0 and bottom == gd.sy - 1)
-        grid.scroll_full_screen_into_history(gd)
-    else
-        grid.scroll_up(gd, top, bottom);
-    s.cy = bottom;
+    if ((s.mode & T.MODE_CRLF) != 0) s.cx = 0;
+    linefeed(ctx, false);
 }
 
 pub fn cursor_left(ctx: *T.ScreenWriteCtx, count: u32) void {
@@ -632,7 +622,9 @@ pub fn scrolldown(ctx: *T.ScreenWriteCtx, lines: u32) void {
 }
 
 /// Line feed: move cursor down, scroll up if at bottom of scroll region.
-/// Unlike newline(), this does NOT do a carriage return (screen_write_linefeed).
+/// Move cursor down one line, scrolling if at the bottom of the scroll region.
+/// Does NOT perform a carriage return; newline() calls this and also resets cx
+/// when MODE_CRLF is active (screen_write_linefeed).
 pub fn linefeed(ctx: *T.ScreenWriteCtx, wrapped: bool) void {
     const s = ctx.s;
     const gd = s.grid;
@@ -1901,7 +1893,7 @@ test "screen-write preview copies a cursor-centered viewport" {
 
     {
         var src_ctx = T.ScreenWriteCtx{ .s = src };
-        putn(&src_ctx, "abcdefgh\nijklmnop\nqrstuvwx\nyz012345");
+        putn(&src_ctx, "abcdefgh\r\nijklmnop\r\nqrstuvwx\r\nyz012345");
         src.cx = 5;
         src.cy = 2;
         src.mode |= T.MODE_CURSOR;
@@ -2407,4 +2399,81 @@ test "screen-write make_list and free_list manage write_list lifecycle" {
 
     screen_write_free_list(s);
     try std.testing.expect(s.write_list == null);
+}
+
+test "screen-write newline without MODE_CRLF moves cursor down but preserves cx" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 5, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    // Ensure MODE_CRLF is not set
+    s.mode &= ~T.MODE_CRLF;
+    s.cx = 5;
+    s.cy = 1;
+
+    newline(&ctx);
+
+    // LF without CRLF mode: cy advances, cx unchanged
+    try std.testing.expectEqual(@as(u32, 5), s.cx);
+    try std.testing.expectEqual(@as(u32, 2), s.cy);
+}
+
+test "screen-write newline with MODE_CRLF moves cursor down and resets cx" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 5, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    // Enable MODE_CRLF
+    s.mode |= T.MODE_CRLF;
+    s.cx = 5;
+    s.cy = 1;
+
+    newline(&ctx);
+
+    // LF with CRLF mode: cy advances, cx reset to 0
+    try std.testing.expectEqual(@as(u32, 0), s.cx);
+    try std.testing.expectEqual(@as(u32, 2), s.cy);
+}
+
+test "screen-write linefeed never touches cx regardless of MODE_CRLF" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 5, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start(&ctx, s);
+    defer screen_write_stop(&ctx);
+
+    // Test without MODE_CRLF
+    s.mode &= ~T.MODE_CRLF;
+    s.cx = 7;
+    s.cy = 0;
+    linefeed(&ctx, false);
+    try std.testing.expectEqual(@as(u32, 7), s.cx);
+    try std.testing.expectEqual(@as(u32, 1), s.cy);
+
+    // Test with MODE_CRLF — linefeed still must not touch cx
+    s.mode |= T.MODE_CRLF;
+    s.cx = 7;
+    s.cy = 1;
+    linefeed(&ctx, false);
+    try std.testing.expectEqual(@as(u32, 7), s.cx);
+    try std.testing.expectEqual(@as(u32, 2), s.cy);
 }

@@ -370,16 +370,11 @@ to simple semicolon-split tokenisation.
   tmux dispatches these synchronously in the event loop. The
   async delivery means control clients may see notifications
   delayed until the next queue drain.
-- The `window-mode-runtime` control notification test is skipped
-  because `expectPaneModeChanged` does a blocking `imsgbuf_read`
-  that hangs indefinitely. Reordering `cmdq_next` before the
-  read did not fix it, which suggests the callback either crashes
-  in `notify_insert_hook` before `dispatchControlNotifications`
-  runs, `imsgbuf_flush` fails silently on the socket pair, or
-  the callback is never queued. Diagnosis was blocked by lack of
-  strace access to the test process. The `imsgbuf_read` call has
-  no timeout and will hang the entire test suite if the message
-  is not delivered.
+- Tests that read control notifications from a socket pair must
+  call `cmdq_next` before the blocking `imsgbuf_read` so the
+  notification callback fires and flushes data to the socket.
+  The `imsgbuf_read` call has no timeout and will hang the
+  entire test suite if the message is not delivered.
 
 ## Test Infrastructure
 

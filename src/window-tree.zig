@@ -461,7 +461,7 @@ fn redraw(wme: *T.WindowModeEntry) void {
 
         const rendered = renderLine(tree, line_index);
         defer xm.allocator.free(rendered);
-        screen_write.putn(&ctx, rendered);
+        screen_write.puts(&ctx, &T.grid_default_cell, rendered);
     }
 
     drawPreview(data, &ctx, body_rows, preview_rows);
@@ -469,13 +469,13 @@ fn redraw(wme: *T.WindowModeEntry) void {
     if (rows > 0) {
         screen_write.cursor_to(&ctx, rows - 1, 0);
         screen_write.erase_line(&ctx);
-        screen_write.putn(&ctx, HELP_TEXT);
+        screen_write.puts(&ctx, &T.grid_default_cell, HELP_TEXT);
     }
 
     if (tree.line_list.items.len == 0 and body_rows != 0) {
         screen_write.cursor_to(&ctx, 0, 0);
         screen_write.erase_line(&ctx);
-        screen_write.putn(&ctx, if (data.filter != null) "No matching sessions, windows, or panes." else "No sessions, windows, or panes.");
+        screen_write.puts(&ctx, &T.grid_default_cell, if (data.filter != null) "No matching sessions, windows, or panes." else "No sessions, windows, or panes.");
     }
 
     window_mode_runtime.noteModeRedraw(wme.wp);
@@ -545,7 +545,7 @@ fn drawSessionPreview(data: *WindowTreeModeData, session_ptr: *T.Session, ctx: *
             label = xm.xasprintf(" {d} ", .{wl.idx});
         }
         defer xm.allocator.free(label);
-        drawCenteredText(ctx, top, x, width, height, label);
+        drawCenteredText(ctx, top, x, width, height, &T.grid_default_cell, label);
 
         if (loop != layout.end - 1)
             drawVerticalLine(ctx, x + width, top, height);
@@ -573,7 +573,7 @@ fn drawWindowPreview(data: *WindowTreeModeData, w: *T.Window, ctx: *T.ScreenWrit
 
         const label = xm.xasprintf(" {d} ", .{paneIndex(w, pane)});
         defer xm.allocator.free(label);
-        drawCenteredText(ctx, top, x, width, height, label);
+        drawCenteredText(ctx, top, x, width, height, &T.grid_default_cell, label);
 
         if (loop != layout.end - 1)
             drawVerticalLine(ctx, x + width, top, height);
@@ -640,12 +640,12 @@ fn beginPreviewLayout(
     if (left) {
         data.preview_left = 2;
         drawVerticalLine(ctx, 2, top, height);
-        drawCenteredText(ctx, top, 0, 1, height, "<");
+        drawCenteredText(ctx, top, 0, 1, height, &T.grid_default_cell, "<");
     }
     if (right) {
         data.preview_right = @as(i32, @intCast(sx)) - 3;
         drawVerticalLine(ctx, sx - 3, top, height);
-        drawCenteredText(ctx, top, sx - 1, 1, height, ">");
+        drawCenteredText(ctx, top, sx - 1, 1, height, &T.grid_default_cell, ">");
     }
 
     data.preview_start = start;
@@ -677,14 +677,14 @@ fn drawVerticalLine(ctx: *T.ScreenWriteCtx, col: u32, top: u32, height: u32) voi
     }
 }
 
-fn drawCenteredText(ctx: *T.ScreenWriteCtx, top: u32, left: u32, width: u32, height: u32, text: []const u8) void {
-    const text_width = utf8.utf8_cstrwidth(text);
+fn drawCenteredText(ctx: *T.ScreenWriteCtx, top: u32, left: u32, width: u32, height: u32, gc: *const T.GridCell, text_str: []const u8) void {
+    const text_width = utf8.utf8_cstrwidth(text_str);
     if (width == 0 or height == 0 or text_width > width) return;
     const row = top + height / 2;
     const col = left + (width - text_width) / 2;
     if (row >= ctx.s.grid.sy or col >= ctx.s.grid.sx) return;
     screen_write.cursor_to(ctx, row, col);
-    screen_write.putn(ctx, text);
+    screen_write.puts(ctx, gc, text_str);
 }
 
 fn sessionCurrentIndex(session_ptr: *T.Session, windows: []*T.Winlink) usize {
@@ -1504,9 +1504,10 @@ pub fn window_tree_draw_label(
     left: u32,
     width: u32,
     height: u32,
-    text: []const u8,
+    gc: *const T.GridCell,
+    text_str: []const u8,
 ) void {
-    drawCenteredText(ctx, top, left, width, height, text);
+    drawCenteredText(ctx, top, left, width, height, gc, text_str);
 }
 
 /// tmux: window_tree_search – mode_tree search callback.

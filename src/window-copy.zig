@@ -2420,7 +2420,6 @@ pub fn window_copy_formats(wme: *T.WindowModeEntry, raw_ft: ?*anyopaque) void {
         const format_resolve = @import("format-resolve.zig");
         const s_opts2 = if (ctx.session) |s| s.options else opts.global_s_options;
         const separators = opts.options_get_string(s_opts2, "word-separators");
-        const gd = data.backing.grid;
         if (format_resolve.format_grid_word(xm.allocator, gd, data.cx, data.top + data.cy, separators)) |w| {
             defer xm.allocator.free(w);
             format_mod.format_add(ctx, "copy_cursor_word", w);

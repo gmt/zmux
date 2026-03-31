@@ -21,14 +21,17 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const c = @import("c.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
+const grid = @import("grid.zig");
 const sort_mod = @import("sort.zig");
 const win = @import("window.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const notify = @import("notify.zig");
+const proc_mod = @import("proc.zig");
 const utf8 = @import("utf8.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
@@ -317,16 +320,44 @@ pub fn session_create(
 
 pub fn session_update_activity(s: *T.Session, from: ?i64) void {
     s.activity_time = from orelse std.time.milliTimestamp();
+
+    // Reset the lock-after-time inactivity timer.
+    if (s.lock_timer) |ev|
+        _ = c.libevent.event_del(ev);
+
+    const base = proc_mod.libevent orelse return;
+    if (s.lock_timer == null) {
+        s.lock_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            session_lock_timer_cb,
+            s,
+        );
+    }
+    const ev = s.lock_timer orelse return;
+    if (s.attached != 0) {
+        const lock_after: i64 = opts.options_get_number(s.options, "lock-after-time");
+        if (lock_after != 0) {
+            var tv = std.posix.timeval{ .sec = @intCast(lock_after), .usec = 0 };
+            _ = c.libevent.event_add(ev, @ptrCast(&tv));
+        }
+    }
 }
 
-/// Lock a session whose inactivity timer has fired.
-/// In tmux this is a libevent timer callback (session_lock_timer).
-/// Stubbed here because the Zig port does not yet use libevent timers.
-pub fn session_lock_timer(s: *T.Session) void {
+/// Libevent timer callback: lock a session after inactivity.
+export fn session_lock_timer_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const s: *T.Session = @ptrCast(@alignCast(arg orelse return));
+
     if (s.attached == 0)
         return;
 
-    log.log_debug("session_lock_timer: session {s} lock timer fired (stub)", .{s.name});
+    log.log_debug("session {s} locked, activity time {d}", .{ s.name, s.activity_time });
+
+    @import("server-fn.zig").server_lock_session(s);
+    @import("resize.zig").recalculate_sizes();
 }
 
 pub fn session_theme_changed(s: ?*T.Session) void {
@@ -349,10 +380,12 @@ pub fn session_update_history(s: *T.Session) void {
             const gd = wp.base.grid;
             const osize = gd.hsize;
             gd.hlimit = limit;
-            // grid_collect_history is not yet ported; log instead.
-            log.log_debug("session_update_history: %%{d} hlimit set to {d} (hsize {d})", .{
-                wp.id, limit, osize,
-            });
+            grid.grid_collect_history(gd, true);
+            if (gd.hsize != osize) {
+                log.log_debug("session_update_history: %%{d} {d} -> {d}", .{
+                    wp.id, osize, gd.hsize,
+                });
+            }
         }
     }
 }
@@ -363,6 +396,13 @@ pub fn session_destroy(s: *T.Session, do_notify: bool, from: []const u8) void {
     _ = sessions.remove(s.name);
     if (do_notify)
         notify.notify_session("session-closed", s);
+
+    if (s.lock_timer) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        s.lock_timer = null;
+    }
+
     session_group_remove(s);
 
     var window_counts = std.AutoHashMap(*T.Window, u32).init(xm.allocator);

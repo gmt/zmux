@@ -631,6 +631,13 @@ pub fn window_add_ref(w: *T.Window, _from: []const u8) void {
 
 pub fn window_remove_ref(w: *T.Window, _from: []const u8) void {
     _ = _from;
+    // Guard against use-after-free: if the window is not in the global
+    // registry (e.g. because window_init_globals reinitialised it between
+    // tests), the pointer may be stale.  Bail out rather than crash.
+    if (windows.get(w.id)) |tracked| {
+        if (tracked != w) return;
+    } else return;
+
     if (w.references == 0) return;
     w.references -= 1;
     if (w.references == 0) {

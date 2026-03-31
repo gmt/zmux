@@ -25,6 +25,7 @@ const opts = @import("options.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const sess = @import("session.zig");
+const tty_mod = @import("tty.zig");
 const layout_mod = @import("layout.zig");
 const win = @import("window.zig");
 const xm = @import("xmalloc.zig");
@@ -56,6 +57,7 @@ pub fn resize_window(w: *T.Window, sx_: u32, sy_: u32, xpixel: i32, ypixel: i32)
         }
     }
 
+    tty_mod.tty_update_window_offset(w);
     server_fn.server_status_window(w);
     notify.notify_window("window-layout-changed", w);
     notify.notify_window("window-resized", w);
@@ -119,7 +121,10 @@ pub fn recalculate_size(w: *T.Window, now: bool) void {
         changed = false;
     }
 
-    if (!changed) return;
+    if (!changed) {
+        tty_mod.tty_update_window_offset(w);
+        return;
+    }
 
     // Reduced seam: tmux can defer this until server-client's resize pass;
     // zmux applies it immediately because that later pass is not ported yet.

@@ -557,7 +557,7 @@ test "translate_client_mouse_event maps status pane ranges onto shared status ta
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer {
@@ -611,7 +611,7 @@ test "client_outer_tty_mode follows tmux-style button versus all-motion negotiat
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -659,7 +659,7 @@ test "translate_client_mouse_event maps pane hits onto pane targets" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -708,7 +708,7 @@ test "translate_client_mouse_event maps border hits onto shared border targets" 
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -752,7 +752,7 @@ test "mouse click timeout promotes second click to a translated double click" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -809,7 +809,7 @@ test "translate_client_mouse_event emits drag-end keys when a drag stops" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -870,7 +870,7 @@ test "translate_client_mouse_event emits KEYC_DRAGGING when a drag callback is i
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = s,
     };
     defer env_mod.environ_free(client.environ);

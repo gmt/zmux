@@ -512,6 +512,11 @@ pub fn cmdq_next(cl: ?*T.Client) u32 {
                     return items;
                 },
                 .@"error" => {
+                    // Propagate error exit code to non-attached (command-mode) clients.
+                    // Mirrors tmux's cmdq_next: c->retval = 1 on CMD_RETURN_ERROR.
+                    if (item.client) |err_cl| {
+                        if (err_cl.session == null) err_cl.retval = 1;
+                    }
                     remove_group(item);
                     items += 1;
                 },

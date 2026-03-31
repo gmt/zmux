@@ -332,19 +332,19 @@ fn redraw(wme: *T.WindowModeEntry) void {
 
         const rendered = renderLine(tree, line_index);
         defer xm.allocator.free(rendered);
-        screen_write.putn(&ctx, rendered);
+        screen_write.puts(&ctx, &T.grid_default_cell, rendered);
     }
 
     if (rows > 0) {
         screen_write.cursor_to(&ctx, rows - 1, 0);
         screen_write.erase_line(&ctx);
-        screen_write.putn(&ctx, HELP_TEXT);
+        screen_write.puts(&ctx, &T.grid_default_cell, HELP_TEXT);
     }
 
     if (tree.line_list.items.len == 0 and body_rows != 0) {
         screen_write.cursor_to(&ctx, 0, 0);
         screen_write.erase_line(&ctx);
-        screen_write.putn(&ctx, if (data.filter != null) "No matching options." else "No options.");
+        screen_write.puts(&ctx, &T.grid_default_cell, if (data.filter != null) "No matching options." else "No options.");
     }
 
     window_mode_runtime.noteModeRedraw(wme.wp);

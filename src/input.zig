@@ -1507,23 +1507,25 @@ test "input handles VT, FF, SO, SI and MODE_CRLF" {
 
     const wp = win.window_add_pane(w, null, 8, 3);
 
-    // Write text, then VT should move to next line like LF
+    // Write text, then VT should move to next line like LF (no carriage return
+    // without MODE_CRLF — cursor column is preserved per tmux/ECMA-48).
     input_parse_screen(wp, "AB\x0BCD");
     try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
-    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 1, 0));
-    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 1, 1));
+    // cx was 2 before VT; VT only moves down — C/D land at columns 2/3 on row 1.
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 1, 2));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 1, 3));
 
-    // FF should also behave like LF
+    // FF should also behave like LF — cx was 4 after CD, so E/F land at 4/5 on row 2.
     input_parse_screen(wp, "\x0CEF");
-    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 0));
-    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 1));
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 4));
+    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 5));
 
     // SO and SI should be silently consumed without corrupting output.
-    // Cursor is at (2,2) after the previous "EF" so G/H land at columns 2/3.
+    // cx is 6 after the previous "EF"; G/H land at columns 6/7.
     input_parse_screen(wp, "\x0E\x0FGH");
-    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 2));
-    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 3));
+    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 6));
+    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 7));
 
     // MODE_CRLF: LF should do carriage return before newline
     screen_mod.screen_current(wp).mode |= T.MODE_CRLF;

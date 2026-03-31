@@ -1701,10 +1701,15 @@ pub fn screen_write_free_citem(ci: *T.ScreenWriteCitem) void {
     free_citem(ci);
 }
 
-pub fn screen_write_strlen(_: [*:0]const u8) usize {
-    return 0;
+/// Calculate the display width of a sentinel-terminated string
+/// (screen_write_strlen). Handles UTF-8 multi-byte characters.
+pub fn screen_write_strlen(fmt: [*:0]const u8) usize {
+    return utf8.utf8_cstrwidth(std.mem.span(fmt));
 }
 
+/// Write a string with word-wrapping into a rectangular region
+/// (screen_write_text). Returns 1 on success (text fits), 0 on failure
+/// (text was truncated or the region ran out of lines).
 pub fn screen_write_text(
     ctx: *T.ScreenWriteCtx,
     cx: u32,
@@ -1714,12 +1719,108 @@ pub fn screen_write_text(
     gcp: *const T.GridCell,
     fmt: [*:0]const u8,
 ) i32 {
-    _ = .{ ctx, cx, width, lines, more, gcp, fmt };
-    return 0;
+    return text(ctx, cx, width, lines, more != 0, gcp, std.mem.span(fmt));
 }
 
+/// Write a string with word-wrapping into a rectangular region
+/// (Zig-native equivalent of screen_write_text). Returns 1 on success,
+/// 0 if the text was truncated or the region ran out of lines.
+pub fn text(
+    ctx: *T.ScreenWriteCtx,
+    cx: u32,
+    width: u32,
+    lines_avail: u32,
+    more_to_come: bool,
+    gcp: *const T.GridCell,
+    str: []const u8,
+) i32 {
+    const s = ctx.s;
+    const cy = s.cy;
+    var gc = gcp.*;
+
+    const uds = utf8.utf8_fromcstr(str);
+    defer xm.allocator.free(uds);
+
+    var left: u32 = (cx + width) -| s.cx;
+    var idx: usize = 0;
+
+    while (true) {
+        // Find the end of what can fit on the line.
+        var at: u32 = 0;
+        var end: usize = idx;
+        while (uds[end].size != 0) {
+            if (uds[end].size == 1 and uds[end].data[0] == '\n')
+                break;
+            if (at + uds[end].width > left)
+                break;
+            at += uds[end].width;
+            end += 1;
+        }
+
+        // If we're on a space, that's the end. If not, walk back to
+        // try and find one.
+        var next: usize = undefined;
+        if (uds[end].size == 0) {
+            next = end;
+        } else if (uds[end].size == 1 and uds[end].data[0] == '\n') {
+            next = end + 1;
+        } else if (uds[end].size == 1 and uds[end].data[0] == ' ') {
+            next = end + 1;
+        } else {
+            var i: usize = end;
+            while (i > idx) : (i -= 1) {
+                if (uds[i].size == 1 and uds[i].data[0] == ' ')
+                    break;
+            }
+            if (i != idx) {
+                next = i + 1;
+                end = i;
+            } else {
+                next = end;
+            }
+        }
+
+        // Print the line.
+        var i: usize = idx;
+        while (i < end) : (i += 1) {
+            utf8.utf8_copy(&gc.data, &uds[i]);
+            putCell(ctx, &gc);
+        }
+
+        // If at the bottom, stop.
+        idx = next;
+        if (s.cy == cy + lines_avail - 1 or uds[idx].size == 0)
+            break;
+
+        cursormove(ctx, cx, s.cy + 1, false);
+        left = width;
+    }
+
+    // Fail if on the last line and there is more to come or at the end,
+    // or if the text was not entirely consumed.
+    if ((s.cy == cy + lines_avail - 1 and (!more_to_come or s.cx == cx + width)) or
+        uds[idx].size != 0)
+    {
+        return 0;
+    }
+
+    // If no more to come, move to the next line. Otherwise, leave on
+    // the same line (except if at the end).
+    if (!more_to_come or s.cx == cx + width)
+        cursormove(ctx, cx, s.cy + 1, false);
+    return 1;
+}
+
+/// Write simple string with grid cell styling, no length limit
+/// (screen_write_puts). C-compatible wrapper.
 pub fn screen_write_puts(ctx: *T.ScreenWriteCtx, gcp: *const T.GridCell, fmt: [*:0]const u8) void {
-    _ = .{ ctx, gcp, fmt };
+    nputs(ctx, -1, gcp, std.mem.span(fmt));
+}
+
+/// Write a Zig slice string with grid cell styling, no length limit
+/// (Zig-native equivalent of screen_write_puts).
+pub fn puts(ctx: *T.ScreenWriteCtx, gcp: *const T.GridCell, str: []const u8) void {
+    nputs(ctx, -1, gcp, str);
 }
 
 pub fn screen_write_alternateon(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, cursor: i32) void {

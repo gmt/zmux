@@ -819,17 +819,47 @@ fn style_to_sgr(style: CellStyle) ![]u8 {
     if (style.attr & T.GRID_ATTR_ITALICS != 0) try buf.appendSlice(xm.allocator, ";3");
     if (style.attr & T.GRID_ATTR_STRIKETHROUGH != 0) try buf.appendSlice(xm.allocator, ";9");
 
-    if (style.fg != 0 and style.fg != 8) {
-        const fg = if (style.fg < 8) 30 + style.fg else if (style.fg < 16) 90 + (style.fg - 8) else -1;
-        if (fg != -1) try append_code(&buf, fg);
-    }
-    if (style.bg != 0 and style.bg != 8) {
-        const bg = if (style.bg < 8) 40 + style.bg else if (style.bg < 16) 100 + (style.bg - 8) else -1;
-        if (bg != -1) try append_code(&buf, bg);
-    }
+    try append_colour(&buf, style.fg, 38);
+    try append_colour(&buf, style.bg, 48);
 
     try buf.append(xm.allocator, 'm');
     return buf.toOwnedSlice(xm.allocator);
+}
+
+/// Emit a foreground (base=38) or background (base=48) colour into an SGR
+/// sequence being assembled in `buf`.  Handles basic 8/16, 256-colour, and
+/// 24-bit RGB.
+fn append_colour(buf: *std.ArrayList(u8), colour: i32, base: u32) !void {
+    if (colour == 0 or colour == 8) return;
+
+    if (colour & T.COLOUR_FLAG_RGB != 0) {
+        const r = (colour >> 16) & 0xff;
+        const g = (colour >> 8) & 0xff;
+        const b = colour & 0xff;
+        const s = try std.fmt.allocPrint(xm.allocator, ";{d};2;{d};{d};{d}", .{ base, r, g, b });
+        defer xm.allocator.free(s);
+        try buf.appendSlice(xm.allocator, s);
+        return;
+    }
+
+    if (colour & T.COLOUR_FLAG_256 != 0) {
+        const idx = colour & 0xff;
+        const s = try std.fmt.allocPrint(xm.allocator, ";{d};5;{d}", .{ base, idx });
+        defer xm.allocator.free(s);
+        try buf.appendSlice(xm.allocator, s);
+        return;
+    }
+
+    // Basic 8 colours (0-7) → 30-37 / 40-47.
+    if (colour < 8) {
+        try append_code(buf, @as(i32, @intCast(base)) - 8 + colour);
+        return;
+    }
+    // Aixterm bright colours (90-97 / 100-107).
+    if (colour >= 90 and colour <= 97) {
+        try append_code(buf, @as(i32, @intCast(base)) + 52 + colour - 90);
+        return;
+    }
 }
 
 fn append_code(buf: *std.ArrayList(u8), code: i32) !void {

@@ -2202,6 +2202,7 @@ pub fn tty_update_client_offset(c: *T.Client) void {
 
 /// Port of tmux tty_update_window_offset().
 pub fn tty_update_window_offset(w: *T.Window) void {
+    if (!@import("options.zig").options_ready) return;
     for (client_registry.clients.items) |c| {
         if (c.session) |s| {
             if (s.curw) |curw| {

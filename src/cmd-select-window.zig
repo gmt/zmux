@@ -211,6 +211,7 @@ fn free_argv(argv: [][]u8) void {
 fn init_test_state() void {
     const opts = @import("options.zig");
 
+    cmdq.cmdq_reset_for_tests();
     sess.session_init_globals(xm.allocator);
     win_mod.window_init_globals(xm.allocator);
 
@@ -227,6 +228,7 @@ fn init_test_state() void {
 fn deinit_test_state() void {
     const opts = @import("options.zig");
 
+    cmdq.cmdq_reset_for_tests();
     env_mod.environ_free(env_mod.global_environ);
     opts.options_free(opts.global_w_options);
     opts.options_free(opts.global_s_options);
@@ -444,7 +446,7 @@ test "select-window records latest client on the newly selected window across se
         .name = "select-window-latest-client",
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = driver.session,
     };
@@ -496,7 +498,7 @@ test "new-window synchronizes grouped peers and uses shared group status-only in
         .name = "new-window-group-leader",
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = leader,
     };
@@ -507,7 +509,7 @@ test "new-window synchronizes grouped peers and uses shared group status-only in
         .name = "new-window-group-peer",
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = peer,
     };
@@ -557,7 +559,7 @@ test "new-window -S -n reuses one matching existing window" {
         .name = "new-window-reuse-client",
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -608,7 +610,7 @@ test "new-window -S -n errors when multiple windows share the name" {
         .name = "new-window-reuse-ambiguous-client",
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };

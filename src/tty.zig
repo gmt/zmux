@@ -39,6 +39,11 @@ const client_registry = @import("client-registry.zig");
 const server_fn = @import("server-fn.zig");
 const notify_mod = @import("notify.zig");
 const win_mod = @import("window.zig");
+const tty_keys_mod = @import("tty-keys.zig");
+const colour_mod = @import("colour.zig");
+const session_mod = @import("session.zig");
+const input_mod = @import("input.zig");
+const paste_mod = @import("paste.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -1754,11 +1759,8 @@ fn freeStartTimer(tty: *T.Tty) void {
 export fn tty_start_timer_fire(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = arg;
-    // TODO: re-enable when tty-keys read path consumes DA/colour responses.
-    // Sending requests without a response consumer causes ANSI spam in panes.
-    // const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
-    // tty_send_requests(tty);
+    const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
+    tty_send_requests(tty);
 }
 
 /// Write a Zig slice to the tty (helper used by tty_send_requests and similar).
@@ -1869,49 +1871,288 @@ export fn tty_read_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) voi
 /// Returns true if a key was consumed (caller should loop), false if the
 /// buffer is empty or contains only a partial sequence.
 /// Mirrors tmux tty_keys_next (tty-keys.c:732).
-fn tty_keys_next(tty: *T.Tty) bool {
+pub fn tty_keys_next(tty: *T.Tty) bool {
     return tty_keys_next_inner(tty, false);
 }
 
 fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
-    const c = tty.client;
+    const cl = tty.client;
     const buf = tty.in_buf.items;
     if (buf.len == 0) return false;
 
+    var size: usize = 0;
     var event: T.key_event = .{};
-    const consumed = input_keys.input_key_get_client(c, buf, &event) orelse {
+
+    // ── Response parsers (consume bytes without generating key events) ──
+
+    // 1. Clipboard response (OSC 52).
+    {
+        var clip: u8 = 0;
+        var clip_data: ?[]u8 = null;
+        switch (tty_keys_mod.tty_keys_clipboard(buf, &size, &clip, &clip_data)) {
+            .match => {
+                if (clip_data) |data| {
+                    // If we queried the clipboard, create a paste buffer.
+                    if (tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY)) != 0) {
+                        paste_mod.paste_add(null, data);
+                        tty.flags &= ~@as(i32, @intCast(T.TTY_OSC52QUERY));
+                    } else {
+                        xm.allocator.free(data);
+                    }
+                }
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 2. Primary device attributes (DA1): \033[?...c
+    {
+        var da_params: [16]u32 = undefined;
+        var n_params: usize = 0;
+        const have_da = (tty.flags & @as(i32, @intCast(T.TTY_HAVEDA))) != 0;
+        switch (tty_keys_mod.tty_keys_device_attributes(buf, &size, have_da, &da_params, &n_params)) {
+            .match => {
+                tty.flags |= @as(i32, @intCast(T.TTY_HAVEDA));
+                // Parse DA1 feature codes.
+                for (da_params[0..n_params]) |param| {
+                    switch (param) {
+                        4 => tty_features.tty_add_features(&cl.term_features, "sixel", ","),
+                        69 => tty_features.tty_add_features(&cl.term_features, "margins", ","),
+                        28 => tty_features.tty_add_features(&cl.term_features, "rectfill", ","),
+                        else => {},
+                    }
+                }
+                tty_update_features(tty);
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 3. Secondary device attributes (DA2): \033[>...c
+    {
+        var da2_params: [16]u32 = undefined;
+        var n_params: usize = 0;
+        const have_da2 = (tty.flags & @as(i32, @intCast(T.TTY_HAVEDA2))) != 0;
+        switch (tty_keys_mod.tty_keys_device_attributes2(buf, &size, have_da2, &da2_params, &n_params)) {
+            .match => {
+                tty.flags |= @as(i32, @intCast(T.TTY_HAVEDA2));
+                // DA2 first param identifies terminal type.
+                if (n_params >= 2) {
+                    const term_type = da2_params[0];
+                    const version = da2_params[1];
+                    switch (term_type) {
+                        77 => tty_features.defaultFeatures(&cl.term_features, "mintty", version),
+                        // tmux identifies itself in DA2
+                        else => {},
+                    }
+                }
+                tty_update_features(tty);
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 4. Extended device attributes (XDA/XTVERSION): \033P>|...\033\\
+    {
+        var xda_tmp: [256]u8 = undefined;
+        const have_xda = (tty.flags & @as(i32, @intCast(T.TTY_HAVEXDA))) != 0;
+        switch (tty_keys_mod.tty_keys_extended_device_attributes(buf, &size, have_xda, &xda_tmp)) {
+            .match => {
+                tty.flags |= @as(i32, @intCast(T.TTY_HAVEXDA));
+                // Parse terminal identity from XDA string.
+                const xda_str = std.mem.sliceTo(&xda_tmp, 0);
+                if (xda_str.len > 0) {
+                    // Match known terminal names.
+                    inline for (.{ "iTerm2", "foot", "tmux", "mintty", "XTerm" }) |name| {
+                        if (std.mem.indexOf(u8, xda_str, name) != null) {
+                            tty_features.defaultFeatures(&cl.term_features, name, 0);
+                        }
+                    }
+                }
+                tty_update_features(tty);
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 5. Foreground/background colour responses (OSC 10/11).
+    {
+        var colour_tmp: [128]u8 = undefined;
+        // Check OSC 10 (foreground).
+        switch (tty_keys_mod.tty_keys_colours(buf, &size, true, &colour_tmp)) {
+            .match => {
+                const colour_str = std.mem.sliceTo(&colour_tmp, 0);
+                if (colour_str.len > 0) {
+                    tty.fg = colour_mod.colour_parseX11(colour_str);
+                }
+                tty.flags &= ~@as(i32, @intCast(T.TTY_WAITFG));
+                if (cl.session) |s| session_mod.session_theme_changed(s);
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => {
+                // Even on partial colour response, trigger theme change
+                // (tmux does this — see tty-keys.c:804).
+                if (cl.session) |s| session_mod.session_theme_changed(s);
+                return handle_partial(tty, cl);
+            },
+            .no_match, .discard => {},
+        }
+        // Check OSC 11 (background).
+        switch (tty_keys_mod.tty_keys_colours(buf, &size, false, &colour_tmp)) {
+            .match => {
+                const colour_str = std.mem.sliceTo(&colour_tmp, 0);
+                if (colour_str.len > 0) {
+                    tty.bg = colour_mod.colour_parseX11(colour_str);
+                }
+                tty.flags &= ~@as(i32, @intCast(T.TTY_WAITBG));
+                if (cl.session) |s| session_mod.session_theme_changed(s);
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => {
+                if (cl.session) |s| session_mod.session_theme_changed(s);
+                return handle_partial(tty, cl);
+            },
+            .no_match, .discard => {},
+        }
+    }
+
+    // 6. Palette colour response (OSC 4).
+    {
+        var palette_tmp: [128]u8 = undefined;
+        switch (tty_keys_mod.tty_keys_palette(buf, &size, &palette_tmp)) {
+            .match => {
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 7. Mouse events.
+    {
+        const mr = tty_keys_mod.tty_keys_mouse(
+            buf,
+            &size,
+            &tty.mouse_last_x,
+            &tty.mouse_last_y,
+            &tty.mouse_last_b,
+        );
+        switch (mr.result) {
+            .match => {
+                event.key = T.KEYC_MOUSE;
+                event.m = mr.m;
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                dispatchKeyEvent(cl, &event);
+                return true;
+            },
+            .discard => {
+                // Valid mouse event we don't care about.
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match => {},
+        }
+    }
+
+    // 8. Extended key sequences (CSI u / modifyOtherKeys).
+    {
+        var ext_key: T.key_code = T.KEYC_UNKNOWN;
+        switch (tty_keys_mod.tty_keys_extended_key(buf, &size, &ext_key, null)) {
+            .match => {
+                event.key = ext_key;
+                drainInBuf(tty, size);
+                tty_keys_cancel_timer(tty);
+                dispatchKeyEvent(cl, &event);
+                return true;
+            },
+            .partial => return handle_partial(tty, cl),
+            .no_match, .discard => {},
+        }
+    }
+
+    // 9. Window size report (CSI 8;...t / CSI 4;...t).
+    if (tty_keys_mod.tty_keys_winsz(buf, &size)) |winsz| {
+        switch (winsz.kind) {
+            .chars => tty_set_size(tty, winsz.v1, winsz.v2, 0, 0),
+            .pixels => {
+                // Calculate character dimensions from pixels.
+                if (tty.sx > 0 and tty.sy > 0) {
+                    const cw = winsz.v1 / tty.sx;
+                    const ch = winsz.v2 / tty.sy;
+                    if (cw > 0 and ch > 0)
+                        tty_set_size(tty, tty.sx, tty.sy, cw, ch);
+                }
+                tty_invalidate(tty);
+            },
+        }
+        drainInBuf(tty, size);
+        tty_keys_cancel_timer(tty);
+        return true;
+    }
+
+    // ── Regular key decoding (fallback to input-keys.zig) ──
+
+    // 10. Try the existing input-keys decoder for regular keystrokes.
+    const consumed = input_keys.input_key_get_client(cl, buf, &event) orelse {
         if (expired) {
             // Timer expired and we still have partial data -- treat the
             // first byte(s) as a literal key (mirrors tmux fallthrough in
             // tty_keys_next after the timer fires).
             var key: T.key_code = @intCast(buf[0]);
-            var size: usize = 1;
+            var key_size: usize = 1;
             if (buf[0] == 0x1b and buf.len >= 2) {
                 key = @as(T.key_code, @intCast(buf[1])) | T.KEYC_META;
-                size = 2;
+                key_size = 2;
             }
             event.key = key;
-            event.len = @min(size, event.data.len);
+            event.len = @min(key_size, event.data.len);
             @memcpy(event.data[0..event.len], buf[0..event.len]);
-            drainInBuf(tty, size);
+            drainInBuf(tty, key_size);
             tty_keys_cancel_timer(tty);
-            dispatchKeyEvent(c, &event);
+            dispatchKeyEvent(cl, &event);
             return true;
         }
         // Partial sequence -- set escape timer if not already running.
-        if (tty.flags & @as(i32, @intCast(T.TTY_TIMER)) == 0) {
-            tty_keys_set_timer(tty);
-        }
-        return false;
+        return handle_partial(tty, cl);
     };
 
     drainInBuf(tty, consumed);
-
-    // Clear key timer -- we have a complete key.
     tty_keys_cancel_timer(tty);
-
-    dispatchKeyEvent(c, &event);
+    dispatchKeyEvent(cl, &event);
     return true;
+}
+
+/// Handle a partial key sequence: arm the escape timer if not already running.
+fn handle_partial(tty: *T.Tty, _: *T.Client) bool {
+    if (tty.flags & @as(i32, @intCast(T.TTY_TIMER)) == 0) {
+        tty_keys_set_timer(tty);
+    }
+    return false;
 }
 
 /// Remove `n` bytes from the front of the tty input buffer.
@@ -2060,6 +2301,9 @@ export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
 
 
 pub fn tty_update_features(tty: *T.Tty) void {
+    // Features might have changed since the first draw during attach.
+    // For example, this happens when DA responses are received.
+    server_fn.server_redraw_client(tty.client);
     tty_invalidate(tty);
 }
 

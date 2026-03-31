@@ -2486,7 +2486,7 @@ test "tty_open starts reduced tty lifecycle" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     tty_init(&cl.tty, &cl);
 
@@ -2520,7 +2520,7 @@ test "tty_resize clamps size and restores default pixels" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     tty_init(&cl.tty, &cl);
 
@@ -2547,7 +2547,7 @@ test "tty_append_mode_update emits reduced outer mouse, bracketed-paste, and foc
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2577,7 +2577,7 @@ test "tty_append_mode_update suppresses unsupported outer modes on reduced dumb 
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = &.{},
     };
     tty_init(&cl.tty, &cl);
@@ -2599,7 +2599,7 @@ test "tty_append_mode_update falls back to standard toggles when only feature bi
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_features = tty_features.featureBit(.bpaste) | tty_features.featureBit(.focus),
     };
     tty_init(&cl.tty, &cl);
@@ -2624,7 +2624,7 @@ test "tty_set_title honours the reduced title capability layer" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = &.{},
     };
     tty_init(&cl.tty, &cl);
@@ -2648,7 +2648,7 @@ test "tty_clipboard_query emits the recorded Ms capability query" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2707,7 +2707,7 @@ test "tty_cursor updates cx/cy to target position" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2745,7 +2745,7 @@ test "tty_cursor skips when already at target position" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2784,7 +2784,7 @@ test "tty_cursor clamps x to right margin" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2822,7 +2822,7 @@ test "tty_cursor_pane translates pane-relative to absolute coordinates" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2861,7 +2861,7 @@ test "tty_cursor_pane subtracts window origin offset" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2900,7 +2900,7 @@ test "tty_cursor_pane_unless_wrap delegates when not wrapped" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);
@@ -2940,7 +2940,7 @@ test "tty_cursor emits CUP with correct parameter expansion" {
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     tty_init(&cl.tty, &cl);

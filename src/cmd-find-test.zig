@@ -59,7 +59,7 @@ test "cmd_find_target resolves current client state when target is omitted" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -111,7 +111,7 @@ test "cmd_find_target resolves session prefixes and patterns" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = alpha,
     };
     defer env_mod.environ_free(client.environ);
@@ -165,7 +165,7 @@ test "cmd_find_target resolves window names, last window, and window-index targe
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -260,7 +260,7 @@ test "cmd_find_target resolves last pane in the current window" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     defer env_mod.environ_free(client.environ);
@@ -318,7 +318,7 @@ test "cmd_find_target uses unattached inside-pane context to choose a session" {
     var client = T.Client{
         .environ = client_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .ttyname = xm.xstrdup(tty),
     };
     defer xm.allocator.free(client.ttyname.?);
@@ -371,7 +371,7 @@ test "cmd_find_target uses ZMUX_PANE for unattached clients without tty matches"
     var client = T.Client{
         .environ = client_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     var list: cmd_mod.CmdList = .{};
@@ -427,7 +427,7 @@ test "cmd_find_current_client prefers attached clients in the inside-pane sessio
         .id = 1,
         .environ = attached_old_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     const attached_new_env = env_mod.environ_create();
@@ -436,7 +436,7 @@ test "cmd_find_current_client prefers attached clients in the inside-pane sessio
         .id = 2,
         .environ = attached_new_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     const other_env = env_mod.environ_create();
@@ -445,7 +445,7 @@ test "cmd_find_current_client prefers attached clients in the inside-pane sessio
         .id = 3,
         .environ = other_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = other,
     };
 
@@ -459,7 +459,7 @@ test "cmd_find_current_client prefers attached clients in the inside-pane sessio
     var query_client = T.Client{
         .environ = query_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .ttyname = xm.xstrdup(tty),
     };
     defer xm.allocator.free(query_client.ttyname.?);
@@ -508,7 +508,7 @@ test "cmd_find_current_client prefers higher activity over client id" {
         .activity_time = 200,
         .environ = old_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
     const new_env = env_mod.environ_create();
@@ -518,7 +518,7 @@ test "cmd_find_current_client prefers higher activity over client id" {
         .activity_time = 100,
         .environ = new_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
 
@@ -573,7 +573,7 @@ test "cmd_find_target prefers unattached session for shared window ids" {
     var query_client = T.Client{
         .environ = query_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = attached,
     };
 
@@ -624,7 +624,7 @@ test "cmd_find_target resolves {mouse} through the shared mouse runtime state" {
     var query_client = T.Client{
         .environ = query_env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
     };
 

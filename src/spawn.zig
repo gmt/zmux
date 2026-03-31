@@ -26,6 +26,7 @@ const log = @import("log.zig");
 const opts = @import("options.zig");
 const cmdq = @import("cmd-queue.zig");
 const win = @import("window.zig");
+const layout_mod = @import("layout.zig");
 const sess = @import("session.zig");
 const env_mod = @import("environ.zig");
 const format_mod = @import("format.zig");
@@ -141,6 +142,7 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
     };
 
     const wp = win.window_add_pane(w, null, sx, sy);
+    layout_mod.layout_init(w, wp);
     w.active = wp;
 
     if (sc.flags & T.SPAWN_EMPTY == 0) {
@@ -183,6 +185,11 @@ pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
     const sy = w.sy;
 
     const wp = win.window_add_pane_with_flags(w, sc.wp0, sx, sy, sc.flags);
+
+    if (sc.lc) |lc| {
+        const zoom_flag: i32 = if (sc.flags & T.SPAWN_ZOOM != 0) 1 else 0;
+        layout_mod.layout_assign_pane(lc, wp, zoom_flag);
+    }
 
     if (sc.flags & T.SPAWN_EMPTY == 0) {
         spawn_pane_exec(wp, sc) catch |err| {

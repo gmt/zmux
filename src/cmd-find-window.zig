@@ -240,7 +240,7 @@ test "find-window enters the reduced window-tree runtime" {
         .name = "find-window-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -281,7 +281,7 @@ test "find-window -Z zooms tree mode and unzooms on exit when it created the zoo
         .name = "find-window-zoom-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };
@@ -327,7 +327,7 @@ test "find-window -Z preserves an already zoomed window after tree mode closes" 
         .name = "find-window-keep-zoom-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
         .session = setup.session,
     };

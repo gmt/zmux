@@ -216,7 +216,7 @@ fn newTestClient() !TestClient {
     const client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     return .{ .env = env, .client = client };
 }

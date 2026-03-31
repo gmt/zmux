@@ -967,6 +967,12 @@ pub fn tty_attributes(tty: *T.Tty, gc: *const T.GridCell, defaults: *const T.Gri
         }
     }
 
+    // Fix up the colours if necessary (palette substitution, RGB-to-256
+    // downsampling when the terminal lacks truecolour support).
+    tty_check_fg(tty, null, &gc2);
+    tty_check_bg(tty, null, &gc2);
+    tty_check_us(tty, null, &gc2);
+
     // If any bits are being cleared, reset everything first.
     if ((tc.attr & ~gc2.attr) != 0 or (tc.us != gc2.us and gc2.us == 0))
         tty_reset(tty);

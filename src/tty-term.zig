@@ -1280,7 +1280,7 @@ test "tty_term parses numeric, string, and ACS capabilities from reduced terminf
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_caps = caps[0..],
     };
     client.tty = .{ .client = &client };
@@ -1310,7 +1310,7 @@ test "tty_term falls back to feature-provided capability strings" {
     var client = T.Client{
         .environ = undefined,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .term_features = tty_features.featureBit(.title) | tty_features.featureBit(.clipboard),
     };
     client.tty = .{ .client = &client };

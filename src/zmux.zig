@@ -363,6 +363,7 @@ test {
     _ = @import("names.zig");
     _ = @import("pane-io.zig");
     _ = @import("paste.zig");
+    _ = @import("screen-redraw.zig");
     _ = @import("screen-write.zig");
     _ = @import("screen.zig");
     _ = @import("sort.zig");

@@ -2522,3 +2522,337 @@ pub fn input_restore_state(wp: ?*T.WindowPane) void {
         screen_write.restore_cursor(&ctx);
     }
 }
+
+// ── Request queue (tmux: input_request machinery) ─────────────────────────
+//
+// Mirrors the per-input_ctx request TAILQ from tmux's input.c.  A pane can
+// issue pending queries to the outer terminal (DA, clipboard read, palette
+// colour query).  When the terminal replies, input_request_reply dispatches
+// the response to the waiting pane and flushes any queued replies that were
+// held behind this request.
+//
+// zmux stores the queue on WindowPane rather than a heap-allocated input_ctx.
+// The cross-reference list on Client (Client.input_requests) lets
+// input_request_reply find the matching request without iterating all panes.
+
+const c_zig = @import("c.zig");
+const proc_mod = @import("proc.zig");
+const client_registry = @import("client-registry.zig");
+const paste_mod = @import("paste.zig");
+const log = @import("log.zig");
+
+/// Return a monotonic timestamp in milliseconds.  Mirrors tmux get_timer().
+fn get_timer_ms() u64 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch
+        (std.posix.clock_gettime(.REALTIME) catch return 0);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+/// Write `reply` directly to the pane's PTY fd (write-back path).
+/// Mirrors tmux input_send_reply / bufferevent_write.
+/// TODO: replace with a libevent bufferevent write when pane I/O is ported
+/// (see zig-porting-todo.md "Pane buffer management").
+fn input_send_reply(wp: *T.WindowPane, reply: []const u8) void {
+    if (wp.fd < 0 or reply.len == 0) return;
+    _ = std.posix.write(wp.fd, reply) catch {};
+}
+
+/// Allocate and queue a reply string, or send it immediately if no requests
+/// are pending (tmux: input_reply).
+/// `add` non-zero means: queue behind any pending requests rather than
+/// sending immediately.  This is how tmux serialises pane replies.
+pub fn input_reply(wp: *T.WindowPane, add: i32, reply: []const u8) void {
+    if (add != 0 and wp.input_request_count != 0) {
+        // Queue behind pending requests as INPUT_REQUEST_QUEUE entry.
+        const ir = input_make_request(wp, .queue);
+        const copy = xm.allocator.dupe(u8, reply) catch unreachable;
+        ir.data = @ptrCast(copy.ptr);
+        // Store length in idx so we can recover the slice on dispatch.
+        ir.idx = @intCast(copy.len);
+    } else {
+        input_send_reply(wp, reply);
+    }
+}
+
+/// Arm the request-expiry timer (fires every 100 ms, removes stale entries).
+/// Mirrors tmux input_start_request_timer.
+fn input_start_request_timer(wp: *T.WindowPane) void {
+    const base = proc_mod.libevent orelse return;
+    if (wp.input_request_timer == null) {
+        wp.input_request_timer = c_zig.libevent.event_new(
+            base,
+            -1,
+            @intCast(c_zig.libevent.EV_TIMEOUT),
+            input_request_timer_callback,
+            wp,
+        );
+    }
+    if (wp.input_request_timer) |ev| {
+        var tv = std.posix.timeval{ .sec = 0, .usec = 100_000 };
+        _ = c_zig.libevent.event_del(ev);
+        _ = c_zig.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+/// Timer callback: expire requests older than INPUT_REQUEST_TIMEOUT ms.
+export fn input_request_timer_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _fd;
+    _ = _events;
+    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
+    const t = get_timer_ms();
+    var idx: usize = 0;
+    while (idx < wp.input_request_list.items.len) {
+        const ir = wp.input_request_list.items[idx];
+        if (ir.t >= t -| T.INPUT_REQUEST_TIMEOUT) {
+            idx += 1;
+            continue;
+        }
+        // Timed out: flush queued replies, skip non-queue entries.
+        if (ir.type == .queue) {
+            const reply_ptr: [*]u8 = @ptrCast(ir.data orelse { idx += 1; continue; });
+            const reply = reply_ptr[0..@intCast(ir.idx)];
+            input_send_reply(wp, reply);
+        }
+        input_free_request_at(wp, idx);
+        // Don't increment idx — items shift left after removal.
+    }
+    if (wp.input_request_count != 0)
+        input_start_request_timer(wp);
+}
+
+/// Allocate and append a new request to the pane's queue.
+/// Mirrors tmux input_make_request.
+fn input_make_request(wp: *T.WindowPane, kind: T.InputRequestType) *T.InputRequest {
+    const ir = xm.allocator.create(T.InputRequest) catch unreachable;
+    ir.* = .{
+        .wp = wp,
+        .type = kind,
+        .t = get_timer_ms(),
+    };
+    wp.input_request_list.append(xm.allocator, ir) catch unreachable;
+    wp.input_request_count += 1;
+    if (wp.input_request_count == 1)
+        input_start_request_timer(wp);
+    return ir;
+}
+
+/// Free the request at position `idx` in the pane's list.
+/// Also removes it from the client's cross-reference list.
+fn input_free_request_at(wp: *T.WindowPane, idx: usize) void {
+    const ir = wp.input_request_list.items[idx];
+    // Remove from client cross-reference.
+    if (ir.c) |c| {
+        var ci: usize = 0;
+        while (ci < c.input_requests.items.len) : (ci += 1) {
+            if (c.input_requests.items[ci] == ir) {
+                _ = c.input_requests.swapRemove(ci);
+                break;
+            }
+        }
+    }
+    // Free payload.
+    if (ir.data) |d| {
+        if (ir.type == .queue) {
+            const ptr: [*]u8 = @ptrCast(d);
+            xm.allocator.free(ptr[0..@intCast(ir.idx)]);
+        } else {
+            // Palette and clipboard data payloads are caller-owned; the
+            // input_request_reply caller frees them.  Nothing to do here.
+        }
+    }
+    // Use orderedRemove to preserve FIFO ordering of the pane's request list.
+    _ = wp.input_request_list.orderedRemove(idx);
+    wp.input_request_count -= 1;
+    xm.allocator.destroy(ir);
+}
+
+/// Find the most recently active client that can see window `w`.
+/// Returns null if no eligible client found.
+/// Mirrors tmux's client-selection loop in input_add_request.
+fn find_active_client(w: *T.Window) ?*T.Client {
+    var best: ?*T.Client = null;
+    for (client_registry.clients.items) |c| {
+        if ((c.flags & T.CLIENT_UNATTACHEDFLAGS) != 0) continue;
+        const sess = c.session orelse continue;
+        // Check whether this session contains a winlink for w.
+        var found = false;
+        var it = sess.windows.valueIterator();
+        while (it.next()) |wl| {
+            if (wl.*.window == w) { found = true; break; }
+        }
+        if (!found) continue;
+        if ((c.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) continue;
+        if (best == null or c.activity_time > best.?.activity_time)
+            best = c;
+    }
+    return best;
+}
+
+/// Queue a terminal query on behalf of the current pane and send the request
+/// sequence to the best available client tty.
+/// Mirrors tmux input_add_request.
+pub fn input_add_request(wp: ?*T.WindowPane, kind: T.InputRequestType, idx: i32) i32 {
+    const w_pane = wp orelse return -1;
+    const c = find_active_client(w_pane.window) orelse return -1;
+    const ir = input_make_request(w_pane, kind);
+    ir.c = c;
+    ir.idx = idx;
+    // Append to client's cross-reference list.
+    c.input_requests.append(xm.allocator, ir) catch unreachable;
+    // Send the query sequence.
+    const tty_mod = @import("tty.zig");
+    switch (kind) {
+        .palette => {
+            const seq = std.fmt.allocPrintZ(xm.allocator, "\x1b]4;{d};?\x1b\\", .{idx}) catch return -1;
+            defer xm.allocator.free(seq);
+            tty_mod.tty_puts(&c.tty, seq.ptr);
+        },
+        .clipboard => {
+            tty_mod.tty_putcode_ss(&c.tty, "Ms", "", "?");
+        },
+        .queue => {
+            // Queue entries are never directly added here.
+        },
+    }
+    return 0;
+}
+
+/// Send a deferred reply string stored in a .queue request.
+fn input_send_queued_reply(wp: *T.WindowPane, ir: *T.InputRequest) void {
+    if (ir.data) |d| {
+        const ptr: [*]u8 = @ptrCast(d);
+        input_send_reply(wp, ptr[0..@intCast(ir.idx)]);
+    }
+}
+
+/// Dispatch a reply to the oldest matching pending request and flush any
+/// queued replies that followed it.  Mirrors tmux input_request_reply.
+pub fn input_request_reply(c: *T.Client, kind: T.InputRequestType, data: ?*anyopaque) void {
+    // Find the matching request in the client's cross-reference list.
+    var found: ?*T.InputRequest = null;
+    var fi: usize = 0;
+    while (fi < c.input_requests.items.len) : (fi += 1) {
+        const ir = c.input_requests.items[fi];
+        if (ir.type != kind) continue;
+        if (kind == .palette) {
+            const pd: *T.InputRequestPaletteData = @ptrCast(@alignCast(data orelse continue));
+            if (pd.idx != ir.idx) continue;
+        }
+        found = ir;
+        break;
+    }
+    const fir = found orelse return;
+    const wp = fir.wp orelse return;
+
+    // Walk the pane's request list from the front.  We always process index 0
+    // because input_free_request_at removes and shifts the array; stop when
+    // the list is empty or when we've completed dispatching and hit a
+    // non-queue entry (which belongs to a future request).
+    var complete = false;
+    while (wp.input_request_list.items.len > 0) {
+        const ir = wp.input_request_list.items[0];
+        if (complete and ir.type != .queue) break;
+        if (ir.type == .queue) {
+            input_send_queued_reply(wp, ir);
+            input_free_request_at(wp, 0);
+            continue;
+        }
+        if (ir == fir) {
+            // Dispatch reply to pane.
+            switch (ir.type) {
+                .palette => input_request_palette_reply(ir, data),
+                .clipboard => input_request_clipboard_reply(ir, data),
+                .queue => unreachable,
+            }
+            complete = true;
+            input_free_request_at(wp, 0);
+            continue;
+        }
+        // Non-matching non-queue request ahead of ours: discard it (tmux
+        // treats earlier requests as superseded).
+        input_free_request_at(wp, 0);
+    }
+}
+
+/// Handle a palette colour reply (OSC 4 response).
+/// Mirrors tmux input_request_palette_reply.
+fn input_request_palette_reply(ir: *T.InputRequest, data: ?*anyopaque) void {
+    const pd: *T.InputRequestPaletteData = @ptrCast(@alignCast(data orelse return));
+    // TODO: call input_osc_colour_reply once it is ported (zig-porting-todo.md).
+    log.log_debug("input_request_palette_reply: wp={?*} idx={d} colour={d}", .{ ir.wp, pd.idx, pd.c });
+}
+
+/// Handle a clipboard read reply (OSC 52 response).
+/// Mirrors tmux input_request_clipboard_reply.
+fn input_request_clipboard_reply(ir: *T.InputRequest, data: ?*anyopaque) void {
+    const wp = ir.wp orelse return;
+    const cd: *T.InputRequestClipboardData = @ptrCast(@alignCast(data orelse return));
+
+    const state = opts.options_get_number(opts.global_options, "set-clipboard");
+    // state 0 or 1: do not pass clipboard back to pane.
+    if (state == 0 or state == 1) return;
+
+    // state 3: also save into the zmux paste buffer.
+    if (state == 3) {
+        if (cd.buf) |buf| {
+            const copy = xm.allocator.dupe(u8, buf) catch return;
+            paste_mod.paste_add(null, copy);
+        }
+    }
+
+    // Write clipboard reply back to the pane's pty.
+    input_reply_clipboard(wp, cd.buf, cd.clip, ir.end);
+}
+
+/// Encode a clipboard payload as base64 and write an OSC 52 reply.
+/// Mirrors tmux input_reply_clipboard.
+fn input_reply_clipboard(wp: *T.WindowPane, buf: ?[]u8, clip: u8, end: T.InputEndType) void {
+    // Build the OSC 52 response: ESC ] 52 ; [clip] ; <base64> <terminator>
+    const term_str: []const u8 = switch (end) {
+        .bel => "\x07",
+        .st => "\x1b\\",
+    };
+
+    var out = std.ArrayList(u8).init(xm.allocator);
+    defer out.deinit();
+
+    out.appendSlice("\x1b]52;") catch return;
+    if (clip != 0) out.append(clip) catch return;
+    out.append(';') catch return;
+
+    if (buf) |b| if (b.len != 0) {
+        // base64-encode the buffer.
+        const encoded_len = std.base64.standard.Encoder.calcSize(b.len);
+        const encoded = xm.allocator.alloc(u8, encoded_len) catch return;
+        defer xm.allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, b);
+        out.appendSlice(encoded) catch return;
+    };
+
+    out.appendSlice(term_str) catch return;
+    input_send_reply(wp, out.items);
+}
+
+/// Cancel all pending requests associated with a client (on client disconnect).
+/// Mirrors tmux input_cancel_requests.
+pub fn input_cancel_requests(c: *T.Client) void {
+    // Free all requests in the client's cross-reference list.
+    // input_free_request_at also removes the entry from the client list,
+    // so we need to work backwards or re-scan.
+    while (c.input_requests.items.len > 0) {
+        const ir = c.input_requests.items[0];
+        if (ir.wp) |wp| {
+            // Find and remove from pane list.
+            var i: usize = 0;
+            while (i < wp.input_request_list.items.len) : (i += 1) {
+                if (wp.input_request_list.items[i] == ir) {
+                    input_free_request_at(wp, i);
+                    break;
+                }
+            }
+        } else {
+            // Orphan (pane destroyed): remove from client list directly.
+            _ = c.input_requests.swapRemove(0);
+        }
+    }
+}

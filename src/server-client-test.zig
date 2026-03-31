@@ -74,7 +74,7 @@ test "server_client_finalize_identify supplies client name and default term" {
         .pid = 42,
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     cl.tty = .{ .client = &cl };
     defer {
@@ -99,7 +99,7 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     cl.tty = .{ .client = &cl };
 
@@ -160,7 +160,7 @@ test "server_client_check_nested requires ZMUX and a live pane tty match" {
         .environ = env_mod.environ_create(),
         .ttyname = xm.xstrdup(tty),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(client.environ);
     defer xm.allocator.free(client.ttyname.?);
@@ -219,7 +219,7 @@ test "server_client_lock sends lock message and unlock restores redraw state" {
         .fd = 1,
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = &session,
     };
     tty_mod.tty_init(&client.tty, &client);
@@ -291,7 +291,7 @@ test "server_client_detach sends detachkill payload and clears session state" {
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -395,7 +395,7 @@ test "server_client_lost clears attached socket execute bits" {
         .name = xm.xstrdup("lost-client"),
         .environ = env_mod.environ_create(),
         .tty = .{ .client = client },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -481,7 +481,7 @@ test "server_client_attach updates socket execute bits for attach state" {
         .name = xm.xstrdup("attach-client"),
         .environ = env_mod.environ_create(),
         .tty = .{ .client = undefined },
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer {
         client_registry.clients.clearRetainingCapacity();
@@ -528,7 +528,7 @@ test "server_client_suspend sends suspend message and leaves session attached" {
         .fd = 1,
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = &session,
     };
@@ -600,7 +600,7 @@ test "server_client_exec sends command and shell payload" {
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = &session,
     };
     client.tty = .{ .client = &client };
@@ -658,7 +658,7 @@ test "server_client_send_shell returns default shell over shell message" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .pane_cache = .{},
         .stdin_pending = .{},
     };
@@ -715,7 +715,7 @@ test "server_client_dispatch_command queues default-client-command when argc is 
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .pane_cache = .{},
         .stdin_pending = .{},
     };
@@ -751,7 +751,7 @@ test "server_client_dispatch_command marks unattached clients for exit after com
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .pane_cache = .{},
         .stdin_pending = .{},
     };
@@ -815,7 +815,7 @@ test "build_client_draw_payload keeps multi-pane status-only redraw off the full
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };
@@ -873,7 +873,7 @@ test "build_client_draw_payload crops a panned multi-pane viewport" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
         .session = s,
         .pan_window = w,
@@ -928,7 +928,7 @@ test "build_client_draw_payload keeps border-only redraw off the full-clear body
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
         .session = s,
     };
@@ -980,7 +980,7 @@ test "build_client_draw_payload keeps scrollbar-only redraw off the full-clear b
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
         .session = s,
     };
@@ -1033,7 +1033,7 @@ test "build_client_draw_payload can redraw only dirty panes without clearing the
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF,
         .session = s,
     };

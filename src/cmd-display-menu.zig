@@ -811,7 +811,7 @@ fn test_setup(name: []const u8) struct {
         .name = xm.xstrdup(name),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };

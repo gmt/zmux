@@ -470,7 +470,7 @@ fn test_setup(name: []const u8) struct {
         .name = xm.xstrdup("source"),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -482,7 +482,7 @@ fn test_setup(name: []const u8) struct {
         .name = xm.xstrdup("target"),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };

@@ -72,20 +72,30 @@ sequence) and decodes some input sequences, but the full server-side
 key input tree from `tty-keys.c` is missing. Without it, the server
 cannot properly decode all terminal input from attached clients.
 
-## Screen Redraw (screen-redraw.c -- no zmux equivalent)
+## Screen Redraw (screen-redraw.c -- partial port in src/screen-redraw.zig)
 
-tmux's `screen-redraw.c` (1100 lines) is not ported. It provides:
+`src/screen-redraw.zig` ports the structural skeleton of tmux's
+`screen-redraw.c`.  Core border geometry (`ScreenRedrawCtx`,
+`screen_redraw_set_context`, `screen_redraw_pane_border`,
+`screen_redraw_cell_border`, `screen_redraw_type_of_cell`,
+`screen_redraw_check_cell`, `screen_redraw_check_is`),
+border glyph selection for all six styles (`screen_redraw_border_set`),
+border arrow indicators, and scrollbar slider geometry are in place.
 
-- Pane border drawing with support for six border styles (default,
-  double, heavy, simple, number, spaces).
-- Pane border colour, active-pane indicators, and border markers.
-- Scrollbar rendering (position, slider, up/down arrows).
-- Fill character support for unused terminal space.
-- Full-screen redraw orchestration: borders, pane contents, status
-  line, and overlay are drawn in the correct order.
-- `screen_redraw_screen` and `screen_redraw_pane` are called from
-  `server_client_check_redraw`; zmux uses a simplified draw path
-  that delegates to `tty_draw_pane` directly.
+Remaining gaps that need porting dependencies:
+
+- `screen_redraw_make_pane_status` / `screen_redraw_draw_pane_status`:
+  require the format system (`format_create`, `format_expand_time`,
+  `format_draw`) and `status_screen` / `status_size` fields on
+  `WindowPane`, none of which are ported yet.
+- `screen_redraw_screen` / `screen_redraw_pane` orchestration:
+  the logical flow is present, but the actual draw calls delegate to
+  the zmux payload path (`tty_draw_*`); full ctx-based tty drawing
+  (tty_cell, tty_cursor, tty_puts, tty_draw_line) is not wired.
+- Bidi isolate handling for horizontal borders requires
+  `tty_term_has(tty->term, TTYC_BIDI)`.
+- `window_copy_get_current_offset` for accurate scrollbar slider
+  position in copy mode.
 
 ## Image and Sixel
 

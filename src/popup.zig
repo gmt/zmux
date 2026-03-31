@@ -554,7 +554,7 @@ pub fn popup_make_pane(pd: *PopupData, layout_type: PopupLayoutType) void {
         if (ps.title) |t| _ = screen_mod.screen_set_title(&new_wp.base, t);
         screen_mod.screen_free(&new_wp.base);
         new_wp.base = ps.*;
-        screen_mod.screen_resize(&new_wp.base, new_wp.sx, new_wp.sy);
+        screen_mod.screen_resize(&new_wp.base, new_wp.sx, new_wp.sy, false);
         pd.screen = screen_mod.screen_init(1, 1, 0);
     }
 

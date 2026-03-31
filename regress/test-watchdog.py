@@ -176,16 +176,9 @@ def _have_coredumpctl() -> bool:
     return shutil.which("coredumpctl") is not None
 
 
-def collect_coredumps(since: float, exe_hint: str | None = None) -> list[dict]:
-    """Query coredumpctl for crashes since *since* (UNIX timestamp).
-
-    Returns a list of dicts with keys: pid, signal, exe, backtrace.
-    """
-    if not _have_coredumpctl():
-        return []
-
+def _find_coredump_pids(since: float, exe_hint: str | None = None) -> list[str]:
+    """Return PIDs of coredumps since *since* matching *exe_hint*."""
     since_dt = datetime.datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M:%S")
-    # List matching coredumps as JSON.
     try:
         result = subprocess.run(
             ["coredumpctl", "list", "--since", since_dt, "--no-pager"],
@@ -194,53 +187,124 @@ def collect_coredumps(since: float, exe_hint: str | None = None) -> list[dict]:
     except (subprocess.TimeoutExpired, OSError):
         return []
 
-    # Parse PIDs from the listing.
     pids: list[str] = []
     for line in result.stdout.splitlines():
-        parts = line.split()
-        # Typical line: "Mon 2026-03-30 17:43:00 PDT 1913401 1000 1000 SIGABRT ..."
-        # Filter by executable hint if provided.
         if exe_hint and exe_hint not in line:
             continue
-        for part in parts:
+        for part in line.split():
             if part.isdigit() and len(part) >= 4:
                 pids.append(part)
                 break
+    return pids
 
+
+def _gdb_backtrace(pid: str) -> list[str] | None:
+    """Get a debuginfod-enriched backtrace via gdb, if available.
+
+    Uses ``gdb -batch -iex 'set debuginfod enabled on'`` to pull
+    debug symbols from configured debuginfod servers (e.g.,
+    debuginfod.archlinux.org) before unwinding.  This resolves
+    system library frames to source file and line number.
+    """
+    if not shutil.which("gdb"):
+        return None
+    # Dump the core to a temp file so gdb can load it with the binary.
+    with tempfile.NamedTemporaryFile(suffix=".core", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        dump = subprocess.run(
+            ["coredumpctl", "dump", pid, "-o", tmp_path, "--no-pager"],
+            capture_output=True, timeout=15,
+        )
+        if dump.returncode != 0:
+            return None
+        # Find the executable path from coredumpctl info.
+        info = subprocess.run(
+            ["coredumpctl", "info", pid, "--no-pager"],
+            capture_output=True, text=True, timeout=5,
+        )
+        exe = None
+        for line in info.stdout.splitlines():
+            if line.strip().startswith("Executable:"):
+                exe = line.split(":", 1)[1].strip()
+                break
+        if not exe:
+            return None
+        result = subprocess.run(
+            ["gdb", "-batch",
+             "-iex", "set debuginfod enabled on",
+             "-ex", "bt",
+             exe, tmp_path],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "DEBUGINFOD_URLS":
+                 os.environ.get("DEBUGINFOD_URLS", "")},
+        )
+        bt = [l for l in result.stdout.splitlines() if l.startswith("#")]
+        return bt if bt else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _coredumpctl_backtrace(pid: str) -> tuple[str, list[str]]:
+    """Fallback: extract signal and backtrace from coredumpctl info."""
+    try:
+        info = subprocess.run(
+            ["coredumpctl", "info", pid, "--no-pager"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "", []
+    if info.returncode != 0:
+        return "", []
+
+    sig = ""
+    bt_lines: list[str] = []
+    in_bt = False
+    for line in info.stdout.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("Signal:"):
+            sig = line_s.split(":", 1)[1].strip()
+        if "Stack trace" in line_s:
+            in_bt = True
+            continue
+        if in_bt:
+            if line_s.startswith("#"):
+                bt_lines.append(line_s)
+            elif bt_lines:
+                break
+    return sig, bt_lines
+
+
+def collect_coredumps(since: float, exe_hint: str | None = None) -> list[dict]:
+    """Query coredumpctl for crashes since *since* (UNIX timestamp).
+
+    When gdb and debuginfod are available, produces enriched backtraces
+    with system library source locations.  Falls back to coredumpctl's
+    own traces otherwise.
+
+    Returns a list of dicts with keys: pid, signal, backtrace.
+    """
+    if not _have_coredumpctl():
+        return []
+
+    pids = _find_coredump_pids(since, exe_hint)
     dumps: list[dict] = []
     for pid in pids[-3:]:  # At most 3 most recent.
-        try:
-            info = subprocess.run(
-                ["coredumpctl", "info", pid, "--no-pager"],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            continue
-        if info.returncode != 0:
-            continue
-
-        # Extract signal and backtrace.
-        sig = ""
-        bt_lines: list[str] = []
-        in_bt = False
-        for line in info.stdout.splitlines():
-            line_s = line.strip()
-            if line_s.startswith("Signal:"):
-                sig = line_s.split(":", 1)[1].strip()
-            if "Stack trace" in line_s:
-                in_bt = True
-                continue
-            if in_bt:
-                if line_s.startswith("#"):
-                    bt_lines.append(line_s)
-                elif bt_lines:
-                    break
-
-        dumps.append({
-            "pid": pid,
-            "signal": sig,
-            "backtrace": bt_lines,
-        })
+        # Try gdb+debuginfod first for richer traces.
+        gdb_bt = _gdb_backtrace(pid)
+        if gdb_bt is not None:
+            # Still need the signal from coredumpctl info.
+            sig, _ = _coredumpctl_backtrace(pid)
+            dumps.append({"pid": pid, "signal": sig, "backtrace": gdb_bt})
+        else:
+            sig, bt = _coredumpctl_backtrace(pid)
+            if bt:
+                dumps.append({"pid": pid, "signal": sig, "backtrace": bt})
 
     return dumps
 

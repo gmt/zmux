@@ -190,52 +190,47 @@ fn build_menu_item(
 }
 
 fn build_menu(args: *const args_mod.Arguments, target: *const T.CmdFindState, tc: *const T.Client) ?*menu_mod.Menu {
-    var items: std.ArrayList(menu_mod.MenuItem) = .{};
-    defer {
-        for (items.items) |*item| item.deinit();
-        items.deinit(xm.allocator);
-    }
-
     const title = menu_title(args, target);
-    errdefer xm.allocator.free(title);
-    var width: u32 = format_display_width(title);
+    const menu = menu_mod.menu_create(title);
+    xm.allocator.free(title);
 
     var i: usize = 0;
     while (i < args.count()) {
         const name = args.value_at(i).?;
         i += 1;
         if (name.len == 0) {
-            if (items.items.len == 0) continue;
-            if (items.items[items.items.len - 1].separator) continue;
-            items.append(xm.allocator, .{ .separator = true }) catch unreachable;
+            // Insert separator directly (bypass menu_add_item since we have no format context)
+            if (menu.items.len > 0 and !menu.items[menu.items.len - 1].separator) {
+                menu.items = xm.allocator.realloc(menu.items, menu.items.len + 1) catch unreachable;
+                menu.items[menu.items.len - 1] = .{ .separator = true };
+            }
             continue;
         }
 
-        if (args.count() - i < 2) return null;
-        const key = args.value_at(i).?;
+        if (args.count() - i < 2) {
+            menu.deinit();
+            return null;
+        }
+        const raw_key = args.value_at(i).?;
         const command = args.value_at(i + 1).?;
         i += 2;
 
-        const built = build_menu_item(name, key, command, target, tc) orelse continue;
-        width = @max(width, format_display_width(built.display_text orelse ""));
-        items.append(xm.allocator, built) catch unreachable;
+        const built = build_menu_item(name, raw_key, command, target, tc) orelse continue;
+        // Bypass menu_add_item: build_menu_item already did format expansion.
+        const old_len = menu.items.len;
+        menu.items = xm.allocator.realloc(menu.items, old_len + 1) catch unreachable;
+        menu.items[old_len] = built;
+
+        var w = format_display_width(built.display_text orelse "");
+        if (built.dimmed and w > 0) w -= 1;
+        if (w > menu.width) menu.width = w;
     }
 
-    if (items.items.len == 0) {
-        xm.allocator.free(title);
+    if (menu.items.len == 0) {
+        menu.deinit();
         return null;
     }
 
-    const menu = xm.allocator.create(menu_mod.Menu) catch unreachable;
-    menu.* = .{
-        .title = title,
-        .items = xm.allocator.dupe(menu_mod.MenuItem, items.items) catch unreachable,
-        .width = width,
-    };
-    for (menu.items, 0..) |*item, idx| {
-        item.* = items.items[idx];
-    }
-    items.clearRetainingCapacity();
     return menu;
 }
 

@@ -83,6 +83,16 @@ pub const Menu = struct {
     }
 };
 
+/// Static menu-item template (tmux `struct menu_item`).
+/// Used by `menu_add_item` / `menu_add_items` to build a `Menu` from a
+/// compile-time table.  A sentinel entry with `name == null` terminates
+/// the list for `menu_add_items`.
+pub const MenuItemTemplate = struct {
+    name: ?[]const u8 = null,
+    key: T.key_code = T.KEYC_NONE,
+    command: ?[]const u8 = null,
+};
+
 pub const Bounds = struct {
     px: u32,
     py: u32,

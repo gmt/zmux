@@ -107,9 +107,6 @@ test "list-windows templates and filters use shared formatter" {
     const env_mod = @import("environ.zig");
     const win = @import("window.zig");
 
-    cmdq.cmdq_reset_for_tests();
-    defer cmdq.cmdq_reset_for_tests();
-
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
 

@@ -258,7 +258,7 @@ test "source-file waits for detached client reads and loads remote content" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -342,7 +342,7 @@ test "source-file expands relative glob patterns from the client cwd" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .cwd = cwd,
     };
 
@@ -424,7 +424,7 @@ test "source-file -F expands paths from the target pane context" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .cwd = cwd,
     };
     client.tty.client = &client;
@@ -462,7 +462,7 @@ test "source-file quiet glob nomatch does not fail" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .cwd = cwd,
     };
 

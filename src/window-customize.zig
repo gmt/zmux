@@ -1356,7 +1356,7 @@ fn makeClient(session_ptr: *T.Session, name: []const u8, ttyname: []const u8) T.
         .ttyname = xm.xstrdup(ttyname),
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session_ptr,
     };

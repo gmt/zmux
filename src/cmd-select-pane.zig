@@ -341,7 +341,7 @@ test "select-pane uses the client-local active pane when active-pane is set" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED | T.CLIENT_ACTIVEPANE,
         .session = s,
     };

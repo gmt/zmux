@@ -240,7 +240,7 @@ test "check_window_name renames immediately and marks redraws" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .session = session,
         .flags = T.CLIENT_ATTACHED,
     };

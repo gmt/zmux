@@ -365,7 +365,7 @@ test "default_window_size uses the latest eligible client" {
         .name = "c1",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(cl.environ);
     cl.tty = .{ .client = &cl, .sx = 120, .sy = 40, .xpixel = 17, .ypixel = 34 };
@@ -460,7 +460,7 @@ test "recalculate_size applies smallest client size to a linked window" {
         .name = "big",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(big.environ);
     big.tty = .{ .client = &big, .sx = 120, .sy = 40, .xpixel = 20, .ypixel = 40 };
@@ -470,7 +470,7 @@ test "recalculate_size applies smallest client size to a linked window" {
         .name = "small",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(small.environ);
     small.tty = .{ .client = &small, .sx = 90, .sy = 30, .xpixel = 18, .ypixel = 36 };
@@ -517,7 +517,7 @@ test "recalculate_size honors per-window control client sizes" {
         .name = "big",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(big.environ);
     defer big.client_windows.deinit(xm.allocator);
@@ -528,7 +528,7 @@ test "recalculate_size honors per-window control client sizes" {
         .name = "small",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(small.environ);
     small.tty = .{ .client = &small, .sx = 90, .sy = 30, .xpixel = 18, .ypixel = 36 };

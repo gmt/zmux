@@ -286,7 +286,7 @@ pub fn main() !void {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-fn getshell() []const u8 {
+pub fn getshell() []const u8 {
     if (std.posix.getenv("SHELL")) |sh| {
         if (sh.len > 0 and sh[0] == '/') return sh;
     }

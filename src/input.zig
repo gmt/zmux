@@ -29,8 +29,155 @@ const screen_write = @import("screen-write.zig");
 const alerts = @import("alerts.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
 const colour_mod = @import("colour.zig");
-const paste_mod = @import("paste.zig");
 const window_mod = @import("window.zig");
+const log = @import("log.zig");
+const paste_mod = @import("paste.zig");
+/// OSC terminator type — mirrors tmux's input_end_type.
+const OscEndType = enum { st, bel };
+
+/// Global input buffer size limit, settable via input_set_buffer_size.
+var input_buffer_size: usize = 1048576;
+
+// ── Reply infrastructure ─────────────────────────────────────────────────
+
+/// Low-level reply writer: writes a raw string back to the pane's PTY fd.
+/// Mirrors tmux input_send_reply (writes to bufferevent; zmux writes to fd).
+pub fn input_send_reply(wp: *T.WindowPane, reply: []const u8) void {
+    if (wp.fd < 0) return;
+    log.log_debug("input_send_reply: {s}", .{reply});
+    var rest = reply;
+    while (rest.len > 0) {
+        const written = std.posix.write(@intCast(wp.fd), rest) catch return;
+        if (written == 0) return;
+        rest = rest[written..];
+    }
+}
+
+/// Terminal reply: format and send a reply string to the pane's PTY.
+/// Mirrors tmux input_reply. The `add` parameter is accepted for API
+/// compatibility (tmux uses it for request queuing) but currently ignored
+/// since zmux does not yet have the request queue infrastructure.
+pub fn input_reply(wp: *T.WindowPane, _: bool, comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const reply = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    input_send_reply(wp, reply);
+}
+
+/// Reply to a colour query (OSC 4/10/11/12).
+/// Mirrors tmux input_osc_colour_reply.
+pub fn input_osc_colour_reply(
+    wp: *T.WindowPane,
+    add: bool,
+    n: u32,
+    idx: i32,
+    c_in: i32,
+    end_type: OscEndType,
+) void {
+    var c = c_in;
+    if (c != -1) c = colour_mod.colour_force_rgb(c);
+    if (c == -1) return;
+    var r: u8 = undefined;
+    var g: u8 = undefined;
+    var b: u8 = undefined;
+    colour_mod.colour_split_rgb(c, &r, &g, &b);
+
+    const end: []const u8 = if (end_type == .bel) "\x07" else "\x1b\\";
+
+    if (n == 4) {
+        input_reply(wp, add, "\x1b]{d};{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}", .{
+            n, idx, r, r, g, g, b, b, end,
+        });
+    } else {
+        input_reply(wp, add, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}", .{
+            n, r, r, g, g, b, b, end,
+        });
+    }
+}
+
+/// Report the current theme (dark/light) to the pane.
+/// Mirrors tmux input_report_current_theme.
+pub fn input_report_current_theme(wp: *T.WindowPane) void {
+    const theme = window_mod.window_pane_get_theme(wp);
+    wp.flags &= ~@as(u32, T.PANE_THEMECHANGED);
+
+    switch (theme) {
+        .dark => {
+            log.log_debug("input_report_current_theme: %%{d} dark theme", .{wp.id});
+            input_reply(wp, false, "\x1b[?997;1n", .{});
+        },
+        .light => {
+            log.log_debug("input_report_current_theme: %%{d} light theme", .{wp.id});
+            input_reply(wp, false, "\x1b[?997;2n", .{});
+        },
+        .unknown => {
+            log.log_debug("input_report_current_theme: %%{d} unknown theme", .{wp.id});
+        },
+    }
+}
+
+/// Send a clipboard reply (OSC 52) back to the pane.
+/// Mirrors tmux input_reply_clipboard.
+pub fn input_reply_clipboard(wp: *T.WindowPane, buf: ?[]const u8, end: []const u8, clip: u8) void {
+    if (wp.fd < 0) return;
+
+    // Compute base64 payload size (if any).
+    const encoded_len: usize = if (buf) |data| (if (data.len > 0) std.base64.standard.Encoder.calcSize(data.len) else 0) else 0;
+    // Header "\x1b]52;" (5) + optional clip (1) + ";" (1) + encoded + end
+    const clip_len: usize = if (clip != 0) 1 else 0;
+    const total = 5 + clip_len + 1 + encoded_len + end.len;
+    const out = xm.allocator.alloc(u8, total) catch return;
+    defer xm.allocator.free(out);
+
+    var pos: usize = 0;
+    @memcpy(out[pos..][0..5], "\x1b]52;");
+    pos += 5;
+    if (clip != 0) {
+        out[pos] = clip;
+        pos += 1;
+    }
+    out[pos] = ';';
+    pos += 1;
+
+    if (buf) |data| {
+        if (data.len > 0) {
+            _ = std.base64.standard.Encoder.encode(out[pos..][0..encoded_len], data);
+            pos += encoded_len;
+        }
+    }
+    @memcpy(out[pos..][0..end.len], end);
+    pos += end.len;
+
+    input_send_reply(wp, out[0..pos]);
+}
+
+/// Start the ground timer (DCS/OSC/APC/rename timeout).
+/// Stub: zmux does not yet use libevent timers in the input parser.
+/// In tmux this fires a 5-second timer that resets the parser to ground state.
+pub fn input_start_ground_timer(_: *T.WindowPane) void {
+    // TODO: implement when zmux has event-loop timer integration
+}
+
+/// Start the request timer.
+/// Stub: zmux does not yet have the request queue infrastructure.
+/// In tmux this fires a 100ms timer to flush stale requests.
+pub fn input_start_request_timer(_: *T.WindowPane) void {
+    // TODO: implement when zmux has the request queue
+}
+
+/// Set the global input buffer size limit.
+/// Called from options_push_changes when "input-buffer-size" changes.
+/// Mirrors tmux input_set_buffer_size.
+pub fn input_set_buffer_size(buffer_size: usize) void {
+    log.log_debug("input_set_buffer_size: {d} -> {d}", .{ input_buffer_size, buffer_size });
+    input_buffer_size = buffer_size;
+}
+
+/// Handle a reply to a request forwarded from tty-keys.
+/// Stub: zmux does not yet have the client request queue (TAILQ-based).
+/// In tmux this handles palette and clipboard replies from the terminal.
+pub fn input_request_reply(_: *T.Client, _: u32, _: ?*anyopaque) void {
+    // TODO: implement when zmux has client request infrastructure
+}
 
 pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len == 0) return;
@@ -125,7 +272,7 @@ pub fn input_parse_screen(wp: *T.WindowPane, bytes: []const u8) void {
         if (next == 'P') {
             // DCS – device control string with full parameter/intermediate parsing
             const dcs = parse_dcs_structured(wp.input_pending.items[i..]) orelse break;
-            apply_dcs(wp, dcs);
+            apply_dcs(wp, &ctx, dcs);
             i += dcs.consumed;
             continue;
         }
@@ -245,52 +392,25 @@ fn parse_osc(wp: *T.WindowPane, bytes: []const u8) ?usize {
     var idx: usize = 2; // ESC ]
     while (idx < bytes.len) : (idx += 1) {
         if (bytes[idx] == 0x07) {
-            apply_osc(wp, bytes[2..idx], true);
+            apply_osc(wp, bytes[2..idx], .bel);
             return idx + 1;
         }
         if (idx + 1 < bytes.len and bytes[idx] == 0x1b and bytes[idx + 1] == '\\') {
-            apply_osc(wp, bytes[2..idx], false);
+            apply_osc(wp, bytes[2..idx], .st);
             return idx + 2;
         }
     }
     return null;
 }
 
-/// Write a formatted reply to the pane's pty fd.
-fn input_replyf(wp: *T.WindowPane, comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    input_send_reply(wp, s);
-}
-
-/// Reply with an OSC colour value.  n==4 includes the palette index.
-/// end_bel: true means BEL terminator, false means ST.
-fn input_osc_colour_reply(wp: *T.WindowPane, n: u32, idx: i32, c: i32, end_bel: bool) void {
-    const forced = colour_mod.colour_force_rgb(c);
-    if (forced == -1) return;
-    var r: u8 = undefined;
-    var g: u8 = undefined;
-    var b: u8 = undefined;
-    colour_mod.colour_split_rgb(forced, &r, &g, &b);
-    const end: []const u8 = if (end_bel) "\x07" else "\x1b\\";
-    var buf: [128]u8 = undefined;
-    const s = if (n == 4)
-        std.fmt.bufPrint(&buf, "\x1b]{d};{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}", .{ n, idx, r, r, g, g, b, b, end }) catch return
-    else
-        std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}{s}", .{ n, r, r, g, g, b, b, end }) catch return;
-    input_send_reply(wp, s);
-}
-
-fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_bel: bool) void {
+fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_type: OscEndType) void {
     // Parse the numeric OSC kind from the payload (everything before the first ';').
+    // Some OSC codes (110/111/112) have no value part.
     const semi = std.mem.indexOfScalar(u8, payload, ';');
-    const current = screen_mod.screen_current(wp);
-
-    // For OSC sequences without ';' (e.g. OSC 110, OSC 111, OSC 112), the
-    // entire payload is the kind number with no value.
     const kind_slice = if (semi) |s| payload[0..s] else payload;
     const kind = std.fmt.parseInt(u32, kind_slice, 10) catch return;
-    const value = if (semi) |s| payload[s + 1 ..] else "";
+    const value: []const u8 = if (semi) |s| payload[s + 1 ..] else "";
+    const current = screen_mod.screen_current(wp);
 
     switch (kind) {
         0, 1, 2 => {
@@ -298,7 +418,10 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_bel: bool) void {
             if (current.title) |old| xm.allocator.free(old);
             current.title = if (value.len != 0) xm.xstrdup(value) else null;
         },
-        4 => apply_osc_4(wp, value, end_bel),
+        4 => {
+            // OSC 4 ; index ; color — set/query palette colour
+            apply_osc_4(wp, value, end_type);
+        },
         7 => {
             // OSC 7 ; path — set working directory
             screen_mod.screen_set_path(current, value);
@@ -307,240 +430,43 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_bel: bool) void {
             // OSC 8 ; params ; uri — hyperlink open/close
             apply_osc_8(current, value);
         },
-        10 => apply_osc_10(wp, value, end_bel),
-        11 => apply_osc_11(wp, value, end_bel),
-        12 => apply_osc_12(wp, value, end_bel),
-        52 => apply_osc_52(wp, value, end_bel),
-        104 => apply_osc_104(wp, value),
-        110 => apply_osc_110(wp, value),
-        111 => apply_osc_111(wp, value),
-        112 => apply_osc_112(wp, value),
-        133 => apply_osc_133(wp, value),
+        10 => {
+            // OSC 10 ; color — set/query foreground colour
+            apply_osc_10(wp, value, end_type);
+        },
+        11 => {
+            // OSC 11 ; color — set/query background colour
+            apply_osc_11(wp, value, end_type);
+        },
+        12 => {
+            // OSC 12 ; color — set/query cursor colour
+            apply_osc_12(wp, value, end_type);
+        },
+        52 => {
+            // OSC 52 ; clipboard — clipboard access
+            apply_osc_52(wp, value, end_type);
+        },
+        104 => {
+            // OSC 104 ; index — reset palette colour (stub)
+        },
+        110 => {
+            // OSC 110 — reset foreground colour
+            wp.palette.fg = 8;
+        },
+        111 => {
+            // OSC 111 — reset background colour
+            wp.palette.bg = 8;
+        },
+        112 => {
+            // OSC 112 — reset cursor colour (stub)
+        },
+        133 => {
+            // OSC 133 ; marker — semantic prompt markers A/B/C/D (stub)
+        },
         else => {
             // Unknown OSC sequence — ignore
         },
     }
-}
-
-/// OSC 4 ; N ; spec — set or query palette colour index N.
-fn apply_osc_4(wp: *T.WindowPane, p: []const u8, end_bel: bool) void {
-    // p is "N;spec[;N;spec...]" — multiple pairs allowed.
-    var rest = p;
-    var redraw = false;
-
-    while (rest.len > 0) {
-        // Parse index.
-        const idx_end = std.mem.indexOfScalar(u8, rest, ';') orelse break;
-        const idx_str = rest[0..idx_end];
-        const idx = std.fmt.parseInt(i32, idx_str, 10) catch break;
-        if (idx < 0 or idx >= 256) break;
-        rest = rest[idx_end + 1 ..];
-
-        // Parse colour spec (next field, semicolon-separated).
-        const spec_end = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
-        const spec = rest[0..spec_end];
-        rest = if (spec_end < rest.len) rest[spec_end + 1 ..] else "";
-
-        if (std.mem.eql(u8, spec, "?")) {
-            // Query: reply with current palette colour.
-            const c = colour_mod.colour_palette_get(&wp.palette, idx | @as(i32, @bitCast(T.COLOUR_FLAG_256)));
-            if (c != -1) {
-                input_osc_colour_reply(wp, 4, idx, c, end_bel);
-            }
-            continue;
-        }
-
-        const c = colour_mod.colour_parseX11(spec);
-        if (c == -1) continue;
-        if (colour_mod.colour_palette_set(&wp.palette, idx, c))
-            redraw = true;
-    }
-
-    if (redraw) {
-        var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-        screen_write.fullredraw(&ctx);
-    }
-}
-
-/// OSC 10 ; spec — set or query foreground colour.
-fn apply_osc_10(wp: *T.WindowPane, p: []const u8, end_bel: bool) void {
-    if (std.mem.eql(u8, p, "?")) {
-        var c = window_mod.window_pane_get_fg_control_client(wp);
-        if (c == -1) {
-            var defaults = T.grid_default_cell;
-            tty_mod_default_colours(&defaults, wp);
-            if (T.colour_is_default(defaults.fg))
-                c = window_mod.window_pane_get_fg(wp)
-            else
-                c = defaults.fg;
-        }
-        input_osc_colour_reply(wp, 10, 0, c, end_bel);
-        return;
-    }
-    const c = colour_mod.colour_parseX11(p);
-    if (c == -1) return;
-    wp.palette.fg = c;
-    wp.flags |= T.PANE_STYLECHANGED;
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-    screen_write.fullredraw(&ctx);
-}
-
-/// OSC 11 ; spec — set or query background colour.
-fn apply_osc_11(wp: *T.WindowPane, p: []const u8, end_bel: bool) void {
-    if (std.mem.eql(u8, p, "?")) {
-        const c = window_mod.window_pane_get_bg(wp);
-        input_osc_colour_reply(wp, 11, 0, c, end_bel);
-        return;
-    }
-    const c = colour_mod.colour_parseX11(p);
-    if (c == -1) return;
-    wp.palette.bg = c;
-    wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-    screen_write.fullredraw(&ctx);
-}
-
-/// OSC 12 ; spec — set or query cursor colour.
-fn apply_osc_12(wp: *T.WindowPane, p: []const u8, end_bel: bool) void {
-    const s = screen_mod.screen_current(wp);
-    if (std.mem.eql(u8, p, "?")) {
-        var c = s.ccolour;
-        if (c == -1) c = s.default_ccolour;
-        input_osc_colour_reply(wp, 12, 0, c, end_bel);
-        return;
-    }
-    const c = colour_mod.colour_parseX11(p);
-    if (c == -1) return;
-    screen_mod.screen_set_cursor_colour(s, c);
-}
-
-/// OSC 52 ; clip ; data — set or query clipboard.
-fn apply_osc_52(wp: *T.WindowPane, p: []const u8, end_bel: bool) void {
-    // p is "clip;data" where clip is a string of allowed clipboard chars.
-    const semi = std.mem.indexOfScalar(u8, p, ';') orelse return;
-    const data = p[semi + 1 ..];
-
-    if (std.mem.eql(u8, data, "?")) {
-        // Clipboard query.
-        const state = opts.options_get_number(opts.global_options, "get-clipboard");
-        if (state == 0) return;
-        if (state == 1) {
-            const pb = paste_mod.paste_get_top(null) orelse return;
-            const buf = paste_mod.paste_buffer_data(pb, null);
-            apply_osc_52_reply(wp, buf, end_bel);
-        }
-        // state == 2: would need async clipboard request (not yet supported)
-        return;
-    }
-
-    // Set clipboard.
-    if (opts.options_get_number(opts.global_options, "set-clipboard") != 2) return;
-    if (data.len == 0) return;
-
-    // Base64-decode.
-    const dec = std.base64.standard.Decoder;
-    const exact_len = dec.calcSizeForSlice(data) catch return;
-    const max_len = dec.calcSizeUpperBound(data.len) catch return;
-    const out = xm.allocator.alloc(u8, max_len) catch return;
-    dec.decode(out, data) catch {
-        xm.allocator.free(out);
-        return;
-    };
-    const decoded = out[0..exact_len];
-
-    // Store in clipboard and notify.
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-    screen_write.setselection(&ctx, p[0..semi], decoded);
-    paste_mod.paste_add(null, xm.xstrdup(decoded));
-    xm.allocator.free(out);
-}
-
-/// Send a base64-encoded clipboard reply: ESC ] 52 ; c ; <b64> BEL/ST.
-fn apply_osc_52_reply(wp: *T.WindowPane, buf: []const u8, end_bel: bool) void {
-    if (buf.len == 0) return;
-
-    const enc = std.base64.standard.Encoder;
-    const b64_len = enc.calcSize(buf.len);
-    const encoded = xm.allocator.alloc(u8, b64_len) catch return;
-    defer xm.allocator.free(encoded);
-    _ = enc.encode(encoded, buf);
-
-    const end: []const u8 = if (end_bel) "\x07" else "\x1b\\";
-    input_send_reply(wp, "\x1b]52;c;");
-    input_send_reply(wp, encoded);
-    input_send_reply(wp, end);
-}
-
-/// OSC 104 ; N[;N...] — reset palette entry/entries.
-/// If empty, resets all palette entries.
-fn apply_osc_104(wp: *T.WindowPane, p: []const u8) void {
-    var redraw = false;
-    if (p.len == 0) {
-        colour_mod.colour_palette_clear(&wp.palette);
-        redraw = true;
-    } else {
-        var rest = p;
-        while (rest.len > 0) {
-            const end = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
-            const idx_str = rest[0..end];
-            rest = if (end < rest.len) rest[end + 1 ..] else "";
-            if (idx_str.len == 0) continue;
-            const idx = std.fmt.parseInt(i32, idx_str, 10) catch break;
-            if (idx < 0 or idx >= 256) break;
-            if (colour_mod.colour_palette_set(&wp.palette, idx, -1))
-                redraw = true;
-        }
-    }
-    if (redraw) {
-        var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-        screen_write.fullredraw(&ctx);
-    }
-}
-
-/// OSC 110 — reset foreground colour to default.
-fn apply_osc_110(wp: *T.WindowPane, p: []const u8) void {
-    if (p.len != 0) return;
-    wp.palette.fg = 8;
-    wp.flags |= T.PANE_STYLECHANGED;
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-    screen_write.fullredraw(&ctx);
-}
-
-/// OSC 111 — reset background colour to default.
-fn apply_osc_111(wp: *T.WindowPane, p: []const u8) void {
-    if (p.len != 0) return;
-    wp.palette.bg = 8;
-    wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
-    var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-    screen_write.fullredraw(&ctx);
-}
-
-/// OSC 112 — reset cursor colour.
-fn apply_osc_112(wp: *T.WindowPane, p: []const u8) void {
-    if (p.len != 0) return;
-    screen_mod.screen_set_cursor_colour(screen_mod.screen_current(wp), -1);
-}
-
-/// OSC 133 ; A/B/C/D — semantic prompt markers.
-/// A = prompt start, C = command output start.
-fn apply_osc_133(wp: *T.WindowPane, p: []const u8) void {
-    if (p.len == 0) return;
-    const s = screen_mod.screen_current(wp);
-    const gd = s.grid;
-    const line = s.cy + gd.hsize;
-    if (line > gd.hsize + gd.sy - 1) return;
-    const gl = grid_mod.grid_get_line(gd, line);
-    switch (p[0]) {
-        'A' => gl.flags |= T.GRID_LINE_START_PROMPT,
-        'C' => gl.flags |= T.GRID_LINE_START_OUTPUT,
-        else => {},
-    }
-}
-
-/// Shim for tty_default_colours — sets gc fg/bg from pane palette defaults.
-fn tty_mod_default_colours(gc: *T.GridCell, wp: *T.WindowPane) void {
-    gc.fg = wp.palette.fg;
-    gc.bg = wp.palette.bg;
 }
 
 /// OSC 8 ; params ; uri — open or close a hyperlink.
@@ -585,6 +511,107 @@ fn apply_osc_8(s: *T.Screen, value: []const u8) void {
         s.saved_cell.link = link_id;
     }
     // If no hyperlink table exists, just swallow (reduced)
+}
+
+/// Handle OSC 4 — palette colour set/query.
+/// If the value is "idx;?" we reply with the palette colour.
+/// Otherwise consume silently (set is a stub for now).
+fn apply_osc_4(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
+    // Parse "idx;?" or "idx;colour" pairs
+    var rest: []const u8 = value;
+    while (rest.len > 0) {
+        const semi1 = std.mem.indexOfScalar(u8, rest, ';') orelse return;
+        const idx_str = rest[0..semi1];
+        const idx = std.fmt.parseInt(i32, idx_str, 10) catch return;
+        if (idx < 0 or idx >= 256) return;
+        rest = rest[semi1 + 1 ..];
+        const semi2 = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+        const colour_str = rest[0..semi2];
+        if (std.mem.eql(u8, colour_str, "?")) {
+            // Query: reply with palette colour
+            const c = colour_mod.colour_palette_get(&wp.palette, idx | @as(i32, @bitCast(T.COLOUR_FLAG_256)));
+            if (c != -1) {
+                input_osc_colour_reply(wp, true, 4, idx, c, end_type);
+            }
+        }
+        // Set is a stub — would need colour_parseX11 + colour_palette_set
+        if (semi2 >= rest.len) break;
+        rest = rest[semi2 + 1 ..];
+    }
+}
+
+/// Handle OSC 10 — foreground colour set/query.
+fn apply_osc_10(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
+    if (std.mem.eql(u8, value, "?")) {
+        // Query foreground colour
+        const c = window_mod.window_pane_get_fg(wp);
+        input_osc_colour_reply(wp, true, 10, 0, c, end_type);
+        return;
+    }
+    // Set foreground colour — stub (would need colour_parseX11)
+}
+
+/// Handle OSC 11 — background colour set/query.
+fn apply_osc_11(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
+    if (std.mem.eql(u8, value, "?")) {
+        // Query background colour
+        const c = window_mod.window_pane_get_bg(wp);
+        input_osc_colour_reply(wp, true, 11, 0, c, end_type);
+        return;
+    }
+    // Set background colour — stub (would need colour_parseX11)
+}
+
+/// Handle OSC 12 — cursor colour set/query.
+fn apply_osc_12(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
+    if (std.mem.eql(u8, value, "?")) {
+        // Query cursor colour
+        const current = screen_mod.screen_current(wp);
+        var c = current.ccolour;
+        if (c == -1) c = current.default_ccolour;
+        input_osc_colour_reply(wp, true, 12, 0, c, end_type);
+        return;
+    }
+    // Set cursor colour — stub (would need colour_parseX11)
+}
+
+/// Handle OSC 52 — clipboard access.
+/// "c;?" queries, "c;base64data" sets.
+fn apply_osc_52(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
+    const semi = std.mem.indexOfScalar(u8, value, ';') orelse return;
+    const clip_str = value[0..semi];
+    const data_str = value[semi + 1 ..];
+
+    // Determine which clipboard target
+    const clip: u8 = if (clip_str.len > 0) clip_str[0] else 0;
+
+    if (std.mem.eql(u8, data_str, "?")) {
+        // Query clipboard — reply with current paste buffer
+        const state = opts.options_get_number(opts.global_options, "get-clipboard");
+        if (state == 0) return;
+        if (state == 1) {
+            const pb = paste_mod.paste_get_top(null) orelse return;
+            var len: usize = 0;
+            const buf = paste_mod.paste_buffer_data(pb, &len);
+            const end: []const u8 = if (end_type == .bel) "\x07" else "\x1b\\";
+            input_reply_clipboard(wp, buf[0..len], end, clip);
+        }
+        // state >= 2 would need input_add_request (client request infrastructure)
+        return;
+    }
+
+    // Set clipboard — decode base64 and store
+    const set_state = opts.options_get_number(opts.global_options, "set-clipboard");
+    if (set_state != 2) return;
+    if (data_str.len == 0) return;
+
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_str) catch return;
+    const decoded = xm.allocator.alloc(u8, decoded_len) catch return;
+    std.base64.standard.Decoder.decode(decoded, data_str) catch {
+        xm.allocator.free(decoded);
+        return;
+    };
+    paste_mod.paste_add(null, decoded);
 }
 
 /// Parsed DCS structure: parameters, intermediate bytes, and data payload.
@@ -671,62 +698,60 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
 
 /// Dispatch a fully-parsed DCS sequence, applying side-effects.
 /// Mirrors tmux's input_dcs_dispatch and input_handle_decrqss.
-fn apply_dcs(wp: *T.WindowPane, dcs: DcsParsed) void {
+fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     const data = dcs.data;
 
-    // DECRQSS: DCS $ q <params> ST  (intermediate '$', data starts with 'q')
-    // tmux: interm_len==1 && interm_buf[0]=='$' && data[0]=='q'
-    if (dcs.interm.len == 1 and dcs.interm[0] == '$') {
-        if (data.len >= 1 and data[0] == 'q') {
-            apply_decrqss(wp, data);
-        }
+    // DECRQSS: DCS $ q <request> ST  (intermediate '$', data starts with 'q')
+    if (dcs.interm.len == 1 and dcs.interm[0] == '$' and data.len >= 1 and data[0] == 'q') {
+        apply_decrqss(wp, ctx, data);
         return;
     }
 
     // Sixel: DCS Ps ; ... q <data> ST  (no intermediate, data starts with 'q')
     // Stub: consume but do not render.
     if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
-        // Sixel image data — stub, consumed silently.
         return;
     }
 
     // Passthrough: DCS tmux; <raw> ST
-    // Check allow-passthrough option; if set, emit rawstring.
-    const oo = wp.options;
-    const allow_passthrough = opts.options_get_number(oo, "allow-passthrough");
-    if (allow_passthrough == 0) return;
-
-    const prefix = "tmux;";
-    if (data.len >= prefix.len and std.mem.startsWith(u8, data, prefix)) {
-        var ctx = T.ScreenWriteCtx{ .wp = wp, .s = screen_mod.screen_current(wp) };
-        screen_write.rawstring(&ctx, data[prefix.len..]);
-    }
-}
-
-/// Handle DECRQSS: DCS $ q Pt ST
-/// Reply: DCS 1 $ r <cursor-style> ST, or DCS 0 $ r ST if unrecognised.
-fn apply_decrqss(wp: *T.WindowPane, data: []const u8) void {
-    // Cursor style query: data must be " q" (space + q) after the leading 'q'.
-    // data[0] == 'q' already confirmed by caller; full form is "q q<Ps> q".
-    // tmux checks: len >= 3, buf[1]==' ', buf[2]=='q' (i.e., data is "q q...").
-    if (data.len >= 3 and data[1] == ' ' and data[2] == 'q') {
-        const s = screen_mod.screen_current(wp);
-        const blinking = (s.mode & T.MODE_CURSOR_BLINKING) != 0;
-        const ps: i32 = switch (s.cstyle) {
-            .block => if (blinking) @as(i32, 1) else 2,
-            .underline => if (blinking) @as(i32, 3) else 4,
-            .bar => if (blinking) @as(i32, 5) else 6,
-            else => blk: {
-                const opt_ps = opts.options_get_number(wp.options, "cursor-style");
-                const clamped: i32 = if (opt_ps < 0 or opt_ps > 6) 0 else @intCast(opt_ps);
-                break :blk clamped;
-            },
-        };
-        input_replyf(wp, "\x1bP1$r q{d} q\x1b\\", .{ps});
+    // Stub: would need allow-passthrough option check + rawstring output.
+    if (data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
         return;
     }
-    // Unrecognised DECRQSS.
-    input_send_reply(wp, "\x1bP0$r\x1b\\");
+
+    // All other DCS sequences: silently consumed.
+}
+
+/// Handle DECRQSS (DCS $ q <request> ST).
+/// Currently handles cursor style query (SP q).
+fn apply_decrqss(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, data: []const u8) void {
+    // data[0] == 'q', rest is the request selector
+    if (data.len < 3 or data[1] != ' ' or data[2] != 'q') {
+        // Unrecognized DECRQSS: send DCS 0 $ r ST
+        input_reply(wp, true, "\x1bP0$r\x1b\\", .{});
+        return;
+    }
+
+    // Cursor style query: DCS $ q SP q ST
+    // Reply: DCS 1 $ r Ps SP q ST
+    const s = ctx.s;
+    const ps: u32 = blk: {
+        if (s.cstyle == .block or s.cstyle == .underline or s.cstyle == .bar) {
+            const blinking = (s.mode & T.MODE_CURSOR_BLINKING) != 0;
+            break :blk switch (s.cstyle) {
+                .block => if (blinking) @as(u32, 1) else 2,
+                .underline => if (blinking) @as(u32, 3) else 4,
+                .bar => if (blinking) @as(u32, 5) else 6,
+                else => 0,
+            };
+        }
+        // Fall back to configured cursor-style option
+        const opt_ps = opts.options_get_number(wp.options, "cursor-style");
+        if (opt_ps < 0 or opt_ps > 6) break :blk @as(u32, 0);
+        break :blk @intCast(opt_ps);
+    };
+
+    input_reply(wp, true, "\x1bP1$r q{d} q\x1b\\", .{ps});
 }
 
 fn parse_string_to_st(bytes: []const u8) ?usize {
@@ -799,11 +824,15 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         params_raw = params_raw[1..];
     }
 
-    // Check for space (0x20) intermediate byte — used by DECSCUSR (CSI Ps SP q).
-    // The intermediate byte sits between the numeric parameters and the final byte.
-    // After stripping prefix chars, any space in params_raw is an intermediate.
+    // Check for intermediate bytes between numeric parameters and final byte.
+    // Space (0x20) is used by DECSCUSR (CSI Ps SP q).
+    // Dollar (0x24) is used by DECRQM (CSI ? Ps $ p).
+    var has_intermediate_dollar = false;
     if (std.mem.indexOfScalar(u8, params_raw, ' ') != null) {
         has_intermediate_space = true;
+    }
+    if (std.mem.indexOfScalar(u8, params_raw, '$') != null) {
+        has_intermediate_dollar = true;
     }
 
     var params_buf: [24]u32 = [_]u32{0} ** 24;
@@ -815,7 +844,10 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         return;
     }
     if (modify_other_keys and final == 'c') {
-        // CSI > c — DA2 secondary device attributes (reduced: no reply, just consume)
+        // CSI > c — DA2 secondary device attributes
+        if (first_param(params, 0) == 0) {
+            if (ctx.wp) |wp| input_reply(wp, true, "\x1b[>84;0;0c", .{});
+        }
         return;
     }
     if (modify_other_keys and final == 'n') {
@@ -824,7 +856,14 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
         return;
     }
     if (modify_other_keys and final == 'q') {
-        // CSI > q — XDA (reduced: no reply, just consume)
+        // CSI > q — XDA (report terminal name and version)
+        if (first_param(params, 0) == 0) {
+            if (ctx.wp) |wp| {
+                const zmux_mod = @import("zmux.zig");
+                const ver = zmux_mod.getversion();
+                input_reply(wp, true, "\x1bP>|zmux {s}\x1b\\", .{ver});
+            }
+        }
         return;
     }
     if (private and (final == 'h' or final == 'l')) {
@@ -833,9 +872,19 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
     }
     if (private and final == 'n') {
         // CSI ? Ps n — DSR_PRIVATE (device status report, private mode).
-        // tmux handles case 996 to report the current theme.
-        // zmux cannot reply to the terminal yet (no tty write path), so
-        // we consume the sequence without generating a response.
+        if (first_param(params, 0) == 996) {
+            if (ctx.wp) |wp| input_report_current_theme(wp);
+        }
+        return;
+    }
+    if (private and has_intermediate_dollar and final == 'p') {
+        // CSI ? Ps $ p — DECRQM (request mode, private)
+        apply_decrqm(ctx, params);
+        return;
+    }
+    if (private and final == 'S') {
+        // CSI ? Ps S — graphics mode SM (Sixel support query)
+        apply_sm_graphics(ctx, params);
         return;
     }
     if (has_intermediate_space and final == 'q') {
@@ -927,10 +976,20 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             apply_rep(ctx, first_param(params, 1));
         },
         'c' => {
-            // DA1 – device attributes (reduced: no reply)
+            // DA1 – device attributes
+            if (first_param(params, 0) == 0) {
+                if (ctx.wp) |wp| input_reply(wp, true, "\x1b[?1;2c", .{});
+            }
         },
         'n' => {
-            // DSR – device status report (reduced: no reply)
+            // DSR – device status report
+            if (ctx.wp) |wp| {
+                switch (first_param(params, 0)) {
+                    5 => input_reply(wp, true, "\x1b[0n", .{}),
+                    6 => input_reply(wp, true, "\x1b[{d};{d}R", .{ ctx.s.cy + 1, ctx.s.cx + 1 }),
+                    else => {},
+                }
+            }
         },
         'r' => {
             const top = first_param(params, 1) -| 1;
@@ -1249,12 +1308,61 @@ fn apply_decscusr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
     }
 }
 
+/// Handle CSI ? Ps S — graphics mode SM (Sixel support query).
+/// zmux does not support Sixel, so always replies with "not recognized" (3).
+fn apply_sm_graphics(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    const wp = ctx.wp orelse return;
+    if (params.len == 0) return;
+    const n = params[0];
+    const o: u32 = if (params.len >= 3) params[2] else 0;
+    // Reply: not supported (action 3 = not recognized)
+    input_reply(wp, true, "\x1b[?{d};3;{d}S", .{ n, o });
+}
+
 fn apply_winops(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    const wp = ctx.wp;
+    const x = ctx.s.grid.sx;
+    const y = ctx.s.grid.sy;
     var m: usize = 0;
     while (m < params.len) {
         const n = params[m];
         switch (n) {
-            1, 2, 5, 6, 7, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 24 => {},
+            1, 2, 5, 6, 7, 11, 13, 17, 20, 21, 24 => {},
+            14 => {
+                // Report text area size in pixels
+                if (wp) |p| {
+                    const w = p.window;
+                    input_reply(p, true, "\x1b[4;{d};{d}t", .{
+                        y * w.ypixel, x * w.xpixel,
+                    });
+                }
+            },
+            15 => {
+                // Report screen size in pixels
+                if (wp) |p| {
+                    const w = p.window;
+                    input_reply(p, true, "\x1b[5;{d};{d}t", .{
+                        y * w.ypixel, x * w.xpixel,
+                    });
+                }
+            },
+            16 => {
+                // Report cell size in pixels
+                if (wp) |p| {
+                    const w = p.window;
+                    input_reply(p, true, "\x1b[6;{d};{d}t", .{ w.ypixel, w.xpixel });
+                }
+            },
+            18 => {
+                // Report text area size in characters
+                if (wp) |p|
+                    input_reply(p, true, "\x1b[8;{d};{d}t", .{ y, x });
+            },
+            19 => {
+                // Report screen size in characters
+                if (wp) |p|
+                    input_reply(p, true, "\x1b[9;{d};{d}t", .{ y, x });
+            },
             3, 4, 8 => {
                 m += 1;
                 if (m >= params.len) return;
@@ -1281,6 +1389,34 @@ fn apply_winops(ctx: *T.ScreenWriteCtx, params: []const u32) void {
         }
         m += 1;
     }
+}
+
+/// Handle CSI ? Ps $ p — DECRQM (request mode, private).
+/// Replies with the current state of various private modes.
+fn apply_decrqm(ctx: *T.ScreenWriteCtx, params: []const u32) void {
+    const wp = ctx.wp orelse return;
+    const s = ctx.s;
+    const mode = first_param(params, 0);
+    // n: 1 = set, 2 = reset
+    const n: u32 = switch (mode) {
+        12 => blk: {
+            // Cursor blink: check runtime style or option
+            if (s.cstyle != .default or (s.mode & T.MODE_CURSOR_BLINKING_SET != 0)) {
+                break :blk if (s.mode & T.MODE_CURSOR_BLINKING != 0) 1 else 2;
+            }
+            const oo = wp.options;
+            const p = opts.options_get_number(oo, "cursor-style");
+            // blink for 1,3,5; steady for 0,2,4,6
+            break :blk if (p == 1 or p == 3 or p == 5) 1 else 2;
+        },
+        1004 => if (s.mode & T.MODE_FOCUSON != 0) @as(u32, 1) else 2,
+        1006 => if (s.mode & T.MODE_MOUSE_SGR != 0) @as(u32, 1) else 2,
+        2004 => if (s.mode & T.MODE_BRACKETPASTE != 0) @as(u32, 1) else 2,
+        2026 => if (s.mode & T.MODE_SYNC != 0) @as(u32, 1) else 2,
+        2031 => 2, // theme updates: always report "not recognized"
+        else => return,
+    };
+    input_reply(wp, true, "\x1b[?{d};{d}$y", .{ mode, n });
 }
 
 fn apply_modify_other_keys(ctx: *T.ScreenWriteCtx, params: []const u32) void {
@@ -1768,25 +1904,23 @@ test "input handles VT, FF, SO, SI and MODE_CRLF" {
 
     const wp = win.window_add_pane(w, null, 8, 3);
 
-    // Write text, then VT should move to next line like LF (no carriage return
-    // without MODE_CRLF — cursor column is preserved per tmux/ECMA-48).
+    // Write text, then VT should move to next line like LF
     input_parse_screen(wp, "AB\x0BCD");
     try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(wp.base.grid, 0, 1));
-    // cx was 2 before VT; VT only moves down — C/D land at columns 2/3 on row 1.
-    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 1, 2));
-    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 1, 3));
+    try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(wp.base.grid, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'D'), grid.ascii_at(wp.base.grid, 1, 1));
 
-    // FF should also behave like LF — cx was 4 after CD, so E/F land at 4/5 on row 2.
+    // FF should also behave like LF
     input_parse_screen(wp, "\x0CEF");
-    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 4));
-    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 5));
+    try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 0));
+    try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 1));
 
     // SO and SI should be silently consumed without corrupting output.
-    // cx is 6 after the previous "EF"; G/H land at columns 6/7.
+    // Cursor is at (2,2) after the previous "EF" so G/H land at columns 2/3.
     input_parse_screen(wp, "\x0E\x0FGH");
-    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 6));
-    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 7));
+    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 2));
+    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 3));
 
     // MODE_CRLF: LF should do carriage return before newline
     screen_mod.screen_current(wp).mode |= T.MODE_CRLF;
@@ -2697,105 +2831,6 @@ pub fn input_parse_buffer(wp: *T.WindowPane, buf: []const u8) void {
     input_parse_screen(wp, buf);
 }
 
-/// Parse ANSI escape sequences directly into a screen write context.
-/// Unlike `input_parse_screen`, this does not require a WindowPane and skips
-/// pane-specific sequences (OSC, DCS, APC).  Suitable for view-mode output
-/// where text with SGR styling needs to render into a backing screen.
-pub fn input_parse_ctx(ctx: *T.ScreenWriteCtx, bytes: []const u8) void {
-    if (bytes.len == 0) return;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (bytes[i] != 0x1b) {
-            const start = i;
-            var end = i;
-            while (end < bytes.len and bytes[end] != 0x1b) : (end += 1) {}
-            const keep_incomplete_tail = end == bytes.len;
-            const consumed = handle_plain_bytes(ctx, bytes[start..end], keep_incomplete_tail);
-            i += consumed;
-            if (consumed < end - start) break;
-            continue;
-        }
-        if (i + 1 >= bytes.len) break;
-        const next = bytes[i + 1];
-        if (next == '[') {
-            const consumed = parse_csi(ctx, bytes[i..]) orelse break;
-            i += consumed;
-            continue;
-        }
-        // Skip pane-specific sequences (OSC, DCS, APC) by consuming until ST.
-        if (next == ']' or next == 'P' or next == '_' or next == 'k' or next == 'X') {
-            const consumed = parse_string_to_st(bytes[i..]) orelse break;
-            i += consumed;
-            continue;
-        }
-        if (next == '7') {
-            screen_write.save_cursor(ctx);
-            i += 2;
-            continue;
-        }
-        if (next == '8') {
-            screen_write.restore_cursor(ctx);
-            i += 2;
-            continue;
-        }
-        if (next == 'D') {
-            screen_write.newline(ctx);
-            i += 2;
-            continue;
-        }
-        if (next == 'M') {
-            const gd = ctx.s.grid;
-            if (ctx.s.cy == ctx.s.rupper)
-                grid_mod.scroll_down(gd, ctx.s.rupper, @min(ctx.s.rlower, gd.sy -| 1))
-            else if (ctx.s.cy > 0)
-                ctx.s.cy -= 1;
-            i += 2;
-            continue;
-        }
-        if (next == 'E') {
-            screen_write.carriage_return(ctx);
-            screen_write.newline(ctx);
-            i += 2;
-            continue;
-        }
-        if (next == 'c') {
-            input_reset_cell(ctx.s);
-            screen_write.erase_screen(ctx);
-            i += 2;
-            continue;
-        }
-        if (next == '=' or next == '>') {
-            if (next == '=')
-                ctx.s.mode |= T.MODE_KKEYPAD
-            else
-                ctx.s.mode &= ~T.MODE_KKEYPAD;
-            i += 2;
-            continue;
-        }
-        if (next == '(' or next == ')') {
-            if (i + 2 >= bytes.len) break;
-            const charset = bytes[i + 2];
-            if (next == '(') {
-                ctx.s.g0set = if (charset == '0') 1 else 0;
-            } else {
-                ctx.s.g1set = if (charset == '0') 1 else 0;
-            }
-            i += 3;
-            continue;
-        }
-        if (next == '#') {
-            if (i + 2 >= bytes.len) break;
-            if (bytes[i + 2] == '8') {
-                screen_write.alignmenttest(ctx);
-            }
-            i += 3;
-            continue;
-        }
-        // Swallow other ESC sequences.
-        i += 2;
-    }
-}
-
 /// Low-level parse entry point (tmux: `input_parse`).
 /// In tmux this takes an `input_ctx` pointer and drives the state machine.
 /// zmux delegates to `input_parse_screen` when a pane is available.
@@ -2880,665 +2915,5 @@ pub fn input_restore_state(wp: ?*T.WindowPane) void {
     if (wp) |w| {
         var ctx = T.ScreenWriteCtx{ .wp = w, .s = screen_mod.screen_current(w) };
         screen_write.restore_cursor(&ctx);
-    }
-}
-
-// ── Request queue (tmux: input_request machinery) ─────────────────────────
-//
-// Mirrors the per-input_ctx request TAILQ from tmux's input.c.  A pane can
-// issue pending queries to the outer terminal (DA, clipboard read, palette
-// colour query).  When the terminal replies, input_request_reply dispatches
-// the response to the waiting pane and flushes any queued replies that were
-// held behind this request.
-//
-// zmux stores the queue on WindowPane rather than a heap-allocated input_ctx.
-// The cross-reference list on Client (Client.input_requests) lets
-// input_request_reply find the matching request without iterating all panes.
-
-const c_zig = @import("c.zig");
-const proc_mod = @import("proc.zig");
-const client_registry = @import("client-registry.zig");
-const log = @import("log.zig");
-
-/// Return a monotonic timestamp in milliseconds.  Mirrors tmux get_timer().
-fn get_timer_ms() u64 {
-    const ts = std.posix.clock_gettime(.MONOTONIC) catch
-        (std.posix.clock_gettime(.REALTIME) catch return 0);
-    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
-}
-
-/// Write `reply` directly to the pane's PTY fd (write-back path).
-/// Mirrors tmux input_send_reply / bufferevent_write.
-/// TODO: replace with a libevent bufferevent write when pane I/O is ported
-/// (see zig-porting-todo.md "Pane buffer management").
-fn input_send_reply(wp: *T.WindowPane, reply: []const u8) void {
-    if (wp.fd < 0 or reply.len == 0) return;
-    _ = std.posix.write(wp.fd, reply) catch {};
-}
-
-/// Allocate and queue a reply string, or send it immediately if no requests
-/// are pending (tmux: input_reply).
-/// `add` non-zero means: queue behind any pending requests rather than
-/// sending immediately.  This is how tmux serialises pane replies.
-pub fn input_reply(wp: *T.WindowPane, add: i32, reply: []const u8) void {
-    if (add != 0 and wp.input_request_count != 0) {
-        // Queue behind pending requests as INPUT_REQUEST_QUEUE entry.
-        const ir = input_make_request(wp, .queue);
-        const copy = xm.allocator.dupe(u8, reply) catch unreachable;
-        ir.data = @ptrCast(copy.ptr);
-        // Store length in idx so we can recover the slice on dispatch.
-        ir.idx = @intCast(copy.len);
-    } else {
-        input_send_reply(wp, reply);
-    }
-}
-
-/// Arm the request-expiry timer (fires every 100 ms, removes stale entries).
-/// Mirrors tmux input_start_request_timer.
-fn input_start_request_timer(wp: *T.WindowPane) void {
-    const base = proc_mod.libevent orelse return;
-    if (wp.input_request_timer == null) {
-        wp.input_request_timer = c_zig.libevent.event_new(
-            base,
-            -1,
-            @intCast(c_zig.libevent.EV_TIMEOUT),
-            input_request_timer_callback,
-            wp,
-        );
-    }
-    if (wp.input_request_timer) |ev| {
-        var tv = std.posix.timeval{ .sec = 0, .usec = 100_000 };
-        _ = c_zig.libevent.event_del(ev);
-        _ = c_zig.libevent.event_add(ev, @ptrCast(&tv));
-    }
-}
-
-/// Timer callback: expire requests older than INPUT_REQUEST_TIMEOUT ms.
-export fn input_request_timer_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
-    _ = _fd;
-    _ = _events;
-    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
-    const t = get_timer_ms();
-    var idx: usize = 0;
-    while (idx < wp.input_request_list.items.len) {
-        const ir = wp.input_request_list.items[idx];
-        if (ir.t >= t -| T.INPUT_REQUEST_TIMEOUT) {
-            idx += 1;
-            continue;
-        }
-        // Timed out: flush queued replies, skip non-queue entries.
-        if (ir.type == .queue) {
-            const reply_ptr: [*]u8 = @ptrCast(ir.data orelse { idx += 1; continue; });
-            const reply = reply_ptr[0..@intCast(ir.idx)];
-            input_send_reply(wp, reply);
-        }
-        input_free_request_at(wp, idx);
-        // Don't increment idx — items shift left after removal.
-    }
-    if (wp.input_request_count != 0)
-        input_start_request_timer(wp);
-}
-
-/// Allocate and append a new request to the pane's queue.
-/// Mirrors tmux input_make_request.
-fn input_make_request(wp: *T.WindowPane, kind: T.InputRequestType) *T.InputRequest {
-    const ir = xm.allocator.create(T.InputRequest) catch unreachable;
-    ir.* = .{
-        .wp = wp,
-        .type = kind,
-        .t = get_timer_ms(),
-    };
-    wp.input_request_list.append(xm.allocator, ir) catch unreachable;
-    wp.input_request_count += 1;
-    if (wp.input_request_count == 1)
-        input_start_request_timer(wp);
-    return ir;
-}
-
-/// Free the request at position `idx` in the pane's list.
-/// Also removes it from the client's cross-reference list.
-fn input_free_request_at(wp: *T.WindowPane, idx: usize) void {
-    const ir = wp.input_request_list.items[idx];
-    // Remove from client cross-reference.
-    if (ir.c) |c| {
-        var ci: usize = 0;
-        while (ci < c.input_requests.items.len) : (ci += 1) {
-            if (c.input_requests.items[ci] == ir) {
-                _ = c.input_requests.swapRemove(ci);
-                break;
-            }
-        }
-    }
-    // Free payload.
-    if (ir.data) |d| {
-        if (ir.type == .queue) {
-            const ptr: [*]u8 = @ptrCast(d);
-            xm.allocator.free(ptr[0..@intCast(ir.idx)]);
-        } else {
-            // Palette and clipboard data payloads are caller-owned; the
-            // input_request_reply caller frees them.  Nothing to do here.
-        }
-    }
-    // Use orderedRemove to preserve FIFO ordering of the pane's request list.
-    _ = wp.input_request_list.orderedRemove(idx);
-    wp.input_request_count -= 1;
-    xm.allocator.destroy(ir);
-}
-
-/// Find the most recently active client that can see window `w`.
-/// Returns null if no eligible client found.
-/// Mirrors tmux's client-selection loop in input_add_request.
-fn find_active_client(w: *T.Window) ?*T.Client {
-    var best: ?*T.Client = null;
-    for (client_registry.clients.items) |c| {
-        if ((c.flags & T.CLIENT_UNATTACHEDFLAGS) != 0) continue;
-        const sess = c.session orelse continue;
-        // Check whether this session contains a winlink for w.
-        var found = false;
-        var it = sess.windows.valueIterator();
-        while (it.next()) |wl| {
-            if (wl.*.window == w) { found = true; break; }
-        }
-        if (!found) continue;
-        if ((c.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) continue;
-        if (best == null or c.activity_time > best.?.activity_time)
-            best = c;
-    }
-    return best;
-}
-
-/// Queue a terminal query on behalf of the current pane and send the request
-/// sequence to the best available client tty.
-/// Mirrors tmux input_add_request.
-pub fn input_add_request(wp: ?*T.WindowPane, kind: T.InputRequestType, idx: i32) i32 {
-    const w_pane = wp orelse return -1;
-    const c = find_active_client(w_pane.window) orelse return -1;
-    const ir = input_make_request(w_pane, kind);
-    ir.c = c;
-    ir.idx = idx;
-    // Append to client's cross-reference list.
-    c.input_requests.append(xm.allocator, ir) catch unreachable;
-    // Send the query sequence.
-    const tty_mod = @import("tty.zig");
-    switch (kind) {
-        .palette => {
-            const seq = std.fmt.allocPrintZ(xm.allocator, "\x1b]4;{d};?\x1b\\", .{idx}) catch return -1;
-            defer xm.allocator.free(seq);
-            tty_mod.tty_puts(&c.tty, seq.ptr);
-        },
-        .clipboard => {
-            tty_mod.tty_putcode_ss(&c.tty, "Ms", "", "?");
-        },
-        .queue => {
-            // Queue entries are never directly added here.
-        },
-    }
-    return 0;
-}
-
-/// Send a deferred reply string stored in a .queue request.
-fn input_send_queued_reply(wp: *T.WindowPane, ir: *T.InputRequest) void {
-    if (ir.data) |d| {
-        const ptr: [*]u8 = @ptrCast(d);
-        input_send_reply(wp, ptr[0..@intCast(ir.idx)]);
-    }
-}
-
-/// Dispatch a reply to the oldest matching pending request and flush any
-/// queued replies that followed it.  Mirrors tmux input_request_reply.
-pub fn input_request_reply(c: *T.Client, kind: T.InputRequestType, data: ?*anyopaque) void {
-    // Find the matching request in the client's cross-reference list.
-    var found: ?*T.InputRequest = null;
-    var fi: usize = 0;
-    while (fi < c.input_requests.items.len) : (fi += 1) {
-        const ir = c.input_requests.items[fi];
-        if (ir.type != kind) continue;
-        if (kind == .palette) {
-            const pd: *T.InputRequestPaletteData = @ptrCast(@alignCast(data orelse continue));
-            if (pd.idx != ir.idx) continue;
-        }
-        found = ir;
-        break;
-    }
-    const fir = found orelse return;
-    const wp = fir.wp orelse return;
-
-    // Walk the pane's request list from the front.  We always process index 0
-    // because input_free_request_at removes and shifts the array; stop when
-    // the list is empty or when we've completed dispatching and hit a
-    // non-queue entry (which belongs to a future request).
-    var complete = false;
-    while (wp.input_request_list.items.len > 0) {
-        const ir = wp.input_request_list.items[0];
-        if (complete and ir.type != .queue) break;
-        if (ir.type == .queue) {
-            input_send_queued_reply(wp, ir);
-            input_free_request_at(wp, 0);
-            continue;
-        }
-        if (ir == fir) {
-            // Dispatch reply to pane.
-            switch (ir.type) {
-                .palette => input_request_palette_reply(ir, data),
-                .clipboard => input_request_clipboard_reply(ir, data),
-                .queue => unreachable,
-            }
-            complete = true;
-            input_free_request_at(wp, 0);
-            continue;
-        }
-        // Non-matching non-queue request ahead of ours: discard it (tmux
-        // treats earlier requests as superseded).
-        input_free_request_at(wp, 0);
-    }
-}
-
-/// Handle a palette colour reply (OSC 4 response).
-/// Mirrors tmux input_request_palette_reply.
-fn input_request_palette_reply(ir: *T.InputRequest, data: ?*anyopaque) void {
-    const pd: *T.InputRequestPaletteData = @ptrCast(@alignCast(data orelse return));
-    // TODO: call input_osc_colour_reply once it is ported (zig-porting-todo.md).
-    log.log_debug("input_request_palette_reply: wp={?*} idx={d} colour={d}", .{ ir.wp, pd.idx, pd.c });
-}
-
-/// Handle a clipboard read reply (OSC 52 response).
-/// Mirrors tmux input_request_clipboard_reply.
-fn input_request_clipboard_reply(ir: *T.InputRequest, data: ?*anyopaque) void {
-    const wp = ir.wp orelse return;
-    const cd: *T.InputRequestClipboardData = @ptrCast(@alignCast(data orelse return));
-
-    const state = opts.options_get_number(opts.global_options, "set-clipboard");
-    // state 0 or 1: do not pass clipboard back to pane.
-    if (state == 0 or state == 1) return;
-
-    // state 3: also save into the zmux paste buffer.
-    if (state == 3) {
-        if (cd.buf) |buf| {
-            const copy = xm.allocator.dupe(u8, buf) catch return;
-            paste_mod.paste_add(null, copy);
-        }
-    }
-
-    // Write clipboard reply back to the pane's pty.
-    input_reply_clipboard(wp, cd.buf, cd.clip, ir.end);
-}
-
-/// Encode a clipboard payload as base64 and write an OSC 52 reply.
-/// Mirrors tmux input_reply_clipboard.
-fn input_reply_clipboard(wp: *T.WindowPane, buf: ?[]u8, clip: u8, end: T.InputEndType) void {
-    // Build the OSC 52 response: ESC ] 52 ; [clip] ; <base64> <terminator>
-    const term_str: []const u8 = switch (end) {
-        .bel => "\x07",
-        .st => "\x1b\\",
-    };
-
-    var out = std.ArrayList(u8).init(xm.allocator);
-    defer out.deinit();
-
-    out.appendSlice("\x1b]52;") catch return;
-    if (clip != 0) out.append(clip) catch return;
-    out.append(';') catch return;
-
-    if (buf) |b| if (b.len != 0) {
-        // base64-encode the buffer.
-        const encoded_len = std.base64.standard.Encoder.calcSize(b.len);
-        const encoded = xm.allocator.alloc(u8, encoded_len) catch return;
-        defer xm.allocator.free(encoded);
-        _ = std.base64.standard.Encoder.encode(encoded, b);
-        out.appendSlice(encoded) catch return;
-    };
-
-    out.appendSlice(term_str) catch return;
-    input_send_reply(wp, out.items);
-}
-
-/// Cancel all pending requests associated with a client (on client disconnect).
-/// Mirrors tmux input_cancel_requests.
-pub fn input_cancel_requests(c: *T.Client) void {
-    // Free all requests in the client's cross-reference list.
-    // input_free_request_at also removes the entry from the client list,
-    // so we need to work backwards or re-scan.
-    while (c.input_requests.items.len > 0) {
-        const ir = c.input_requests.items[0];
-        if (ir.wp) |wp| {
-            // Find and remove from pane list.
-            var i: usize = 0;
-            while (i < wp.input_request_list.items.len) : (i += 1) {
-                if (wp.input_request_list.items[i] == ir) {
-                    input_free_request_at(wp, i);
-                    break;
-                }
-            }
-        } else {
-            // Orphan (pane destroyed): remove from client list directly.
-            _ = c.input_requests.swapRemove(0);
-        }
-    }
-}
-
-test "OSC 4 sets palette colour" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    // OSC 4 ; 1 ; rgb:aa/bb/cc — set palette entry 1
-    input_parse_screen(wp, "\x1b]4;1;rgb:aa/bb/cc\x07");
-    const c = colour_mod.colour_palette_get(&wp.palette, 1);
-    try std.testing.expect(c != -1);
-    // Verify the colour value has the COLOUR_FLAG_RGB bit set
-    try std.testing.expect(c & @as(i32, T.COLOUR_FLAG_RGB) != 0);
-}
-
-test "OSC 10 sets foreground colour in palette" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    try std.testing.expectEqual(@as(i32, 8), wp.palette.fg);
-    input_parse_screen(wp, "\x1b]10;rgb:11/22/33\x07");
-    // Palette fg should be set to the RGB colour
-    try std.testing.expect(wp.palette.fg != 8);
-    try std.testing.expect(wp.palette.fg & @as(i32, T.COLOUR_FLAG_RGB) != 0);
-}
-
-test "OSC 11 sets background colour in palette" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    try std.testing.expectEqual(@as(i32, 8), wp.palette.bg);
-    input_parse_screen(wp, "\x1b]11;rgb:44/55/66\x07");
-    try std.testing.expect(wp.palette.bg != 8);
-    try std.testing.expect(wp.palette.bg & @as(i32, T.COLOUR_FLAG_RGB) != 0);
-}
-
-test "OSC 12 sets cursor colour" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    const s = screen_mod.screen_current(wp);
-    try std.testing.expectEqual(@as(i32, -1), s.ccolour);
-    input_parse_screen(wp, "\x1b]12;rgb:77/88/99\x07");
-    try std.testing.expect(s.ccolour != -1);
-    try std.testing.expect(s.ccolour & @as(i32, T.COLOUR_FLAG_RGB) != 0);
-}
-
-test "OSC 110 resets foreground to default" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    // First set fg via OSC 10, then reset via OSC 110.
-    input_parse_screen(wp, "\x1b]10;rgb:11/22/33\x07");
-    try std.testing.expect(wp.palette.fg != 8);
-    input_parse_screen(wp, "\x1b]110\x07");
-    try std.testing.expectEqual(@as(i32, 8), wp.palette.fg);
-}
-
-test "OSC 111 resets background to default" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    input_parse_screen(wp, "\x1b]11;rgb:44/55/66\x07");
-    try std.testing.expect(wp.palette.bg != 8);
-    input_parse_screen(wp, "\x1b]111\x07");
-    try std.testing.expectEqual(@as(i32, 8), wp.palette.bg);
-}
-
-test "OSC 112 resets cursor colour" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    const s = screen_mod.screen_current(wp);
-    input_parse_screen(wp, "\x1b]12;rgb:77/88/99\x07");
-    try std.testing.expect(s.ccolour != -1);
-    input_parse_screen(wp, "\x1b]112\x07");
-    try std.testing.expectEqual(@as(i32, -1), s.ccolour);
-}
-
-test "OSC 104 resets palette entries" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    // Set two entries, then reset one.
-    input_parse_screen(wp, "\x1b]4;1;rgb:aa/bb/cc\x07");
-    input_parse_screen(wp, "\x1b]4;2;rgb:dd/ee/ff\x07");
-    try std.testing.expect(colour_mod.colour_palette_get(&wp.palette, 1) != -1);
-    try std.testing.expect(colour_mod.colour_palette_get(&wp.palette, 2) != -1);
-
-    // Reset index 1 only.
-    input_parse_screen(wp, "\x1b]104;1\x07");
-    try std.testing.expectEqual(@as(i32, -1), colour_mod.colour_palette_get(&wp.palette, 1));
-    try std.testing.expect(colour_mod.colour_palette_get(&wp.palette, 2) != -1);
-
-    // Reset all.
-    input_parse_screen(wp, "\x1b]104\x07");
-    try std.testing.expectEqual(@as(i32, -1), colour_mod.colour_palette_get(&wp.palette, 2));
-}
-
-test "OSC 133 marks semantic prompt regions in grid" {
-    const win = @import("window.zig");
-
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    const s = screen_mod.screen_current(wp);
-
-    // OSC 133 ; A at cursor row 0 — prompt start
-    input_parse_screen(wp, "\x1b]133;A\x07");
-    const line0 = grid_mod.grid_get_line(s.grid, s.grid.hsize + 0);
-    try std.testing.expect(line0.flags & T.GRID_LINE_START_PROMPT != 0);
-
-    // Move to row 1, OSC 133 ; C — output start
-    input_parse_screen(wp, "\x1b[2;1H\x1b]133;C\x07");
-    const line1 = grid_mod.grid_get_line(s.grid, s.grid.hsize + 1);
-    try std.testing.expect(line1.flags & T.GRID_LINE_START_OUTPUT != 0);
-
-    // OSC 133 ; B and D do nothing to the flag (not A or C)
-    input_parse_screen(wp, "\x1b[1;1H\x1b]133;B\x07");
-    // Only A and C set flags, so line 0 still only has PROMPT set.
-    try std.testing.expect(line0.flags & T.GRID_LINE_START_PROMPT != 0);
-}
-
-test "OSC 52 clipboard set with set-clipboard=2" {
-    const win = @import("window.zig");
-
-    opts.global_options = opts.options_create(null);
-    defer opts.options_free(opts.global_options);
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    // Enable clipboard set.
-    opts.options_set_number(opts.global_options, "set-clipboard", 2);
-    win.window_init_globals(@import("xmalloc.zig").allocator);
-
-    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
-    defer {
-        while (w.panes.items.len > 0) {
-            const pane = w.panes.items[w.panes.items.len - 1];
-            win.window_remove_pane(w, pane);
-        }
-        w.panes.deinit(@import("xmalloc.zig").allocator);
-        w.last_panes.deinit(@import("xmalloc.zig").allocator);
-        opts.options_free(w.options);
-        @import("xmalloc.zig").allocator.free(w.name);
-        _ = win.windows.remove(w.id);
-        @import("xmalloc.zig").allocator.destroy(w);
-    }
-
-    const wp = win.window_add_pane(w, null, 8, 3);
-    // "SGVsbG8=" is base64("Hello")
-    input_parse_screen(wp, "\x1b]52;c;SGVsbG8=\x07");
-    // Verify the paste buffer has the decoded content.
-    const pb = paste_mod.paste_get_top(null);
-    try std.testing.expect(pb != null);
-    if (pb) |p| {
-        try std.testing.expectEqualStrings("Hello", paste_mod.paste_buffer_data(p, null));
     }
 }

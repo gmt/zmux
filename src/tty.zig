@@ -30,11 +30,15 @@ const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
 const tty_draw_mod = @import("tty-draw.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
+const input_keys = @import("input-keys.zig");
 const log = @import("log.zig");
 const resize_mod = @import("resize.zig");
 const status_mod = @import("status.zig");
 const server_client_mod = @import("server-client.zig");
 const client_registry = @import("client-registry.zig");
+const server_fn = @import("server-fn.zig");
+const notify_mod = @import("notify.zig");
+const win_mod = @import("window.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -57,6 +61,7 @@ pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
     tty.flags |= @intCast(T.TTY_OPENED);
     tty.flags &= ~@as(i32, @intCast(T.TTY_NOCURSOR | T.TTY_FREEZE | T.TTY_BLOCK));
     tty_start_tty(tty);
+    tty_keys_build(tty);
     return 0;
 }
 
@@ -64,6 +69,9 @@ pub fn tty_close(tty: *T.Tty) void {
     tty_stop_tty(tty);
     freeClipboardTimer(tty);
     freeStartTimer(tty);
+    if (tty.flags & @as(i32, @intCast(T.TTY_OPENED)) != 0) {
+        tty_keys_free(tty);
+    }
     tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
 }
 
@@ -1829,10 +1837,171 @@ pub const tty_draw_line = tty_draw_mod.tty_draw_line;
 // ── C-name stubs: I/O, timers, offsets, pane clamp (tmux tty.c parity) ───────
 
 
+/// Libevent read callback for the client tty fd.
+/// Reads available bytes into the tty input buffer, then dispatches all
+/// complete keys via tty_keys_next (mirrors tmux tty_read_callback).
 export fn tty_read_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
+    _ = _events;
+    const tty: *T.Tty = @ptrCast(@alignCast(_arg orelse return));
+    const c = tty.client;
+    const fd = if (_fd >= 0) _fd else c.fd;
+    if (fd < 0) return;
+
+    var tmp: [4096]u8 = undefined;
+    const nread = std.posix.read(@intCast(fd), &tmp) catch |err| {
+        log.log_debug("tty read error: {s}", .{@errorName(err)});
+        return;
+    };
+    if (nread == 0) {
+        log.log_debug("tty read: closed", .{});
+        return;
+    }
+
+    tty.in_buf.appendSlice(xm.allocator, tmp[0..nread]) catch return;
+
+    while (tty_keys_next(tty)) {}
+}
+
+/// Decode and dispatch the next key from the tty input buffer.
+/// Returns true if a key was consumed (caller should loop), false if the
+/// buffer is empty or contains only a partial sequence.
+/// Mirrors tmux tty_keys_next (tty-keys.c:732).
+fn tty_keys_next(tty: *T.Tty) bool {
+    return tty_keys_next_inner(tty, false);
+}
+
+fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
+    const c = tty.client;
+    const buf = tty.in_buf.items;
+    if (buf.len == 0) return false;
+
+    var event: T.key_event = .{};
+    const consumed = input_keys.input_key_get_client(c, buf, &event) orelse {
+        if (expired) {
+            // Timer expired and we still have partial data -- treat the
+            // first byte(s) as a literal key (mirrors tmux fallthrough in
+            // tty_keys_next after the timer fires).
+            var key: T.key_code = @intCast(buf[0]);
+            var size: usize = 1;
+            if (buf[0] == 0x1b and buf.len >= 2) {
+                key = @as(T.key_code, @intCast(buf[1])) | T.KEYC_META;
+                size = 2;
+            }
+            event.key = key;
+            event.len = @min(size, event.data.len);
+            @memcpy(event.data[0..event.len], buf[0..event.len]);
+            drainInBuf(tty, size);
+            tty_keys_cancel_timer(tty);
+            dispatchKeyEvent(c, &event);
+            return true;
+        }
+        // Partial sequence -- set escape timer if not already running.
+        if (tty.flags & @as(i32, @intCast(T.TTY_TIMER)) == 0) {
+            tty_keys_set_timer(tty);
+        }
+        return false;
+    };
+
+    drainInBuf(tty, consumed);
+
+    // Clear key timer -- we have a complete key.
+    tty_keys_cancel_timer(tty);
+
+    dispatchKeyEvent(c, &event);
+    return true;
+}
+
+/// Remove `n` bytes from the front of the tty input buffer.
+fn drainInBuf(tty: *T.Tty, n: usize) void {
+    if (n == 0) return;
+    if (n >= tty.in_buf.items.len) {
+        tty.in_buf.clearRetainingCapacity();
+    } else {
+        const remaining = tty.in_buf.items.len - n;
+        std.mem.copyForwards(u8, tty.in_buf.items[0..remaining], tty.in_buf.items[n..]);
+        tty.in_buf.shrinkRetainingCapacity(remaining);
+    }
+}
+
+/// Handle focus events and fire the key through server_client_handle_key.
+fn dispatchKeyEvent(c: *T.Client, event: *T.key_event) void {
+    // Handle focus events.
+    if (event.key == T.KEYC_FOCUS_OUT) {
+        c.flags &= ~T.CLIENT_FOCUSED;
+        if (c.session) |s| {
+            if (s.curw) |wl| {
+                win_mod.window_update_focus(wl.window);
+            }
+        }
+        notify_mod.notify_client("client-focus-out", c);
+    } else if (event.key == T.KEYC_FOCUS_IN) {
+        c.flags |= T.CLIENT_FOCUSED;
+        notify_mod.notify_client("client-focus-in", c);
+        if (c.session) |s| {
+            if (s.curw) |wl| {
+                win_mod.window_update_focus(wl.window);
+            }
+        }
+    }
+
+    // Fire the key.
+    if (event.key != T.KEYC_UNKNOWN) {
+        _ = server_fn.server_client_handle_key(c, event);
+    }
+}
+
+/// Set the escape-time timer for partial key sequences.
+fn tty_keys_set_timer(tty: *T.Tty) void {
+    const base = proc_mod.libevent orelse return;
+    if (tty.key_timer == null) {
+        tty.key_timer = c_zig.libevent.event_new(
+            base,
+            -1,
+            @intCast(c_zig.libevent.EV_TIMEOUT),
+            tty_keys_timer_callback,
+            tty,
+        );
+    }
+    if (tty.key_timer) |ev| {
+        tty.flags |= @as(i32, @intCast(T.TTY_TIMER));
+        // Default 500ms escape time.
+        var tv = std.posix.timeval{ .sec = 0, .usec = 500000 };
+        _ = c_zig.libevent.event_add(ev, @ptrCast(&tv));
+    }
+}
+
+/// Cancel the escape-time timer.
+fn tty_keys_cancel_timer(tty: *T.Tty) void {
+    if (tty.key_timer) |ev| _ = c_zig.libevent.event_del(ev);
+    tty.flags &= ~@as(i32, @intCast(T.TTY_TIMER));
+}
+
+/// Libevent callback fired when the escape-time timer expires.
+/// Treats buffered partial data as complete key(s).
+export fn tty_keys_timer_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = _arg;
+    const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
+    if (tty.flags & @as(i32, @intCast(T.TTY_TIMER)) != 0) {
+        while (tty_keys_next_inner(tty, true)) {}
+    }
+}
+
+/// Build the key lookup structures.  In zmux, input_key_get uses
+/// compile-time tables so this is a no-op placeholder that matches the
+/// tmux tty_keys_build call site.
+pub fn tty_keys_build(_: *T.Tty) void {}
+
+/// Free key lookup structures.  No-op in zmux (no runtime tree to free),
+/// but releases the input buffer memory.
+pub fn tty_keys_free(tty: *T.Tty) void {
+    tty_keys_cancel_timer(tty);
+    if (tty.key_timer) |ev| {
+        c_zig.libevent.event_free(ev);
+        tty.key_timer = null;
+    }
+    tty.in_buf.deinit(xm.allocator);
+    tty.in_buf = .{};
 }
 
 export fn tty_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {

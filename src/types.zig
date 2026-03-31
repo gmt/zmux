@@ -1793,6 +1793,7 @@ pub const TtyCtx = struct {
     redraw_cb: ?*const fn (*const TtyCtx) void = null,
     set_client_cb: ?*const fn (*TtyCtx, *Client) i32 = null,
     arg: ?*anyopaque = null,
+    si: ?*anyopaque = null,
     allow_invisible_panes: bool = false,
 };
 

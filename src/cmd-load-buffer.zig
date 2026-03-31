@@ -191,6 +191,7 @@ test "load-buffer reads a named buffer from a relative path using client cwd" {
         .tty = undefined,
         .status = .{},
     };
+    client.tty = T.Tty{ .client = &client };
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};
@@ -241,6 +242,7 @@ test "load-buffer reads a named buffer from session cwd when client cwd is missi
         .status = .{},
         .session = &session,
     };
+    client.tty = T.Tty{ .client = &client };
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};
@@ -314,6 +316,7 @@ test "load-buffer reads stdin when path is dash" {
         .tty = undefined,
         .status = .{},
     };
+    client.tty = T.Tty{ .client = &client };
     client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = client.peer.?;
@@ -419,6 +422,7 @@ test "load-buffer ignores target-client without clipboard export" {
         .tty = undefined,
         .status = .{},
     };
+    target.tty = T.Tty{ .client = &target };
     target.session = &session;
     client_registry.add(&target);
 
@@ -428,6 +432,7 @@ test "load-buffer ignores target-client without clipboard export" {
         .tty = undefined,
         .status = .{},
     };
+    client.tty = T.Tty{ .client = &client };
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};
@@ -473,6 +478,7 @@ test "load-buffer write flag is a no-op without a sessionful target client" {
         .tty = undefined,
         .status = .{},
     };
+    client.tty = T.Tty{ .client = &client };
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};
@@ -554,6 +560,7 @@ test "load-buffer write flag exports selection via Ms escape for a started targe
         .tty = undefined,
         .status = .{},
     };
+    client.tty = T.Tty{ .client = &client };
 
     var cause: ?[]u8 = null;
     var list: cmd_mod.CmdList = .{};

@@ -1067,6 +1067,7 @@ pub const Session = struct {
     tio: ?*std.posix.termios = null,
     environ: *Environ,
     references: i32 = 1,
+    lock_timer: ?*c.libevent.event = null,
 };
 
 // ── Options ───────────────────────────────────────────────────────────────

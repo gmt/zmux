@@ -21,10 +21,10 @@ const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const cmd_mod = @import("cmd.zig");
-const clipboard_mod = @import("clipboard.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const paste_mod = @import("paste.zig");
+const tty_mod = @import("tty.zig");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -82,7 +82,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (args.has('w')) {
-        clipboard_mod.export_selection(target_client, "", stored_data);
+        if (target_client) |tc| tty_mod.tty_set_selection(&tc.tty, null, stored_data.ptr, stored_data.len);
     }
 
     return .normal;

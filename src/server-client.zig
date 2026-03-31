@@ -233,6 +233,7 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const msg: *const protocol.MsgResize = @ptrCast(@alignCast(imsg_msg.data.?));
 
     tty_mod.tty_resize(&cl.tty, msg.sx, msg.sy, msg.xpixel, msg.ypixel);
+    tty_mod.tty_repeat_requests(&cl.tty, false);
     cl.flags |= T.CLIENT_SIZECHANGED;
 
     if (cl.session) |s| {
@@ -534,8 +535,13 @@ fn server_client_send_exit_status(cl: *T.Client, retval: i32) void {
 
 fn server_client_command_done(item: *cmdq_mod.CmdqItem, _: ?*anyopaque) T.CmdRetval {
     const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
-    if (cl.flags & T.CLIENT_ATTACHED == 0)
+    if (cl.flags & T.CLIENT_ATTACHED == 0) {
         cl.flags |= T.CLIENT_EXIT;
+    } else if (cl.flags & T.CLIENT_EXIT == 0) {
+        if (cl.flags & T.CLIENT_CONTROL != 0)
+            control.control_ready(cl);
+        tty_mod.tty_send_requests(&cl.tty);
+    }
     return .normal;
 }
 
@@ -795,7 +801,6 @@ pub fn server_client_write_fmt(cl: *T.Client, comptime fmt: []const u8, args: an
 /// For control clients, this writes to the control output. For detached
 /// clients, this is sent to the peer's output stream.
 pub fn server_client_print(cl: *T.Client, text: []const u8, parse: bool) void {
-    _ = parse;
     if (cl.session == null) {
         server_client_write(cl, text);
         server_client_write(cl, "\n");
@@ -806,15 +811,14 @@ pub fn server_client_print(cl: *T.Client, text: []const u8, parse: bool) void {
         return;
     }
 
+    const window_copy = @import("window-copy.zig");
     const wp = server_client_get_pane(cl) orelse return;
-    if (wp.modes.items.len == 0) {
-        // No active mode; output goes to the pane or is dropped.
-        return;
-    }
 
-    // copy-mode output is stub: window-copy mode is not yet ported.
-    // When a window-copy mode is added, it will parse text line-by-line.
-    // For now, output in copy-mode is dropped.
+    const wme = if (wp.modes.items.len > 0) wp.modes.items[0] else null;
+    if (wme == null or wme.?.mode != &window_copy.window_view_mode)
+        _ = win_mod.window_pane_set_mode(wp, null, &window_copy.window_view_mode, null);
+
+    window_copy.window_copy_add(wp, parse, text);
 }
 
 pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
@@ -2532,6 +2536,9 @@ pub fn server_client_report_theme(cl: *T.Client, theme: T.ClientTheme) void {
         notify.notify_client("client-dark-theme", cl);
     }
     log.log_debug("server_client_report_theme: {s}", .{if (theme == .light) "light" else "dark"});
+
+    // Re-request foreground and background colour after theme change.
+    tty_mod.tty_repeat_requests(&cl.tty, true);
 }
 
 pub fn server_client_window_cmp(cw1: *const T.ClientWindow, cw2: *const T.ClientWindow) i32 {

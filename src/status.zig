@@ -56,9 +56,9 @@ pub fn status_init(c: *T.Client) void {
     }
     const lines = resize_mod.status_line_size(c);
     if (lines == 0) {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0);
+        c.status.screen = screen_mod.screen_init(c.tty.sx, 1, 0).*;
     } else {
-        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0);
+        c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0).*;
     }
     c.status.timer = null;
 }
@@ -981,8 +981,7 @@ test "status_prompt_load_history reads typed history from a temp file" {
     {
         const file = std.fs.cwd().createFile(abs_path, .{ .truncate = true }) catch return;
         defer file.close();
-        const writer = file.writer();
-        writer.writeAll("command:hello\nsearch:world\ncommand:foo\n") catch return;
+        file.writeAll("command:hello\nsearch:world\ncommand:foo\n") catch return;
     }
 
     opts.options_set_string(opts.global_options, false, "history-file", abs_path);

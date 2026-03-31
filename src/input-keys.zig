@@ -1010,7 +1010,7 @@ test "input_key_get_client consumes OSC 52 query replies into the paste buffer" 
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     tty_mod.tty_init(&client.tty, &client);
     client.tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
@@ -1038,7 +1038,7 @@ test "input_key_get_client accepts ST terminated OSC 52 query replies" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     tty_mod.tty_init(&client.tty, &client);
     client.tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
@@ -1064,7 +1064,7 @@ test "input_key_get_client keeps OSC 52 reply prefixes partial and discards unso
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     tty_mod.tty_init(&client.tty, &client);
 
@@ -1083,7 +1083,7 @@ test "input_key_get_client decodes mouse sequences and tracks the previous state
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(client.environ);
     client.tty = .{ .client = &client };

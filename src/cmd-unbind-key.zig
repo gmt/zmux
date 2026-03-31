@@ -93,6 +93,9 @@ test "unbind-key removes a specific key binding" {
     key_bindings.key_bindings_init();
     key_bindings.key_bindings_add("root", 'x', null, false, null);
 
+    const root_before = key_bindings.key_bindings_get_table("root", false).?;
+    try std.testing.expect(key_bindings.key_bindings_get(root_before, 'x') != null);
+
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "unbind-key", "-n", "x" }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
@@ -101,7 +104,8 @@ test "unbind-key removes a specific key binding" {
     var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
 
-    try std.testing.expect(key_bindings.key_bindings_get_table("root", false) == null);
+    const root_after = key_bindings.key_bindings_get_table("root", false).?;
+    try std.testing.expect(key_bindings.key_bindings_get(root_after, 'x') == null);
 }
 
 test "unbind-key -a removes a table entirely" {

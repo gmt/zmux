@@ -713,15 +713,6 @@ pub const TTY_BLOCK: u32 = 0x0080;
 pub const TTY_HAVEDA: u32 = 0x0100;
 pub const TTY_HAVEXDA: u32 = 0x0200;
 pub const TTY_SYNCING: u32 = 0x0400;
-pub const TTY_HAVEDA2: u32 = 0x0800;
-pub const TTY_WAITFG: u32 = 0x2000;
-pub const TTY_WAITBG: u32 = 0x4000;
-/// Combination of all DA/XDA/XTVERSION request-complete flags.
-pub const TTY_ALL_REQUEST_FLAGS: u32 = TTY_HAVEDA | TTY_HAVEDA2 | TTY_HAVEXDA;
-/// Minimum seconds between repeated tty_repeat_requests calls.
-pub const TTY_REQUEST_LIMIT: u32 = 30;
-/// Seconds to wait for a query response before giving up.
-pub const TTY_QUERY_TIMEOUT: u32 = 5;
 
 pub const Tty = struct {
     client: *Client,
@@ -767,10 +758,6 @@ pub const Tty = struct {
     mouse_scrolling_flag: bool = false,
     mouse_slider_mpos: i32 = -1,
     clipboard_timer: ?*c.libevent.event = null,
-    /// libevent timer that fires after TTY_QUERY_TIMEOUT to send DA/XDA requests.
-    start_timer: ?*c.libevent.event = null,
-    /// Timestamp (seconds since epoch) of the last tty_send_requests call.
-    last_requests: i64 = 0,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────
@@ -880,13 +867,6 @@ pub const WindowPane = struct {
     // Resize queue (ported from tmux's TAILQ-based resize_queue)
     resize_queue: std.ArrayListUnmanaged(WindowPaneResize) = .{},
     resize_timer: ?*c.libevent.event = null,
-
-    // Input request queue — pending outer-terminal queries (DA, clipboard, palette).
-    // Mirrors tmux's per-input_ctx request TAILQ.  Each element is a heap pointer
-    // so that Client.input_requests can hold a stable cross-reference.
-    input_request_list: std.ArrayListUnmanaged(*InputRequest) = .{},
-    input_request_count: u32 = 0,
-    input_request_timer: ?*c.libevent.event = null,
 };
 
 // ── Window ────────────────────────────────────────────────────────────────
@@ -1077,58 +1057,6 @@ pub const Environ = struct {
     pub fn deinit(self: *Environ) void {
         self.entries.deinit();
     }
-};
-
-// ── Input request queue ───────────────────────────────────────────────────
-//
-// Mirrors tmux's `input_request` / `input_request_type` from input.c.
-// A pane can have pending requests to the outer terminal (palette colour
-// lookups, clipboard reads). Each request carries a type and optional
-// payload data; replies are dispatched through input_request_reply.
-
-/// Type of request sent to the outer terminal on behalf of a pane.
-pub const InputRequestType = enum {
-    palette,   // OSC 4 colour-index query
-    clipboard, // OSC 52 clipboard read
-    queue,     // deferred reply queued behind another request
-};
-
-/// Timeout in milliseconds after which an unanswered request is discarded.
-pub const INPUT_REQUEST_TIMEOUT: u64 = 500;
-
-/// Per-request payload for a palette colour query (OSC 4 reply).
-pub const InputRequestPaletteData = struct {
-    idx: i32,
-    c: i32,
-};
-
-/// Per-request payload for a clipboard query (OSC 52 reply).
-pub const InputRequestClipboardData = struct {
-    buf: ?[]u8 = null,
-    clip: u8 = 0,
-};
-
-/// Whether the originating OSC string was terminated by BEL (0x07) or ST.
-pub const InputEndType = enum(u8) {
-    st = 0,  // ESC backslash  (String Terminator)
-    bel = 1, // BEL (0x07)
-};
-
-/// A single pending request from a pane to the outer terminal.
-pub const InputRequest = struct {
-    /// The pane whose parser issued this request.  Null if the pane
-    /// has been destroyed before the reply arrived.
-    wp: ?*WindowPane = null,
-    /// The client whose tty should receive / forward the reply.
-    c: ?*Client = null,
-    type: InputRequestType,
-    /// Monotonic timestamp (ms) when the request was created.
-    t: u64 = 0,
-    end: InputEndType = .st,
-    /// Colour-index (for .palette) or ignored.
-    idx: i32 = 0,
-    /// Optional per-type payload allocated via xmalloc; freed on discard.
-    data: ?*anyopaque = null,
 };
 
 // ── Client ────────────────────────────────────────────────────────────────
@@ -1413,11 +1341,6 @@ pub const Client = struct {
     click_wp: i32 = -1,
     click_state: MouseClickState = .none,
     pause_age: u32 = 0,
-
-    /// Pending input requests associated with this client (cross-reference into
-    /// WindowPane.input_request_list entries whose .c == this client).
-    /// Mirrors tmux's client.input_requests TAILQ.
-    input_requests: std.ArrayListUnmanaged(*InputRequest) = .{},
 };
 
 // ── Client file IPC ───────────────────────────────────────────────────────

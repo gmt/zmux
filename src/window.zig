@@ -548,11 +548,6 @@ pub fn window_pane_destroy(wp: *T.WindowPane) void {
     wp.modes.deinit(xm.allocator);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
-    // When the alternate screen is active, saved_grid points to
-    // wp.base.grid.  Null it before freeing wp.screen so that
-    // screen_free does not free the base grid, which screen_free of
-    // wp.base will free separately.
-    wp.screen.saved_grid = null;
     screen_mod.screen_free(wp.screen);
     xm.allocator.destroy(wp.screen);
     screen_mod.screen_free(&wp.base);

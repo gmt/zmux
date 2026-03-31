@@ -32,6 +32,29 @@ const server_fn = @import("server-fn.zig");
 const style_mod = @import("style.zig");
 const notify = @import("notify.zig");
 const win = @import("window.zig");
+const client_registry = @import("client-registry.zig");
+const tty_mod = @import("tty.zig");
+const sess_mod = @import("session.zig");
+
+/// Redraw entire window if it is bigger than the client (the offset may
+/// change), otherwise just draw borders and status.
+fn cmd_select_pane_redraw(w: *T.Window) void {
+    for (client_registry.clients.items) |cl| {
+        if (cl.session == null or (cl.flags & T.CLIENT_CONTROL != 0))
+            continue;
+        const s = cl.session.?;
+        if (s.curw) |curw| {
+            if (curw.window == w and tty_mod.tty_window_bigger(&cl.tty) != 0) {
+                server_fn.server_redraw_client(cl);
+            } else {
+                if (curw.window == w)
+                    cl.flags |= T.CLIENT_REDRAWBORDERS;
+                if (sess_mod.session_has_window(s, w))
+                    cl.flags |= T.CLIENT_REDRAWSTATUS;
+            }
+        }
+    }
+}
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -116,8 +139,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     if (cl) |c| {
         if (c.session == s) server_client_mod.server_client_apply_session_size(c, s);
     }
-    server_fn.server_redraw_session(s);
-    server_fn.server_status_window(wl.window);
+    cmd_select_pane_redraw(wl.window);
     return .normal;
 }
 
@@ -153,8 +175,7 @@ fn exec_last_pane(item: *cmdq.CmdqItem, args: *const @import("arguments.zig").Ar
     if (cl) |c| {
         if (c.session == s) server_client_mod.server_client_apply_session_size(c, s);
     }
-    server_fn.server_redraw_session(s);
-    server_fn.server_status_window(wl.window);
+    cmd_select_pane_redraw(wl.window);
     return .normal;
 }
 
@@ -249,10 +270,8 @@ pub const entry_last: cmd_mod.CmdEntry = .{
 };
 
 test "select-pane switches active pane and last-pane switches back" {
-    const client_registry = @import("client-registry.zig");
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     client_registry.clients.clearRetainingCapacity();
@@ -302,10 +321,8 @@ test "select-pane switches active pane and last-pane switches back" {
 }
 
 test "select-pane uses the client-local active pane when active-pane is set" {
-    const client_registry = @import("client-registry.zig");
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     client_registry.clients.clearRetainingCapacity();
@@ -386,7 +403,6 @@ test "select-pane uses the client-local active pane when active-pane is set" {
 test "select-pane can set pane title" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -425,7 +441,6 @@ test "select-pane can set pane title" {
 test "select-pane formats pane titles" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -464,7 +479,6 @@ test "select-pane formats pane titles" {
 test "select-pane stores pane title on the base screen when alternate is active" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -507,7 +521,6 @@ test "select-pane stores pane title on the base screen when alternate is active"
 test "select-pane selects directional neighbours and toggles pane input" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -576,7 +589,6 @@ test "select-pane selects directional neighbours and toggles pane input" {
 test "select-pane sets pane styles and last-pane falls back to the only other pane" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -634,7 +646,6 @@ test "select-pane rejects invalid pane styles" {
 test "select-pane can mark panes and resolve the marked target" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);
@@ -687,7 +698,6 @@ test "select-pane can mark panes and resolve the marked target" {
 test "select-pane -Z switches panes while preserving the reduced zoom flag" {
     const opts_mod = @import("options.zig");
     const env_mod = @import("environ.zig");
-    const sess_mod = @import("session.zig");
     const spawn = @import("spawn.zig");
 
     sess_mod.session_init_globals(xm.allocator);

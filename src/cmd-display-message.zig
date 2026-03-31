@@ -193,7 +193,7 @@ test "display-message routes attached clients through the shared status runtime"
         .name = "display-message-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -255,7 +255,7 @@ test "display-message -p reuses the shared print view-mode seam" {
         .name = "display-message-print-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -411,7 +411,7 @@ test "display-message -v keeps ordinary expansion working" {
         .name = "display-message-verbose-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session,
     };
@@ -459,7 +459,7 @@ test "display-message -I feeds detached stdin into the empty pane parser" {
     var client = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     defer env_mod.environ_free(client.environ);
 

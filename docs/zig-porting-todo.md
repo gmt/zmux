@@ -2,6 +2,26 @@
 
 Functional gaps where zmux does not yet match tmux behavior.
 
+## UTF-8 Width Fudges
+
+Eight call sites use `bytes.len` (byte count) where tmux uses
+`utf8_cstrwidth` (display width). CJK, emoji, and other wide
+characters will overflow columns or be split mid-character.
+
+- `mode-tree.zig:724` — `text_buf.items.len` used as display
+  width limit for `putn` truncation. Should use display width
+  to avoid splitting wide characters.
+- `cmd-display-menu.zig:157` — `candidate.len + 3` for key
+  display width. Should be `utf8_cstrwidth(candidate) + 3`.
+- `menu.zig:198,209` — `kstr.len + 3` for key column width
+  (two occurrences). Same fix.
+- `format-draw.zig:321` — `expanded.len` for screen allocation
+  width. Multi-byte format expansions get wrong-sized screens.
+- `mode-tree.zig:1016` — `name.len` for menu item width.
+- `mode-tree.zig:1030` — `title.len` for menu title width.
+- `window-tree.zig:679,682` — `text.len` for fit check and
+  centering calculation in `drawCenteredText`.
+
 ## Screen Redraw (dead module)
 
 - `screen_redraw_screen` and `screen_redraw_pane` were ported

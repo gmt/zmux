@@ -1519,10 +1519,11 @@ test "input handles VT, FF, SO, SI and MODE_CRLF" {
     try std.testing.expectEqual(@as(u8, 'E'), grid.ascii_at(wp.base.grid, 2, 0));
     try std.testing.expectEqual(@as(u8, 'F'), grid.ascii_at(wp.base.grid, 2, 1));
 
-    // SO and SI should be silently consumed without corrupting output
+    // SO and SI should be silently consumed without corrupting output.
+    // Cursor is at (2,2) after the previous "EF" so G/H land at columns 2/3.
     input_parse_screen(wp, "\x0E\x0FGH");
-    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 0));
-    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 1));
+    try std.testing.expectEqual(@as(u8, 'G'), grid.ascii_at(wp.base.grid, 2, 2));
+    try std.testing.expectEqual(@as(u8, 'H'), grid.ascii_at(wp.base.grid, 2, 3));
 
     // MODE_CRLF: LF should do carriage return before newline
     screen_mod.screen_current(wp).mode |= T.MODE_CRLF;

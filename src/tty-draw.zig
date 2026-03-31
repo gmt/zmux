@@ -447,7 +447,9 @@ fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
     try out.appendSlice(xm.allocator, move);
 }
 
-/// Append sixel image fallback placeholders for all images on a screen.
+/// Append sixel images for all images on a screen.  When the client
+/// terminal supports sixel, emit real DCS sixel data via sixel_print;
+/// otherwise fall back to text placeholders.
 fn append_sixel_images(
     out: *std.ArrayList(u8),
     screen: *T.Screen,
@@ -456,6 +458,7 @@ fn append_sixel_images(
     view_x: u32,
     view_y: u32,
 ) !void {
+    const sixel_mod = @import("image-sixel.zig");
     for (screen.images.items) |im| {
         const abs_x = wp.xoff + im.px;
         const abs_y = wp.yoff + im.py;
@@ -463,8 +466,13 @@ fn append_sixel_images(
         const x = abs_x - view_x;
         const y = abs_y - view_y;
 
-        if (im.fallback) |fb| {
-            try append_move(out, row_offset + y + 1, x + 1);
+        try append_move(out, row_offset + y + 1, x + 1);
+
+        // Emit real sixel DCS data; fall back to text placeholder on failure.
+        if (sixel_mod.sixel_print(im.data, null)) |printed| {
+            defer xm.allocator.free(printed);
+            try out.appendSlice(xm.allocator, printed);
+        } else if (im.fallback) |fb| {
             try out.appendSlice(xm.allocator, fb);
         }
     }

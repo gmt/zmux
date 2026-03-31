@@ -49,6 +49,7 @@ const status = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const screen_mod = @import("screen.zig");
+const screen_redraw = @import("screen-redraw.zig");
 const control = @import("control.zig");
 const control_subscriptions = @import("control-subscriptions.zig");
 const popup = @import("popup.zig");
@@ -699,12 +700,16 @@ pub fn server_client_check_modes(cl: *T.Client) void {
 }
 
 /// Check if client needs a redraw and perform it if output buffer is clear.
+///
+/// Two draw paths run in sequence:
+///  - screen-redraw dispatch (per-pane and full-screen via tty-level drawing)
+///  - payload-based IPC fallback (build_client_draw_payload -> sendPeerStream)
 pub fn server_client_check_redraw(cl: *T.Client) void {
     if (cl.flags & T.CLIENT_CONTROL != 0) return;
     if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
 
     var needed: bool = false;
-    if (cl.flags & T.CLIENT_REDRAW != 0) {
+    if (cl.flags & T.CLIENT_ALLREDRAWFLAGS != 0) {
         needed = true;
     }
 
@@ -722,9 +727,32 @@ pub fn server_client_check_redraw(cl: *T.Client) void {
 
     if (!needed) return;
 
-    const redraw_flags = cl.flags & T.CLIENT_REDRAW;
+    // Per-pane redraw when the full window is not being redrawn.
+    if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) {
+        if (cl.session) |s| {
+            if (s.curw) |wl| {
+                const w = wl.window;
+                for (w.panes.items) |wp| {
+                    if (wp.flags & T.PANE_REDRAW != 0) {
+                        log.log_debug("server_client_check_redraw: pane %%{d}", .{wp.id});
+                        screen_redraw.screen_redraw_pane(cl, wp, false);
+                    }
+                }
+            }
+        }
+    }
+
+    if (cl.flags & T.CLIENT_ALLREDRAWFLAGS != 0) {
+        server_client_set_title(cl);
+        server_client_set_path(cl);
+        screen_redraw.screen_redraw_screen(cl);
+    }
+
+    // Payload-based fallback for borders, scrollbars, status, overlay.
+    const redraw_flags = cl.flags & T.CLIENT_ALLREDRAWFLAGS;
     server_client_draw(cl, redraw_flags);
-    cl.flags &= ~@as(u64, T.CLIENT_REDRAW);
+
+    cl.flags &= ~@as(u64, T.CLIENT_ALLREDRAWFLAGS);
 }
 
 /// Reset terminal cursor and mode state between events.
@@ -1420,11 +1448,6 @@ fn server_client_draw(cl: *T.Client, redraw_flags: u64) void {
         if (cl.peer) |peer| {
             _ = file_mod.sendPeerStream(peer, 1, bytes);
         }
-    }
-
-    if (redraw_flags & T.CLIENT_REDRAWWINDOW != 0) {
-        server_client_set_title(cl);
-        server_client_set_path(cl);
     }
 }
 

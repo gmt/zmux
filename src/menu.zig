@@ -76,10 +76,6 @@ pub const Bounds = struct {
     sy: u32,
 };
 
-/// Callback fired when a menu item is chosen.  Matches tmux `menu_choice_cb`.
-/// Receives: menu pointer (unused), item index, key of the item chosen, caller data.
-pub const ChoiceCb = *const fn (?*anyopaque, u32, T.key_code, ?*anyopaque) void;
-
 const MenuData = struct {
     client: *T.Client,
     item: ?*cmdq.CmdqItem = null,
@@ -97,8 +93,6 @@ const MenuData = struct {
     py: u32 = 0,
     menu: *Menu,
     choice: i32 = -1,
-    choice_cb: ?ChoiceCb = null,
-    choice_data: ?*anyopaque = null,
 
     fn deinit(self: *MenuData) void {
         if (self.screen) |screen| {
@@ -151,11 +145,6 @@ pub fn clear_overlay(client: *T.Client) void {
     client.flags |= T.CLIENT_REDRAWOVERLAY;
 
     if (md.item) |item| cmdq.cmdq_continue(item);
-
-    // Fire the choice callback with KEYC_NONE to signal cancellation/cleanup,
-    // matching tmux's menu_free_cb calling cb(menu, UINT_MAX, KEYC_NONE, data).
-    if (md.choice_cb) |cb| cb(null, std.math.maxInt(u32), T.KEYC_NONE, md.choice_data);
-
     md.deinit();
     xm.allocator.destroy(md);
 }
@@ -173,8 +162,6 @@ pub fn menu_display(
     selected_style: ?[]const u8,
     border_style: ?[]const u8,
     fs: ?*const T.CmdFindState,
-    choice_cb: ?ChoiceCb,
-    choice_data: ?*anyopaque,
 ) i32 {
     const sx = menu.width + 4;
     const sy: u32 = @as(u32, @intCast(menu.items.len)) + 2;
@@ -194,8 +181,6 @@ pub fn menu_display(
         .px = @min(px, client.tty.sx - sx),
         .py = @min(py, max_sy - sy),
         .menu = menu,
-        .choice_cb = choice_cb,
-        .choice_data = choice_data,
     };
     errdefer {
         md.deinit();
@@ -545,23 +530,10 @@ fn choose_current(client: *T.Client) void {
         return;
     }
 
-    const idx: u32 = @intCast(md.choice);
-    const item = &md.menu.items[idx];
+    const item = &md.menu.items[@intCast(md.choice)];
     if (!item.selectable()) {
         if ((md.flags & MENU_STAYOPEN) == 0)
             clear_overlay(client);
-        return;
-    }
-
-    // If a choice callback is registered (tmux menu_choice_cb path), fire it
-    // instead of dispatching via command string.  Null out choice_cb first so
-    // that clear_overlay's KEYC_NONE cleanup fire does not double-invoke it.
-    if (md.choice_cb) |cb| {
-        const key_val = item.key;
-        const data = md.choice_data;
-        md.choice_cb = null;
-        clear_overlay(client);
-        cb(null, idx, key_val, data);
         return;
     }
 

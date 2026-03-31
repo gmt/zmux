@@ -980,7 +980,7 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     cl.tty.client = &cl;
 
@@ -1019,7 +1019,7 @@ test "cmdq_error routes control clients through the shared presenter path" {
         .name = "control-client",
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
     client.tty.client = &client;
@@ -1093,7 +1093,7 @@ test "cmdq_error keeps detached non-utf8 clients on the shared sanitized stderr 
         .name = "detached-client",
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = 0,
     };
     client.tty.client = &client;
@@ -1201,7 +1201,7 @@ test "cmdq logs command execution into the shared message log once config is fin
         .name = "logger",
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
     };
     cl.tty.client = &cl;
 

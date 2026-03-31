@@ -587,7 +587,7 @@ fn prompt_test_setup(name: []const u8) struct {
     var client = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = s,
     };

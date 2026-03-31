@@ -70,7 +70,7 @@ pub fn server_client_create(fd: i32) *T.Client {
         .fd = fd,
         .environ = env,
         .tty = .{ .client = cl },
-        .status = .{ .screen = undefined },
+        .status = .{},
         .pane_cache = .{},
         .flags = 0,
     };

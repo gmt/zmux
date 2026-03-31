@@ -1,5 +1,13 @@
 Please read COPYING and be sure to add headers to code files as Greg Turner with email gmt@be-evil.net
 
+## Git workflow
+
+Work happens directly on `main`. There are no long-lived feature
+branches unless explicitly set up for a side-quest. Agents should
+commit directly to `main` with a well-written commit message -- no
+need to ask permission to commit. Do not push to GitHub without
+explicit approval.
+
 ## tmux-museum: implementation oracle and tmux microscopy
 
 - `tmux-museum/src/` is and must remain an unmodified archive of the

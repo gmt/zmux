@@ -979,8 +979,8 @@ test "status_prompt_load_history reads typed history from a temp file" {
     const ts = std.time.milliTimestamp();
     const abs_path = std.fmt.allocPrint(xm.allocator, "/tmp/zmux-test-hist-{d}.txt", .{ts}) catch return;
     defer {
-        xm.allocator.free(abs_path);
         std.fs.cwd().deleteFile(abs_path) catch {};
+        xm.allocator.free(abs_path);
     }
 
     // Write a temp file to /tmp

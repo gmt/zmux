@@ -1498,7 +1498,7 @@ test "window-tree choose runs the command template for the selected target" {
         .name = "tree-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session_ptr,
     };
@@ -1574,7 +1574,7 @@ test "window-tree custom key format renders labels and chooses the matching line
         .name = "tree-key-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{ .screen = undefined },
+        .status = .{},
         .flags = T.CLIENT_ATTACHED,
         .session = session_ptr,
     };

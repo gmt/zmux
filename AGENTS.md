@@ -55,6 +55,53 @@ to help maintain this and other invariants about our porting effort please also 
 - repair outdated documentation by changing it to reflect the new status quo, not the old. The word "now" should be a red flag that you are about to break this rule. The only options are "now" and in the future and "now" is the default so why are you about to use that word? Usuaully for a prohibited reason. If you would like to document that something has changed in zmux from the way it used to work, or that a formerly incomplete implementation has been reformed to be complete, the correct and only permitted place to do so in the repository is in the commitmsg attached to your commit making that change.
 - zmux documentation should be short, simple and salient: stylistically, think: o'reilly, not apress.
 
+## Orphan server processes and timeout nesting
+
+zmux server processes `fork()` and become session leaders, placing them
+outside the process group of the shell that launched them. This means:
+
+- If a shell is killed (by a timeout, SIGTERM, or Ctrl-C), any zmux
+  server it started will keep running as an orphan.
+- The next smoke run using the same `-L` socket label will hang
+  indefinitely waiting for the prior server to release the socket.
+- `kill-server` only works when a healthy server is listening; it
+  cannot reach a server that is stuck or using a different label.
+
+**The class of problem:** any tool that imposes an outer timeout
+(the Claude Code Bash tool defaults to 120s; CI runners have job
+limits) can kill the driving shell while leaving server children
+alive. This compounds when layered: `test-watchdog.py` has its own
+adaptive timeout and escalation loop, and if an outer timeout fires
+mid-escalation the watchdog itself is killed before it can finish
+cleaning up its children.
+
+**Recipe for running smoke tests safely:**
+
+1. Set an explicit Bash timeout well above the expected smoke budget —
+   `zig build smoke` typically completes in under 60s on a warm cache,
+   so 300s is a safe ceiling:
+
+   ```
+   zig build smoke   # pass --timeout 300000 if invoking via Bash tool
+   ```
+
+2. After every smoke invocation — success or failure — reap any
+   leftover servers:
+
+   ```sh
+   pkill -f "zig-out/bin/zmux" 2>/dev/null || true
+   ```
+
+3. Never run zmux server commands with `run_in_background: true` (or
+   shell `&`) unless you have an explicit reap step. Background server
+   commands that outlive their shell become invisible orphans that
+   block future test runs.
+
+4. If `test-watchdog.py` is the outermost driver, give it a timeout
+   budget that fits inside the outer harness limit so it can finish
+   its own escalation and diagnostic re-run before the outer kill
+   fires.
+
 ## Advanced testing
 
 - docker configured for unprivileged user control is required for some advanced tests but not the main suite

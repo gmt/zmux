@@ -848,6 +848,10 @@ pub const Tty = struct {
     start_timer: ?*c.libevent.event = null,
     /// Timestamp (seconds since epoch) of the last tty_send_requests call.
     last_requests: i64 = 0,
+    /// Input buffer for bytes read from the client fd (replaces tmux's evbuffer *in).
+    in_buf: std.ArrayList(u8) = .{},
+    /// Key escape-time timer (partial key timeout).
+    key_timer: ?*c.libevent.event = null,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────

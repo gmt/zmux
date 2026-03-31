@@ -41,6 +41,7 @@ const utf8_mod = @import("utf8.zig");
 const resize_mod = @import("resize.zig");
 const format_mod = @import("format.zig");
 const cmd_mod = @import("cmd.zig");
+const tty_mod = @import("tty.zig");
 
 /// Global option tables (see options-table.zig for entries).
 /// Set at startup before any session is created.
@@ -1403,6 +1404,12 @@ pub fn options_push_changes(name: []const u8) void {
     if (std.mem.eql(u8, name, "key-table")) {
         for (client_registry.clients.items) |cl| {
             server_client.server_client_set_key_table(cl, null);
+        }
+    }
+    if (std.mem.eql(u8, name, "user-keys")) {
+        for (client_registry.clients.items) |cl| {
+            if (cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED)) != 0)
+                tty_mod.tty_keys_build(&cl.tty);
         }
     }
     if (std.mem.eql(u8, name, "status") or

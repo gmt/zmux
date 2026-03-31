@@ -234,7 +234,8 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const msg: *const protocol.MsgResize = @ptrCast(@alignCast(imsg_msg.data.?));
 
     tty_mod.tty_resize(&cl.tty, msg.sx, msg.sy, msg.xpixel, msg.ypixel);
-    tty_mod.tty_repeat_requests(&cl.tty, 0);
+    // TODO: re-enable when tty-keys read path consumes DA/colour responses
+    // tty_mod.tty_repeat_requests(&cl.tty, 0);
     cl.flags |= T.CLIENT_SIZECHANGED;
 
     if (cl.session) |s| {
@@ -541,7 +542,8 @@ fn server_client_command_done(item: *cmdq_mod.CmdqItem, _: ?*anyopaque) T.CmdRet
     } else if (cl.flags & T.CLIENT_EXIT == 0) {
         if (cl.flags & T.CLIENT_CONTROL != 0)
             control.control_ready(cl);
-        tty_mod.tty_send_requests(&cl.tty);
+        // TODO: re-enable when tty-keys read path consumes DA/colour responses
+        // tty_mod.tty_send_requests(&cl.tty);
     }
     return .normal;
 }
@@ -2561,7 +2563,8 @@ pub fn server_client_report_theme(cl: *T.Client, theme: T.ClientTheme) void {
     log.log_debug("server_client_report_theme: {s}", .{if (theme == .light) "light" else "dark"});
 
     // Re-request foreground and background colour after theme change.
-    tty_mod.tty_repeat_requests(&cl.tty, 1);
+    // TODO: re-enable when tty-keys read path consumes DA/colour responses
+    // tty_mod.tty_repeat_requests(&cl.tty, 1);
 }
 
 pub fn server_client_window_cmp(cw1: *const T.ClientWindow, cw2: *const T.ClientWindow) i32 {

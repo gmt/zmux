@@ -32,6 +32,22 @@ const xm = @import("xmalloc.zig");
 const sess = @import("session.zig");
 const window_mod = @import("window.zig");
 
+/// Dynamic key-value dictionary for per-context format variables
+/// (e.g. copy_cursor_x, scroll_position, customize-mode variables).
+/// Matches tmux's format_entry_tree on format_tree.
+pub const FormatExtras = struct {
+    map: std.StringHashMapUnmanaged([]const u8) = .{},
+
+    pub fn deinit(self: *FormatExtras) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            xm.allocator.free(entry.key_ptr.*);
+            xm.allocator.free(entry.value_ptr.*);
+        }
+        self.map.deinit(xm.allocator);
+    }
+};
+
 pub const FormatContext = struct {
     item: ?*anyopaque = null,
     client: ?*T.Client = null,
@@ -70,6 +86,9 @@ pub const FormatContext = struct {
     option_is_global: ?bool = null,
     option_inherited: ?bool = null,
     line: ?u32 = null,
+
+    /// Optional dynamic key-value store; populated via format_add().
+    extras: ?*FormatExtras = null,
 };
 
 pub const FormatExpandResult = struct {
@@ -159,6 +178,12 @@ pub fn format_each(alloc: std.mem.Allocator, ctx: *const FormatContext, cb: Form
         defer alloc.free(value);
         cb(resolver.name, value, arg);
     }
+    if (ctx.extras) |extras| {
+        var it = extras.map.iterator();
+        while (it.next()) |entry| {
+            cb(entry.key_ptr.*, entry.value_ptr.*, arg);
+        }
+    }
 }
 
 pub fn format_log_defaults(alloc: std.mem.Allocator, prefix: []const u8, ctx: *const FormatContext) void {
@@ -169,11 +194,167 @@ pub fn format_log_defaults(alloc: std.mem.Allocator, prefix: []const u8, ctx: *c
         defer alloc.free(value);
         log.log_debug("{s}: {s}={s}", .{ prefix, resolver.name, value });
     }
+    if (ctx.extras) |extras| {
+        var it = extras.map.iterator();
+        while (it.next()) |entry| {
+            log.log_debug("{s}: {s}={s}", .{ prefix, entry.key_ptr.*, entry.value_ptr.* });
+        }
+    }
 }
 
 pub fn format_tidy_jobs() void {
-    const job_mod = @import("job.zig");
     job_mod.job_tidy();
+    format_job_cache_tidy(false);
+}
+
+/// Insert (or replace) a dynamic key-value pair into the format context.
+/// Matches tmux's format_add().  The caller must have initialised ctx.extras
+/// (or pass a pointer to a FormatExtras that outlives the context's use).
+pub fn format_add(ctx: *FormatContext, key: []const u8, value: []const u8) void {
+    if (ctx.extras == null) {
+        const extras = xm.allocator.create(FormatExtras) catch unreachable;
+        extras.* = .{};
+        ctx.extras = extras;
+    }
+    const extras = ctx.extras.?;
+    const gop = extras.map.getOrPut(xm.allocator, key) catch unreachable;
+    if (gop.found_existing) {
+        // Replace value; key memory is reused.
+        xm.allocator.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = xm.allocator.dupe(u8, key) catch unreachable;
+    }
+    gop.value_ptr.* = xm.allocator.dupe(u8, value) catch unreachable;
+}
+
+/// Look up a key in the dynamic extras dict.  Returns borrowed slice (owned
+/// by the FormatExtras map); caller must not free it.
+fn extras_lookup(ctx: *const FormatContext, key: []const u8) ?[]const u8 {
+    const extras = ctx.extras orelse return null;
+    return extras.map.get(key);
+}
+
+// ---------------------------------------------------------------------------
+// format_job_get — #(...) shell-command expansion with async caching.
+// Matches tmux format_job_get() / format_job_update() / format_job_complete().
+// ---------------------------------------------------------------------------
+
+const job_mod = @import("job.zig");
+
+/// One entry in the module-level format job cache.
+const FormatJob = struct {
+    cmd: []const u8,    // owned copy of the shell command (same slice as map key)
+    out: ?[]u8,         // last captured output (owned); null while pending
+    last: i64,          // unix time of last launch
+    async_shell: ?*job_mod.AsyncShell = null,
+};
+
+/// Module-level job cache: keyed by command string.  Keys are owned by the
+/// FormatJob.cmd field; the map borrows them as slices.
+var format_job_cache: std.StringHashMapUnmanaged(FormatJob) = .{};
+var format_job_cache_lock: std.Thread.Mutex = .{};
+
+/// Tidy the job cache, freeing entries older than 3600 s (or all if force).
+fn format_job_cache_tidy(force: bool) void {
+    // Collect expired entries under the lock, then free async shells outside
+    // the lock (async_shell_free may join a thread that calls back into the
+    // cache lock, which would deadlock if we held it).
+    const Expired = struct { key: []const u8, shell: ?*job_mod.AsyncShell, out: ?[]u8 };
+    var expired: std.ArrayListUnmanaged(Expired) = .{};
+    defer expired.deinit(xm.allocator);
+
+    {
+        format_job_cache_lock.lock();
+        defer format_job_cache_lock.unlock();
+
+        const now: i64 = std.time.timestamp();
+        var it = format_job_cache.iterator();
+        while (it.next()) |entry| {
+            const fj = entry.value_ptr;
+            if (!force and fj.last > now) continue;
+            if (!force and (now - fj.last) < 3600) continue;
+            expired.append(xm.allocator, .{
+                .key = entry.key_ptr.*,
+                .shell = fj.async_shell,
+                .out = fj.out,
+            }) catch unreachable;
+        }
+        for (expired.items) |e| _ = format_job_cache.remove(e.key);
+    }
+
+    for (expired.items) |e| {
+        if (e.shell) |ash| job_mod.async_shell_free(ash);
+        if (e.out) |out| xm.allocator.free(out);
+        xm.allocator.free(e.key);
+    }
+}
+
+/// Callback invoked when the async shell job for a #() expression finishes.
+fn format_job_complete_cb(ash: *job_mod.AsyncShell, arg: ?*anyopaque) void {
+    _ = arg;
+    format_job_cache_lock.lock();
+    defer format_job_cache_lock.unlock();
+
+    // Find the cache entry that owns this AsyncShell.
+    var it = format_job_cache.iterator();
+    while (it.next()) |entry| {
+        const fj = entry.value_ptr;
+        if (fj.async_shell != ash) continue;
+
+        // Capture final output; trim one trailing newline, matching tmux.
+        const raw = ash.result.output.items;
+        const trimmed = std.mem.trimRight(u8, raw, "\n");
+
+        if (fj.out) |old| xm.allocator.free(old);
+        fj.out = xm.allocator.dupe(u8, trimmed) catch unreachable;
+        fj.async_shell = null;
+        // ash will be freed by the caller (async_shell_event_cb → callback).
+        return;
+    }
+}
+
+/// Expand a #(cmd) shell expression: return cached output or launch a new job.
+/// Returns a heap-allocated string (caller frees).
+fn format_job_get(alloc: std.mem.Allocator, cmd: []const u8, ctx: *const FormatContext) FormatExpandResult {
+    _ = ctx; // client cwd lookup not yet wired; use "/"
+    const cwd: []const u8 = "/";
+
+    format_job_cache_lock.lock();
+    defer format_job_cache_lock.unlock();
+
+    const now: i64 = std.time.timestamp();
+    const gop = format_job_cache.getOrPut(xm.allocator, cmd) catch unreachable;
+    if (!gop.found_existing) {
+        gop.key_ptr.* = xm.allocator.dupe(u8, cmd) catch unreachable;
+        gop.value_ptr.* = .{
+            .cmd = gop.key_ptr.*,
+            .out = null,
+            .last = 0,
+        };
+    }
+    const fj = gop.value_ptr;
+
+    // Launch if no job is running and enough time has passed.
+    if (fj.async_shell == null and fj.last != now) {
+        const ash = job_mod.async_shell_start(
+            null,
+            fj.cmd,
+            .{ .cwd = cwd, .capture_output = true },
+            format_job_complete_cb,
+            null,
+        );
+        fj.async_shell = ash;
+        fj.last = now;
+    } else if (fj.async_shell != null and (now - fj.last) > 1 and fj.out == null) {
+        // Still running after >1 s with no output yet.
+        const msg = xm.xasprintf("<'{s}' not ready>", .{fj.cmd});
+        return .{ .text = msg, .complete = true };
+    }
+
+    if (fj.out) |out| {
+        return .{ .text = alloc.dupe(u8, out) catch unreachable, .complete = true };
+    }
+    return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
 }
 
 fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext, depth: u32) FormatExpandResult {
@@ -200,6 +381,21 @@ fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const F
         if (next == '#') {
             out.append(alloc, '#') catch unreachable;
             i += 2;
+            continue;
+        }
+
+        if (next == '(') {
+            const end = find_paren_end(template, i + 2) orelse {
+                out.appendSlice(alloc, template[i..]) catch unreachable;
+                complete = false;
+                break;
+            };
+            const cmd = template[i + 2 .. end];
+            const result = format_job_get(alloc, cmd, ctx);
+            defer alloc.free(result.text);
+            out.appendSlice(alloc, result.text) catch unreachable;
+            complete = complete and result.complete;
+            i = end + 1;
             continue;
         }
 
@@ -1013,6 +1209,10 @@ fn resolve_base_value(
         return .{ .text = value, .complete = true };
     }
 
+    if (extras_lookup(ctx, expr)) |value| {
+        return .{ .text = alloc.dupe(u8, value) catch unreachable, .complete = true };
+    }
+
     if (allow_option_lookup) {
         if (lookup_option_value(alloc, expr, ctx)) |value| {
             return .{ .text = value, .complete = true };
@@ -1033,6 +1233,9 @@ fn expand_value_expr(alloc: std.mem.Allocator, expr: []const u8, ctx: *const For
         };
         return .{ .text = value, .complete = true };
     }
+    if (extras_lookup(ctx, expr)) |value| {
+        return .{ .text = alloc.dupe(u8, value) catch unreachable, .complete = true };
+    }
     return .{ .text = alloc.dupe(u8, expr) catch unreachable, .complete = true };
 }
 
@@ -1040,6 +1243,9 @@ fn resolve_direct_key(alloc: std.mem.Allocator, key: []const u8, ctx: *const For
     if (lookup_resolver(key)) |resolver| {
         const value = resolver.func(alloc, ctx) orelse return unresolved_key(alloc, key, short_alias);
         return .{ .text = value, .complete = true };
+    }
+    if (extras_lookup(ctx, key)) |value| {
+        return .{ .text = alloc.dupe(u8, value) catch unreachable, .complete = true };
     }
     if (lookup_option_value(alloc, key, ctx)) |value| {
         return .{ .text = value, .complete = true };
@@ -1181,6 +1387,22 @@ fn find_format_end(input: []const u8, start: usize) ?usize {
         if (input[i] != '}') continue;
         if (depth == 0) return i;
         depth -= 1;
+    }
+    return null;
+}
+
+/// Find the closing ')' for a #(...) shell-command expression, counting
+/// nested parens.  `start` is the index of the first character after '('.
+fn find_paren_end(input: []const u8, start: usize) ?usize {
+    var depth: u32 = 1;
+    var i = start;
+    while (i < input.len) : (i += 1) {
+        if (input[i] == '(') {
+            depth += 1;
+        } else if (input[i] == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
     }
     return null;
 }

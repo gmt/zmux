@@ -556,7 +556,7 @@ fn render_message(screen: *T.Screen, c: *T.Client, rows: u32, message: []const u
 
 fn message_area(c: *T.Client, rows: u32) Area {
     const s = c.session orelse return .{ .x = 0, .width = c.tty.sx, .line = 0 };
-    const sy = style_mod.style_from_option(s.options, "message-style");
+    const sy = style_mod.style_from_option(s.options, "message-style", null);
 
     var width = c.tty.sx;
     if (sy) |style| {
@@ -584,7 +584,7 @@ fn message_area(c: *T.Client, rows: u32) Area {
 }
 
 fn message_fill_colour(oo: *T.Options, style_name: []const u8) i32 {
-    if (style_mod.style_from_option(oo, style_name)) |sy| {
+    if (style_mod.style_from_option(oo, style_name, null)) |sy| {
         if (sy.fill != 8) return sy.fill;
         return sy.gc.bg;
     }

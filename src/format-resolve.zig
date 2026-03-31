@@ -677,7 +677,7 @@ fn mouse_mode_flag(alloc: std.mem.Allocator, ctx: *const FormatContext, flag: i3
     return alloc.dupe(u8, if ((current.mode & flag) != 0) "1" else "0") catch unreachable;
 }
 
-const GridStorageUsage = struct {
+pub const GridStorageUsage = struct {
     lines: usize = 0,
     line_bytes: usize = 0,
     cells: usize = 0,
@@ -685,7 +685,7 @@ const GridStorageUsage = struct {
     extended_cells: usize = 0,
     extended_bytes: usize = 0,
 
-    fn totalBytes(self: GridStorageUsage) usize {
+    pub fn totalBytes(self: GridStorageUsage) usize {
         return self.line_bytes + self.cell_bytes + self.extended_bytes;
     }
 };
@@ -706,7 +706,7 @@ fn pane_display_screen(wp: *T.WindowPane) *T.Screen {
 // The current grid runtime only materializes the stored backing it actually
 // owns, so the history byte counters describe live backing storage rather than
 // reconstructing scrolled-off lines that the reduced grid does not retain.
-fn grid_storage_usage(gd: *const T.Grid) GridStorageUsage {
+pub fn grid_storage_usage(gd: *const T.Grid) GridStorageUsage {
     var usage = GridStorageUsage{
         .lines = gd.linedata.len,
         .line_bytes = gd.linedata.len * @sizeOf(T.GridLine),

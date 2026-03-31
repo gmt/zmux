@@ -144,7 +144,6 @@ pub const CmdqItem = struct {
 
     cb: ?CmdqCb = null,
     data: ?*anyopaque = null,
-    free_data: ?*const fn (?*anyopaque) void = null,
 };
 
 pub const CmdqList = struct {
@@ -210,14 +209,6 @@ fn get_queue(cl: ?*T.Client, create: bool) ?*CmdqList {
 }
 
 fn destroy_item(item: *CmdqItem) void {
-    // When a callback item is destroyed without having been fired (e.g.
-    // during cmdq_reset_for_tests), invoke its free_data hook so that any
-    // heap-allocated data reachable only through the opaque `data` pointer
-    // is released.  Fired items have already run their callback which is
-    // responsible for freeing its own data.
-    if (item.flags & CMDQ_FIRED == 0) {
-        if (item.free_data) |free_fn| free_fn(item.data);
-    }
     if (item.cmdlist) |cmdlist| cmd_mod.cmd_list_unref(@ptrCast(cmdlist));
     cmdq_free_state(item.state);
     xm.allocator.destroy(item);
@@ -409,15 +400,6 @@ pub fn cmdq_get_command(cmdlist_ptr: *T.CmdList, state: ?*CmdqState) *CmdqItem {
 }
 
 pub fn cmdq_get_callback1(name: []const u8, cb: CmdqCb, data: ?*anyopaque) *CmdqItem {
-    return cmdq_get_callback2(name, cb, data, null);
-}
-
-/// Like `cmdq_get_callback1` but accepts an optional `free_data` function that
-/// is called to release `data` when the item is destroyed without being fired
-/// (e.g. during `cmdq_reset_for_tests`).  Callbacks that own heap-allocated
-/// data reachable only through the opaque `data` pointer should supply this so
-/// that queue teardown does not leak.
-pub fn cmdq_get_callback2(name: []const u8, cb: CmdqCb, data: ?*anyopaque, free_data: ?*const fn (?*anyopaque) void) *CmdqItem {
     const item = xm.allocator.create(CmdqItem) catch unreachable;
     item.* = .{
         .name = name,
@@ -425,7 +407,6 @@ pub fn cmdq_get_callback2(name: []const u8, cb: CmdqCb, data: ?*anyopaque, free_
         .state = cmdq_new_state(null, null, 0),
         .cb = cb,
         .data = data,
-        .free_data = free_data,
     };
     return item;
 }
@@ -806,19 +787,12 @@ fn cmdq_error_callback(item: *CmdqItem, data: ?*anyopaque) T.CmdRetval {
     return .normal;
 }
 
-/// free_data hook for cmdq_get_error items.
-fn free_error_data(data: ?*anyopaque) void {
-    const err_ptr: *[]u8 = @ptrCast(@alignCast(data orelse return));
-    xm.allocator.free(err_ptr.*);
-    xm.allocator.destroy(err_ptr);
-}
-
 /// Get an error callback item for the command queue.
 /// Mirrors tmux `cmdq_get_error`.
 pub fn cmdq_get_error(error_msg: []const u8) *CmdqItem {
     const owned = xm.allocator.create([]u8) catch unreachable;
     owned.* = xm.xstrdup(error_msg);
-    return cmdq_get_callback2("cmdq-error", cmdq_error_callback, @ptrCast(owned), free_error_data);
+    return cmdq_get_callback1("cmdq-error", cmdq_error_callback, @ptrCast(owned));
 }
 
 /// Fill in a find state from a command entry flag descriptor.
@@ -1006,7 +980,7 @@ test "cmdq_append_event preserves the triggering key for queued commands" {
     var cl = T.Client{
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     cl.tty.client = &cl;
 
@@ -1045,7 +1019,7 @@ test "cmdq_error routes control clients through the shared presenter path" {
         .name = "control-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
     client.tty.client = &client;
@@ -1119,7 +1093,7 @@ test "cmdq_error keeps detached non-utf8 clients on the shared sanitized stderr 
         .name = "detached-client",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = 0,
     };
     client.tty.client = &client;
@@ -1227,7 +1201,7 @@ test "cmdq logs command execution into the shared message log once config is fin
         .name = "logger",
         .environ = env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     cl.tty.client = &cl;
 

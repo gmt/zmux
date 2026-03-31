@@ -27,8 +27,10 @@ const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const server_fn = @import("server-fn.zig");
 const sess = @import("session.zig");
 const sort_mod = @import("sort.zig");
+const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
@@ -80,6 +82,11 @@ const TreeItem = struct {
 };
 
 const WindowTreeModeData = struct {
+    // Reference counting and lifecycle (mirrors tmux window_tree_modedata)
+    dead: bool = false,
+    references: u32 = 1,
+    wp: *T.WindowPane = undefined,
+
     fs: T.CmdFindState,
     tree: *mode_tree.Data,
     items: std.ArrayList(*TreeItem) = .{},
@@ -90,6 +97,11 @@ const WindowTreeModeData = struct {
     sort_crit: T.SortCriteria = .{},
     kind: DisplayKind = .pane,
     squash_groups: bool = true,
+    prompt_flags: u32 = 0,
+
+    // transient: the command string currently being iterated over tagged items
+    entered: ?[]const u8 = null,
+
     preview_offset: i32 = 0,
     preview_left: i32 = -1,
     preview_right: i32 = -1,
@@ -124,6 +136,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
 
     const data = xm.allocator.create(WindowTreeModeData) catch unreachable;
     data.* = .{
+        .wp = wp,
         .fs = config.fs.*,
         .tree = undefined,
         .format = xm.xstrdup(config.format orelse defaultFormat(config.kind)),
@@ -141,6 +154,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
         .buildcb = buildTree,
         .searchcb = searchItem,
         .keycb = keyForLineCallback,
+        .swapcb = swapCallback,
     });
 
     const wme = window_mode_runtime.pushMode(wp, &window_tree_mode, @ptrCast(data), null);
@@ -265,6 +279,35 @@ fn windowTreeCommand(
         wme.prefix = 1;
         return;
     }
+    if (std.mem.eql(u8, command, "swap-up")) {
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) mode_tree.swap(data.tree, -1);
+        redraw(wme);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "swap-down")) {
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) mode_tree.swap(data.tree, 1);
+        redraw(wme);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "kill")) {
+        if (client) |cl| startKillCurrentPrompt(wme, cl);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "kill-tagged")) {
+        if (client) |cl| startKillTaggedPrompt(wme, cl);
+        wme.prefix = 1;
+        return;
+    }
+    if (std.mem.eql(u8, command, "command-prompt")) {
+        if (client) |cl| startCommandPrompt(wme, cl);
+        wme.prefix = 1;
+        return;
+    }
 
     unsupportedCommand(client, command);
     redraw(wme);
@@ -334,7 +377,20 @@ fn windowTreeKey(
 
 fn windowTreeClose(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
+    data.dead = true;
     mode_tree.free(data.tree);
+    destroy(data);
+
+    if (wme.wp.modes.items.len <= 1)
+        screen.screen_leave_alternate(wme.wp, true);
+}
+
+/// Reference-counted teardown: free data only when references drops to zero.
+/// Mirrors tmux window_tree_destroy().
+fn destroy(data: *WindowTreeModeData) void {
+    data.references -= 1;
+    if (data.references != 0) return;
+
     freeItems(data);
     data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
@@ -342,9 +398,6 @@ fn windowTreeClose(wme: *T.WindowModeEntry) void {
     if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
     xm.allocator.destroy(data);
-
-    if (wme.wp.modes.items.len <= 1)
-        screen.screen_leave_alternate(wme.wp, true);
 }
 
 fn windowTreeGetScreen(wme: *T.WindowModeEntry) *T.Screen {
@@ -1057,6 +1110,244 @@ fn freeItems(data: *WindowTreeModeData) void {
     data.items.clearRetainingCapacity();
 }
 
+// ── swap / kill / command-prompt helpers ─────────────────────────────────
+
+/// SwapCallback wrapper: matches mode_tree.SwapCallback signature.
+/// Swaps two window-type items' winlinks within the same session.
+fn swapCallback(cur_itemdata: ?*anyopaque, other_itemdata: ?*anyopaque, sort_crit: *T.SortCriteria) bool {
+    const cur: *TreeItem = @ptrCast(@alignCast(cur_itemdata orelse return false));
+    const other: *TreeItem = @ptrCast(@alignCast(other_itemdata orelse return false));
+
+    if (cur.item_type != .window or other.item_type != .window) return false;
+
+    const cur_wl = cur.winlink orelse return false;
+    const other_wl = other.winlink orelse return false;
+    if (cur.session != other.session) return false;
+
+    // Refuse swap when sort order would not produce a visible reordering.
+    if (sort_mod.sort_would_window_tree_swap(sort_crit.*, cur_wl, other_wl)) return false;
+
+    const cur_window = cur_wl.window;
+    const other_window = other_wl.window;
+
+    // Swap the windows the two winlinks point to, mirroring the C
+    // TAILQ_REMOVE / TAILQ_INSERT_TAIL sequence.  We do NOT call
+    // winlink_set_window() because its intermediate window_remove_ref could
+    // drop a refcount to zero and free a window before the matching
+    // window_add_ref rebalances it.  Instead we manipulate the back-reference
+    // lists directly (net ref-count change is zero across the pair).
+    {
+        // Remove cur_wl from cur_window's back-list.
+        var i: usize = 0;
+        while (i < cur_window.winlinks.items.len) {
+            if (cur_window.winlinks.items[i] == cur_wl)
+                _ = cur_window.winlinks.orderedRemove(i)
+            else
+                i += 1;
+        }
+        // Remove other_wl from other_window's back-list.
+        var j: usize = 0;
+        while (j < other_window.winlinks.items.len) {
+            if (other_window.winlinks.items[j] == other_wl)
+                _ = other_window.winlinks.orderedRemove(j)
+            else
+                j += 1;
+        }
+        // Cross-insert: other_wl -> cur_window, cur_wl -> other_window.
+        other_wl.window = cur_window;
+        cur_window.winlinks.append(xm.allocator, other_wl) catch unreachable;
+        cur_wl.window = other_window;
+        other_window.winlinks.append(xm.allocator, cur_wl) catch unreachable;
+    }
+
+    const session_ptr = cur.session;
+    if (session_ptr.curw == cur_wl)
+        _ = sess.session_set_current(session_ptr, other_wl)
+    else if (session_ptr.curw == other_wl)
+        _ = sess.session_set_current(session_ptr, cur_wl);
+    sess.session_group_synchronize_from(session_ptr);
+    server_fn.server_redraw_session_group(session_ptr);
+
+    return true;
+}
+
+/// CmdqCb: rebuilds and redraws the tree after an async command completes.
+/// Mirrors tmux window_tree_command_done().
+fn commandDoneCb(_: *cmdq.CmdqItem, raw_data: ?*anyopaque) T.CmdRetval {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(raw_data.?));
+    if (!data.dead) {
+        mode_tree.build(data.tree);
+        data.wp.flags |= T.PANE_REDRAW;
+    }
+    destroy(data);
+    return .normal;
+}
+
+/// EachCallback: run data.entered command for a single tagged item.
+/// Signature must match mode_tree.EachCallback.
+fn commandEachCb(tree: *mode_tree.Data, itemdata: ?*anyopaque, client: ?*T.Client, _: T.key_code) void {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item: *TreeItem = @ptrCast(@alignCast(itemdata orelse return));
+    const entered = data.entered orelse return;
+    const name = targetName(item) orelse return;
+    defer xm.allocator.free(name);
+    const session_ptr = item.session;
+    const wl = item.winlink orelse (session_ptr.curw orelse return);
+    runCommand(client, session_ptr, wl, entered, name);
+}
+
+/// PromptInputCb: user typed a command to run over every tagged item.
+/// Mirrors tmux window_tree_command_callback().
+fn commandCallbackFn(client: *T.Client, raw_data: ?*anyopaque, s: ?[]const u8, done: bool) i32 {
+    _ = done;
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(raw_data.?));
+    if (s == null or s.?.len == 0 or data.dead) return 0;
+
+    data.entered = s.?;
+    mode_tree.eachTagged(data.tree, commandEachCb, client, T.KEYC_NONE, true);
+    data.entered = null;
+
+    data.references += 1;
+    _ = cmdq.cmdq_append_item(client, cmdq.cmdq_get_callback(commandDoneCb, data));
+    return 0;
+}
+
+/// PromptFreeCb: release the reference held by the command prompt.
+/// Mirrors tmux window_tree_command_free().
+fn commandFreeFn(raw_data: ?*anyopaque) void {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(raw_data.?));
+    destroy(data);
+}
+
+/// EachCallback: kill one tagged item (session/window/pane).
+/// Mirrors tmux window_tree_kill_each().
+fn killEachCb(_: *mode_tree.Data, itemdata: ?*anyopaque, client: ?*T.Client, _: T.key_code) void {
+    const item: *TreeItem = @ptrCast(@alignCast(itemdata orelse return));
+    const cl = client orelse return;
+    const name = targetName(item) orelse return;
+    defer xm.allocator.free(name);
+    const session_ptr = item.session;
+    const wl = item.winlink orelse (session_ptr.curw orelse return);
+    const kill_cmd: []const u8 = switch (item.item_type) {
+        .session => "kill-session -t '%%'",
+        .window => "kill-window -t '%%'",
+        .pane => "kill-pane -t '%%'",
+    };
+    runCommand(cl, session_ptr, wl, kill_cmd, name);
+}
+
+/// PromptInputCb: user confirmed 'y' to kill the currently selected item.
+/// Mirrors tmux window_tree_kill_current_callback().
+fn killCurrentCallbackFn(client: *T.Client, raw_data: ?*anyopaque, s: ?[]const u8, done: bool) i32 {
+    _ = done;
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(raw_data.?));
+    if (s == null or s.?.len == 0 or data.dead) return 0;
+    if (std.ascii.toLower(s.?[0]) != 'y' or s.?.len != 1) return 0;
+
+    const itemdata = mode_tree.getCurrent(data.tree);
+    if (itemdata) |ptr| {
+        killEachCb(data.tree, ptr, client, T.KEYC_NONE);
+    }
+    server_fn.server_renumber_all();
+
+    data.references += 1;
+    _ = cmdq.cmdq_append_item(client, cmdq.cmdq_get_callback(commandDoneCb, data));
+    return 0;
+}
+
+/// PromptInputCb: user confirmed 'y' to kill all tagged items.
+/// Mirrors tmux window_tree_kill_tagged_callback().
+fn killTaggedCallbackFn(client: *T.Client, raw_data: ?*anyopaque, s: ?[]const u8, done: bool) i32 {
+    _ = done;
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(raw_data.?));
+    if (s == null or s.?.len == 0 or data.dead) return 0;
+    if (std.ascii.toLower(s.?[0]) != 'y' or s.?.len != 1) return 0;
+
+    mode_tree.eachTagged(data.tree, killEachCb, client, T.KEYC_NONE, true);
+    server_fn.server_renumber_all();
+
+    data.references += 1;
+    _ = cmdq.cmdq_append_item(client, cmdq.cmdq_get_callback(commandDoneCb, data));
+    return 0;
+}
+
+/// Build the "Kill <type> <name>? " prompt string for the current item.
+fn killCurrentPrompt(data: *const WindowTreeModeData) ?[]u8 {
+    const itemdata = mode_tree.getCurrent(data.tree) orelse return null;
+    const item: *TreeItem = @ptrCast(@alignCast(itemdata));
+    return switch (item.item_type) {
+        .session => xm.xasprintf("Kill session {s}? ", .{item.session.name}),
+        .window => xm.xasprintf("Kill window {d}? ", .{item.winlink.?.idx}),
+        .pane => xm.xasprintf("Kill pane {d}? ", .{paneIndex(item.winlink.?.window, item.pane.?)}),
+    };
+}
+
+/// Start a kill-current prompt.
+fn startKillCurrentPrompt(wme: *T.WindowModeEntry, client: *T.Client) void {
+    const data = modeData(wme);
+    const prompt = killCurrentPrompt(data) orelse return;
+    defer xm.allocator.free(prompt);
+    data.references += 1;
+    status_prompt.status_prompt_set(
+        client,
+        null,
+        prompt,
+        "",
+        killCurrentCallbackFn,
+        null,
+        commandFreeFn,
+        data,
+        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT | data.prompt_flags,
+        .command,
+    );
+}
+
+/// Start a kill-tagged prompt.
+fn startKillTaggedPrompt(wme: *T.WindowModeEntry, client: *T.Client) void {
+    const data = modeData(wme);
+    const tagged = mode_tree.countTagged(data.tree);
+    if (tagged == 0) return;
+    const prompt = xm.xasprintf("Kill {d} tagged? ", .{tagged});
+    defer xm.allocator.free(prompt);
+    data.references += 1;
+    status_prompt.status_prompt_set(
+        client,
+        null,
+        prompt,
+        "",
+        killTaggedCallbackFn,
+        null,
+        commandFreeFn,
+        data,
+        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT | data.prompt_flags,
+        .command,
+    );
+}
+
+/// Start a command-prompt to run an arbitrary command over tagged items.
+fn startCommandPrompt(wme: *T.WindowModeEntry, client: *T.Client) void {
+    const data = modeData(wme);
+    const tagged = mode_tree.countTagged(data.tree);
+    const prompt = if (tagged != 0)
+        xm.xasprintf("({d} tagged) ", .{tagged})
+    else
+        xm.xstrdup("(current) ");
+    defer xm.allocator.free(prompt);
+    data.references += 1;
+    status_prompt.status_prompt_set(
+        client,
+        null,
+        prompt,
+        "",
+        commandCallbackFn,
+        null,
+        commandFreeFn,
+        data,
+        status_prompt.PROMPT_NOFORMAT | data.prompt_flags,
+        .command,
+    );
+}
+
 fn defaultFormat(kind: DisplayKind) []const u8 {
     return switch (kind) {
         .session => DEFAULT_SESSION_FORMAT,
@@ -1304,96 +1595,36 @@ pub fn window_tree_menu(
 
 /// tmux: window_tree_swap – swap two window items in the tree.
 ///
-/// In tmux this swaps the underlying winlinks.  The Zig port does not
-/// yet implement full winlink manipulation; returns false (swap refused).
-pub fn window_tree_swap(
-    cur_itemdata: ?*anyopaque,
-    other_itemdata: ?*anyopaque,
-    sort_crit: *T.SortCriteria,
-) bool {
-    _ = cur_itemdata;
-    _ = other_itemdata;
-    _ = sort_crit;
-    return false;
-}
+/// Delegates to swapCallback which performs the full winlink swap.
+pub const window_tree_swap = swapCallback;
 
 /// tmux: window_tree_destroy – reference-counted destroy.
 ///
-/// The Zig port manages teardown through windowTreeClose (window_tree_free);
-/// this wrapper is a no-op compatibility shim.
-pub fn window_tree_destroy(data: *WindowTreeModeData) void {
-    _ = data;
-}
+/// Delegates to the internal destroy() which does refcounted teardown.
+pub const window_tree_destroy = destroy;
 
 /// tmux: window_tree_command_each – run a command for each tagged item.
-pub fn window_tree_command_each(
-    data: *WindowTreeModeData,
-    item: *const TreeItem,
-    client: ?*T.Client,
-) void {
-    const name = targetName(item) orelse return;
-    defer xm.allocator.free(name);
-    if (client) |cl| {
-        const session_ptr = item.session;
-        const wl = item.winlink orelse return;
-        runCommand(cl, session_ptr, wl, data.command, name);
-    }
-}
+///
+/// Delegates to commandEachCb (mode_tree EachCallback-compatible).
+pub const window_tree_command_each = commandEachCb;
 
-/// tmux: window_tree_command_done – callback after tagged commands complete.
-pub fn window_tree_command_done(data: *WindowTreeModeData) void {
-    _ = data;
-}
+/// tmux: window_tree_command_done – CmdqCb that rebuilds tree after commands.
+pub const window_tree_command_done = commandDoneCb;
 
-/// tmux: window_tree_command_callback – prompt callback for running commands.
-pub fn window_tree_command_callback(
-    client: ?*T.Client,
-    data: *WindowTreeModeData,
-    s: ?[]const u8,
-) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
-}
+/// tmux: window_tree_command_callback – PromptInputCb for running commands.
+pub const window_tree_command_callback = commandCallbackFn;
 
-/// tmux: window_tree_command_free – release reference from command prompt.
-pub fn window_tree_command_free(data: *WindowTreeModeData) void {
-    _ = data;
-}
+/// tmux: window_tree_command_free – PromptFreeCb releasing the command ref.
+pub const window_tree_command_free = commandFreeFn;
 
-/// tmux: window_tree_kill_each – kill session/window/pane for a tagged item.
-pub fn window_tree_kill_each(
-    item: *const TreeItem,
-    client: ?*T.Client,
-) void {
-    _ = item;
-    _ = client;
-}
+/// tmux: window_tree_kill_each – EachCallback that kills a tagged item.
+pub const window_tree_kill_each = killEachCb;
 
-/// tmux: window_tree_kill_current_callback – prompt callback to kill current.
-pub fn window_tree_kill_current_callback(
-    client: ?*T.Client,
-    data: *WindowTreeModeData,
-    s: ?[]const u8,
-) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
-}
+/// tmux: window_tree_kill_current_callback – PromptInputCb to kill current.
+pub const window_tree_kill_current_callback = killCurrentCallbackFn;
 
-/// tmux: window_tree_kill_tagged_callback – prompt callback to kill tagged.
-pub fn window_tree_kill_tagged_callback(
-    client: ?*T.Client,
-    data: *WindowTreeModeData,
-    s: ?[]const u8,
-) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
-}
+/// tmux: window_tree_kill_tagged_callback – PromptInputCb to kill tagged.
+pub const window_tree_kill_tagged_callback = killTaggedCallbackFn;
 
 test "window-tree enterMode builds reduced hierarchy and focuses the target pane" {
     const env_mod = @import("environ.zig");
@@ -1795,4 +2026,130 @@ test "window-tree preview arrows translate pane clicks into scroll actions" {
     };
     windowTreeKey(wme, null, session_ptr, wl, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), &right_mouse);
     try std.testing.expectEqual(@as(u32, 2), data.preview_start);
+}
+
+test "window-tree swap-down exchanges windows via swapCallback" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-swap", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-swap") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx0: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl0 = spawn.spawn_window(&ctx0, &cause).?;
+    session_ptr.curw = wl0;
+
+    var ctx1: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl1 = spawn.spawn_window(&ctx1, &cause).?;
+
+    const win0_ptr = wl0.window;
+    const win1_ptr = wl1.window;
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl0,
+        .w = wl0.window,
+        .wp = wl0.window.active,
+        .idx = wl0.idx,
+    };
+
+    // enterMode operates on the pane, which must still be active after adding wl1.
+    const active_pane = wl0.window.active.?;
+    const wme = enterMode(active_pane, .{
+        .fs = &target,
+        .kind = .window,
+        // Index sort is required: sort_would_window_tree_swap always permits swaps
+        // under index ordering (two windows with different indices are still swappable).
+        .sort_crit = .{ .order = .index },
+    });
+    defer {
+        if (window.window_pane_mode(active_pane) != null)
+            _ = window_mode_runtime.resetMode(active_pane);
+    }
+
+    const data = modeData(wme);
+
+    // Find the tree line for wl0 and set it as current.
+    const wl0_line = blk: {
+        for (data.tree.line_list.items, 0..) |line, li| {
+            const ti: *TreeItem = @ptrCast(@alignCast(line.item.itemdata.?));
+            if (ti.item_type == .window and ti.winlink == wl0)
+                break :blk @as(u32, @intCast(li));
+        }
+        return error.TestUnexpectedResult;
+    };
+    data.tree.current = wl0_line;
+
+    // Issue swap-down: should swap wl0 and wl1's windows.
+    var args_cause: ?[]u8 = null;
+    var swap_args = try args_mod.args_parse(xm.allocator, &.{"swap-down"}, "", 1, 1, &args_cause);
+    defer swap_args.deinit();
+    windowTreeCommand(wme, null, session_ptr, wl0, @ptrCast(&swap_args), null);
+
+    // After swap, wl0 should hold win1 and wl1 should hold win0.
+    try std.testing.expect(wl0.window == win1_ptr);
+    try std.testing.expect(wl1.window == win0_ptr);
+}
+
+test "window-tree swapCallback refuses cross-session swap" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s1 = sess.session_create(null, "tree-swap-s1", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-swap-s1") != null) sess.session_destroy(s1, false, "test");
+    const s2 = sess.session_create(null, "tree-swap-s2", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-swap-s2") != null) sess.session_destroy(s2, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx1: T.SpawnContext = .{ .s = s1, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl1 = spawn.spawn_window(&ctx1, &cause).?;
+    s1.curw = wl1;
+
+    var ctx2: T.SpawnContext = .{ .s = s2, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl2 = spawn.spawn_window(&ctx2, &cause).?;
+    s2.curw = wl2;
+
+    var item1 = TreeItem{ .item_type = .window, .session = s1, .winlink = wl1, .text = xm.xstrdup("") };
+    defer xm.allocator.free(item1.text);
+    var item2 = TreeItem{ .item_type = .window, .session = s2, .winlink = wl2, .text = xm.xstrdup("") };
+    defer xm.allocator.free(item2.text);
+
+    var sort_crit = T.SortCriteria{};
+    const result = swapCallback(@ptrCast(&item1), @ptrCast(&item2), &sort_crit);
+    try std.testing.expect(!result);
 }

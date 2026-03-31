@@ -21,7 +21,6 @@ const std = @import("std");
 const c = @import("c.zig");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
-const clipboard_mod = @import("clipboard.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
@@ -29,6 +28,7 @@ const file_mod = @import("file.zig");
 const paste_mod = @import("paste.zig");
 const proc_mod = @import("proc.zig");
 const tty_features = @import("tty-features.zig");
+const tty_mod = @import("tty.zig");
 const protocol = @import("zmux-protocol.zig");
 
 const LoadBufferRemoteState = struct {
@@ -80,7 +80,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     if (export_after_store) {
-        clipboard_mod.export_selection(target_client, "", data);
+        if (target_client) |tc| tty_mod.tty_set_selection(&tc.tty, null, data.ptr, data.len);
     }
 
     return .normal;
@@ -110,7 +110,7 @@ fn load_buffer_done(path: []const u8, errno_value: c_int, data: []const u8, cbda
     }
 
     if (state.export_after_store and data.len != 0) {
-        clipboard_mod.export_selection(state.target_client, "", data);
+        if (state.target_client) |tc| tty_mod.tty_set_selection(&tc.tty, null, data.ptr, data.len);
     }
 
     cmdq.cmdq_continue(state.item);
@@ -486,7 +486,7 @@ test "load-buffer write flag is a no-op without a sessionful target client" {
     try std.testing.expectEqualStrings("clipboard data", paste_mod.paste_buffer_data(pb, null));
 }
 
-test "load-buffer write flag exports selection for an attached target client" {
+test "load-buffer write flag exports selection via Ms escape for a started target tty" {
     init_options_for_tests();
     defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
@@ -527,14 +527,16 @@ test "load-buffer write flag exports selection for an attached target client" {
     var proc = T.ZmuxProc{ .name = "load-buffer-test-peer" };
     defer proc.peers.deinit(xm.allocator);
 
+    // tty_set_selection requires TTY_STARTED; Ms capability comes from .clipboard feature.
     var target = T.Client{
         .name = "clip",
         .environ = &target_env,
         .tty = undefined,
         .status = .{},
-        .flags = T.CLIENT_ATTACHED,
         .term_features = tty_features.featureBit(.clipboard),
     };
+    target.tty = .{ .client = &target };
+    target.tty.flags |= @intCast(T.TTY_STARTED);
     target.session = &session;
     target.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
@@ -589,7 +591,14 @@ test "load-buffer write flag exports selection for an attached target client" {
     @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
     try std.testing.expectEqual(@as(i32, 1), stream);
 
-    const expected = try clipboard_mod.osc52_sequence(xm.allocator, "", "clipboard data");
+    // tty_set_selection renders the Ms template (\x1b]52;%p1%s;%p2%s\x07)
+    // with clip="" and the base64-encoded data; same bytes as the OSC 52 sequence.
+    const data = "clipboard data";
+    const b64_len = std.base64.standard.Encoder.calcSize(data.len);
+    const b64 = try xm.allocator.alloc(u8, b64_len);
+    defer xm.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, data);
+    const expected = try std.fmt.allocPrint(xm.allocator, "\x1b]52;;{s}\x07", .{b64});
     defer xm.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }

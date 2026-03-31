@@ -29,6 +29,7 @@ const proc_mod = @import("proc.zig");
 const server = @import("server.zig");
 const status_runtime = @import("status-runtime.zig");
 const win = @import("window.zig");
+const window_clock = @import("window-clock.zig");
 const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND_TEMPLATE = "select-pane -t \"%%%\"";
@@ -274,14 +275,7 @@ pub fn render_overlay_payload_region(
         const bounds = clipped_bounds_region(win.window_pane_draw_bounds(wp), view_x, view_y, tty_sx, pane_area_sy) orelse continue;
         const pane_index = win.window_pane_index(w, wp) orelse continue;
         const pane_colour = if (w.active == wp) active_colour else colour;
-
-        var label_buf: [16]u8 = undefined;
-        const label = pane_label(pane_index, &label_buf);
-        try append_pane_badge(&out, bounds, row_offset, label, pane_colour);
-
-        var size_buf: [16]u8 = undefined;
-        const size_text = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ wp.sx, wp.sy }) catch unreachable;
-        try append_pane_size(&out, bounds, row_offset, size_text, pane_colour);
+        try append_pane_overlay(&out, bounds, row_offset, pane_index, wp.sx, wp.sy, pane_colour);
     }
 
     if (out.items.len == 0) return null;
@@ -295,10 +289,6 @@ const ClippedBounds = struct {
     sx: u32,
     sy: u32,
 };
-
-fn clipped_bounds(bounds: win.PaneDrawBounds, max_sx: u32, max_sy: u32) ?ClippedBounds {
-    return clipped_bounds_region(bounds, 0, 0, max_sx, max_sy);
-}
 
 fn clipped_bounds_region(bounds: win.PaneDrawBounds, view_x: u32, view_y: u32, max_sx: u32, max_sy: u32) ?ClippedBounds {
     const start_x = @max(bounds.xoff, view_x);
@@ -317,50 +307,101 @@ fn clipped_bounds_region(bounds: win.PaneDrawBounds, view_x: u32, view_y: u32, m
     };
 }
 
-fn pane_label(index: usize, buf: *[16]u8) []const u8 {
-    if (index > 9 and index < 35)
-        return std.fmt.bufPrint(buf, "{d} {c}", .{ index, @as(u8, @intCast('a' + (index - 10))) }) catch unreachable;
-    return std.fmt.bufPrint(buf, "{d}", .{index}) catch unreachable;
-}
-
-fn append_pane_badge(
+/// Render a pane number/label overlay onto `out`.
+/// Mirrors tmux cmd_display_panes_draw_pane(): large digit art when the pane
+/// is wide enough (sx >= digit_count*6, sy >= 5), else small text fallback.
+fn append_pane_overlay(
     out: *std.ArrayList(u8),
     bounds: ClippedBounds,
     row_offset: u32,
-    label: []const u8,
+    pane_index: usize,
+    pane_sx: u32,
+    pane_sy: u32,
     colour: i32,
 ) !void {
-    if (bounds.sx < label.len) return;
+    var num_buf: [16]u8 = undefined;
+    const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{pane_index}) catch unreachable;
+    const digit_count: u32 = @intCast(num_str.len);
 
-    const padded = bounds.sx >= label.len + 2;
-    const text = if (padded) try std.fmt.allocPrint(xm.allocator, " {s} ", .{label}) else try xm.allocator.dupe(u8, label);
-    defer xm.allocator.free(text);
+    var lbuf: [4]u8 = undefined;
+    const llen: u32 = if (pane_index > 9 and pane_index < 35) blk: {
+        lbuf[0] = @as(u8, @intCast('a' + (pane_index - 10)));
+        break :blk 1;
+    } else 0;
 
-    const x = bounds.xoff + (bounds.sx - @as(u32, @intCast(text.len))) / 2;
-    const y = bounds.yoff + bounds.sy / 2;
+    var size_buf: [16]u8 = undefined;
+    const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ pane_sx, pane_sy }) catch unreachable;
+    const rlen: u32 = @intCast(size_str.len);
 
-    try append_move(out, row_offset + y + 1, x + 1);
-    if (padded) {
-        try append_sgr(out, 97, colour);
-    } else {
+    if (bounds.sx < digit_count) return;
+
+    // ── Large digit art path ─────────────────────────────────────────────
+    if (bounds.sx >= digit_count * 6 and bounds.sy >= 5) {
+        // Centre the digit block.  Each digit is 5 cols wide + 1 gap = 6.
+        // py: top of the 5-row digit block centred vertically.
+        var px: u32 = bounds.sx / 2;
+        if (px >= digit_count * 3) px -= digit_count * 3 else px = 0;
+        var py: u32 = bounds.sy / 2;
+        if (py >= 2) py -= 2 else py = 0;
+
+        // Draw filled blocks using background colour.
+        try append_sgr(out, null, colour);
+        for (num_str) |ch| {
+            if (ch < '0' or ch > '9') continue;
+            const idx: usize = @intCast(ch - '0');
+            for (0..5) |j| {
+                for (0..5) |i| {
+                    if (window_clock.window_clock_table[idx][j][i] == 0) continue;
+                    const col = bounds.xoff + px + @as(u32, @intCast(i));
+                    const row = bounds.yoff + py + @as(u32, @intCast(j));
+                    try append_move(out, row_offset + row + 1, col + 1);
+                    try out.append(xm.allocator, ' ');
+                }
+            }
+            px += 6;
+        }
+
+        if (bounds.sy <= 6) return;
+
+        // Size string at top-right corner in foreground colour.
         try append_sgr(out, colour, null);
+        if (rlen != 0 and bounds.sx >= rlen) {
+            const rx = bounds.xoff + bounds.sx - rlen;
+            try append_move(out, row_offset + bounds.yoff + 1, rx + 1);
+            try out.appendSlice(xm.allocator, size_str);
+        }
+
+        // Letter label below the digit art.
+        // C formula: xoff + sx/2 + len*3 - llen - 1, yoff + py + 5
+        if (llen != 0) {
+            const half_sx = bounds.sx / 2;
+            const lx = bounds.xoff + half_sx + digit_count * 3 - llen - 1;
+            const ly = bounds.yoff + py + 5;
+            try append_move(out, row_offset + ly + 1, lx + 1);
+            try out.appendSlice(xm.allocator, lbuf[0..llen]);
+        }
+
+        return;
     }
-    try out.appendSlice(xm.allocator, text);
-}
 
-fn append_pane_size(
-    out: *std.ArrayList(u8),
-    bounds: ClippedBounds,
-    row_offset: u32,
-    size_text: []const u8,
-    colour: i32,
-) !void {
-    if (bounds.sy < 2 or bounds.sx < size_text.len) return;
+    // ── Small text fallback ──────────────────────────────────────────────
+    // Show "N" or "N a" centred, and size text if there is room.
+    const cx = bounds.sx / 2;
+    const cy = bounds.sy / 2;
 
-    const x = bounds.xoff + bounds.sx - @as(u32, @intCast(size_text.len));
-    try append_move(out, row_offset + bounds.yoff + 1, x + 1);
     try append_sgr(out, colour, null);
-    try out.appendSlice(xm.allocator, size_text);
+    if (bounds.sx >= digit_count + llen + 1 and llen != 0) {
+        const total = digit_count + 1 + llen;
+        const x = bounds.xoff + (if (cx >= total / 2) cx - total / 2 else 0);
+        try append_move(out, row_offset + bounds.yoff + cy + 1, x + 1);
+        try out.appendSlice(xm.allocator, num_str);
+        try out.append(xm.allocator, ' ');
+        try out.appendSlice(xm.allocator, lbuf[0..llen]);
+    } else {
+        const x = bounds.xoff + (if (cx >= digit_count / 2) cx - digit_count / 2 else 0);
+        try append_move(out, row_offset + bounds.yoff + cy + 1, x + 1);
+        try out.appendSlice(xm.allocator, num_str);
+    }
 }
 
 fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
@@ -620,6 +661,6 @@ test "display-panes overlay renders centered pane labels" {
 
     const payload = (try render_overlay_payload(&setup.target_client, 80, 24, 0)).?;
     defer xm.allocator.free(payload);
-    try std.testing.expect(std.mem.indexOf(u8, payload, " 0 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, " 0 ") == null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "80x24") != null);
 }

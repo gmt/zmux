@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const c = @import("c.zig");
+const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
 const build_options = @import("build_options");
@@ -279,11 +280,13 @@ fn job_run_child(cmd: []const u8, cwd: ?[]const u8, flags: u32) noreturn {
     closefrom(3);
 
     // Determine shell
-    const shell: [*:0]const u8 = if (flags & JOB_DEFAULTSHELL != 0)
-        // TODO: respect session default-shell option
-        "/bin/sh"
-    else
-        "/bin/sh";
+    const shell: [*:0]const u8 = if (flags & JOB_DEFAULTSHELL != 0) blk: {
+        const opt = opts.options_get_string(opts.global_s_options, "default-shell");
+        if (opt.len > 0)
+            break :blk xm.allocator.dupeZ(u8, opt) catch "/bin/sh"
+        else
+            break :blk "/bin/sh";
+    } else "/bin/sh";
 
     if (flags & JOB_DEFAULTSHELL != 0)
         _ = setenv("SHELL", shell, 1);

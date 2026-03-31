@@ -27,7 +27,6 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const env_mod = @import("environ.zig");
 const cmd_respawn_pane = @import("cmd-respawn-pane.zig");
-const pane_empty_input = @import("pane-empty-input.zig");
 const spawn_mod = @import("spawn.zig");
 const server_fn = @import("server-fn.zig");
 const win = @import("window.zig");
@@ -99,7 +98,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     var wait_for_input = false;
     if (input) {
-        switch (pane_empty_input.start(item, new_wp)) {
+        switch (win.window_pane_start_input(new_wp, item)) {
             .@"error" => {
                 layout_mod.layout_close_pane(new_wp);
                 win.window_remove_pane(w, new_wp);

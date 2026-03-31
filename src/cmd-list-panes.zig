@@ -18,7 +18,12 @@ const format_mod = @import("format.zig");
 const DEFAULT_PANE_TEMPLATE = "#{pane_index}: #{pane_width}x#{pane_height} pid=#{pane_pid}";
 const DEFAULT_WINDOW_PANE_TEMPLATE = "#{window_index}.#{pane_index}: #{pane_width}x#{pane_height} pid=#{pane_pid}";
 const DEFAULT_SESSION_PANE_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}: #{pane_width}x#{pane_height} pid=#{pane_pid}";
-const DEFAULT_CLIENT_TEMPLATE = "#{client_tty} #{client_termname}";
+const DEFAULT_CLIENT_TEMPLATE =
+    "#{client_name}: #{session_name} " ++
+    "[#{client_width}x#{client_height} #{client_termname}] " ++
+    "#{?#{!=:#{client_uid},#{uid}}," ++
+    "[user #{?client_user,#{client_user},#{client_uid},}] ,}" ++
+    "#{?client_flags,(,}#{client_flags}#{?client_flags,),}";
 
 fn exec_lsp(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);

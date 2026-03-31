@@ -48,6 +48,14 @@ pub const FormatExtras = struct {
     }
 };
 
+/// Discriminator mirroring tmux's FORMAT_TYPE_*.
+pub const FormatType = enum {
+    unknown,
+    session,
+    window,
+    pane,
+};
+
 pub const FormatContext = struct {
     item: ?*anyopaque = null,
     client: ?*T.Client = null,
@@ -57,6 +65,7 @@ pub const FormatContext = struct {
     pane: ?*T.WindowPane = null,
     mouse_event: ?*const T.MouseEvent = null,
     paste_buffer: ?*paste_mod.PasteBuffer = null,
+    format_type: FormatType = .unknown,
 
     message_text: ?[]const u8 = null,
     message_number: ?u32 = null,
@@ -143,6 +152,14 @@ pub fn format_filter_require(alloc: std.mem.Allocator, filter: []const u8, ctx: 
     return format_truthy(expanded);
 }
 
+/// Infer the format type from the arguments, matching tmux format_defaults.
+pub fn infer_format_type(s: ?*T.Session, wl: ?*T.Winlink, wp: ?*T.WindowPane) FormatType {
+    if (wp != null) return .pane;
+    if (wl != null) return .window;
+    if (s != null) return .session;
+    return .unknown;
+}
+
 pub fn format_truthy(text: []const u8) bool {
     if (text.len == 0) return false;
     if (std.mem.eql(u8, text, "0")) return false;
@@ -168,6 +185,7 @@ pub fn format_single(
         .winlink = wl,
         .window = w,
         .pane = wp,
+        .format_type = infer_format_type(s, wl, wp),
     };
     return format_expand(xm.allocator, fmt, &ctx).text;
 }

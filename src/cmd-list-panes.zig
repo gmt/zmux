@@ -83,6 +83,7 @@ fn print_window_panes(item: *cmdq.CmdqItem, w: *T.Window, sort_crit: T.SortCrite
             .winlink = wl,
             .window = w,
             .pane = wp,
+            .format_type = .pane,
         };
         if (filter) |expr| {
             const matched = cmd_format.filter(item, expr, &ctx) orelse return .@"error";

@@ -800,6 +800,7 @@ fn formatContext(session_ptr: *T.Session, wl: ?*T.Winlink, pane: ?*T.WindowPane)
         .winlink = wl,
         .window = if (wl) |value| value.window else if (session_ptr.curw) |current| current.window else null,
         .pane = pane orelse if (wl) |value| value.window.active else if (session_ptr.curw) |current| current.window.active else null,
+        .format_type = format_mod.infer_format_type(session_ptr, wl, pane),
     };
 }
 

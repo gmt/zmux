@@ -171,6 +171,44 @@ Functional gaps where zmux does not yet match tmux behavior.
   variable. tmux adds it so that `#{command}` resolves in
   hook templates.
 
+## Deleted Stubs With Active tmux Callers
+
+Functions deleted as "dead empty-body stubs" (b1863933, 718a80ab)
+that tmux actively calls. zmux callers either skip the behavior
+or use alternatives that don't match tmux semantics.
+
+- `tty_raw` (21 callers in tmux): writes raw terminal sequences
+  during tty_stop_tty and server_lock_client. Without it, terminal
+  cleanup on tty stop/lock does not emit raw reset sequences.
+- `tty_hyperlink` (1 caller): emits OSC 8 hyperlink sequences in
+  tty_attributes. Hyperlink rendering is non-functional.
+- `tty_draw_images` (1 caller): called from screen_redraw_draw_pane
+  to render sixel images after pane content.
+- `tty_write_one` (1 caller): called from tty_draw_images.
+- `grid_set_cells` (1 caller): called from grid_view_set_cells for
+  multi-cell character placement.
+- `grid_string_cells_add_code` (3 callers): SGR code serialization
+  in grid_string_cells_code.
+- `grid_string_cells_add_hyperlink` (3 callers): hyperlink
+  serialization in grid_string_cells.
+- `input_reply` (25 callers): terminal reply for DA, DSR, DECRQSS,
+  winops, etc. Replaced by input_replyf in some paths but many
+  callers in CSI dispatch have no replacement.
+- `input_osc_colour_reply` (5 callers): palette/fg/bg colour query
+  replies.
+- `input_report_current_theme` (1 caller): theme report reply.
+- `input_csi_dispatch_winops` (1 caller): window operation replies.
+- `input_csi_dispatch_sm_graphics` (1 caller): graphics mode replies.
+- `input_request_reply` (2 callers): tty-keys clipboard/palette
+  reply forwarding.
+- `input_send_reply` (3 callers): low-level reply writer.
+- `input_start_ground_timer` (4 callers): DCS/OSC/APC/rename ground
+  timeout.
+- `input_start_request_timer` (2 callers): request timeout.
+- `input_set_buffer_size` (1 caller): options_push_changes buffer
+  resize.
+- `input_reply_clipboard` (4 callers): OSC 52 clipboard replies.
+
 ## Image and Sixel
 
 - `sixel_parse` call in `input_dcs_dispatch` is stubbed

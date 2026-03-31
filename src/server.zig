@@ -347,6 +347,13 @@ pub fn server_start(
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
+    // Override default-shell from $SHELL (the table default is /bin/sh).
+    {
+        const zmux_mod = @import("zmux.zig");
+        const shell = zmux_mod.getshell();
+        opts.options_set_string(opts.global_s_options, false, "default-shell", shell);
+    }
+
     key_bindings.key_bindings_init();
 
     std.posix.gettimeofday(&start_time, null);

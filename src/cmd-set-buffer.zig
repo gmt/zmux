@@ -233,7 +233,7 @@ test "set-buffer write flag keeps buffer writes even without clipboard transport
         .name = "clip",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .flags = T.CLIENT_ATTACHED,
     };
     target.session = &session;

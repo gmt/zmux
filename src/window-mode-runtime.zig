@@ -222,7 +222,7 @@ test "window-mode-runtime transitions emit pane-mode-changed control messages" {
         .name = "mode-runtime-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = setup.session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
@@ -250,23 +250,23 @@ test "window-mode-runtime transitions emit pane-mode-changed control messages" {
     const second_mode = T.WindowMode{ .name = "second-mode" };
 
     const pushed = pushMode(setup.pane, &first_mode, null, null);
-    while (cmdq.cmdq_next(null) != 0) {}
     try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     try std.testing.expect(popMode(setup.pane, pushed));
-    while (cmdq.cmdq_next(null) != 0) {}
     try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     _ = pushMode(setup.pane, &first_mode, null, null);
-    while (cmdq.cmdq_next(null) != 0) {}
     try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     _ = pushMode(setup.pane, &second_mode, null, null);
-    while (cmdq.cmdq_next(null) != 0) {}
     try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    while (cmdq.cmdq_next(null) != 0) {}
 
     resetModeAll(setup.pane);
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
+    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
     while (cmdq.cmdq_next(null) != 0) {}
-    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
-    try helpers.expectPaneModeChanged(&reader, setup.pane.id);
 }

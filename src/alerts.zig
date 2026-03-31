@@ -490,7 +490,7 @@ test "alerts queue keeps winlink alert fallout on shared status redraw" {
         .name = "alerts-client",
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = s,
         .flags = T.CLIENT_ATTACHED,
     };

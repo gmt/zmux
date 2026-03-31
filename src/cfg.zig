@@ -114,60 +114,37 @@ pub fn cfg_note_path_error(path: []const u8, errno_value: c_int, quiet: bool) vo
 }
 
 fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags: CfgFlags) bool {
-    // Strip comment-only lines before feeding to the parser.
-    // We must pass the full buffer (not line-by-line) so that multi-line
-    // %if/%elif/%else/%endif blocks are handled correctly by the
-    // preprocessor inside cmd_parse_from_string.
-    var stripped: std.ArrayList(u8) = .{};
-    defer stripped.deinit(xm.allocator);
-    {
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        var first = true;
-        while (lines.next()) |raw_line| {
-            const line = std.mem.trimRight(u8, raw_line, "\r");
-            const trimmed = std.mem.trimLeft(u8, line, " \t");
-            // Keep blank lines (they preserve line-count semantics) and
-            // directive lines (%if etc), but strip pure-comment lines.
-            const is_comment = trimmed.len > 0 and trimmed[0] == '#';
-            // Always preserve lines that start with %, even if they
-            // look comment-like to a naive filter.
-            const is_directive = trimmed.len > 0 and trimmed[0] == '%';
-            if (is_comment and !is_directive) {
-                // Replace with blank to keep line numbers consistent.
-                if (!first) stripped.append(xm.allocator, '\n') catch unreachable;
-                first = false;
-                continue;
-            }
-            if (!first) stripped.append(xm.allocator, '\n') catch unreachable;
-            stripped.appendSlice(xm.allocator, line) catch unreachable;
-            first = false;
+    var ok = true;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var line_no: usize = 0;
+    while (lines.next()) |line| {
+        line_no += 1;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        if (flags.verbose) {
+            cmdq.cmdq_write_client(cl, 1, "{s}:{d}: {s}", .{ path, line_no, trimmed });
+        }
+
+        var pi = T.CmdParseInput{ .file = path };
+        const result = cmd_mod.cmd_parse_from_string(trimmed, &pi);
+        switch (result.status) {
+            .@"error" => {
+                cfg_note_cause("{s}:{d}: {s}", .{ path, line_no, result.@"error" orelse "parse error" }, flags.quiet);
+                ok = false;
+            },
+            .success => {
+                if (result.cmdlist) |cl_ptr| {
+                    const list: *cmd_mod.CmdList = @ptrCast(@alignCast(cl_ptr));
+                    if (flags.parse_only)
+                        cmd_mod.cmd_list_free(list)
+                    else if (cmdq.cmdq_run_immediate_flags(cl, list, T.CMDQ_STATE_NOATTACH) == .@"error")
+                        ok = false;
+                }
+            },
         }
     }
-
-    var pi_flags: u32 = 0;
-    if (flags.parse_only) pi_flags |= T.CMD_PARSE_PARSEONLY;
-    if (flags.verbose) pi_flags |= T.CMD_PARSE_VERBOSE;
-
-    var pi = T.CmdParseInput{ .file = path, .flags = pi_flags };
-    const result = cmd_mod.cmd_parse_from_string(stripped.items, &pi);
-    switch (result.status) {
-        .@"error" => {
-            cfg_note_cause("{s}: {s}", .{ path, result.@"error" orelse "parse error" }, flags.quiet);
-            return false;
-        },
-        .success => {
-            if (result.cmdlist) |cl_ptr| {
-                const list: *cmd_mod.CmdList = @ptrCast(@alignCast(cl_ptr));
-                if (flags.parse_only) {
-                    cmd_mod.cmd_list_free(list);
-                } else {
-                    if (cmdq.cmdq_run_immediate_flags(cl, list, T.CMDQ_STATE_NOATTACH) == .@"error")
-                        return false;
-                }
-            }
-            return true;
-        },
-    }
+    return ok;
 }
 
 fn cfg_clear_causes() void {
@@ -243,7 +220,7 @@ test "cfg source path reads stdin through the shared reduced file path" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     try std.testing.expect(cfg_source_path(&client, "-", .{ .parse_only = true }));

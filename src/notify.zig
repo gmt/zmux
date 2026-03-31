@@ -254,27 +254,15 @@ fn dispatchControlNotifications(entry: *const NotifyEntry) void {
     }
 }
 
-/// Release a NotifyEntry and its associated session/window references.
-/// Used both by the normal callback path and by the free_data hook when
-/// the queue item is destroyed without being fired.
-fn freeNotifyEntry(entry: *NotifyEntry) void {
-    if (entry.session) |s| sess.session_remove_ref(s, "notify_callback");
-    if (entry.window) |w| win_mod.window_remove_ref(w, "notify_callback");
-    if (entry.fs.s) |s| sess.session_remove_ref(s, "notify_callback");
-    entry.deinit();
-    xm.allocator.destroy(entry);
-}
-
-/// free_data hook passed to cmdq_get_callback2 so that NotifyEntry is
-/// released even when the queue item is destroyed without being fired.
-fn freeNotifyData(data: ?*anyopaque) void {
-    const entry: *NotifyEntry = @ptrCast(@alignCast(data orelse return));
-    freeNotifyEntry(entry);
-}
-
 fn notifyCallback(item: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const entry: *NotifyEntry = @ptrCast(@alignCast(data orelse return .normal));
-    defer freeNotifyEntry(entry);
+    defer {
+        if (entry.session) |s| sess.session_remove_ref(s, "notify_callback");
+        if (entry.window) |w| win_mod.window_remove_ref(w, "notify_callback");
+        if (entry.fs.s) |s| sess.session_remove_ref(s, "notify_callback");
+        entry.deinit();
+        xm.allocator.destroy(entry);
+    }
 
     dispatchControlNotifications(entry);
     notify_insert_hook(item, entry);
@@ -309,7 +297,7 @@ pub fn notify_add(
     if (window) |w| win_mod.window_add_ref(w, "notify_add");
     if (entry.fs.s) |s| sess.session_add_ref(s, "notify_add");
 
-    _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback2("notify", notifyCallback, entry, freeNotifyData));
+    _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback1("notify", notifyCallback, entry));
 }
 
 pub fn notify_hook(item: *cmdq.CmdqItem, name: []const u8, current: ?*const T.CmdFindState) void {
@@ -474,7 +462,7 @@ test "notify hooks from client queue run after the client tail" {
     var cl = T.Client{
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
     defer env_mod.environ_free(cl.environ);
     cl.tty = .{ .client = &cl };
@@ -543,7 +531,7 @@ test "notify_window emits %layout-change to matching control clients" {
         .name = "layout-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };
@@ -650,7 +638,7 @@ test "session_set_current emits %session-window-changed to control clients" {
         .name = "session-window-client",
         .environ = env_mod.environ_create(),
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
         .session = session,
         .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
     };

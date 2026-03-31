@@ -22,7 +22,9 @@ const T = @import("types.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_draw = @import("format-draw.zig");
+const format_mod = @import("format.zig");
 const grid = @import("grid.zig");
+const key_string = @import("key-string.zig");
 const popup = @import("popup.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -37,6 +39,18 @@ const xm = @import("xmalloc.zig");
 pub const MENU_NOMOUSE: i32 = 0x1;
 pub const MENU_TAB: i32 = 0x2;
 pub const MENU_STAYOPEN: i32 = 0x4;
+
+/// Callback invoked when a menu item is chosen (port of tmux `menu_choice_cb`).
+/// Parameters: menu pointer, choice index, shortcut key, caller data.
+pub const MenuChoiceCb = *const fn (*Menu, i32, T.key_code, ?*anyopaque) void;
+
+/// Raw template for a menu item — name and command are format strings that will
+/// be expanded at build time (port of tmux `struct menu_item`).
+pub const MenuItemSpec = struct {
+    name: []const u8,
+    key: T.key_code = T.KEYC_UNKNOWN,
+    command: ?[]const u8 = null,
+};
 
 pub const MenuItem = struct {
     display_text: ?[]u8 = null,
@@ -93,6 +107,8 @@ const MenuData = struct {
     py: u32 = 0,
     menu: *Menu,
     choice: i32 = -1,
+    cb: ?MenuChoiceCb = null,
+    data: ?*anyopaque = null,
 
     fn deinit(self: *MenuData) void {
         if (self.screen) |screen| {
@@ -137,6 +153,171 @@ pub fn overlay_bounds(client: *const T.Client) ?Bounds {
     };
 }
 
+/// Allocate a new empty menu with the given title (port of tmux `menu_create`).
+pub fn menu_create(title: []const u8) *Menu {
+    const menu = xm.allocator.create(Menu) catch unreachable;
+    menu.* = .{
+        .title = xm.xstrdup(title),
+        .items = xm.allocator.alloc(MenuItem, 0) catch unreachable,
+        .width = format_draw.format_width(title),
+    };
+    return menu;
+}
+
+/// Expand a template item and append it to `menu` (port of tmux `menu_add_item`).
+/// Empty `spec.name` inserts a separator; empty format expansion silently drops the item.
+pub fn menu_add_item(
+    menu: *Menu,
+    spec: MenuItemSpec,
+    qitem: ?*cmdq.CmdqItem,
+    c: *T.Client,
+    fs: ?*const T.CmdFindState,
+) void {
+    // zmux has no format_single_from_state; fs is accepted for API parity only.
+    _ = fs;
+    const is_separator = spec.name.len == 0;
+    if (is_separator) {
+        if (menu.items.len == 0) return;
+        if (menu.items[menu.items.len - 1].separator) return;
+        menu.items = xm.allocator.realloc(menu.items, menu.items.len + 1) catch unreachable;
+        menu.items[menu.items.len - 1] = .{ .separator = true };
+        return;
+    }
+
+    const raw_qitem: ?*anyopaque = if (qitem) |qi| @ptrCast(qi) else null;
+    const s = format_mod.format_single(raw_qitem, spec.name, c, null, null, null);
+    defer xm.allocator.free(s);
+
+    if (s.len == 0) return; // empty expansion → skip
+
+    const max_width: u32 = c.tty.sx -| 4;
+
+    var key_hint: ?[]const u8 = null;
+    if (s[0] != '-' and spec.key != T.KEYC_UNKNOWN and spec.key != T.KEYC_NONE) {
+        const kstr = key_string.key_string_lookup_key(spec.key, 0);
+        const klen: u32 = @intCast(kstr.len + 3); // space + two brackets
+        if (klen <= max_width / 4) {
+            key_hint = kstr;
+        } else if (klen < max_width) {
+            const name_len = @min(format_draw.format_width(s), max_width);
+            if (name_len < max_width - klen)
+                key_hint = kstr;
+        }
+    }
+
+    const available: u32 = if (key_hint) |kstr|
+        max_width -| @as(u32, @intCast(kstr.len + 3))
+    else
+        max_width;
+
+    var suffix: []const u8 = "";
+    const trimmed_width = format_draw.format_width(s);
+    const trim_to: u32 = if (trimmed_width > available and available > 0) blk: {
+        suffix = ">";
+        break :blk available - 1;
+    } else available;
+
+    const trimmed = format_draw.format_trim_right(s, trim_to);
+    defer xm.allocator.free(trimmed);
+
+    const display: []u8 = if (key_hint) |kstr|
+        xm.xasprintf("{s}{s}#[default] #[align=right]({s})", .{ trimmed, suffix, kstr })
+    else
+        xm.xasprintf("{s}{s}", .{ trimmed, suffix });
+
+    const cmd_expanded: ?[]u8 = if (spec.command) |cmd_tmpl|
+        format_mod.format_single(raw_qitem, cmd_tmpl, c, null, null, null)
+    else
+        null;
+
+    menu.items = xm.allocator.realloc(menu.items, menu.items.len + 1) catch unreachable;
+    menu.items[menu.items.len - 1] = .{
+        .display_text = display,
+        .command = cmd_expanded,
+        .key = spec.key,
+    };
+
+    var w = format_draw.format_width(display);
+    if (display.len > 0 and display[0] == '-') w -|= 1;
+    if (w > menu.width) menu.width = w;
+}
+
+/// Append all specs from a slice, calling `menu_add_item` for each (port of tmux `menu_add_items`).
+pub fn menu_add_items(
+    menu: *Menu,
+    specs: []const MenuItemSpec,
+    qitem: ?*cmdq.CmdqItem,
+    c: *T.Client,
+    fs: ?*const T.CmdFindState,
+) void {
+    for (specs) |spec| menu_add_item(menu, spec, qitem, c, fs);
+}
+
+/// Prepare a MenuData without installing it on the client (port of tmux `menu_prepare`).
+/// Returns null if the terminal is too small.
+pub fn menu_prepare(
+    menu: *Menu,
+    flags: i32,
+    starting_choice: i32,
+    item: ?*cmdq.CmdqItem,
+    px: u32,
+    py: u32,
+    client: *T.Client,
+    lines: u32,
+    style: ?[]const u8,
+    selected_style: ?[]const u8,
+    border_style: ?[]const u8,
+    fs: ?*const T.CmdFindState,
+    cb: ?MenuChoiceCb,
+    data: ?*anyopaque,
+) ?*MenuData {
+    const sx = menu.width + 4;
+    const count: u32 = @intCast(menu.items.len);
+    const sy = count + 2;
+    const max_sy = available_height(client);
+    if (client.tty.sx < sx or max_sy < sy) return null;
+
+    const safe_px = if (px + sx > client.tty.sx) client.tty.sx - sx else px;
+    const safe_py = if (py + sy > max_sy) max_sy - sy else py;
+
+    const md = xm.allocator.create(MenuData) catch unreachable;
+    md.* = .{
+        .client = client,
+        .item = item,
+        .flags = flags,
+        .border_lines = lines,
+        .target = if (fs) |target| target.* else .{ .idx = -1 },
+        .px = safe_px,
+        .py = safe_py,
+        .menu = menu,
+        .cb = cb,
+        .data = data,
+    };
+
+    if (style) |value| md.style = xm.xstrdup(value);
+    if (selected_style) |value| md.selected_style = xm.xstrdup(value);
+    if (border_style) |value| md.border_style = xm.xstrdup(value);
+
+    if ((flags & MENU_NOMOUSE) != 0)
+        md.choice = find_initial_choice(menu, starting_choice);
+
+    return md;
+}
+
+/// Reposition menu to stay within the terminal after a resize (port of tmux `menu_resize_cb`).
+pub fn menu_resize_cb(client: *T.Client) void {
+    const md = state(client) orelse return;
+    const w = md.menu.width + 4;
+    const h: u32 = @intCast(md.menu.items.len + 2);
+
+    if (md.px + w > client.tty.sx) {
+        md.px = if (client.tty.sx <= w) 0 else client.tty.sx - w;
+    }
+    if (md.py + h > client.tty.sy) {
+        md.py = if (client.tty.sy <= h) 0 else client.tty.sy - h;
+    }
+}
+
 pub fn clear_overlay(client: *T.Client) void {
     const md = state(client) orelse return;
 
@@ -145,6 +326,7 @@ pub fn clear_overlay(client: *T.Client) void {
     client.flags |= T.CLIENT_REDRAWOVERLAY;
 
     if (md.item) |item| cmdq.cmdq_continue(item);
+
     md.deinit();
     xm.allocator.destroy(md);
 }
@@ -162,38 +344,33 @@ pub fn menu_display(
     selected_style: ?[]const u8,
     border_style: ?[]const u8,
     fs: ?*const T.CmdFindState,
+    cb: ?MenuChoiceCb,
+    data: ?*anyopaque,
 ) i32 {
-    const sx = menu.width + 4;
-    const sy: u32 = @as(u32, @intCast(menu.items.len)) + 2;
-    const max_sy = available_height(client);
-    if (client.tty.sx < sx or max_sy < sy)
-        return -1;
+    return menu_display_cb(menu, flags, starting_choice, item, px, py, client, lines, style, selected_style, border_style, fs, cb, data);
+}
+
+/// Display a menu, optionally invoking a callback when an item is chosen
+/// (port of tmux `menu_display` with `cb`/`data` arguments).
+pub fn menu_display_cb(
+    menu: *Menu,
+    flags: i32,
+    starting_choice: i32,
+    item: ?*cmdq.CmdqItem,
+    px: u32,
+    py: u32,
+    client: *T.Client,
+    lines: u32,
+    style: ?[]const u8,
+    selected_style: ?[]const u8,
+    border_style: ?[]const u8,
+    fs: ?*const T.CmdFindState,
+    cb: ?MenuChoiceCb,
+    data: ?*anyopaque,
+) i32 {
+    const md = menu_prepare(menu, flags, starting_choice, item, px, py, client, lines, style, selected_style, border_style, fs, cb, data) orelse return -1;
 
     clear_overlay(client);
-
-    const md = xm.allocator.create(MenuData) catch unreachable;
-    md.* = .{
-        .client = client,
-        .item = item,
-        .flags = flags,
-        .border_lines = lines,
-        .target = if (fs) |target| target.* else .{ .idx = -1 },
-        .px = @min(px, client.tty.sx - sx),
-        .py = @min(py, max_sy - sy),
-        .menu = menu,
-    };
-    errdefer {
-        md.deinit();
-        xm.allocator.destroy(md);
-    }
-
-    if (style) |value| md.style = xm.xstrdup(value);
-    if (selected_style) |value| md.selected_style = xm.xstrdup(value);
-    if (border_style) |value| md.border_style = xm.xstrdup(value);
-
-    if ((flags & MENU_NOMOUSE) != 0)
-        md.choice = find_initial_choice(menu, starting_choice);
-
     client.menu_data = md;
     client.tty.flags |= @intCast(T.TTY_FREEZE | T.TTY_NOCURSOR);
     client.flags |= T.CLIENT_REDRAWOVERLAY;
@@ -530,10 +707,23 @@ fn choose_current(client: *T.Client) void {
         return;
     }
 
-    const item = &md.menu.items[@intCast(md.choice)];
+    const idx: u32 = @intCast(md.choice);
+    const item = &md.menu.items[idx];
     if (!item.selectable()) {
         if ((md.flags & MENU_STAYOPEN) == 0)
             clear_overlay(client);
+        return;
+    }
+
+    if (md.cb) |cb| {
+        const choice = md.choice;
+        const item_key = item.key;
+        const cb_data = md.data;
+        const menu = md.menu;
+        // Null the callback before clearing so it isn't double-invoked.
+        md.cb = null;
+        clear_overlay(client);
+        cb(menu, choice, item_key, cb_data);
         return;
     }
 

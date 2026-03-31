@@ -50,5 +50,6 @@ pub fn target_context(target: *const T.CmdFindState, message_text: ?[]const u8) 
         .window = target.w,
         .pane = target.wp,
         .message_text = message_text,
+        .format_type = format_mod.infer_format_type(target.s, target.wl, target.wp),
     };
 }

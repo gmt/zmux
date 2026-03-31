@@ -36,6 +36,7 @@ const sort_mod = @import("sort.zig");
 const srv = @import("server.zig");
 const regsub_mod = @import("regsub.zig");
 const tty_features = @import("tty-features.zig");
+const tty_mod = @import("tty.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const client_registry = @import("client-registry.zig");
@@ -52,6 +53,7 @@ const fmt = @import("format.zig");
 
 pub const FormatContext = fmt.FormatContext;
 pub const FormatExpandResult = fmt.FormatExpandResult;
+pub const FormatType = fmt.FormatType;
 
 pub const Resolver = struct {
     name: []const u8,
@@ -66,6 +68,7 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "message_number", .func = resolve_message_number },
     .{ .name = "message_time", .func = resolve_message_time },
     .{ .name = "message_text", .func = resolve_message_text },
+    .{ .name = "command", .func = resolve_command },
     .{ .name = "command_prompt", .func = resolve_command_prompt },
     .{ .name = "hook", .func = resolve_hook },
     .{ .name = "hook_client", .func = resolve_hook_client },
@@ -401,6 +404,7 @@ pub fn child_context_for_session(base: *const FormatContext, s: *T.Session, last
     child.window = if (s.curw) |wl| wl.window else null;
     child.pane = if (s.curw) |wl| wl.window.active else null;
     child.loop_last_flag = last;
+    child.format_type = .session;
     return child;
 }
 
@@ -411,6 +415,7 @@ pub fn child_context_for_winlink(base: *const FormatContext, s: *T.Session, wl: 
     child.window = wl.window;
     child.pane = wl.window.active;
     child.loop_last_flag = last;
+    child.format_type = .window;
     return child;
 }
 
@@ -419,6 +424,7 @@ pub fn child_context_for_pane(base: *const FormatContext, w: *T.Window, wp: *T.W
     child.window = w;
     child.pane = wp;
     child.loop_last_flag = last;
+    child.format_type = .pane;
     return child;
 }
 
@@ -735,6 +741,10 @@ fn resolve_message_number(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
 
 fn resolve_message_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return std.fmt.allocPrint(alloc, "{d}", .{ctx.message_time orelse 0}) catch unreachable;
+}
+
+fn resolve_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return resolve_hook_value(alloc, ctx, "command");
 }
 
 fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -1670,11 +1680,19 @@ fn resolve_window_bell_flag(alloc: std.mem.Allocator, ctx: *const FormatContext)
     return alloc.dupe(u8, if (wl.flags & T.WINLINK_BELL != 0) "1" else "0") catch unreachable;
 }
 
+const WindowOffset = struct { ox: u32, oy: u32, sx: u32, sy: u32, bigger: bool };
+
+fn ctx_window_offset(ctx: *const FormatContext) ?WindowOffset {
+    const cl = ctx.client orelse return null;
+    var wo: WindowOffset = undefined;
+    wo.bigger = tty_mod.tty_window_offset(&cl.tty, &wo.ox, &wo.oy, &wo.sx, &wo.sy) != 0;
+    return wo;
+}
+
 fn resolve_window_bigger(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    const w = ctx_window(ctx) orelse return null;
-    const cl = ctx.client orelse return alloc.dupe(u8, "0") catch unreachable;
-    const bigger = w.sx > cl.tty.sx or w.sy > cl.tty.sy;
-    return alloc.dupe(u8, if (bigger) "1" else "0") catch unreachable;
+    _ = ctx_window(ctx) orelse return null;
+    const wo = ctx_window_offset(ctx) orelse return null;
+    return alloc.dupe(u8, if (wo.bigger) "1" else "0") catch unreachable;
 }
 
 fn resolve_window_id(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -1724,14 +1742,16 @@ fn resolve_window_flags_impl(alloc: std.mem.Allocator, ctx: *const FormatContext
 
 fn resolve_window_offset_x(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
-    const wp = ctx_pane(ctx) orelse return null;
-    return xm.xasprintf("{d}", .{wp.xoff});
+    const wo = ctx_window_offset(ctx) orelse return null;
+    if (!wo.bigger) return null;
+    return xm.xasprintf("{d}", .{wo.ox});
 }
 
 fn resolve_window_offset_y(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = alloc;
-    const wp = ctx_pane(ctx) orelse return null;
-    return xm.xasprintf("{d}", .{wp.yoff});
+    const wo = ctx_window_offset(ctx) orelse return null;
+    if (!wo.bigger) return null;
+    return xm.xasprintf("{d}", .{wo.oy});
 }
 
 fn resolve_window_zoomed_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2309,11 +2329,7 @@ fn resolve_mouse_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 
 }
 
 fn resolve_pane_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    // tmux returns "1" when the format tree's type is FORMAT_TYPE_PANE
-    // (set by format_defaults_pane). zmux's FormatContext does not carry a
-    // format-type tag; callers that need this should set it on the context.
-    _ = ctx;
-    return alloc.dupe(u8, "0") catch unreachable;
+    return alloc.dupe(u8, if (ctx.format_type == .pane) "1" else "0") catch unreachable;
 }
 
 fn resolve_session_activity_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2329,10 +2345,7 @@ fn resolve_session_bell_flag(alloc: std.mem.Allocator, ctx: *const FormatContext
 }
 
 fn resolve_session_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    // tmux returns "1" when format tree type is FORMAT_TYPE_SESSION.
-    // zmux FormatContext lacks a format-type discriminator; always "0".
-    _ = ctx;
-    return alloc.dupe(u8, "0") catch unreachable;
+    return alloc.dupe(u8, if (ctx.format_type == .session) "1" else "0") catch unreachable;
 }
 
 fn resolve_session_many_attached(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2500,10 +2513,7 @@ fn resolve_window_end_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) 
 }
 
 fn resolve_window_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    // tmux returns "1" when format tree type is FORMAT_TYPE_WINDOW.
-    // zmux FormatContext lacks a format-type discriminator; always "0".
-    _ = ctx;
-    return alloc.dupe(u8, "0") catch unreachable;
+    return alloc.dupe(u8, if (ctx.format_type == .window) "1" else "0") catch unreachable;
 }
 
 fn resolve_window_linked_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

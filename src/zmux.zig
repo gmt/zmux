@@ -369,7 +369,6 @@ test {
     _ = @import("style.zig");
     _ = @import("tty.zig");
     _ = @import("tty-draw.zig");
-    _ = @import("tty-keys.zig");
     _ = @import("input-keys.zig");
     _ = @import("mode-tree.zig");
     _ = @import("utf8.zig");
@@ -380,4 +379,5 @@ test {
     _ = @import("layout.zig");
     _ = @import("window-test.zig");
     _ = @import("cmd-find-test.zig");
+    _ = @import("screen-redraw.zig");
 }

@@ -49,6 +49,8 @@ var next_active_point: u32 = 0;
 pub fn window_init_globals(alloc: std.mem.Allocator) void {
     windows = std.AutoHashMap(u32, *T.Window).init(alloc);
     all_window_panes = std.AutoHashMap(u32, *T.WindowPane).init(alloc);
+    next_window_id = 0;
+    next_window_pane_id = 0;
     next_active_point = 0;
     marked_pane_mod.clear();
 }

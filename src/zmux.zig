@@ -379,4 +379,6 @@ test {
     _ = @import("layout.zig");
     _ = @import("window-test.zig");
     _ = @import("cmd-find-test.zig");
+    _ = @import("image-sixel.zig");
+    _ = @import("image.zig");
 }

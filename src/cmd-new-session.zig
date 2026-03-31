@@ -281,10 +281,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
                 wp.sx = sx;
                 wp.sy = sy;
             }
-            // Persist dimensions as the session default so new-window inherits them.
-            const size_str = xm.xasprintf("{d}x{d}", .{ sx, sy });
-            defer xm.allocator.free(size_str);
-            opts.options_set_string(s.options, false, "default-size", size_str);
         }
     }
 

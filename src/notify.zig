@@ -276,6 +276,7 @@ fn notifyCallback(item: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const entry: *NotifyEntry = @ptrCast(@alignCast(data orelse return .normal));
     defer freeNotifyEntry(entry);
 
+    dispatchControlNotifications(entry);
     notify_insert_hook(item, entry);
     return .normal;
 }
@@ -307,10 +308,6 @@ pub fn notify_add(
     if (session) |s| sess.session_add_ref(s, "notify_add");
     if (window) |w| win_mod.window_add_ref(w, "notify_add");
     if (entry.fs.s) |s| sess.session_add_ref(s, "notify_add");
-
-    // Dispatch control-mode notifications synchronously so control clients
-    // see them immediately, matching tmux's event-loop behaviour.
-    dispatchControlNotifications(entry);
 
     _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback2("notify", notifyCallback, entry, freeNotifyData));
 }

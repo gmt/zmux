@@ -20,13 +20,14 @@ Functional gaps where zmux does not yet match tmux behavior.
   colours — added `append_colour` supporting 256-colour and 24-bit
   RGB. Wired `tty_check_fg`/`bg`/`us` into `tty_attributes`.
 
-## DCS Passthrough
+## ~~DCS Passthrough~~ (FIXED)
 
-- The `allow-passthrough` option exists in the options table but
-  the DCS handler (`input.zig` `apply_dcs`) silently consumes
-  `tmux;`-prefixed passthrough sequences instead of forwarding
-  them to the outer terminal.  Sixel rendering itself (parse →
-  store → re-emit via `sixel_print`) is fully wired.
+- Fixed: `apply_dcs` now checks `allow-passthrough`, strips the
+  `tmux;` prefix, and forwards raw bytes via `screen_write_rawstring`
+  → `wp.passthrough_pending`.  The render cycle in
+  `build_client_draw_payload` drains the buffer to attached clients.
+  Also fixed out-of-bounds crash in DCS sixel parameter parsing
+  (`dcs.params[1]` on empty param string).
 
 ## ~~Shell Environment~~ (FIXED)
 

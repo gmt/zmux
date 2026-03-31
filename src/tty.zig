@@ -1754,8 +1754,11 @@ fn freeStartTimer(tty: *T.Tty) void {
 export fn tty_start_timer_fire(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
-    tty_send_requests(tty);
+    _ = arg;
+    // TODO: re-enable when tty-keys read path consumes DA/colour responses.
+    // Sending requests without a response consumer causes ANSI spam in panes.
+    // const tty: *T.Tty = @ptrCast(@alignCast(arg orelse return));
+    // tty_send_requests(tty);
 }
 
 /// Write a Zig slice to the tty (helper used by tty_send_requests and similar).

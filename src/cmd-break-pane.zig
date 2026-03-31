@@ -28,6 +28,7 @@ const sess = @import("session.zig");
 const win = @import("window.zig");
 const names_mod = @import("names.zig");
 const opts = @import("options.zig");
+const layout_mod = @import("layout.zig");
 const server_fn = @import("server-fn.zig");
 
 const BREAK_PANE_TEMPLATE = "#{session_name}:#{window_index}.#{pane_index}";
@@ -89,8 +90,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
 
         const new_w = win.window_create(src_w.sx, src_w.sy, src_w.xpixel, src_w.ypixel);
+        layout_mod.layout_close_pane(src_wp);
         _ = win.window_detach_pane(src_w, src_wp);
         win.window_adopt_pane(new_w, src_wp);
+        layout_mod.layout_init(new_w, src_wp);
 
         if (args.get('n')) |name| {
             win.window_set_name(new_w, name);

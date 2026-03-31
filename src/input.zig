@@ -32,6 +32,8 @@ const colour_mod = @import("colour.zig");
 const window_mod = @import("window.zig");
 const log = @import("log.zig");
 const paste_mod = @import("paste.zig");
+const proc_mod = @import("proc.zig");
+const c_bridge = @import("c.zig");
 /// OSC terminator type — mirrors tmux's input_end_type.
 const OscEndType = enum { st, bel };
 
@@ -150,11 +152,25 @@ pub fn input_reply_clipboard(wp: *T.WindowPane, buf: ?[]const u8, end: []const u
     input_send_reply(wp, out[0..pos]);
 }
 
-/// Start the ground timer (DCS/OSC/APC/rename timeout).
-/// Stub: zmux does not yet use libevent timers in the input parser.
-/// In tmux this fires a 5-second timer that resets the parser to ground state.
-pub fn input_start_ground_timer(_: *T.WindowPane) void {
-    // TODO: implement when zmux has event-loop timer integration
+/// Start a 5-second timer that resets the input parser to ground state.
+/// Prevents a stuck parser when a DCS/OSC/APC sequence is never completed.
+pub fn input_start_ground_timer(wp: *T.WindowPane) void {
+    const base = proc_mod.libevent orelse return;
+    if (wp.ground_timer == null) {
+        wp.ground_timer = c_bridge.libevent.event_new(
+            base, -1, 0, input_ground_timer_cb, wp,
+        );
+    }
+    const ev = wp.ground_timer orelse return;
+    _ = c_bridge.libevent.event_del(ev);
+    var tv = std.posix.timeval{ .sec = 5, .usec = 0 };
+    _ = c_bridge.libevent.event_add(ev, @ptrCast(&tv));
+}
+
+export fn input_ground_timer_cb(_: c_int, _: c_short, arg: ?*anyopaque) void {
+    const wp: *T.WindowPane = @ptrCast(@alignCast(arg orelse return));
+    log.log_debug("input_ground_timer_cb: %%{d} ground timer expired", .{wp.id});
+    input_reset(wp, 0);
 }
 
 /// Start the request timer.

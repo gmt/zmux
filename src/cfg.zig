@@ -220,7 +220,7 @@ test "cfg source path reads stdin through the shared reduced file path" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     try std.testing.expect(cfg_source_path(&client, "-", .{ .parse_only = true }));

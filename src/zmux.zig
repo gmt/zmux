@@ -383,4 +383,5 @@ test {
     _ = @import("image-sixel.zig");
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");
+    _ = @import("format-test.zig");
 }

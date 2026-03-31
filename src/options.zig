@@ -1453,6 +1453,11 @@ pub fn options_push_changes(name: []const u8) void {
             sess.session_update_history(s.*);
         }
     }
+    if (std.mem.eql(u8, name, "input-buffer-size")) {
+        const input_mod = @import("input.zig");
+        const v = options_get_number(global_options, "input-buffer-size");
+        if (v > 0) input_mod.input_set_buffer_size(@intCast(v));
+    }
 
     resize_mod.recalculate_sizes();
     for (client_registry.clients.items) |cl| {

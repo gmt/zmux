@@ -3050,7 +3050,6 @@ pub fn window_copy_search_down(wme: *T.WindowModeEntry, regex: bool) bool {
     return doSearch(wme, .down, regex);
 }
 
-<<<<<<< HEAD
 pub fn window_copy_search_marks(wme: *T.WindowModeEntry, ssp: ?*T.Screen, regex: bool, visible_only: bool) bool {
     const data = modeData(wme);
     if (data.timeout) return false;

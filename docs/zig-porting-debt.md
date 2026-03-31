@@ -48,3 +48,25 @@ natural in Zig.
 - `src/compat/imsg.c` and `imsg-buffer.c` are C IPC bridges.
   Replace with Zig-native implementation when the protocol
   layer stabilizes.
+
+## API Drift
+
+- Several call sites used the Zig 0.14 `std.ArrayList(T).init(allocator)`
+  pattern. Zig 0.15 removed `init`; the idiomatic form is zero-init
+  (`.{}`) with the allocator passed to each method. Remaining
+  instances in non-test code paths (e.g., `status-prompt.zig:1434`,
+  `window.zig:1652`, `control.zig:360`) still compile because
+  they are not reachable from any current call graph, but will
+  break once wired in.
+- `std.fs.File.writer()` in Zig 0.15 requires a `[]u8` buffer
+  argument. Two call sites in `status-prompt.zig` and `status.zig`
+  were ported to use `file.writeAll` / `std.fmt.bufPrint` instead.
+
+## Status Screen Lifecycle
+
+- `StatusLine.screen` was changed from an embedded `Screen`
+  value to `?*Screen` (heap-allocated pointer, nullable). The
+  embedded form created a type mismatch with `screen_init` which
+  heap-allocates. `status_free` now frees the screen when
+  non-null. All test clients that construct `StatusLine` use
+  the default `.screen = null`.

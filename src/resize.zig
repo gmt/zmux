@@ -25,6 +25,7 @@ const opts = @import("options.zig");
 const server_client_mod = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const sess = @import("session.zig");
+const layout_mod = @import("layout.zig");
 const win = @import("window.zig");
 const xm = @import("xmalloc.zig");
 
@@ -34,6 +35,10 @@ pub fn resize_window(w: *T.Window, sx_: u32, sy_: u32, xpixel: i32, ypixel: i32)
     var sx = std.math.clamp(sx_, T.WINDOW_MINIMUM, T.WINDOW_MAXIMUM);
     var sy = std.math.clamp(sy_, T.WINDOW_MINIMUM, T.WINDOW_MAXIMUM);
 
+    // Resize the layout first (as tmux does in resize.c).
+    layout_mod.layout_resize(w, sx, sy);
+
+    // The window can be no smaller than the layout root.
     if (w.layout_root) |root| {
         sx = @max(sx, root.sx);
         sy = @max(sy, root.sy);
@@ -41,7 +46,7 @@ pub fn resize_window(w: *T.Window, sx_: u32, sy_: u32, xpixel: i32, ypixel: i32)
 
     win.window_resize(w, sx, sy, xpixel, ypixel);
 
-    // Reduced seam: until layout.zig exists, panes follow the whole-window size.
+    // When there is no layout tree, panes follow the whole-window size.
     if (w.layout_root == null) {
         for (w.panes.items) |wp| {
             wp.sx = sx;

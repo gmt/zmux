@@ -808,6 +808,22 @@ pub const Tty = struct {
     /// Right margin (DECSLRM).
     rright: u32 = 0,
 
+    /// Cached window offset X (populated by tty_update_client_offset).
+    oox: u32 = 0,
+    /// Cached window offset Y (populated by tty_update_client_offset).
+    ooy: u32 = 0,
+    /// Cached window size X (populated by tty_update_client_offset).
+    osx: u32 = 0,
+    /// Cached window size Y (populated by tty_update_client_offset).
+    osy: u32 = 0,
+    /// Non-zero when the window is bigger than the terminal (oflag cache).
+    oflag: i32 = 0,
+
+    /// Bytes buffered for output (used by tty_block_maybe throttle logic).
+    /// Zig sends via imsg (synchronous), so this field tracks logical pending
+    /// bytes for faithful structural parity with tmux; in practice it is always 0.
+    pending_out: usize = 0,
+
     ttyname: ?[]u8 = null,
     term_name: ?[]u8 = null,
     acs: [256][2]u8 = [_][2]u8{[_]u8{ 0, 0 }} ** 256,

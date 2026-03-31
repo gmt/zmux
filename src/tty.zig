@@ -30,6 +30,11 @@ const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
 const tty_draw_mod = @import("tty-draw.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
+const log = @import("log.zig");
+const resize_mod = @import("resize.zig");
+const status_mod = @import("status.zig");
+const server_client_mod = @import("server-client.zig");
+const client_registry = @import("client-registry.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
@@ -1792,8 +1797,36 @@ export fn tty_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
     _ = _arg;
 }
 
-pub fn tty_block_maybe(_: *T.Tty) i32 {
-    return 0;
+/// Port of tmux tty_block_maybe().
+/// Throttles output when the output buffer exceeds TTY_BLOCK_START bytes.
+/// Zmux uses synchronous imsg delivery instead of evbuffers, so
+/// tty.pending_out is always 0; the block path is never taken in practice.
+pub fn tty_block_maybe(tty: *T.Tty) i32 {
+    const c = tty.client;
+    const size = tty.pending_out;
+
+    // TTY_BLOCK_START(tty) = 1 + sx*sy*8; TTY_BLOCK_STOP = 1 + sx*sy/8 (timer, not yet ported).
+    const tty_block_start: usize = 1 + @as(usize, tty.sx) * @as(usize, tty.sy) * 8;
+
+    if (size == 0)
+        tty.flags &= ~@as(i32, @intCast(T.TTY_NOBLOCK))
+    else if ((tty.flags & @as(i32, @intCast(T.TTY_NOBLOCK))) != 0)
+        return 0;
+
+    if (size < tty_block_start)
+        return 0;
+
+    if ((tty.flags & @as(i32, @intCast(T.TTY_BLOCK))) != 0)
+        return 1;
+
+    tty.flags |= @as(i32, @intCast(T.TTY_BLOCK));
+
+    log.log_debug("{s}: can't keep up, {d} discarded", .{ c.name orelse "(unknown)", size });
+
+    c.discarded += size;
+    tty.pending_out = 0;
+
+    return 1;
 }
 
 export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
@@ -1835,16 +1868,132 @@ pub fn tty_emulate_repeat(tty: *T.Tty, code: []const u8, code1: []const u8, n: u
     }
 }
 
-pub fn tty_window_bigger(_: *T.Tty) i32 {
-    return 0;
+/// Port of tmux tty_window_bigger().
+pub fn tty_window_bigger(tty: *T.Tty) i32 {
+    const c = tty.client;
+    const s = c.session orelse return 0;
+    const curw = s.curw orelse return 0;
+    const w = curw.window;
+    const lines = resize_mod.status_line_size(c);
+    return if (tty.sx < w.sx or tty.sy -| lines < w.sy) 1 else 0;
 }
 
-pub fn tty_window_offset(_: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
-    ox.* = 0;
-    oy.* = 0;
-    sx.* = 0;
-    sy.* = 0;
-    return 0;
+/// Port of tmux tty_window_offset().
+/// Returns the cached viewport offset (populated by tty_update_client_offset).
+pub fn tty_window_offset(tty: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
+    ox.* = tty.oox;
+    oy.* = tty.ooy;
+    sx.* = tty.osx;
+    sy.* = tty.osy;
+    return tty.oflag;
+}
+
+/// Port of tmux tty_window_offset1() — computes the viewport for caching.
+fn tty_window_offset1(tty: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
+    const c = tty.client;
+    const s = c.session orelse {
+        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        return 0;
+    };
+    const curw = s.curw orelse {
+        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        return 0;
+    };
+    const w = curw.window;
+    const wp = server_client_mod.server_client_get_pane(c) orelse {
+        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        return 0;
+    };
+    const lines = resize_mod.status_line_size(c);
+
+    if (tty.sx >= w.sx and tty.sy -| lines >= w.sy) {
+        ox.* = 0;
+        oy.* = 0;
+        sx.* = w.sx;
+        sy.* = w.sy;
+        c.pan_window = null;
+        return 0;
+    }
+
+    sx.* = tty.sx;
+    sy.* = tty.sy -| lines;
+
+    if (c.pan_window == w) {
+        if (sx.* >= w.sx)
+            c.pan_ox = 0
+        else if (c.pan_ox + sx.* > w.sx)
+            c.pan_ox = w.sx - sx.*;
+        ox.* = c.pan_ox;
+        if (sy.* >= w.sy)
+            c.pan_oy = 0
+        else if (c.pan_oy + sy.* > w.sy)
+            c.pan_oy = w.sy - sy.*;
+        oy.* = c.pan_oy;
+        return 1;
+    }
+
+    if ((wp.screen.mode & T.MODE_CURSOR) == 0) {
+        ox.* = 0;
+        oy.* = 0;
+    } else {
+        const cx = wp.xoff + wp.screen.cx;
+        const cy = wp.yoff + wp.screen.cy;
+
+        if (cx < sx.*)
+            ox.* = 0
+        else if (cx > w.sx -| sx.*)
+            ox.* = w.sx -| sx.*
+        else
+            ox.* = cx -| sx.* / 2;
+
+        if (cy < sy.*)
+            oy.* = 0
+        else if (cy > w.sy -| sy.*)
+            oy.* = w.sy -| sy.*
+        else
+            oy.* = cy -| sy.* / 2;
+    }
+
+    c.pan_window = null;
+    return 1;
+}
+
+/// Port of tmux tty_update_client_offset().
+pub fn tty_update_client_offset(c: *T.Client) void {
+    if ((c.flags & T.CLIENT_TERMINAL) == 0) return;
+
+    var ox: u32 = 0;
+    var oy: u32 = 0;
+    var sx: u32 = 0;
+    var sy: u32 = 0;
+    c.tty.oflag = tty_window_offset1(&c.tty, &ox, &oy, &sx, &sy);
+    if (ox == c.tty.oox and oy == c.tty.ooy and sx == c.tty.osx and sy == c.tty.osy)
+        return;
+
+    log.log_debug("tty_update_client_offset: {s} offset changed ({d},{d} {d}x{d} -> {d},{d} {d}x{d})", .{
+        c.name orelse "(unknown)",
+        c.tty.oox, c.tty.ooy, c.tty.osx, c.tty.osy,
+        ox, oy, sx, sy,
+    });
+
+    c.tty.oox = ox;
+    c.tty.ooy = oy;
+    c.tty.osx = sx;
+    c.tty.osy = sy;
+
+    c.flags |= T.CLIENT_REDRAWWINDOW | T.CLIENT_REDRAWSTATUS;
+}
+
+/// Port of tmux tty_update_window_offset().
+pub fn tty_update_window_offset(w: *T.Window) void {
+    for (client_registry.clients.items) |c| {
+        if (c.session) |s| {
+            if (s.curw) |curw| {
+                if (curw.window == w)
+                    tty_update_client_offset(c);
+            }
+        }
+    }
 }
 
 
@@ -2004,13 +2153,41 @@ pub fn tty_check_codeset(_: *T.Tty, gc: *const T.GridCell) *const T.GridCell {
     return gc;
 }
 
-pub fn tty_set_client_cb(_: ?*anyopaque, _: *T.Client) i32 {
-    return 0;
+/// Port of tmux tty_set_client_cb() (#ifdef ENABLE_SIXEL).
+/// Per-client setup callback for multi-client sixel rendering.
+pub fn tty_set_client_cb(ttyctx: *T.TtyCtx, c: *T.Client) i32 {
+    const wp: *T.WindowPane = @ptrCast(@alignCast(ttyctx.arg orelse return 0));
+
+    const s = c.session orelse return 0;
+    const curw = s.curw orelse return 0;
+    if (curw.window != wp.window) return 0;
+    if (wp.layout_cell == null) return 0;
+
+    ttyctx.bigger = tty_window_offset(&c.tty, &ttyctx.wox, &ttyctx.woy,
+        &ttyctx.wsx, &ttyctx.wsy) != 0;
+
+    ttyctx.yoff = wp.yoff;
+    ttyctx.ryoff = wp.yoff;
+    if (status_mod.status_at_line(c) == 0)
+        ttyctx.yoff += resize_mod.status_line_size(c);
+
+    return 1;
 }
 
+/// Port of tmux tty_client_ready().
+pub fn tty_client_ready(ctx: *const T.TtyCtx, c: *T.Client) i32 {
+    if (c.session == null) return 0;
+    // Zmux does not carry a per-client TtyTerm pointer on the Tty struct;
+    // skip the term != NULL guard (the client would not have been attached
+    // without a term).
+    if ((c.flags & T.CLIENT_SUSPENDED) != 0) return 0;
 
-pub fn tty_client_ready(_: *const T.TtyCtx, _: *T.Client) i32 {
-    return 0;
+    // If invisible panes are allowed (passthrough), skip redraw/freeze checks.
+    if (ctx.allow_invisible_panes) return 1;
+
+    if ((c.flags & T.CLIENT_REDRAWWINDOW) != 0) return 0;
+    if ((c.tty.flags & @as(i32, @intCast(T.TTY_FREEZE))) != 0) return 0;
+    return 1;
 }
 
 
@@ -2510,9 +2687,40 @@ pub fn tty_cmd_rawstring(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     tty_invalidate(tty);
 }
 
+/// Port of tmux tty_cmd_sixelimage() (#ifdef ENABLE_SIXEL).
+/// Renders a sixel image stored in ctx.ptr at position (ctx.ocx, ctx.ocy).
+/// TODO: replace ctx.ptr/ctx.num fallback text with sixel_scale/sixel_print
+/// output once image-sixel.zig is ported.
 pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
-    _ = tty;
-    _ = ctx;
+    const has_sixel = (tty.client.term_features & tty_features.TERM_SIXEL) != 0 or
+        tty_term.hasCapability(tty, "Sxl");
+    const has_pixel = tty.xpixel != 0 and tty.ypixel != 0;
+    const fallback = !has_sixel or !has_pixel;
+
+    // Use ctx.sx/sy as dimension bounds; exact cell size requires the sixel
+    // runtime which is not yet ported.
+    var i: u32 = 0;
+    var j: u32 = 0;
+    var x: u32 = 0;
+    var y: u32 = 0;
+    var rx: u32 = 0;
+    var ry: u32 = 0;
+    if (tty_clamp_area(tty, ctx, ctx.ocx, ctx.ocy, ctx.sx, ctx.sy,
+            &i, &j, &x, &y, &rx, &ry) == 0)
+        return;
+
+    log.log_debug("tty_cmd_sixelimage: fallback={}, clamp ({d},{d})-({d},{d})",
+        .{ fallback, i, j, rx, ry });
+
+    // Both paths currently emit the pre-rendered fallback text from ctx.ptr.
+    // The sixel-capable path will call sixel_scale/sixel_print here instead.
+    const data = ctx.ptr orelse return;
+    tty_region_off(tty);
+    tty_margin_off(tty);
+    tty_cursor(tty, x, y);
+    tty.flags |= @as(i32, @intCast(T.TTY_NOBLOCK));
+    tty_add(tty, data, ctx.num);
+    tty_invalidate(tty);
 }
 
 pub fn tty_cmd_syncstart(tty: *T.Tty, ctx: *const T.TtyCtx) void {

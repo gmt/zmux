@@ -880,6 +880,7 @@ pub const PANE_UNSEENCHANGES: u32 = 0x4000;
 
 pub const WindowMode = struct {
     name: []const u8 = "",
+    update: ?*const fn (*WindowModeEntry) void = null,
     key: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, key_code, ?*const MouseEvent) void = null,
     key_table: ?*const fn (*WindowModeEntry) []const u8 = null,
     command: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, *const anyopaque, ?*const MouseEvent) void = null,
@@ -1409,6 +1410,7 @@ pub const Client = struct {
     id: u32 = 0,
     name: ?[]const u8 = null,
     peer: ?*ZmuxPeer = null,
+    references: u32 = 1,
 
     creation_time: i64 = 0,
     activity_time: i64 = 0,

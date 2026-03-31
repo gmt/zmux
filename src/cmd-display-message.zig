@@ -26,8 +26,8 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const format_mod = @import("format.zig");
-const pane_empty_input = @import("pane-empty-input.zig");
 const server_print = @import("server-print.zig");
+const win = @import("window.zig");
 const status_runtime = @import("status-runtime.zig");
 
 const DISPLAY_MESSAGE_TEMPLATE =
@@ -73,7 +73,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (args.has('I')) {
         const wp = target.wp orelse return .normal;
-        return pane_empty_input.start(item, wp);
+        return win.window_pane_start_input(wp, item);
     }
 
     if (args.has('F') and args.count() != 0) {

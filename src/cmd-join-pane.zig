@@ -298,7 +298,11 @@ test "join-pane -b inserts before the destination and -d preserves current pane"
     const src_wp = src_wl.window.active.?;
     var dst_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
     const dst_wl = spawn.spawn_window(&dst_ctx, &cause).?;
-    var dst_split_ctx: T.SpawnContext = .{ .s = s, .wl = dst_wl, .flags = T.SPAWN_EMPTY };
+    const dst_first = dst_wl.window.active.?;
+
+    // Split the layout so the second pane gets a proper layout cell.
+    const lc2 = layout_mod.layout_split_pane(dst_first, .topbottom, -1, 0).?;
+    var dst_split_ctx: T.SpawnContext = .{ .s = s, .wl = dst_wl, .lc = lc2, .flags = T.SPAWN_EMPTY };
     const dst_second = spawn.spawn_pane(&dst_split_ctx, &cause).?;
     _ = win.window_set_active_pane(dst_wl.window, dst_second, true);
 

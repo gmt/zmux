@@ -547,6 +547,7 @@ pub fn window_pane_destroy(wp: *T.WindowPane) void {
     wp.modes.deinit(xm.allocator);
     opts.options_free(wp.options);
     colour_mod.colour_palette_free(&wp.palette);
+    wp.screen.saved_grid = null; // prevent double-free with wp.base.grid
     screen_mod.screen_free(wp.screen);
     xm.allocator.destroy(wp.screen);
     screen_mod.screen_free(&wp.base);

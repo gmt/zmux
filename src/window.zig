@@ -532,6 +532,11 @@ pub fn window_forget_pane_history(w: *T.Window, wp: *T.WindowPane) void {
 }
 
 pub fn window_pane_destroy(wp: *T.WindowPane) void {
+    if (wp.ground_timer) |ev| {
+        _ = @import("c.zig").libevent.event_del(ev);
+        @import("c.zig").libevent.event_free(ev);
+        wp.ground_timer = null;
+    }
     pane_io.pane_io_stop(wp);
     pane_io.pane_pipe_close(wp);
     if (wp.pid > 0) {

@@ -107,7 +107,6 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "client_width", .func = resolve_client_width },
     .{ .name = "client_written", .func = resolve_client_written },
 
-    .{ .name = "command", .func = resolve_command },
     .{ .name = "command_alias", .func = resolve_command_alias },
     .{ .name = "command_name", .func = resolve_command_name },
     .{ .name = "command_usage", .func = resolve_command_usage },
@@ -741,10 +740,6 @@ fn resolve_message_number(alloc: std.mem.Allocator, ctx: *const FormatContext) ?
 
 fn resolve_message_time(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return std.fmt.allocPrint(alloc, "{d}", .{ctx.message_time orelse 0}) catch unreachable;
-}
-
-fn resolve_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    return resolve_hook_value(alloc, ctx, "command");
 }
 
 fn resolve_command_prompt(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

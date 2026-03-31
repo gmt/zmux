@@ -297,6 +297,7 @@ pub fn createWithClient(
 
     if (cl) |cc| {
         cf.peer = cc.peer;
+        cc.references += 1;
     }
 
     return cf;

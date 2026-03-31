@@ -259,7 +259,17 @@ fn dispatchControlNotifications(entry: *const NotifyEntry) void {
 /// the queue item is destroyed without being fired.
 fn freeNotifyEntry(entry: *NotifyEntry) void {
     if (entry.session) |s| sess.session_remove_ref(s, "notify_callback");
-    if (entry.window) |w| win_mod.window_remove_ref(w, "notify_callback");
+    if (entry.window) |w| {
+        // Guard against a dangling window pointer — in test environments a
+        // prior test may have freed a window without draining the notify queue.
+        // Since window_remove_ref removes the window from the global map before
+        // freeing, any live window is present in win_mod.windows by pointer.
+        var vit = win_mod.windows.valueIterator();
+        const valid = while (vit.next()) |wp| {
+            if (wp.* == w) break true;
+        } else false;
+        if (valid) win_mod.window_remove_ref(w, "notify_callback");
+    }
     if (entry.fs.s) |s| sess.session_remove_ref(s, "notify_callback");
     entry.deinit();
     xm.allocator.destroy(entry);

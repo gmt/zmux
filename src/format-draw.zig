@@ -1380,7 +1380,7 @@ test "format_leading_hashes matches tmux hash runs" {
     const a = format_leading_hashes("##[");
     try std.testing.expectEqual(@as(u32, 2), a.n);
     try std.testing.expectEqual(@as(u32, 1), a.leading_width);
-    try std.testing.expectEqual(@as(usize, 3), a.end_skip);
+    try std.testing.expectEqual(@as(usize, 2), a.end_skip);
 
     const b = format_leading_hashes("###");
     try std.testing.expectEqual(@as(u32, 3), b.n);

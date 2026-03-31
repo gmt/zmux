@@ -2,13 +2,14 @@
 
 Functional gaps where zmux does not yet match tmux behavior.
 
-## Pane Resize
+## ~~Pane Resize~~ (FIXED)
 
-- Terminal resize events update the zmux status bar width correctly
-  but panes do not resize. Vim stays at 80x24 when the terminal
-  grows. tmux propagates resize via server_client_check_resize →
-  recalculate_size → window_pane_resize → ioctl(TIOCSWINSZ).
-  One of those links is broken or fudged in zmux.
+- Fixed: `window_pane_resize` now queues `WindowPaneResize` entries
+  and calls `screen_resize` (un-stubbed to forward to
+  `screen_resize_cursor`). `layout_fix_panes` / `apply_panes_skip`
+  call `window_pane_resize` instead of direct assignment.
+  `server_client_check_pane_resize` → `window_pane_send_resize` →
+  TIOCSWINSZ chain was already ported — just never fed.
 
 ## SGR Attribute Rendering
 

@@ -294,7 +294,7 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     // Open PTY
     var master: i32 = -1;
     var slave: i32 = -1;
-    open_pty(&master, &slave, &wp.tty_name) catch {
+    open_pty(&master, &slave, &wp.tty_name, wp.sx, wp.sy, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL) catch {
         log.log_warn("open_pty failed", .{});
         return error.OpenPtyFailed;
     };
@@ -488,12 +488,21 @@ fn resolve_spawn_cwd(
     return resolved;
 }
 
-fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8) !void {
+fn open_pty(master: *i32, slave: *i32, tty_name: *[T.TTY_NAME_MAX]u8, sx: u32, sy: u32, xpixel: u32, ypixel: u32) !void {
     var m: c_int = undefined;
     var s_fd: c_int = undefined;
     var name_buf: [T.TTY_NAME_MAX]u8 = undefined;
 
-    if (openpty(&m, &s_fd, &name_buf, null, null) != 0)
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    const have_size = sx > 0 and sy > 0;
+    if (have_size) {
+        ws.ws_col = @intCast(sx);
+        ws.ws_row = @intCast(sy);
+        ws.ws_xpixel = @intCast(@min(@as(u32, xpixel) * sx, 0xFFFF));
+        ws.ws_ypixel = @intCast(@min(@as(u32, ypixel) * sy, 0xFFFF));
+    }
+
+    if (openpty(&m, &s_fd, &name_buf, null, if (have_size) &ws else null) != 0)
         return error.OpenPtyFailed;
 
     master.* = @intCast(m);

@@ -164,17 +164,16 @@ dynamic keys. Copy-mode variables are evaluated eagerly in
 
 ## Window Modes
 
-### window-customize (14 stubs)
+### window-customize
 
-- `draw`, `draw_key`, `draw_option` -- rendering customize items
-- `build_keys` -- building key-binding items
-- `destroy`, `free_callback` -- cleanup with command state
-- `set_command_callback`, `set_note_callback` -- prompt callbacks
-- `set_key`, `unset_key`, `reset_key` -- key-binding editing
-- `change_each`, `change_current_callback`,
-  `change_tagged_callback` -- bulk change operations
+Implemented: `draw`, `draw_key`, `draw_option`, `build_keys`,
+`destroy`, `free_callback`, `set_command_callback`,
+`set_note_callback`, `set_key`, `unset_key`, `reset_key`,
+`change_each`, `change_current_callback`, `change_tagged_callback`.
 
-Blocked on mode-tree `runCommand` and prompt infrastructure.
+Remaining: `screen_write_text` is a stub so draw preview panes
+produce no output; `cmdListToString` omits command arguments
+(requires `cmd_list_print` which is not yet ported).
 
 ### window-tree (8 stubs)
 

@@ -1073,6 +1073,19 @@ pub fn acsCapability(tty: *const T.Tty, ch: u8) ?[]const u8 {
     return null;
 }
 
+/// Return true when the tty's terminal looks VT100-like.
+/// Mirrors the detection criterion in tty_term_create: either the `xt`
+/// (xterm) capability flag is set, or the `clear` capability string starts
+/// with ESC [ (CSI), which is the classic VT100 indicator.
+pub fn isVt100Like(tty: *const T.Tty) bool {
+    // xt (xterm-compatible) flag: implies VT100-compatible escape sequences.
+    const xt = capabilityValue(tty.client, "xt");
+    if (xt != null) return true;
+    // Inspect the `clear` capability: VT100 clear begins with ESC [.
+    const clear = stringCapability(tty, "clear") orelse return false;
+    return clear.len >= 2 and clear[0] == '\x1b' and clear[1] == '[';
+}
+
 // ── Capability description (for show-messages) ────────────────────────────
 
 pub fn describeRecordedCapability(alloc: std.mem.Allocator, ordinal: usize, cap: []const u8) []u8 {

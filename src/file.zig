@@ -664,7 +664,7 @@ test "readResolvedPathAlloc reads stdin for reduced detached consumers" {
     var client = T.Client{
         .environ = &env,
         .tty = undefined,
-        .status = .{},
+        .status = .{ .screen = undefined },
     };
 
     switch (readResolvedPathAlloc(&client, "-")) {

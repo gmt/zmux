@@ -54,7 +54,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const bufdata = paste_mod.paste_buffer_data(pb.?, null);
     if (cmd.entry == &entry_show) {
         if (show_uses_control_output(client)) {
-            cmdq.cmdq_print_data(item, bufdata);
+            server_print.server_client_write_stream(client, 1, bufdata);
             return .normal;
         }
         if (show_needs_view_mode(client)) {
@@ -911,6 +911,8 @@ test "save-buffer reports bad file descriptor for dash on attached clients" {
 
 test "save-buffer reports client-side open errors from write-ready" {
     try requireStressTests();
+    init_options_for_tests();
+    defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
     file_mod.resetForTests();
     defer file_mod.resetForTests();

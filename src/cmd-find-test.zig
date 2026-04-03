@@ -24,9 +24,9 @@ const cmdq_mod = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
 const env_mod = @import("environ.zig");
 const cmd_find = @import("cmd-find.zig");
+const cmd_mod = @import("cmd.zig");
 
 test "cmd_find_target resolves current client state when target is omitted" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -76,7 +76,6 @@ test "cmd_find_target resolves current client state when target is omitted" {
 }
 
 test "cmd_find_target resolves session prefixes and patterns" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -127,7 +126,6 @@ test "cmd_find_target resolves session prefixes and patterns" {
 }
 
 test "cmd_find_target resolves window names, last window, and window-index targets" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -189,7 +187,6 @@ test "cmd_find_target resolves window names, last window, and window-index targe
 }
 
 test "cmd_find_target resolves explicit pane indexes within a window" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -226,7 +223,6 @@ test "cmd_find_target resolves explicit pane indexes within a window" {
 }
 
 test "cmd_find_target resolves last pane in the current window" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -273,7 +269,6 @@ test "cmd_find_target resolves last pane in the current window" {
 }
 
 test "cmd_find_target uses unattached inside-pane context to choose a session" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -334,7 +329,6 @@ test "cmd_find_target uses unattached inside-pane context to choose a session" {
 }
 
 test "cmd_find_target uses ZMUX_PANE for unattached clients without tty matches" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -384,7 +378,6 @@ test "cmd_find_target uses ZMUX_PANE for unattached clients without tty matches"
 }
 
 test "cmd_find_current_client prefers attached clients in the inside-pane session" {
-    const cmd_mod = @import("cmd.zig");
     const spawn = @import("spawn.zig");
 
     sess.session_init_globals(xm.allocator);
@@ -531,7 +524,6 @@ test "cmd_find_current_client prefers higher activity over client id" {
 }
 
 test "cmd_find_target prefers unattached session for shared window ids" {
-    const cmd_mod = @import("cmd.zig");
     const opts_mod = @import("options.zig");
     const spawn = @import("spawn.zig");
 
@@ -590,7 +582,6 @@ test "cmd_find_target prefers unattached session for shared window ids" {
 }
 
 test "cmd_find_target resolves {mouse} through the shared mouse runtime state" {
-    const cmd_mod = @import("cmd.zig");
     const opts_mod = @import("options.zig");
     const spawn = @import("spawn.zig");
 
@@ -643,4 +634,64 @@ test "cmd_find_target resolves {mouse} through the shared mouse runtime state" {
     try std.testing.expectEqual(s, target.s.?);
     try std.testing.expectEqual(wl, target.wl.?);
     try std.testing.expectEqual(wp, target.wp.?);
+}
+
+test "cmd_find_valid_state rejects incomplete find state" {
+    var fs: T.CmdFindState = .{};
+    try std.testing.expect(!cmd_find.cmd_find_valid_state(&fs));
+}
+
+test "cmd_find_target @ requires a client on the queue item" {
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .cmdlist = &list };
+    var target: T.CmdFindState = .{};
+    try std.testing.expectEqual(@as(i32, -1), cmd_find.cmd_find_target(&target, &item, "@", .pane, 0));
+}
+
+test "cmd_find_target {mouse} fails when the mouse event is invalid" {
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "mouse-invalid", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("mouse-invalid") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    s.curw = wl;
+
+    const query_env = env_mod.environ_create();
+    defer env_mod.environ_free(query_env);
+    var query_client = T.Client{
+        .environ = query_env,
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &query_client, .cmdlist = &list };
+    item.event.m = .{ .valid = false };
+
+    var target: T.CmdFindState = .{};
+    try std.testing.expectEqual(@as(i32, -1), cmd_find.cmd_find_target(&target, &item, "{mouse}", .pane, 0));
 }

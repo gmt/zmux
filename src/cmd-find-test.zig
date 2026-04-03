@@ -695,3 +695,65 @@ test "cmd_find_target {mouse} fails when the mouse event is invalid" {
     var target: T.CmdFindState = .{};
     try std.testing.expectEqual(@as(i32, -1), cmd_find.cmd_find_target(&target, &item, "{mouse}", .pane, 0));
 }
+
+test "cmd_find_valid_state false when session set but winlink missing" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "find-partial", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("find-partial") != null) sess.session_destroy(s, false, "test");
+
+    var fs: T.CmdFindState = .{ .s = s };
+    try std.testing.expect(!cmd_find.cmd_find_valid_state(&fs));
+}
+
+test "cmd_find_target rejects malformed session window index" {
+    const spawn = @import("spawn.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "find-bad-idx", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("find-bad-idx") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_window(&spawn_ctx, &cause).?;
+
+    const query_env = env_mod.environ_create();
+    defer env_mod.environ_free(query_env);
+    var query_client = T.Client{
+        .environ = query_env,
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .client = &query_client, .cmdlist = &list };
+
+    var target: T.CmdFindState = .{};
+    try std.testing.expectEqual(@as(i32, -1), cmd_find.cmd_find_target(&target, &item, "find-bad-idx:999", .pane, 0));
+}

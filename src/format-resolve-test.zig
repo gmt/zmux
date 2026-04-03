@@ -329,3 +329,7 @@ test "child_context_for_winlink sets window pane and loop_last_flag" {
     try std.testing.expectEqual(true, child.loop_last_flag.?);
     try std.testing.expectEqual(fmt.FormatType.window, child.format_type);
 }
+
+test "ctx_session returns null for empty FormatContext" {
+    try std.testing.expect(null == fmt_resolve.ctx_session(&FormatContext{}));
+}

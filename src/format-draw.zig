@@ -1474,3 +1474,10 @@ test "format_draw_ranges translates clipped list ranges" {
     try std.testing.expectEqual(@as(u32, 2), ranges.items[0].start);
     try std.testing.expectEqual(@as(u32, 4), ranges.items[0].end);
 }
+
+test "format_leading_hashes returns zeros without a hash prefix" {
+    const h = format_leading_hashes("plain");
+    try std.testing.expectEqual(@as(u32, 0), h.n);
+    try std.testing.expectEqual(@as(u32, 0), h.leading_width);
+    try std.testing.expectEqual(@as(usize, 0), h.end_skip);
+}

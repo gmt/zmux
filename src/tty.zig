@@ -3823,3 +3823,9 @@ test "expand_tparm_2 copies literal templates without tparm codes" {
     defer xm.allocator.free(result);
     try std.testing.expectEqualStrings("no-csi-here", result);
 }
+
+test "expand_tparm_1 ignores numeric argument for templates without tparm codes" {
+    const result = try expand_tparm_1("status", 999);
+    defer xm.allocator.free(result);
+    try std.testing.expectEqualStrings("status", result);
+}

@@ -563,6 +563,25 @@ fn server_newer_detached_session(s_loop: *T.Session, s_out: ?*T.Session) bool {
     return server_newer_session(s_loop, s_out);
 }
 
+test "server_redraw_client and server_status_client set client redraw flags" {
+    const env_mod = @import("environ.zig");
+
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    server_redraw_client(&cl);
+    try std.testing.expect(cl.flags & T.CLIENT_REDRAW != 0);
+    cl.flags = 0;
+    server_status_client(&cl);
+    try std.testing.expect(cl.flags & T.CLIENT_REDRAWSTATUS != 0);
+}
+
 test "server_destroy_pane removes non-last pane and reassigns active pane" {
     const opts_mod = @import("options.zig");
 

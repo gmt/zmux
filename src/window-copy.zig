@@ -45,7 +45,7 @@ pub const JumpType = enum {
     to_backward,
 };
 
-const CursorDrag = enum {
+pub const CursorDrag = enum {
     none,
     endsel,
     sel,

@@ -196,6 +196,12 @@ fn expand_default_path(path: []const u8) ?[]u8 {
     return xm.xstrdup(path);
 }
 
+test "expand_default_path duplicates plain absolute paths" {
+    const p = expand_default_path("/tmp/zmux-plain-cfg-path").?;
+    defer xm.allocator.free(p);
+    try std.testing.expectEqualStrings("/tmp/zmux-plain-cfg-path", p);
+}
+
 test "cfg default path expansion handles home and xdg" {
     cfg_reset_files();
     defer cfg_reset_files();

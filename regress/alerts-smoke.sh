@@ -19,6 +19,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
 smoke_init alerts
+smoke_use_helper_shell activity-bell || exit $?
 
 window_flags() {
     smoke_cmd display-message -p -t alerts:0 '#{window_flags}'
@@ -47,7 +48,7 @@ session_has_flag() {
 smoke_cmd new-session -d -s alerts || exit 1
 smoke_cmd set-window-option -t alerts:0 monitor-activity on || exit 1
 
-smoke_cmd send-keys -t alerts:0.0 "printf activity" Enter || exit 1
+smoke_cmd send-keys -t alerts:0.0 "activity" Enter || exit 1
 smoke_wait_for 5 has_flag '#' || {
     echo "activity alert flag did not appear: $(window_flags)"
     exit 1
@@ -57,7 +58,7 @@ smoke_wait_for 5 session_has_flag '#' || {
     exit 1
 }
 
-smoke_cmd send-keys -t alerts:0.0 "printf '\\a'" Enter || exit 1
+smoke_cmd send-keys -t alerts:0.0 "bell" Enter || exit 1
 smoke_wait_for 5 has_flag '!' || {
     echo "bell alert flag did not appear: $(window_flags)"
     exit 1

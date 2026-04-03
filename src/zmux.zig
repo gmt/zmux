@@ -394,4 +394,5 @@ test {
     _ = @import("zmux-protocol-test.zig");
     _ = @import("clipboard.zig");
     _ = @import("pane-empty-input.zig");
+    _ = @import("proc-test.zig");
 }

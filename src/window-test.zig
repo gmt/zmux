@@ -586,3 +586,59 @@ test "window_detach_pane collapses the removed gap back into the remaining layou
     try std.testing.expectEqual(@as(u32, 80), first.sx);
     try std.testing.expectEqual(@as(u32, 24), first.sy);
 }
+
+fn destroyTestWindow(w: *T.Window) void {
+    while (w.panes.items.len > 0) {
+        const wp = w.panes.items[w.panes.items.len - 1];
+        win.window_remove_pane(w, wp);
+    }
+    w.panes.deinit(xm.allocator);
+    w.last_panes.deinit(xm.allocator);
+    opts.options_free(w.options);
+    xm.allocator.free(w.name);
+    _ = win.windows.remove(w.id);
+    xm.allocator.destroy(w);
+}
+
+test "window_cmp orders windows by id" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const wa = win.window_create(10, 10, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wb = win.window_create(10, 10, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(wa);
+    defer destroyTestWindow(wb);
+
+    if (wa.id < wb.id) {
+        try std.testing.expectEqual(std.math.Order.lt, win.window_cmp(wa, wb));
+    } else {
+        try std.testing.expectEqual(std.math.Order.gt, win.window_cmp(wa, wb));
+    }
+}
+
+test "window_count_panes window_has_pane and directional pane neighbors after horizontal split" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const left = win.window_add_pane(w, null, 40, 24);
+    const right = win.window_add_pane(w, null, 40, 24);
+    const plan = try win.window_plan_split(left, .leftright, 40, 0);
+    win.window_apply_split_plan(left, right, plan);
+
+    try std.testing.expectEqual(std.math.Order.lt, win.window_pane_cmp(left, right));
+    try std.testing.expectEqual(@as(usize, 2), win.window_count_panes(w));
+    try std.testing.expect(win.window_has_pane(w, left));
+    try std.testing.expect(win.window_has_pane(w, right));
+    try std.testing.expect(win.window_pane_find_right(left).? == right);
+    try std.testing.expect(win.window_pane_find_left(right).? == left);
+    try std.testing.expectEqual(@as(usize, 0), win.window_pane_index(w, left).?);
+    try std.testing.expectEqual(@as(usize, 1), win.window_pane_index(w, right).?);
+    try std.testing.expect(win.window_pane_at_index(w, 1).? == right);
+}

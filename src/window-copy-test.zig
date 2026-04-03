@@ -1343,3 +1343,411 @@ test "window-copy set-mark and jump-to-mark swap cursor with saved mark" {
     try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_x);
     try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).mark_y);
 }
+
+test "window-copy history-top and history-bottom bound absolute cursor row" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(6, 6, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 3, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 6, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 3, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 90,
+        .name = xm.xstrdup("copy-hist-src"),
+        .sx = 6,
+        .sy = 6,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 91,
+        .name = xm.xstrdup("copy-hist-tgt"),
+        .sx = 6,
+        .sy = 3,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 92,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 6,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 5 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 93,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 3,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 2 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    var r: u32 = 0;
+    while (r < 6) : (r += 1) {
+        setGridLineText(source.base.grid, r, "row");
+        source.base.grid.linedata[r].cellused = 3;
+    }
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "history-bottom");
+    try std.testing.expectEqual(@as(u32, 5), wc.absoluteCursorRow(wme));
+
+    try runCopyModeTestCommand(wme, "history-top");
+    try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
+}
+
+test "window-copy start-of-line end-of-line and back-to-indentation" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(12, 2, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 2, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 100,
+        .name = xm.xstrdup("copy-line-edges"),
+        .sx = 12,
+        .sy = 2,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 101,
+        .window = &window_,
+        .options = undefined,
+        .sx = 12,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 102,
+        .window = &window_,
+        .options = undefined,
+        .sx = 12,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "hello world");
+    source.base.grid.linedata[0].cellused = 11;
+    setGridLineText(source.base.grid, 1, "    body");
+    source.base.grid.linedata[1].cellused = 8;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    wc.modeData(wme).cx = 5;
+    try runCopyModeTestCommand(wme, "end-of-line");
+    try std.testing.expectEqual(@as(u32, 10), wc.modeData(wme).cx);
+
+    try runCopyModeTestCommand(wme, "start-of-line");
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
+
+    try runCopyModeTestCommand(wme, "cursor-down");
+    wc.modeData(wme).cx = 0;
+    try runCopyModeTestCommand(wme, "back-to-indentation");
+    try std.testing.expectEqual(@as(u32, 4), wc.modeData(wme).cx);
+}
+
+test "window-copy begin-selection updates end with cursor motion clear-selection ends drag" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 110,
+        .name = xm.xstrdup("copy-sel"),
+        .sx = 8,
+        .sy = 1,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 111,
+        .window = &window_,
+        .options = undefined,
+        .sx = 8,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 112,
+        .window = &window_,
+        .options = undefined,
+        .sx = 8,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "abcdefgh");
+    source.base.grid.linedata[0].cellused = 8;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "begin-selection");
+    try std.testing.expectEqual(&wc.window_copy_mode, wme.mode);
+    try std.testing.expectEqual(wc.CursorDrag.endsel, wc.modeData(wme).cursordrag);
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).selx);
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).endselx);
+
+    try runCopyModeTestCommand(wme, "cursor-right");
+    try runCopyModeTestCommand(wme, "cursor-right");
+    _ = wc.window_copy_update_selection(wme, false, false);
+    try std.testing.expect(wc.modeData(wme).endselx != wc.modeData(wme).selx);
+
+    try runCopyModeTestCommand(wme, "clear-selection");
+    try std.testing.expectEqual(wc.CursorDrag.none, wc.modeData(wme).cursordrag);
+}
+
+test "window-copy rectangle-toggle flips rectflag" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(4, 2, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(4, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(4, 2, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(4, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 120,
+        .name = xm.xstrdup("copy-rect"),
+        .sx = 4,
+        .sy = 2,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 121,
+        .window = &window_,
+        .options = undefined,
+        .sx = 4,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 122,
+        .window = &window_,
+        .options = undefined,
+        .sx = 4,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "abcd");
+    setGridLineText(source.base.grid, 1, "abcd");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try std.testing.expect(!wc.modeData(wme).rectflag);
+    try runCopyModeTestCommand(wme, "rectangle-toggle");
+    try std.testing.expect(wc.modeData(wme).rectflag);
+    try runCopyModeTestCommand(wme, "rectangle-off");
+    try std.testing.expect(!wc.modeData(wme).rectflag);
+    try runCopyModeTestCommand(wme, "rectangle-on");
+    try std.testing.expect(wc.modeData(wme).rectflag);
+}
+
+test "window-copy next-paragraph and previous-paragraph cross blank lines" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(6, 5, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 3, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 5, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 3, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 130,
+        .name = xm.xstrdup("copy-para-src"),
+        .sx = 6,
+        .sy = 5,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 131,
+        .name = xm.xstrdup("copy-para-tgt"),
+        .sx = 6,
+        .sy = 3,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 132,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 5,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 4 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 133,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 6,
+        .sy = 3,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 2 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "block1");
+    source.base.grid.linedata[0].cellused = 5;
+    source.base.grid.linedata[1].cellused = 0;
+    setGridLineText(source.base.grid, 2, "blk2");
+    source.base.grid.linedata[2].cellused = 4;
+    source.base.grid.linedata[3].cellused = 0;
+    source.base.grid.linedata[4].cellused = 0;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "next-paragraph");
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+
+    try runCopyModeTestCommand(wme, "next-paragraph");
+    try std.testing.expectEqual(@as(u32, 3), wc.absoluteCursorRow(wme));
+
+    try runCopyModeTestCommand(wme, "previous-paragraph");
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+
+    try runCopyModeTestCommand(wme, "previous-paragraph");
+    try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
+}

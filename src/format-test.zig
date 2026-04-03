@@ -1347,6 +1347,50 @@ test "format_expand resolves tmux-style client metadata keys" {
     try std.testing.expectEqualStrings(expected, expanded);
 }
 
+test "format_expand resolves client_control_mode prefix readonly utf aliases termname and written" {
+    const env_mod = @import("environ.zig");
+
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session_options = T.Options.init(xm.allocator, null);
+    defer session_options.deinit();
+
+    var session = T.Session{
+        .id = 88,
+        .name = xm.xstrdup("fmt-client-extra"),
+        .cwd = "/",
+        .options = &session_options,
+        .environ = &session_env,
+    };
+    defer xm.allocator.free(session.name);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL | T.CLIENT_READONLY | T.CLIENT_UTF8,
+        .session = &session,
+        .term_name = xm.xstrdup("ansi"),
+        .key_table_name = xm.xstrdup("prefix"),
+    };
+    defer {
+        env_mod.environ_free(client.environ);
+        xm.allocator.free(client.term_name.?);
+        xm.allocator.free(client.key_table_name.?);
+    }
+    client.tty = .{ .client = &client };
+
+    const ctx = FormatContext{ .client = &client };
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{client_control_mode}:#{client_readonly}:#{client_prefix}:#{client_key_table}:#{client_utf8}:#{client_utf}:#{client_session_name}:#{client_termname}:#{client_written}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    try std.testing.expectEqualStrings("1:1:1:prefix:1:1:fmt-client-extra:ansi:0", expanded);
+}
+
 test "format_expand multi-pair conditional #{?c1,v1,c2,v2,...}" {
     var s = T.Session{
         .id = 1,

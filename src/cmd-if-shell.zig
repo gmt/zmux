@@ -375,6 +375,16 @@ test "if-shell waits for a shell failure and then queues the else command" {
     try std.testing.expectEqualStrings("shell-else", setup.window.name);
 }
 
+test "if-shell parse separates shell command and then command" {
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "if-shell", "/bin/true", "select-window -t:.0" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    const args = cmd_mod.cmd_get_args(cmd);
+    try std.testing.expectEqualStrings("/bin/true", args.value_at(0).?);
+    try std.testing.expectEqualStrings("select-window -t:.0", args.value_at(1).?);
+}
+
 test "if-shell -b leaves the caller queue running and appends the branch later" {
     const old_base = installEventBase();
     defer restoreEventBase(old_base);

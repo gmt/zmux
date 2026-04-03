@@ -386,3 +386,11 @@ test "wait-for flush resumes queued waiters and lockers" {
     try std.testing.expectEqual(@as(u32, 1), callbacks.locker_after);
     try std.testing.expectEqual(@as(usize, 0), wait_channels.items.len);
 }
+
+test "wait-for blocking wait without client returns error" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    defer cmd_wait_for_flush();
+
+    try std.testing.expectEqual(T.CmdRetval.@"error", try runDirect(&.{ "wait-for", "no-client-channel" }, null));
+}

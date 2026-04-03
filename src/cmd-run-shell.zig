@@ -914,6 +914,16 @@ test "run-shell -b without a client falls back to the best session pane" {
     try std.testing.expectEqualStrings("best-pane", line);
 }
 
+test "run-shell parse captures shell command argument" {
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "run-shell", "/bin/true" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    try std.testing.expectEqualStrings("run-shell", cmd.entry.name);
+    const args = cmd_mod.cmd_get_args(cmd);
+    try std.testing.expectEqualStrings("/bin/true", args.value_at(0).?);
+}
+
 test "run-shell does not truncate large target-pane output" {
     try requireStressTests();
     const old_base = installEventBase();

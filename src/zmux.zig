@@ -51,6 +51,7 @@ pub const fuzz = struct {
     pub const session = @import("session.zig");
     pub const options = @import("options.zig");
     pub const environ = @import("environ.zig");
+    pub const cmd = @import("cmd.zig");
 };
 
 // ── Usage ────────────────────────────────────────────────────────────────

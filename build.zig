@@ -215,7 +215,7 @@ pub fn build(b: *std.Build) void {
         zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/explicit_bzero.c"), .flags = common_cflags });
         zmux_mod.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
 
-        const fuzz_exe = b.addExecutable(.{
+        const fuzz_input = b.addExecutable(.{
             .name = "zmux-input-fuzzer",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("fuzz/input-fuzzer.zig"),
@@ -226,14 +226,36 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        fuzz_exe.linkLibC();
-        fuzz_exe.linkSystemLibrary("event_core");
-        fuzz_exe.linkSystemLibrary("ncursesw");
-        b.installArtifact(fuzz_exe);
-        b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)").dependOn(&fuzz_exe.step);
+        fuzz_input.linkLibC();
+        fuzz_input.linkSystemLibrary("event_core");
+        fuzz_input.linkSystemLibrary("ncursesw");
+        b.installArtifact(fuzz_input);
+
+        const fuzz_cmd_preprocess = b.addExecutable(.{
+            .name = "zmux-cmd-preprocess-fuzzer",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("fuzz/cmd-preprocess-fuzzer.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zmux", .module = zmux_mod },
+                },
+            }),
+        });
+        fuzz_cmd_preprocess.linkLibC();
+        fuzz_cmd_preprocess.linkSystemLibrary("event_core");
+        fuzz_cmd_preprocess.linkSystemLibrary("ncursesw");
+        b.installArtifact(fuzz_cmd_preprocess);
+
+        const fuzz_step = b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)");
+        fuzz_step.dependOn(&fuzz_input.step);
+        fuzz_step.dependOn(&fuzz_cmd_preprocess.step);
 
         const fuzz_smoke = b.step("fuzz-smoke", "Stdin-replay seeds in fuzz/corpus/ (requires install + -Dfuzzing=true)");
-        const fuzz_smoke_cmd = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-input-fuzzer" });
+        const fuzz_smoke_input = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-input-fuzzer" });
+        fuzz_smoke_input.step.dependOn(b.getInstallStep());
+        fuzz_smoke.dependOn(&fuzz_smoke_input.step);
+        const fuzz_smoke_cmd = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-cmd-preprocess-fuzzer" });
         fuzz_smoke_cmd.step.dependOn(b.getInstallStep());
         fuzz_smoke.dependOn(&fuzz_smoke_cmd.step);
     }

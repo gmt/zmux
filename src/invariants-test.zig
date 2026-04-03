@@ -13,6 +13,8 @@
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 //! Lightweight cross-module sanity checks (types, static tables).
+//! Platform glue in `os/linux.zig` and `c.zig` stays under smoke/regress;
+//! unit tests there are deferred unless pure helpers are split out.
 
 const std = @import("std");
 const T = @import("types.zig");

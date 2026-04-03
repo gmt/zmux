@@ -1048,3 +1048,191 @@ test "build_client_draw_payload can redraw only dirty panes without clearing the
     try std.testing.expect(std.mem.indexOf(u8, dirty, "R1") != null);
     try std.testing.expect(right.flags & T.PANE_REDRAW == 0);
 }
+
+test "server_client_add_client_window deduplicates entries for the same window id" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+    };
+    defer {
+        env_mod.environ_free(cl.environ);
+        cl.client_windows.deinit(xm.allocator);
+    }
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expect(sc.server_client_get_client_window(&cl, 42) == null);
+
+    const a = sc.server_client_add_client_window(&cl, 42);
+    const b = sc.server_client_add_client_window(&cl, 42);
+    try std.testing.expect(a == b);
+    try std.testing.expectEqual(@as(usize, 1), cl.client_windows.items.len);
+    try std.testing.expect(sc.server_client_get_client_window(&cl, 42).? == a);
+}
+
+test "server_client_get_pane respects active pane override when CLIENT_ACTIVEPANE is set" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-client-pane-ov", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        if (sess.session_find("server-client-pane-ov") != null) sess.session_destroy(s, false, "test");
+        win_mod.window_remove_ref(w, "test");
+    }
+
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    const p1 = win_mod.window_add_pane(w, null, 80, 24);
+    const p2 = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = p1;
+    s.curw = wl;
+
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+        .flags = 0,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expect(sc.server_client_get_pane(&cl) == p1);
+
+    cl.flags |= T.CLIENT_ACTIVEPANE;
+    sc.server_client_set_pane(&cl, p2);
+    try std.testing.expect(sc.server_client_get_pane(&cl) == p2);
+}
+
+test "server_client_set_flags sets read-only active-pane and ignore-size bits" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    sc.server_client_set_flags(&cl, "read-only,active-pane");
+    try std.testing.expect(cl.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(cl.flags & T.CLIENT_ACTIVEPANE != 0);
+
+    sc.server_client_set_flags(&cl, "ignore-size");
+    try std.testing.expect(cl.flags & T.CLIENT_IGNORESIZE != 0);
+    try std.testing.expect(cl.flags & T.CLIENT_READONLY != 0);
+    try std.testing.expect(cl.flags & T.CLIENT_ACTIVEPANE != 0);
+}
+
+test "server_client_get_cwd prefers detached client cwd then session cwd" {
+    const tmp_cwd = try xm.allocator.dupe(u8, "/tmp/zmux-sc-cwd-test");
+    defer xm.allocator.free(tmp_cwd);
+
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+        .cwd = tmp_cwd,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expectEqualStrings("/tmp/zmux-sc-cwd-test", sc.server_client_get_cwd(&cl, null));
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var so = T.Options.init(xm.allocator, null);
+    defer so.deinit();
+    var session = T.Session{
+        .id = 9,
+        .name = @constCast("cwd-test"),
+        .cwd = "/session/cwd",
+        .options = &so,
+        .environ = &env,
+    };
+    cl.session = &session;
+    cl.cwd = null;
+    try std.testing.expectEqualStrings("/session/cwd", sc.server_client_get_cwd(&cl, null));
+}
+
+test "server_client_ranges_is_empty and ensure_ranges track allocation" {
+    var r: sc.VisibleRanges = .{};
+    defer if (r.ranges) |slice| xm.allocator.free(slice);
+
+    try std.testing.expect(sc.server_client_ranges_is_empty(&r));
+
+    sc.server_client_ensure_ranges(&r, 4);
+    try std.testing.expectEqual(@as(u32, 4), r.size);
+    try std.testing.expect(r.ranges != null);
+
+    r.used = 1;
+    r.ranges.?[0] = .{ .px = 0, .nx = 0 };
+    try std.testing.expect(sc.server_client_ranges_is_empty(&r));
+
+    r.ranges.?[0].nx = 3;
+    try std.testing.expect(!sc.server_client_ranges_is_empty(&r));
+}
+
+test "server_client_window_cmp orders by window id" {
+    const a = T.ClientWindow{ .window = 1, .pane = null };
+    const b = T.ClientWindow{ .window = 2, .pane = null };
+    try std.testing.expectEqual(@as(i32, -1), sc.server_client_window_cmp(&a, &b));
+    try std.testing.expectEqual(@as(i32, 1), sc.server_client_window_cmp(&b, &a));
+    try std.testing.expectEqual(@as(i32, 0), sc.server_client_window_cmp(&a, &a));
+}
+
+test "server_client_reset_state hides tty cursor while a client message is shown" {
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+    };
+    defer {
+        env_mod.environ_free(cl.environ);
+        if (cl.message_string) |m| xm.allocator.free(m);
+    }
+    cl.tty = .{ .client = &cl, .flags = 0 };
+
+    cl.message_string = xm.xstrdup("status message");
+    sc.server_client_reset_state(&cl);
+    try std.testing.expect(cl.tty.flags & T.TTY_NOCURSOR != 0);
+
+    xm.allocator.free(cl.message_string.?);
+    cl.message_string = null;
+    sc.server_client_reset_state(&cl);
+    try std.testing.expect(cl.tty.flags & T.TTY_NOCURSOR == 0);
+}
+
+test "server_client_set_key_table replaces the stored table name" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .key_table_name = null,
+    };
+    defer {
+        env_mod.environ_free(cl.environ);
+        if (cl.key_table_name) |k| xm.allocator.free(k);
+    }
+    cl.tty = .{ .client = &cl };
+
+    sc.server_client_set_key_table(&cl, "vi-edit");
+    try std.testing.expectEqualStrings("vi-edit", cl.key_table_name.?);
+
+    sc.server_client_set_key_table(&cl, null);
+    try std.testing.expect(cl.key_table_name == null);
+}

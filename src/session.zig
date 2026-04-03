@@ -954,6 +954,16 @@ test "session_check_name sanitizes separators and escapes controls" {
     try std.testing.expectEqualStrings("bad_name_\\n", checked);
 }
 
+test "session_check_name returns null for empty input" {
+    try std.testing.expect(session_check_name("") == null);
+}
+
+test "session_check_name leaves plain ascii unchanged" {
+    const checked = session_check_name("plain-session") orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(checked);
+    try std.testing.expectEqualStrings("plain-session", checked);
+}
+
 test "session_next_session and session_previous_session wrap in name order" {
     const cmdq = @import("cmd-queue.zig");
     const opts_mod = @import("options.zig");

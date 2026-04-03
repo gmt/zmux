@@ -1505,6 +1505,11 @@ test "client_send_identify ends with identify_done after capability stream" {
         client_flags = 0;
     }
 
+    const fl_r = std.c.fcntl(pair[1], std.posix.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(fl_r >= 0);
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(pair[1], std.posix.F.SETFL, fl_r | O_NONBLOCK);
+
     var reader: c.imsg.imsgbuf = undefined;
     try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
     defer {
@@ -1519,14 +1524,18 @@ test "client_send_identify ends with identify_done after capability stream" {
     var last_type: u32 = 0;
     while (true) {
         const nr = c.imsg.imsgbuf_read(&reader);
-        if (nr <= 0) break;
+        if (nr < 0) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.AGAIN)) break;
+            break;
+        }
+        if (nr == 0) break;
         var im: c.imsg.imsg = undefined;
         if (c.imsg.imsg_get(&reader, &im) <= 0) break;
-        defer c.imsg.imsg_free(&im);
         const ty = c.imsg.imsg_get_type(&im);
         if (count == 0) first_type = ty;
         last_type = ty;
         count += 1;
+        c.imsg.imsg_free(&im);
     }
 
     try std.testing.expect(count >= 4);

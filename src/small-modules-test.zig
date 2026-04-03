@@ -19,6 +19,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const env_mod = @import("environ.zig");
 const file_path = @import("file-path.zig");
+const file_mod = @import("file.zig");
 const client_registry = @import("client-registry.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const proc_mod = @import("proc.zig");
@@ -190,4 +191,22 @@ test "cmd_format filter returns null when format expansion is incomplete" {
     const ctx = cmd_format.target_context(&target, null);
 
     try std.testing.expect(cmd_format.filter(&item, "#{window_name}", &ctx) == null);
+}
+
+test "shouldUseRemotePathIO is true only for detached clients with a peer" {
+    var peer: T.ZmuxPeer = undefined;
+    var cl: T.Client = .{
+        .peer = &peer,
+        .flags = 0,
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+    try std.testing.expect(file_mod.shouldUseRemotePathIO(&cl));
+
+    cl.flags = T.CLIENT_ATTACHED;
+    try std.testing.expect(!file_mod.shouldUseRemotePathIO(&cl));
+
+    try std.testing.expect(!file_mod.shouldUseRemotePathIO(null));
 }

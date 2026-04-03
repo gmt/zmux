@@ -1813,3 +1813,9 @@ pub const ScreenWriteCtx = struct {
     init_ctx_cb: ?ScreenWriteInitCtxCb = null,
     arg: ?*anyopaque = null,
 };
+
+test "grid_default_cell uses default palette indices" {
+    try std.testing.expectEqual(@as(i32, 8), grid_default_cell.fg);
+    try std.testing.expectEqual(@as(i32, 8), grid_default_cell.bg);
+    try std.testing.expectEqual(@as(i32, 8), grid_default_cell.us);
+}

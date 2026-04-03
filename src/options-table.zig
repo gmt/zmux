@@ -518,3 +518,13 @@ test "tty compatibility options keep tmux metadata" {
     try std.testing.expect(!xterm_keys.scope.pane);
     try std.testing.expectEqual(@as(i64, 1), xterm_keys.default_num);
 }
+
+test "options_table entry names are non-empty with at least one scope" {
+    const std = @import("std");
+
+    for (options_table) |entry| {
+        try std.testing.expect(entry.name.len > 0);
+        const sc = entry.scope;
+        try std.testing.expect(sc.server or sc.session or sc.window or sc.pane);
+    }
+}

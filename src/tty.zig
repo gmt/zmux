@@ -1930,8 +1930,9 @@ fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
                 for (da_params[0..n_params]) |param| {
                     switch (param) {
                         4 => tty_features.tty_add_features(&cl.term_features, "sixel", ","),
-                        69 => tty_features.tty_add_features(&cl.term_features, "margins", ","),
+                        21 => tty_features.tty_add_features(&cl.term_features, "margins", ","),
                         28 => tty_features.tty_add_features(&cl.term_features, "rectfill", ","),
+                        52 => tty_features.tty_add_features(&cl.term_features, "clipboard", ","),
                         else => {},
                     }
                 }
@@ -1959,6 +1960,8 @@ fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
                     const version = da2_params[1];
                     switch (term_type) {
                         77 => tty_features.defaultFeatures(&cl.term_features, "mintty", version),
+                        84 => tty_features.defaultFeatures(&cl.term_features, "tmux", version),
+                        85 => tty_features.defaultFeatures(&cl.term_features, "rxvt-unicode", version),
                         // tmux identifies itself in DA2
                         else => {},
                     }
@@ -1983,12 +1986,16 @@ fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
                 // Parse terminal identity from XDA string.
                 const xda_str = std.mem.sliceTo(&xda_tmp, 0);
                 if (xda_str.len > 0) {
-                    // Match known terminal names.
-                    inline for (.{ "iTerm2", "foot", "tmux", "mintty", "XTerm" }) |name| {
-                        if (std.mem.indexOf(u8, xda_str, name) != null) {
-                            tty_features.defaultFeatures(&cl.term_features, name, 0);
-                        }
-                    }
+                    if (std.mem.startsWith(u8, xda_str, "iTerm2 "))
+                        tty_features.defaultFeatures(&cl.term_features, "iTerm2", 0)
+                    else if (std.mem.startsWith(u8, xda_str, "tmux "))
+                        tty_features.defaultFeatures(&cl.term_features, "tmux", 0)
+                    else if (std.mem.startsWith(u8, xda_str, "XTerm("))
+                        tty_features.defaultFeatures(&cl.term_features, "XTerm", 0)
+                    else if (std.mem.startsWith(u8, xda_str, "mintty "))
+                        tty_features.defaultFeatures(&cl.term_features, "mintty", 0)
+                    else if (std.mem.startsWith(u8, xda_str, "foot("))
+                        tty_features.defaultFeatures(&cl.term_features, "foot", 0);
                 }
                 tty_update_features(tty);
                 drainInBuf(tty, size);
@@ -3503,6 +3510,32 @@ test "tty_clipboard_query emits the recorded Ms capability query" {
 }
 
 fn test_peer_dispatch(_: ?*c_zig.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+test "tty_keys_next maps tmux DA1 feature codes" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    tty_init(&cl.tty, &cl);
+    defer cl.tty.in_buf.deinit(xm.allocator);
+
+    try cl.tty.in_buf.appendSlice(xm.allocator, "\x1b[?62;4;21;28;52c");
+
+    try std.testing.expect(tty_keys_next(&cl.tty));
+    try std.testing.expectEqual(@as(usize, 0), cl.tty.in_buf.items.len);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_HAVEDA))) != 0);
+    try std.testing.expect((cl.flags & T.CLIENT_REDRAW) != 0);
+    try std.testing.expect((cl.term_features & tty_features.featureBit(.sixel)) != 0);
+    try std.testing.expect((cl.term_features & tty_features.featureBit(.margins)) != 0);
+    try std.testing.expect((cl.term_features & tty_features.featureBit(.rectfill)) != 0);
+    try std.testing.expect((cl.term_features & tty_features.featureBit(.clipboard)) != 0);
+}
 
 test "tty_cursor updates cx/cy to target position" {
     const proc_mod_local = @import("proc.zig");

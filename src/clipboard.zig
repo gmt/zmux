@@ -53,6 +53,10 @@ test "osc52 sequence base64-encodes clipboard data" {
     try std.testing.expectEqualStrings("\x1b]52;;aGVsbG8=\x07", sequence);
 }
 
+test "clipboard export ignores null client" {
+    export_selection(null, "c", "payload");
+}
+
 test "clipboard export requires clipboard feature truth" {
     var peer: T.ZmuxPeer = undefined;
     var client = T.Client{

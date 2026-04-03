@@ -267,6 +267,12 @@ fn buildImsg(msg_type: u32, payload: []const u8) c.imsg.imsg {
     };
 }
 
+test "file read reset is safe when repeated" {
+    reset_for_tests();
+    defer reset_for_tests();
+    reset_for_tests();
+}
+
 test "client read handler opens files and streams chunks back to the peer" {
     reset_for_tests();
     defer reset_for_tests();

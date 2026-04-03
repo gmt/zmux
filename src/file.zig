@@ -696,6 +696,37 @@ pub fn nextStream() i32 {
     return s;
 }
 
+test "readResolvedPathAlloc reports error for missing absolute paths" {
+    const r = readResolvedPathAlloc(null, "/zmux-unit-test-missing-file-404-path");
+    switch (r) {
+        .err => {},
+        .data => |d| {
+            xm.allocator.free(d);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "readResolvedPathAlloc rejects stdin dash for attached clients" {
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+    };
+
+    const r = readResolvedPathAlloc(&client, "-");
+    switch (r) {
+        .err => |e| try std.testing.expect(e != 0),
+        .data => |d| {
+            xm.allocator.free(d);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
 test "readResolvedPathAlloc reads stdin for reduced detached consumers" {
     const saved_stdin = try std.posix.dup(std.posix.STDIN_FILENO);
     defer {

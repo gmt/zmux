@@ -283,3 +283,40 @@ test "environ_cmp and first/next iteration order" {
     try std.testing.expectEqualStrings("Z", third.name);
     try std.testing.expect(environ_next(env, third) == null);
 }
+
+test "environ_copy and environ_clear round-trip through a fresh environment" {
+    const src = environ_create();
+    defer environ_free(src);
+    environ_set(src, "KEEP", 0, "yes");
+    environ_set(src, "DROP", 0, "no");
+    environ_clear(src, "DROP");
+
+    const dst = environ_create();
+    defer environ_free(dst);
+    environ_copy(src, dst);
+
+    const keep = environ_find(dst, "KEEP").?;
+    try std.testing.expectEqualStrings("yes", keep.value.?);
+    const drop = environ_find(dst, "DROP").?;
+    try std.testing.expect(drop.value == null);
+}
+
+test "environ_put parses KEY=VALUE and environ_unset removes entries" {
+    const env = environ_create();
+    defer environ_free(env);
+
+    environ_put(env, "MYKEY=myval", 0);
+    try std.testing.expectEqualStrings("myval", environ_find(env, "MYKEY").?.value.?);
+
+    environ_unset(env, "MYKEY");
+    try std.testing.expect(environ_find(env, "MYKEY") == null);
+}
+
+test "environ_set replaces an existing variable" {
+    const env = environ_create();
+    defer environ_free(env);
+
+    environ_set(env, "X", 0, "first");
+    environ_set(env, "X", 0, "second");
+    try std.testing.expectEqualStrings("second", environ_find(env, "X").?.value.?);
+}

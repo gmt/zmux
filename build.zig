@@ -231,6 +231,11 @@ pub fn build(b: *std.Build) void {
         fuzz_exe.linkSystemLibrary("ncursesw");
         b.installArtifact(fuzz_exe);
         b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)").dependOn(&fuzz_exe.step);
+
+        const fuzz_smoke = b.step("fuzz-smoke", "Stdin-replay seeds in fuzz/corpus/ (requires install + -Dfuzzing=true)");
+        const fuzz_smoke_cmd = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-input-fuzzer" });
+        fuzz_smoke_cmd.step.dependOn(b.getInstallStep());
+        fuzz_smoke.dependOn(&fuzz_smoke_cmd.step);
     }
 }
 

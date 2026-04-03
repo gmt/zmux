@@ -40,6 +40,19 @@ const tty_features = @import("tty-features.zig");
 
 pub const tty_acs = @import("tty-acs.zig");
 
+/// Re-exported for `fuzz/input-fuzzer.zig` when built with `-Dfuzzing=true`.
+pub const fuzz = struct {
+    pub const T = @import("types.zig");
+    pub const xm = @import("xmalloc.zig");
+    pub const c = @import("c.zig");
+    pub const input = @import("input.zig");
+    pub const window = @import("window.zig");
+    pub const cmdq = @import("cmd-queue.zig");
+    pub const session = @import("session.zig");
+    pub const options = @import("options.zig");
+    pub const environ = @import("environ.zig");
+};
+
 // ── Usage ────────────────────────────────────────────────────────────────
 
 fn usage(to_stderr: bool) void {

@@ -385,4 +385,9 @@ test {
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");
     _ = @import("format-test.zig");
+    _ = @import("options-test.zig");
+    _ = @import("popup-menu-test.zig");
+    _ = @import("control-test.zig");
+    _ = @import("small-modules-test.zig");
+    _ = @import("zmux-protocol-test.zig");
 }

@@ -235,6 +235,37 @@ test "send-keys supports hex mode and repeat counts" {
     setup.wp.fd = -1;
 }
 
+test "send-keys -l writes key-name bytes without special-key expansion" {
+    const setup = try test_session_with_empty_pane("send-keys-l-flag-test");
+    const pipe_fds = try std.posix.pipe();
+    defer test_teardown_session("send-keys-l-flag-test", setup.s, pipe_fds[0], -1);
+
+    setup.wp.fd = pipe_fds[1];
+
+    var cause: ?[]u8 = null;
+    const cmd_lit = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-l", "-t", "send-keys-l-flag-test:0.0", "Up" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd_lit);
+    var list_lit: cmd_mod.CmdList = .{};
+    var item_lit = cmdq.CmdqItem{ .client = null, .cmdlist = &list_lit };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd_lit, &item_lit));
+
+    var buf: [32]u8 = undefined;
+    const n_lit = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("Up", buf[0..n_lit]);
+
+    const cmd_seq = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-t", "send-keys-l-flag-test:0.0", "Up" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd_seq);
+    var list_seq: cmd_mod.CmdList = .{};
+    var item_seq = cmdq.CmdqItem{ .client = null, .cmdlist = &list_seq };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd_seq, &item_seq));
+
+    const n_seq = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expect(n_seq > n_lit);
+
+    std.posix.close(pipe_fds[1]);
+    setup.wp.fd = -1;
+}
+
 test "send-keys uses the pane screen mode for cursor-key output" {
     const setup = try test_session_with_empty_pane("send-cursor-mode-test");
     const pipe_fds = try std.posix.pipe();

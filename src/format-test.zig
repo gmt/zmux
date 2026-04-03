@@ -1532,3 +1532,13 @@ test "format_expand window loop neighbor variables" {
     // Note: prev_window_index="0" is falsy per format_truthy, so win1 prev shows "-"
     try std.testing.expectEqualStrings("0:1:- 1:2:- 2:-:1 ", neighbor_idx);
 }
+
+test "format_truthy normalizes common false spellings" {
+    try std.testing.expect(!format_truthy(""));
+    try std.testing.expect(!format_truthy("0"));
+    try std.testing.expect(!format_truthy("false"));
+    try std.testing.expect(!format_truthy("OFF"));
+    try std.testing.expect(!format_truthy("No"));
+    try std.testing.expect(format_truthy("yes"));
+    try std.testing.expect(format_truthy("1"));
+}

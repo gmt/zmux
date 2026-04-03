@@ -67,3 +67,19 @@ test "zmux MsgResize round-trips four u32 fields" {
     try std.testing.expectEqual(@as(u32, 640), m.xpixel);
     try std.testing.expectEqual(@as(u32, 480), m.ypixel);
 }
+
+test "zmux MsgCommand holds argc as c_int" {
+    const m: p.MsgCommand = .{ .argc = 7 };
+    try std.testing.expectEqual(@as(c_int, 7), m.argc);
+}
+
+test "zmux read/write open structs are packed c_int fields only" {
+    try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgReadOpen));
+    try std.testing.expectEqual(3 * @sizeOf(c_int), @sizeOf(p.MsgWriteOpen));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgReadData));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgWriteData));
+}
+
+test "zmux PROTOCOL_VERSION fits in peerid low byte" {
+    try std.testing.expect(p.PROTOCOL_VERSION <= 0xff);
+}

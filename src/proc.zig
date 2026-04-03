@@ -100,6 +100,11 @@ fn peer_check_version(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
     return 0;
 }
 
+/// Test hook: same logic as the version gate inside `proc_event_cb`.
+pub fn proc_peer_check_version(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
+    return peer_check_version(peer, imsg_msg);
+}
+
 fn proc_update_event(peer: *T.ZmuxPeer) void {
     if (peer.event != null) return;
     const base = libevent orelse return;

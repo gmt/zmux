@@ -769,6 +769,23 @@ pub fn status_prompt_type_string(prompt_type: PromptType) []const u8 {
     };
 }
 
+test "status_prompt_type maps names and status_prompt_type_string round-trips" {
+    const pairs = [_]struct { name: []const u8, want: PromptType }{
+        .{ .name = "command", .want = .command },
+        .{ .name = "search", .want = .search },
+        .{ .name = "target", .want = .target },
+        .{ .name = "window-target", .want = .window_target },
+        .{ .name = "bogus", .want = .invalid },
+    };
+    for (pairs) |p| {
+        const got = status_prompt_type(p.name);
+        try std.testing.expectEqual(p.want, got);
+        if (got != .invalid) {
+            try std.testing.expectEqualStrings(p.name, status_prompt_type_string(got));
+        }
+    }
+}
+
 pub fn status_prompt_active(c: *T.Client) bool {
     return find_state(c) != null;
 }

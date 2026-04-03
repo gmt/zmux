@@ -618,6 +618,46 @@ test "window_cmp orders windows by id" {
     }
 }
 
+test "window_pane_search finds third row and regex Gamma" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(20, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const wp = win.window_add_pane(w, null, 20, 4);
+    write_test_line(wp.base.grid, 0, "aaa");
+    write_test_line(wp.base.grid, 1, "bbb");
+    write_test_line(wp.base.grid, 2, "ccc");
+    write_test_line(wp.base.grid, 3, "Gamma-ray");
+
+    try std.testing.expectEqual(@as(u32, 3), win.window_pane_search(wp, "ccc", false, false));
+    try std.testing.expectEqual(@as(u32, 4), win.window_pane_search(wp, "Gamma", false, false));
+    try std.testing.expectEqual(@as(u32, 4), win.window_pane_search(wp, "^Gamma", true, false));
+}
+
+test "window_adopt_pane moves detached pane into another window" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w1 = win.window_create(40, 10, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const w2 = win.window_create(40, 10, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w1);
+    defer destroyTestWindow(w2);
+
+    const p = win.window_add_pane(w1, null, 40, 10);
+    try std.testing.expect(win.window_detach_pane(w1, p));
+    try std.testing.expectEqual(@as(usize, 0), win.window_count_panes(w1));
+
+    win.window_adopt_pane(w2, p);
+    try std.testing.expectEqual(@as(usize, 1), win.window_count_panes(w2));
+    try std.testing.expectEqual(w2, p.window);
+}
+
 test "window_count_panes window_has_pane and directional pane neighbors after horizontal split" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);

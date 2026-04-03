@@ -495,6 +495,92 @@ test "recalculate_size applies smallest client size to a linked window" {
     try std.testing.expectEqual(@as(u32, 29), wp.sy);
 }
 
+test "status_line_size is zero for control and status-off clients" {
+    const env_mod = @import("environ.zig");
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_set_number(opts.global_s_options, "status", 2);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl_control: T.Client = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+        .session = null,
+    };
+    cl_control.tty = .{ .client = &cl_control };
+    try std.testing.expectEqual(@as(u32, 0), status_line_size(&cl_control));
+
+    var cl_off: T.Client = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_STATUSOFF,
+        .session = null,
+    };
+    cl_off.tty = .{ .client = &cl_off };
+    try std.testing.expectEqual(@as(u32, 0), status_line_size(&cl_off));
+}
+
+test "status_line_size uses session statuslines when attached" {
+    const env_mod = @import("environ.zig");
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var session = T.Session{
+        .id = 901,
+        .name = try xm.allocator.dupe(u8, "sls"),
+        .cwd = "/",
+        .statuslines = 4,
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = opts.global_s_options,
+        .environ = env,
+    };
+    defer {
+        session.windows.deinit();
+        xm.allocator.free(session.name);
+    }
+
+    var cl: T.Client = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+        .session = &session,
+    };
+    cl.tty = .{ .client = &cl };
+    try std.testing.expectEqual(@as(u32, 4), status_line_size(&cl));
+}
+
+test "status_line_size falls back to global status when session is null" {
+    const env_mod = @import("environ.zig");
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_set_number(opts.global_s_options, "status", 5);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+    try std.testing.expectEqual(@as(u32, 5), status_line_size(&cl));
+}
+
 test "recalculate_size honors per-window control client sizes" {
     const env_mod = @import("environ.zig");
 

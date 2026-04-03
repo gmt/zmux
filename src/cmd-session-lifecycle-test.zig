@@ -22,6 +22,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_start_server = @import("cmd-start-server.zig");
 const cmd_new_window = @import("cmd-new-window.zig");
 const cmd_list_clients = @import("cmd-list-clients.zig");
+const cmd_list_sessions = @import("cmd-list-sessions.zig");
 const sess = @import("session.zig");
 const win_mod = @import("window.zig");
 const opts = @import("options.zig");
@@ -127,6 +128,35 @@ test "list-clients command entry succeeds with no registered clients" {
 
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "list-clients" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "list-sessions command entry succeeds with no sessions" {
+    init_harness();
+    defer deinit_harness();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-sessions" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+
+    try std.testing.expectEqual(cmd_list_sessions.entry.exec, cmd_mod.cmd_get_entry(cmd).exec);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "list-sessions with format flag executes" {
+    init_harness();
+    defer deinit_harness();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-sessions", "-F", "#{session_name}" }, null, &cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};

@@ -83,3 +83,34 @@ pub fn start(item: *cmdq.CmdqItem, wp: *T.WindowPane) T.CmdRetval {
         },
     };
 }
+
+test "pane_empty_input start errors when pane is not marked empty" {
+    const cmd_mod = @import("cmd.zig");
+    const cmdq_mod = @import("cmd-queue.zig");
+    const win_mod = @import("window.zig");
+    const opts = @import("options.zig");
+
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    win_mod.window_init_globals(xm.allocator);
+    const w = win_mod.window_create(2, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(w, "test");
+
+    const wp = win_mod.window_add_pane(w, null, 2, 2);
+    try std.testing.expect((wp.flags & T.PANE_EMPTY) == 0);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq_mod.CmdqItem{ .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", start(&item, wp));
+}

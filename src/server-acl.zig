@@ -149,6 +149,11 @@ pub fn server_acl_reset_for_tests() void {
     server_acl_init();
 }
 
+test "server_acl_user_exists is false for arbitrary unknown uids" {
+    server_acl_init();
+    try std.testing.expect(!server_acl_user_exists(std.math.maxInt(std.posix.uid_t) - 12345));
+}
+
 test "server ACL join and readonly toggles follow stored entries" {
     server_acl_reset_for_tests();
 

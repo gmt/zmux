@@ -126,3 +126,9 @@ test "regsub respects anchored replacement" {
     defer xm.allocator.free(out);
     try std.testing.expectEqualStrings("barbar", out);
 }
+
+test "regsub empty text yields empty output" {
+    const out = regsub(xm.allocator, "x", "y", "", c.posix_sys.REG_EXTENDED).?;
+    defer xm.allocator.free(out);
+    try std.testing.expectEqualStrings("", out);
+}

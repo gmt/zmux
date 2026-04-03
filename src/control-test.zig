@@ -104,3 +104,160 @@ test "control_notify_client_detached tolerates empty registry" {
     cn.control_notify_client_detached(&dummy);
     try std.testing.expectEqual(@as(usize, 0), registry.clients.items.len);
 }
+
+test "control subscriptions keep multiple distinct hooks ordered by insertion" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_add_sub(&cl, "a", T.ControlSubType.session, 0, "#{session_id}");
+    ctl.control_add_sub(&cl, "b", T.ControlSubType.window, 3, "#{window_id}");
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("a", cl.control_subscriptions.items[0].name);
+    try std.testing.expectEqualStrings("b", cl.control_subscriptions.items[1].name);
+    try std.testing.expectEqual(T.ControlSubType.window, cl.control_subscriptions.items[1].sub_type);
+    try std.testing.expectEqual(@as(u32, 3), cl.control_subscriptions.items[1].id);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_check_subscriptions no-ops without an attached session" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_add_sub(&cl, "hook", T.ControlSubType.session, 0, "#{session_name}");
+    ctl_sub.control_check_subscriptions(&cl);
+    try std.testing.expectEqual(@as(usize, 1), cl.control_subscriptions.items.len);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_free_sub removes the targeted subscription pointer" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_add_sub(&cl, "first", T.ControlSubType.session, 0, "fmt1");
+    ctl.control_add_sub(&cl, "second", T.ControlSubType.session, 0, "fmt2");
+    const ptr = &cl.control_subscriptions.items[1];
+    ctl.control_free_sub(&cl, ptr);
+    try std.testing.expectEqual(@as(usize, 1), cl.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("first", cl.control_subscriptions.items[0].name);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_start control_stop and control_all_done manage block queues" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .peer = null,
+        .control_all_blocks = .{},
+        .control_panes = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_start(&cl);
+    try std.testing.expect(ctl.control_all_done(&cl));
+    // control_stop deinits control_all_blocks without re-init; all_done is only valid while started.
+    ctl.control_stop(&cl);
+}
+
+test "control_window_pane returns null without session" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expect(ctl.control_window_pane(&cl, 999) == null);
+}
+
+test "control_discard on empty client is safe" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_discard(&cl);
+}
+
+test "control_check_subs_session returns early when session is null" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+
+    var sub: T.ControlSubscription = .{
+        .name = try xm.allocator.dupe(u8, "x"),
+        .format = try xm.allocator.dupe(u8, "y"),
+        .sub_type = .session,
+    };
+    defer sub.deinit(xm.allocator);
+
+    ctl.control_check_subs_session(&cl, &sub);
+}
+
+test "control_error_callback flags client exit" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_error_callback(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_EXIT) != 0);
+}

@@ -18,3 +18,7 @@ tmux-museum/rebuild/
 *~
 .codex
 .claude/
+
+# Python cache artifacts
+__pycache__/
+*.pyc

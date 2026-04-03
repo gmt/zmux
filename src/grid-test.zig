@@ -23,6 +23,11 @@ const xm = @import("xmalloc.zig");
 
 const WHITESPACE = grid.WHITESPACE;
 
+test "grid cells_look_equal treats identical cells as equal" {
+    const a = T.grid_default_cell;
+    try std.testing.expect(grid.cells_look_equal(&a, &a));
+}
+
 test "grid set_ascii and scroll_up keep content bounded" {
     const gd = grid.grid_create(4, 2, 100);
     defer grid.grid_free(gd);

@@ -27,6 +27,8 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import smoke_env
+
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve()
 ROOT_DIR = SCRIPT_PATH.parent.parent
@@ -56,9 +58,7 @@ class RecursiveAttachHarness:
         self.zmux_binary = zmux_binary
         self.oracle_binary = oracle_binary
         self.timeout_seconds = timeout_seconds
-        self.env = os.environ.copy()
-        self.env.setdefault("TERM", "screen")
-        self.env.setdefault("COLORTERM", "truecolor")
+        self.env = smoke_env.build_smoke_env(mode=os.environ.get("SMOKE_ENV_MODE", "ambient"), home_dir=self.artifact_dir / "home")
 
     def root_base_args(self, binary: str, socket_path: pathlib.Path) -> list[str]:
         return shlex.split(binary) + ["-S", str(socket_path), "-f/dev/null"]
@@ -182,9 +182,7 @@ class RecursiveAttachHarness:
 
 def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_seconds: float) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env.setdefault("TERM", "screen")
-    env.setdefault("COLORTERM", "truecolor")
+    env = smoke_env.build_smoke_env(mode=os.environ.get("SMOKE_ENV_MODE", "ambient"), home_dir=output_json.parent / "home")
     socket_path = output_json.parent / "inner.socket"
     base = shlex.split(inner_binary) + ["-S", str(socket_path), "-f/dev/null"]
 

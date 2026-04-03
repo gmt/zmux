@@ -1294,3 +1294,18 @@ test "tty_draw_pane renders attached right scrollbar columns from shared window 
     try std.testing.expect(std.mem.indexOf(u8, draw, "abcd") != null);
     try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[0;34m ") != null);
 }
+
+test "tty_draw_invalidate clears pane identity and dimensions" {
+    var cache = T.ClientPaneCache{};
+    defer tty_draw_free(&cache);
+
+    cache.pane_id = 7;
+    cache.valid = true;
+    cache.sx = 80;
+    cache.sy = 24;
+    tty_draw_invalidate(&cache);
+    try std.testing.expect(cache.pane_id == null);
+    try std.testing.expect(!cache.valid);
+    try std.testing.expectEqual(@as(u32, 0), cache.sx);
+    try std.testing.expectEqual(@as(u32, 0), cache.sy);
+}

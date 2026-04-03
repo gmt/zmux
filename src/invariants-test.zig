@@ -28,6 +28,13 @@ test "options scope flags are single-purpose bits" {
     try std.testing.expect(w.window and !w.server);
 }
 
+test "OPTIONS_TABLE_SESSION and PANE markers are single-scope" {
+    const ses = T.OPTIONS_TABLE_SESSION;
+    try std.testing.expect(ses.session and !ses.server and !ses.window and !ses.pane);
+    const pane = T.OPTIONS_TABLE_PANE;
+    try std.testing.expect(pane.pane and !pane.server and !pane.session and !pane.window);
+}
+
 test "key-bindings-data module parses at comptime" {
     comptime {
         _ = @import("key-bindings-data.zig");

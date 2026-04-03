@@ -534,6 +534,7 @@ test {
     _ = @import("cmd-kill-destructive-test.zig");
     _ = @import("cmd-breadth-test.zig");
     _ = @import("cmd-ui-exec-test.zig");
+    _ = @import("imsg-roundtrip-test.zig");
     _ = @import("cmd-exec-groups-test.zig");
     _ = @import("image-sixel.zig");
     _ = @import("image.zig");

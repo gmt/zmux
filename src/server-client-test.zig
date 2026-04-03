@@ -1466,3 +1466,227 @@ test "server_client_dispatch_for_test ignores unknown wire message type" {
     sc.server_client_dispatch_for_test(&imsg, &client);
     try std.testing.expect((client.flags & T.CLIENT_DEAD) == 0);
 }
+
+test "server_client_dispatch_resize updates tty geometry and sets CLIENT_SIZECHANGED" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+        .flags = T.CLIENT_IDENTIFIED,
+    };
+    cl.tty = .{ .client = &cl };
+    tty_mod.tty_init(&cl.tty, &cl);
+    tty_mod.tty_set_size(&cl.tty, 10, 5, 0, 0);
+
+    var msg_st: protocol.MsgResize = .{
+        .sx = 72,
+        .sy = 24,
+        .xpixel = 100,
+        .ypixel = 200,
+    };
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.resize), std.mem.asBytes(&msg_st));
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+
+    try std.testing.expectEqual(@as(u32, 72), cl.tty.sx);
+    try std.testing.expectEqual(@as(u32, 24), cl.tty.sy);
+    // tty_resize passes derived cell pixel sizes into tty_set_size (see tty_resize in tty.zig).
+    try std.testing.expectEqual(@as(u32, 100 / 72), cl.tty.xpixel);
+    try std.testing.expectEqual(@as(u32, 200 / 24), cl.tty.ypixel);
+    try std.testing.expect((cl.flags & T.CLIENT_SIZECHANGED) != 0);
+}
+
+test "server_client_dispatch_stdin ignores payload while client suspended" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_SUSPENDED,
+    };
+    cl.tty = .{ .client = &cl };
+    tty_mod.tty_init(&cl.tty, &cl);
+    const before = cl.tty.in_buf.items.len;
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.stdin_data), "zzz");
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+    try std.testing.expectEqual(before, cl.tty.in_buf.items.len);
+}
+
+test "server_client_dispatch_shell with payload marks peer bad" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "sc-dispatch-shell-bad" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.shell), "unexpected");
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+    try std.testing.expect((cl.peer.?.flags & T.PEER_BAD) != 0);
+    std.posix.close(pair[1]);
+}
+
+test "server_client_dispatch_shell empty sends default shell path then marks peer bad" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    _ = opts.options_set_string(opts.global_s_options, false, "default-shell", "/bin/sh");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "sc-dispatch-shell-ok" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.shell), &.{});
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var out: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
+    defer c.imsg.imsg_free(&out);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.shell))), c.imsg.imsg_get_type(&out));
+    const dlen = c.imsg.imsg_get_len(&out);
+    try std.testing.expect(dlen > 1);
+    const buf = try xm.allocator.alloc(u8, dlen);
+    defer xm.allocator.free(buf);
+    _ = c.imsg.imsg_get_data(&out, buf.ptr, buf.len);
+    try std.testing.expectEqualStrings("/bin/sh", std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf.ptr)), 0));
+
+    try std.testing.expect((cl.peer.?.flags & T.PEER_BAD) != 0);
+}
+
+test "server_client_check_exit sends exit with retval and clears CLIENT_EXIT" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "sc-check-exit" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_EXIT,
+        .exit_reason = .detached,
+        .retval = 9,
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    sc.server_client_check_exit(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_EXIT) == 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var out: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
+    defer c.imsg.imsg_free(&out);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exit))), c.imsg.imsg_get_type(&out));
+    var rv: i32 = -1;
+    _ = c.imsg.imsg_get_data(&out, std.mem.asBytes(&rv).ptr, @sizeOf(i32));
+    try std.testing.expectEqual(@as(i32, 9), rv);
+}
+
+test "server_client_check_modes returns early without REDRAWSTATUS" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+    sc.server_client_check_modes(&cl);
+}
+
+test "server_client_check_redraw returns early for control clients" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL | T.CLIENT_REDRAWWINDOW,
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+    sc.server_client_check_redraw(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_REDRAWWINDOW) != 0);
+}

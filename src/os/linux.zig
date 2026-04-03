@@ -27,6 +27,16 @@ const c = @import("../c.zig");
 // Extern declarations for libc functions not in Zig's std.c
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
+extern fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*c.posix_sys.struct_winsize,
+) c_int;
+extern fn setsid() c_int;
+
+const linux_TIOCSCTTY: u32 = 0x540E;
 
 fn errno_from_syscall(rc: usize) std.posix.E {
     const signed: isize = @bitCast(rc);
@@ -76,7 +86,7 @@ pub fn osdep_get_cwd(fd: i32) ?[]const u8 {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pgrp}) catch return null;
 
-    const n = std.posix.readlink(path, &Static.target) catch blk: {
+    const link = std.posix.readlink(path, &Static.target) catch blk: {
         // Fallback: try the session ID
         var sid: std.posix.pid_t = undefined;
         const rc = std.os.linux.ioctl(fd, std.os.linux.T.IOCGSID, @intFromPtr(&sid));
@@ -85,9 +95,9 @@ pub fn osdep_get_cwd(fd: i32) ?[]const u8 {
         break :blk std.posix.readlink(path2, &Static.target) catch return null;
     };
 
-    if (n == 0) return null;
-    Static.target[n] = 0;
-    return Static.target[0..n];
+    if (link.len == 0) return null;
+    Static.target[link.len] = 0;
+    return link;
 }
 
 /// Initialise a libevent event_base for Linux.
@@ -104,4 +114,77 @@ test "linux osdep_get_name returns null on non-tty fd" {
     const fd = try std.posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
     defer std.posix.close(fd);
     try std.testing.expect(osdep_get_name(fd) == null);
+}
+
+test "linux osdep_event_init returns a live libevent base" {
+    if (builtin.os.tag != .linux) return;
+    const base = osdep_event_init();
+    defer c.libevent.event_base_free(base);
+}
+
+test "linux osdep_get_name and osdep_get_cwd observe pty foreground child" {
+    if (builtin.os.tag != .linux) return;
+    std.fs.accessAbsolute("/bin/sleep", .{}) catch return;
+
+    var tmp = std.testing.tmpDir(.{});
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+    var dirz_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dirz_buf, "{s}", .{dir});
+    _ = setenv("ZMUX_PTY_TEST_CWD", dirz.ptr, 1);
+    defer _ = unsetenv("ZMUX_PTY_TEST_CWD");
+
+    var master: c_int = -1;
+    var slave: c_int = -1;
+    var tty_raw: [256]u8 = std.mem.zeroes([256]u8);
+    if (openpty(&master, &slave, &tty_raw, null, null) != 0)
+        return;
+
+    const pid = try std.posix.fork();
+    if (pid == 0) {
+        _ = std.posix.close(@intCast(master));
+        _ = setsid();
+        const rc = std.os.linux.ioctl(@intCast(slave), linux_TIOCSCTTY, @as(usize, 0));
+        if (errno_from_syscall(rc) != .SUCCESS)
+            std.process.exit(1);
+        std.posix.dup2(@intCast(slave), std.posix.STDIN_FILENO) catch std.process.exit(1);
+        std.posix.dup2(@intCast(slave), std.posix.STDOUT_FILENO) catch std.process.exit(1);
+        std.posix.dup2(@intCast(slave), std.posix.STDERR_FILENO) catch std.process.exit(1);
+        std.posix.close(@intCast(slave));
+        if (std.posix.getenv("ZMUX_PTY_TEST_CWD")) |d|
+            std.posix.chdir(d) catch std.process.exit(1);
+        const argv_exec = [_:null]?[*:0]const u8{ "/bin/sleep", "30", null };
+        _ = std.c.execve("/bin/sleep", @ptrCast(&argv_exec), std.c.environ);
+        std.process.exit(1);
+    }
+
+    _ = std.posix.close(@intCast(slave));
+    defer {
+        _ = std.c.kill(pid, std.posix.SIG.TERM);
+        _ = std.posix.waitpid(pid, 0);
+        _ = std.posix.close(@intCast(master));
+    }
+
+    var saw_sleep = false;
+    for (0..100) |_| {
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+        if (osdep_get_name(@intCast(master))) |n| {
+            defer xm.allocator.free(n);
+            if (std.mem.indexOf(u8, n, "sleep") != null) saw_sleep = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_sleep);
+
+    var saw_cwd = false;
+    for (0..20) |_| {
+        if (osdep_get_cwd(@intCast(master))) |cwd| {
+            if (std.mem.eql(u8, cwd, dir)) {
+                saw_cwd = true;
+                break;
+            }
+        }
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(saw_cwd);
 }

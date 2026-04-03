@@ -106,3 +106,11 @@ pub fn fatalx(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("zmux fatal: " ++ fmt ++ "\n", args);
     std.process.abort();
 }
+
+test "log_get_level reflects log_add_level" {
+    const before = log_level;
+    defer log_level = before;
+    log_add_level();
+    log_add_level();
+    try std.testing.expectEqual(before + 2, log_get_level());
+}

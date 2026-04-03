@@ -1942,6 +1942,35 @@ test "input keeps incomplete UTF-8 pending across calls" {
     try std.testing.expectEqual(@as(u8, 'A'), grid.ascii_at(wp.base.grid, 0, 2));
 }
 
+test "input discards stray UTF-8 continuation byte before ASCII" {
+    const win = @import("window.zig");
+    const grid = @import("grid.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(6, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 6, 2);
+    input_parse_screen(wp, "\x80X");
+    try std.testing.expectEqual(@as(usize, 0), wp.input_pending.items.len);
+    try std.testing.expectEqual(@as(u8, 'X'), grid.ascii_at(wp.base.grid, 0, 0));
+}
+
 test "input parses OSC pane title updates" {
     const win = @import("window.zig");
 

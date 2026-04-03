@@ -1241,3 +1241,9 @@ test "cmdq logs command execution into the shared message log once config is fin
     try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
     try std.testing.expectEqualStrings("logger command: cmdq-test-log one two", server.message_log.items[0].msg);
 }
+
+test "cmdq_next on empty queue returns zero" {
+    cmdq_reset_for_tests();
+    defer cmdq_reset_for_tests();
+    try std.testing.expectEqual(@as(u32, 0), cmdq_next(null));
+}

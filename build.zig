@@ -92,6 +92,16 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const smoke_shell = b.addExecutable(.{
+        .name = "hello-shell-ansi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hello-shell-ansi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(smoke_shell);
+
     // --------------------------------------------------
     // `zig build run`
     // --------------------------------------------------

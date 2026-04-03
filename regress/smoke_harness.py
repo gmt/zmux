@@ -26,6 +26,8 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import smoke_env
+
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
@@ -196,9 +198,15 @@ class SmokeHarness:
         self.inner_socket = self.artifact_dir / "inner.socket"
         self.control_clients: list[ControlClient] = []
         self._native_commands: set[str] | None = None
-        self.env = os.environ.copy()
-        self.env.setdefault("TERM", "screen")
-        self.env.setdefault("COLORTERM", "truecolor")
+        env_mode = os.environ.get("SMOKE_ENV_MODE", "ambient")
+        helper_mode = os.environ.get("ZMUX_SMOKE_HELPER_MODE")
+        helper_path = os.environ.get("ZMUX_SMOKE_HELPER_PATH")
+        self.env = smoke_env.build_smoke_env(
+            mode=env_mode,
+            home_dir=self.artifact_dir / "home",
+            helper_mode=helper_mode,
+            helper_path=helper_path,
+        )
 
     def cleanup(self) -> None:
         for client in reversed(self.control_clients):

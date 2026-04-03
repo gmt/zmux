@@ -183,3 +183,44 @@ test "proc_send returns -1 when peer is PEER_BAD" {
 
     try std.testing.expectEqual(@as(i32, -1), proc.proc_send(&peer, .detach, -1, null, 0));
 }
+
+test "proc_send delivers identify_longflags with 8-byte payload" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = noop_dispatch,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const flags: u64 = 0xc0ffee11deadbeef;
+    try std.testing.expectEqual(@as(i32, 0), proc.proc_send(&peer, .identify_longflags, -1, std.mem.asBytes(&flags).ptr, @sizeOf(u64)));
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var got: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &got) > 0);
+    defer c.imsg.imsg_free(&got);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_longflags))), c.imsg.imsg_get_type(&got));
+    try std.testing.expectEqual(@as(usize, @sizeOf(u64)), c.imsg.imsg_get_len(&got));
+    var round: u64 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&got, std.mem.asBytes(&round).ptr, @sizeOf(u64)));
+    try std.testing.expectEqual(flags, round);
+}

@@ -712,6 +712,78 @@ test "client_connect rejects overlong unix socket path" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(std.posix.E.NAMETOOLONG)), std.c._errno().*);
 }
 
+fn acceptOneIncomingConnection(listen_fd: i32) void {
+    const cfd = std.c.accept(listen_fd, null, null);
+    if (cfd >= 0) std.posix.close(@intCast(cfd));
+}
+
+test "client_connect succeeds against listening unix socket and sets nonblocking" {
+    const base = c.libevent.event_base_new() orelse return error.OutOfMemory;
+    defer c.libevent.event_base_free(base);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir_path);
+    const sock_path = try std.fs.path.join(xm.allocator, &.{ dir_path, "zmux-client-connect.sock" });
+    defer xm.allocator.free(sock_path);
+
+    try std.posix.unlink(sock_path) catch {};
+
+    const listen_fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    defer std.posix.close(listen_fd);
+
+    var sa: std.posix.sockaddr.un = std.mem.zeroes(std.posix.sockaddr.un);
+    sa.family = std.posix.AF.UNIX;
+    if (sock_path.len >= sa.path.len) return error.NameTooLong;
+    @memcpy(sa.path[0..sock_path.len], sock_path);
+
+    try std.posix.bind(listen_fd, @as(*const std.posix.sockaddr, @ptrCast(&sa)), @sizeOf(std.posix.sockaddr.un));
+    try std.posix.listen(listen_fd, 1);
+
+    const thread = try std.Thread.spawn(.{}, acceptOneIncomingConnection, .{listen_fd});
+    defer thread.join();
+
+    const flags: u64 = 0;
+    const rc = client_connect(base, sock_path, flags);
+    try std.testing.expect(rc >= 0);
+    defer std.posix.close(rc);
+
+    const fl = std.c.fcntl(rc, std.posix.F.GETFL, @as(c_int, 0));
+    try std.testing.expect(fl >= 0);
+    const O_NONBLOCK: c_int = 0x800;
+    try std.testing.expect(fl & O_NONBLOCK != 0);
+}
+
+test "client_get_lock returns exclusive fd then EAGAIN when lock already held" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir_path);
+    const lock_path = try std.fs.path.join(xm.allocator, &.{ dir_path, "zmux-test.lock" });
+    defer xm.allocator.free(lock_path);
+
+    const fd1 = client_get_lock(lock_path);
+    try std.testing.expect(fd1 >= 0);
+    defer std.posix.close(fd1);
+
+    const fd2 = client_get_lock(lock_path);
+    try std.testing.expectEqual(@as(i32, -2), fd2);
+}
+
+test "client_connect returns -1 on non-socket path when start-server is disabled" {
+    const base = c.libevent.event_base_new() orelse return error.OutOfMemory;
+    defer c.libevent.event_base_free(base);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const not_sock = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(not_sock);
+
+    const rc = client_connect(base, not_sock, T.CLIENT_NOSTARTSERVER);
+    try std.testing.expectEqual(@as(i32, -1), rc);
+}
+
 test "client detach payload preserves session name and kill reason" {
     defer if (client_exitsession) |session| {
         xm.allocator.free(session);

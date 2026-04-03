@@ -1542,3 +1542,7 @@ test "format_truthy normalizes common false spellings" {
     try std.testing.expect(format_truthy("yes"));
     try std.testing.expect(format_truthy("1"));
 }
+
+test "format_timestamp_local rejects non-numeric seconds" {
+    try std.testing.expect(format_timestamp_local(xm.allocator, "not-a-timestamp", "%Y") == null);
+}

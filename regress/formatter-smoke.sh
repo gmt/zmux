@@ -19,6 +19,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
 smoke_init formatter-smoke
+SEND_OUT="$TEST_TMPDIR/send.out"
+rm -f "$SEND_OUT"
+smoke_use_helper_shell record-stdin "$SEND_OUT" || exit $?
 
 SESSION_PRINT=$(smoke_cmd new-session -d -P -F '#{session_name}' -s fmtcheck) || exit 1
 [ "$SESSION_PRINT" = "fmtcheck" ] || {
@@ -134,9 +137,8 @@ case "$SHOW_LOADED" in
         ;;
 esac
 
-SEND_OUT="$TEST_TMPDIR/send.out"
-smoke_cmd send-keys -F -t fmtcheck:1.0 "printf '%s\\n' '#{session_name}' > $SEND_OUT" Enter || exit 1
-smoke_wait_for 5 sh -c "[ -f '$SEND_OUT' ] && grep -qx 'fmtcheck' '$SEND_OUT'" || {
+smoke_cmd send-keys -F -t fmtcheck:1.0 'session=#{session_name}' Enter || exit 1
+smoke_wait_for 5 sh -c "[ -f '$SEND_OUT' ] && grep -qx 'session=fmtcheck' '$SEND_OUT'" || {
     echo "send-keys -F did not write expanded text"
     exit 1
 }

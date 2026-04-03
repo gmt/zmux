@@ -13,14 +13,15 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# sixel-roundtrip.sh – verify that a sixel image sent to a pane is
-# parsed, stored, and re-emitted as DCS sixel data when a real TTY
-# client attaches.
+# sixel-roundtrip.sh – verify that a sixel image emitted by a
+# deterministic helper pane is parsed, stored, and re-emitted as DCS
+# sixel data when a real TTY client attaches.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
 smoke_init sixel-roundtrip
+smoke_use_helper_shell emit-sixel || exit $?
 
 # Skip if python3 or pty module is unavailable.
 python3 -c 'import pty, select' 2>/dev/null || { echo "python3 pty unavailable"; exit 77; }
@@ -28,19 +29,7 @@ python3 -c 'import pty, select' 2>/dev/null || { echo "python3 pty unavailable";
 # Start a detached session.
 smoke_cmd new-session -d -s sixel -x 80 -y 24 || exit 1
 
-# Wait for the shell prompt to settle.
-sleep 1
-
-# Send a minimal sixel image into the pane: a 4x12 red rectangle.
-#   DCS q               – enter sixel mode
-#   #0;2;100;0;0        – define colour 0 as RGB(100%,0%,0%)
-#   !4~                 – 4 columns, sixel '~' (all 6 rows lit)
-#   -                   – new band
-#   !4~                 – 4 more columns
-#   ST                  – string terminator
-smoke_cmd send-keys -t sixel "printf '\\033Pq#0;2;100;0;0!4~-!4~\\033\\\\'" Enter
-
-# Give zmux time to parse the sixel data and store the image.
+# Give zmux time to parse the helper-emitted sixel data and store the image.
 sleep 1
 
 # Verify the session survived sixel ingestion.

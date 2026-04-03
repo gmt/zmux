@@ -261,3 +261,73 @@ test "control_error_callback flags client exit" {
     ctl.control_error_callback(&cl);
     try std.testing.expect((cl.flags & T.CLIENT_EXIT) != 0);
 }
+
+test "control_remove_sub is safe for unknown subscription names" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl_sub.control_remove_sub(&cl, "nonexistent");
+    try std.testing.expectEqual(@as(usize, 0), cl.control_subscriptions.items.len);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_sub_cmp orders subscriptions lexicographically by name" {
+    var m = T.ControlSubscription{
+        .name = try xm.allocator.dupe(u8, "middle"),
+        .format = try xm.allocator.dupe(u8, "f"),
+        .sub_type = .session,
+    };
+    defer m.deinit(xm.allocator);
+    var z = T.ControlSubscription{
+        .name = try xm.allocator.dupe(u8, "zebra"),
+        .format = try xm.allocator.dupe(u8, "f"),
+        .sub_type = .session,
+    };
+    defer z.deinit(xm.allocator);
+
+    try std.testing.expectEqual(@as(i32, -1), ctl.control_sub_cmp(&m, &z));
+    try std.testing.expectEqual(@as(i32, 1), ctl.control_sub_cmp(&z, &m));
+}
+
+test "control_reset_offsets clears an empty control pane list" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .control_panes = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_reset_offsets(&cl);
+    try std.testing.expectEqual(@as(usize, 0), cl.control_panes.items.len);
+}
+
+test "control_ready sets control_ready_flag" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .control_ready_flag = false,
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl.control_ready(&cl);
+    try std.testing.expect(cl.control_ready_flag);
+}

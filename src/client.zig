@@ -949,3 +949,158 @@ test "client suspend and continue round-trip wakeup state" {
     defer c.imsg.imsg_free(&imsg_msg);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.wakeup))), c.imsg.imsg_get_type(&imsg_msg));
 }
+
+fn clientDispatchTestResetProc(proc: *T.ZmuxProc) void {
+    proc.exit = false;
+    proc.peers.clearRetainingCapacity();
+}
+
+test "client_connect returns -1 with NOSTARTSERVER when unix socket path is missing" {
+    const base = c.libevent.event_base_new() orelse return error.OutOfMemory;
+    defer c.libevent.event_base_free(base);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sock_path = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(sock_path);
+    const path = try std.fs.path.join(xm.allocator, &.{ sock_path, "no-such-zmux.sock" });
+    defer xm.allocator.free(path);
+
+    const rc = client_connect(base, path, T.CLIENT_NOSTARTSERVER);
+    try std.testing.expectEqual(@as(i32, -1), rc);
+}
+
+test "client_dispatch null imsg sets lost_server and marks proc exit" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-null" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_exitreason = .none;
+    }
+
+    client_exitreason = .none;
+    client_dispatch(null, null);
+    try std.testing.expectEqual(T.ClientExitReason.lost_server, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch flags replaces client_flags from payload" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-flags" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_flags = 0;
+    }
+
+    const want: u64 = T.CLIENT_UTF8 | T.CLIENT_READONLY;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.flags)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(u64))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(@constCast(&want)),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(want, client_flags);
+    try std.testing.expect(!proc.exit);
+}
+
+test "client_dispatch exit carries retval and exits proc" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-exit" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_retval = 0;
+        client_exitreason = .none;
+    }
+
+    client_retval = 0;
+    client_exitreason = .none;
+    const rv: i32 = 17;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.exit)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(i32))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(@constCast(&rv)),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(@as(i32, 17), client_retval);
+    try std.testing.expectEqual(T.ClientExitReason.exited, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch shutdown sets lost_server" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-shutdown" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_exitreason = .none;
+    }
+
+    client_exitreason = .none;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.shutdown)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = null,
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(T.ClientExitReason.lost_server, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch write to stdout stream ignores short payload" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-write-short" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer client_proc = null;
+
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.write)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(i32))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = null,
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expect(!proc.exit);
+}
+
+test "client_dispatch malformed write returns without exit" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-write-bad" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer client_proc = null;
+
+    const stream: i32 = 1;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.write)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(i32))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(@constCast(&stream)),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expect(!proc.exit);
+}

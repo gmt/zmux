@@ -138,3 +138,25 @@ test "cmd_format target_context maps cmd_find fields into format context" {
     try std.testing.expect(ctx.window == null);
     try std.testing.expect(ctx.pane == null);
 }
+
+test "cmd_format require returns null when format expansion is incomplete" {
+    const cmd_format = @import("cmd-format.zig");
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    var target: T.CmdFindState = .{ .idx = -1 };
+    const ctx = cmd_format.target_context(&target, null);
+
+    try std.testing.expect(cmd_format.require(&item, "#{session_name}", &ctx) == null);
+}
+
+test "cmd_format filter returns null when format expansion is incomplete" {
+    const cmd_format = @import("cmd-format.zig");
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    var target: T.CmdFindState = .{ .idx = -1 };
+    const ctx = cmd_format.target_context(&target, null);
+
+    try std.testing.expect(cmd_format.filter(&item, "#{window_name}", &ctx) == null);
+}

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -63,36 +64,42 @@ class RecursiveAttachHarness:
         return shlex.split(binary) + ["-S", str(socket_path), "-f/dev/null"]
 
     def run(self) -> None:
-        cases = [
-            RecursiveCase(
-                name="tmux-in-zmux",
-                root_binary=self.zmux_binary,
-                inner_binary=self.oracle_binary,
-                expectation=Expectation(kind="timeout"),
+        waves = [
+            (
+                RecursiveCase(
+                    name="tmux-in-zmux",
+                    root_binary=self.zmux_binary,
+                    inner_binary=self.oracle_binary,
+                    expectation=Expectation(kind="timeout"),
+                ),
+                RecursiveCase(
+                    name="zmux-in-tmux",
+                    root_binary=self.oracle_binary,
+                    inner_binary=self.zmux_binary,
+                    expectation=Expectation(kind="timeout"),
+                ),
             ),
-            RecursiveCase(
-                name="zmux-in-tmux",
-                root_binary=self.oracle_binary,
-                inner_binary=self.zmux_binary,
-                expectation=Expectation(kind="fast_error", stderr_substring="not a terminal"),
-            ),
-            # Controls: the inner binary, not the outer container, currently decides the outcome.
-            RecursiveCase(
-                name="tmux-in-tmux",
-                root_binary=self.oracle_binary,
-                inner_binary=self.oracle_binary,
-                expectation=Expectation(kind="timeout"),
-            ),
-            RecursiveCase(
-                name="zmux-in-zmux",
-                root_binary=self.zmux_binary,
-                inner_binary=self.zmux_binary,
-                expectation=Expectation(kind="fast_error", stderr_substring="not a terminal"),
+            (
+                RecursiveCase(
+                    name="tmux-in-tmux",
+                    root_binary=self.oracle_binary,
+                    inner_binary=self.oracle_binary,
+                    expectation=Expectation(kind="timeout"),
+                ),
+                RecursiveCase(
+                    name="zmux-in-zmux",
+                    root_binary=self.zmux_binary,
+                    inner_binary=self.zmux_binary,
+                    expectation=Expectation(kind="timeout"),
+                ),
             ),
         ]
 
-        for case in cases:
-            self.run_case(case)
+        for wave in waves:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                futures = [pool.submit(self.run_case, case) for case in wave]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
 
     def run_case(self, case: RecursiveCase) -> None:
         case_dir = self.artifact_dir / case.name

@@ -44,6 +44,13 @@ test "file_path resolve_path handles stdin dash absolute and relative segments" 
     try std.testing.expect(std.mem.endsWith(u8, rel.path, "/relative-bit"));
 }
 
+test "file_path resolve_path empty relative joins cwd" {
+    const empty = file_path.resolve_path(null, "");
+    defer if (empty.owned) xm.allocator.free(@constCast(empty.path));
+    try std.testing.expect(empty.owned);
+    try std.testing.expect(empty.path.len > 0);
+}
+
 test "file_get_path joins relative files against client cwd" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
@@ -83,6 +90,23 @@ test "client_registry add and remove round-trip" {
     try std.testing.expectEqual(before, client_registry.clients.items.len);
 }
 
+test "client_registry remove ignores unknown client pointer" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    const n = client_registry.clients.items.len;
+    client_registry.remove(&cl);
+    try std.testing.expectEqual(n, client_registry.clients.items.len);
+}
+
 test "marked_pane clear and is_marked nil guards" {
     marked_pane_mod.clear();
     try std.testing.expect(!marked_pane_mod.is_marked(null, null, null));
@@ -115,6 +139,13 @@ test "pane_input write_all copies bytes to a writable fd" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(fds[0], &buf);
     try std.testing.expectEqualStrings("zmux", buf[0..n]);
+}
+
+test "pane_input write_all surfaces bad file descriptor" {
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    try std.testing.expectError(error.NotOpenForWriting, pane_input.write_all(-1, "x", &item));
 }
 
 test "kill-session command entry parses standard flags" {

@@ -342,6 +342,21 @@ test "image_free_all on empty screen returns false" {
     try std.testing.expect(!image_free_all(s));
 }
 
+test "image_check_line with no stored images returns false" {
+    const grid_mod = @import("grid.zig");
+    const s = blk: {
+        const screen = xm.allocator.create(T.Screen) catch unreachable;
+        screen.* = .{ .grid = grid_mod.grid_create(40, 20, 0) };
+        break :blk screen;
+    };
+    defer {
+        grid_mod.grid_free(s.grid);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(!image_check_line(s, 3, 2));
+}
+
 test "image_check_area frees only overlapping rectangles" {
     const grid_mod = @import("grid.zig");
 

@@ -48,6 +48,14 @@ const server_client_send_shell = sc.server_client_send_shell;
 const server_client_dispatch_command = sc.server_client_dispatch_command;
 const build_client_draw_payload = sc.build_client_draw_payload;
 
+extern fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*anyopaque,
+) c_int;
+
 fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
 test "server_client_resolve_cwd prefers accessible directories and falls back" {
@@ -93,6 +101,49 @@ test "server_client_finalize_identify supplies client name and default term" {
     cl.ttyname = xm.xstrdup("/dev/pts/test");
     server_client_finalize_identify(&cl);
     try std.testing.expectEqualStrings("/dev/pts/test", cl.name.?);
+}
+
+test "server_client_finalize_identify treats tty stdin as terminal and drops captured stdout" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .pid = 77,
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+    defer {
+        if (cl.fd != -1) _ = c.posix_sys.close(cl.fd);
+        if (cl.out_fd != -1) _ = c.posix_sys.close(cl.out_fd);
+        deferFreeClientIdentifyState(&cl);
+    }
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    var tty_name: [T.TTY_NAME_MAX]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, &tty_name, null, null));
+    defer _ = c.posix_sys.close(master);
+
+    const pipe_fds = try std.posix.pipe();
+    defer _ = c.posix_sys.close(pipe_fds[0]);
+
+    const tty_len = std.mem.indexOfScalar(u8, &tty_name, 0) orelse tty_name.len;
+    var tty_imsg = testImsg(.identify_ttyname, tty_name[0 .. tty_len + 1]);
+    sc.server_client_dispatch_for_test(&tty_imsg, &cl);
+
+    cl.fd = slave;
+    cl.out_fd = pipe_fds[1];
+
+    var done_imsg = testImsg(.identify_done, &.{});
+    sc.server_client_dispatch_for_test(&done_imsg, &cl);
+
+    try std.testing.expect((cl.flags & T.CLIENT_TERMINAL) != 0);
+    try std.testing.expect(cl.fd != -1);
+    try std.testing.expectEqual(@as(i32, -1), cl.out_fd);
+    try std.testing.expect(c.posix_sys.isatty(cl.fd) != 0);
+    try std.testing.expectEqualStrings(tty_name[0..tty_len], cl.name.?);
 }
 
 test "server_client_open rejects non-terminal clients but accepts reduced local-terminal path" {

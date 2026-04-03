@@ -164,17 +164,24 @@ fn client_send_identify(feat: i32) void {
     const term = std.posix.getenv("TERM") orelse "screen";
     _ = proc_mod.proc_send(peer, .identify_term, -1, term.ptr, term.len + 1);
 
-    // Identify - TTY name (via /proc/self/fd/0)
-    var ttyname_buf: [64]u8 = std.mem.zeroes([64]u8);
-    if (std.posix.readlink("/proc/self/fd/0", &ttyname_buf)) |name| {
-        _ = proc_mod.proc_send(peer, .identify_ttyname, -1, name.ptr, name.len + 1);
-    } else |_| {}
+    if (client_ttyname(std.posix.STDIN_FILENO)) |ttyname| {
+        _ = proc_mod.proc_send(peer, .identify_ttyname, -1, ttyname.ptr, ttyname.len + 1);
+    }
 
     // CWD
     var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
     if (std.posix.getcwd(&cwd_buf)) |cwd_slice| {
         _ = proc_mod.proc_send(peer, .identify_cwd, -1, cwd_slice.ptr, cwd_slice.len + 1);
     } else |_| {}
+
+    const stdin_fd = c.posix_sys.dup(std.posix.STDIN_FILENO);
+    if (stdin_fd != -1) {
+        _ = proc_mod.proc_send(peer, .identify_stdin, stdin_fd, null, 0);
+    }
+    const stdout_fd = c.posix_sys.dup(std.posix.STDOUT_FILENO);
+    if (stdout_fd != -1) {
+        _ = proc_mod.proc_send(peer, .identify_stdout, stdout_fd, null, 0);
+    }
 
     // Env
     var env_ptr: [*c]const [*c]const u8 = std.c.environ;
@@ -422,7 +429,12 @@ fn client_send_resize() void {
 }
 
 fn client_has_terminal() bool {
-    return c.posix_sys.isatty(0) != 0 and c.posix_sys.isatty(1) != 0;
+    return c.posix_sys.isatty(std.posix.STDIN_FILENO) != 0;
+}
+
+fn client_ttyname(fd: i32) ?[]const u8 {
+    const raw = c.posix_sys.ttyname(fd) orelse return null;
+    return std.mem.span(raw);
 }
 
 fn client_send_command(argv: anytype) void {
@@ -1522,6 +1534,8 @@ test "client_send_identify ends with identify_done after capability stream" {
     var count: u32 = 0;
     var first_type: u32 = 0;
     var last_type: u32 = 0;
+    var saw_stdin = false;
+    var saw_stdout = false;
     while (true) {
         const nr = c.imsg.imsgbuf_read(&reader);
         if (nr < 0) {
@@ -1535,12 +1549,26 @@ test "client_send_identify ends with identify_done after capability stream" {
         if (count == 0) first_type = ty;
         last_type = ty;
         count += 1;
+        if (ty == @as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_stdin)))) {
+            const fd = c.imsg.imsg_get_fd(&im);
+            try std.testing.expect(fd != -1);
+            _ = c.posix_sys.close(fd);
+            saw_stdin = true;
+        }
+        if (ty == @as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_stdout)))) {
+            const fd = c.imsg.imsg_get_fd(&im);
+            try std.testing.expect(fd != -1);
+            _ = c.posix_sys.close(fd);
+            saw_stdout = true;
+        }
         c.imsg.imsg_free(&im);
     }
 
     try std.testing.expect(count >= 4);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_longflags))), first_type);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_done))), last_type);
+    try std.testing.expect(saw_stdin);
+    try std.testing.expect(saw_stdout);
 }
 
 test "client_dispatch read_open with control client rejects stdin dup" {

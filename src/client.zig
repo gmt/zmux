@@ -578,6 +578,28 @@ export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
 
 // ── Main client entry ─────────────────────────────────────────────────────
 
+/// Whether the client should set `CLIENT_STARTSERVER` before connecting (same
+/// rules as `client_main`, without libevent or proc setup).
+pub fn client_infer_start_server(shell_command: ?[]const u8, argc: i32, argv: [*]const [*:0]const u8) bool {
+    if (shell_command != null) return true;
+    if (argc == 0) return true;
+
+    var argv_slice: std.ArrayList([]const u8) = .{};
+    defer argv_slice.deinit(xm.allocator);
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(argc))) : (i += 1) {
+        argv_slice.append(xm.allocator, std.mem.span(argv[i])) catch unreachable;
+    }
+    var cause: ?[]u8 = null;
+    if (cmd_mod.cmd_parse_one(argv_slice.items, null, &cause)) |parsed| {
+        const want = (parsed.entry.flags & T.CMD_STARTSERVER) != 0;
+        cmd_mod.cmd_free(parsed);
+        return want;
+    } else |_| {}
+    if (cause) |c_err| xm.allocator.free(c_err);
+    return false;
+}
+
 pub fn client_main(
     base: *c.libevent.event_base,
     shell_command: ?[]const u8,
@@ -587,29 +609,10 @@ pub fn client_main(
     feat: i32,
 ) i32 {
     var client_mode_flags = flags;
-    var start_server = false;
     client_set_shell_command(shell_command);
     defer client_clear_shell_command();
 
-    if (client_shell_command != null) {
-        start_server = true;
-    } else if (argc == 0) {
-        start_server = true;
-    } else {
-        // Parse to see if the command requests server start
-        var argv_slice: std.ArrayList([]const u8) = .{};
-        defer argv_slice.deinit(xm.allocator);
-        var i: usize = 0;
-        while (i < @as(usize, @intCast(argc))) : (i += 1) {
-            argv_slice.append(xm.allocator, std.mem.span(argv[i])) catch unreachable;
-        }
-        var cause: ?[]u8 = null;
-        if (cmd_mod.cmd_parse_one(argv_slice.items, null, &cause)) |parsed| {
-            if (parsed.entry.flags & T.CMD_STARTSERVER != 0) start_server = true;
-            cmd_mod.cmd_free(parsed);
-        } else |_| {}
-        if (cause) |c_err| xm.allocator.free(c_err);
-    }
+    const start_server = client_infer_start_server(shell_command, argc, argv);
 
     if (client_has_terminal()) client_mode_flags |= T.CLIENT_TERMINAL;
     client_flags = client_mode_flags | if (start_server) T.CLIENT_STARTSERVER else 0;
@@ -1461,6 +1464,74 @@ test "client_dispatch write_open no peer is a no-op" {
     };
     client_dispatch(&open_imsg, null);
     try std.testing.expect(!proc.exit);
+}
+
+test "client_infer_start_server follows shell argv and parse results" {
+    const empty_argv: [*:0]const u8 = "";
+    try std.testing.expect(client_infer_start_server("sh -c true", 0, @ptrCast(&empty_argv)));
+    try std.testing.expect(client_infer_start_server(null, 0, @ptrCast(&empty_argv)));
+
+    const arg_new: [:0]const u8 = "new-session";
+    const argv_new: [1][*:0]const u8 = .{arg_new.ptr};
+    try std.testing.expect(client_infer_start_server(null, 1, @ptrCast(&argv_new)));
+
+    const arg_kill: [:0]const u8 = "kill-server";
+    const argv_kill: [1][*:0]const u8 = .{arg_kill.ptr};
+    try std.testing.expect(!client_infer_start_server(null, 1, @ptrCast(&argv_kill)));
+
+    const arg_ls: [:0]const u8 = "list-sessions";
+    const argv_ls: [1][*:0]const u8 = .{arg_ls.ptr};
+    try std.testing.expect(!client_infer_start_server(null, 1, @ptrCast(&argv_ls)));
+}
+
+test "client_send_identify ends with identify_done after capability stream" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-identify-stream" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    client_flags = T.CLIENT_UTF8;
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+        client_proc = null;
+        client_flags = 0;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    client_send_identify(7);
+
+    var count: u32 = 0;
+    var first_type: u32 = 0;
+    var last_type: u32 = 0;
+    while (true) {
+        const nr = c.imsg.imsgbuf_read(&reader);
+        if (nr <= 0) break;
+        var im: c.imsg.imsg = undefined;
+        if (c.imsg.imsg_get(&reader, &im) <= 0) break;
+        defer c.imsg.imsg_free(&im);
+        const ty = c.imsg.imsg_get_type(&im);
+        if (count == 0) first_type = ty;
+        last_type = ty;
+        count += 1;
+    }
+
+    try std.testing.expect(count >= 4);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_longflags))), first_type);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.identify_done))), last_type);
 }
 
 test "client_dispatch read_open with control client rejects stdin dup" {

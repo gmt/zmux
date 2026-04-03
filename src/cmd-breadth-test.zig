@@ -71,3 +71,55 @@ test "new-window command parses shell flag" {
 test "start-server command parses bare invocation" {
     try std.testing.expectEqualStrings("start-server", try parseName(&.{"start-server"}));
 }
+
+test "attach-session command parses target and cwd flags" {
+    try std.testing.expectEqualStrings("attach-session", try parseName(&.{ "attach-session", "-t", "mysess", "-c", "/tmp" }));
+}
+
+test "switch-client command parses target session flag" {
+    try std.testing.expectEqualStrings("switch-client", try parseName(&.{ "switch-client", "-t", "mysess" }));
+}
+
+test "display-message command parses format and message" {
+    try std.testing.expectEqualStrings("display-message", try parseName(&.{ "display-message", "-F", "#{pane_id}", "hello" }));
+}
+
+test "capture-pane command parses target and line range" {
+    try std.testing.expectEqualStrings("capture-pane", try parseName(&.{ "capture-pane", "-t", "%0", "-S", "-10" }));
+}
+
+test "save-buffer command parses buffer name and path" {
+    try std.testing.expectEqualStrings("save-buffer", try parseName(&.{ "save-buffer", "-b", "paste1", "/tmp/zmux-save-test" }));
+}
+
+test "load-buffer command parses buffer name and path" {
+    try std.testing.expectEqualStrings("load-buffer", try parseName(&.{ "load-buffer", "-b", "paste1", "/tmp/zmux-load-test" }));
+}
+
+test "refresh-client command parses target flag" {
+    try std.testing.expectEqualStrings("refresh-client", try parseName(&.{ "refresh-client", "-t", "client0" }));
+}
+
+test "find-window command parses match string and flags" {
+    try std.testing.expectEqualStrings("find-window", try parseName(&.{ "find-window", "-N", "vim" }));
+}
+
+test "show-buffer command parses buffer name" {
+    try std.testing.expectEqualStrings("show-buffer", try parseName(&.{ "show-buffer", "-b", "buf0" }));
+}
+
+test "select-window command parses target window" {
+    try std.testing.expectEqualStrings("select-window", try parseName(&.{ "select-window", "-t", ":1" }));
+}
+
+test "show-options command parses global and option name" {
+    try std.testing.expectEqualStrings("show-options", try parseName(&.{ "show-options", "-g", "status-left" }));
+}
+
+test "next-window command parses session target" {
+    try std.testing.expectEqualStrings("next-window", try parseName(&.{ "next-window", "-t", "foo" }));
+}
+
+test "show-hooks command parses target pane" {
+    try std.testing.expectEqualStrings("show-hooks", try parseName(&.{ "show-hooks", "-t", "%0" }));
+}

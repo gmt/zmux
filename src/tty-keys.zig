@@ -951,6 +951,96 @@ fn lookupB64(alpha: []const u8, c: u8) ?u8 {
     return null;
 }
 
+fn matchPrefix(buf: []const u8, prefix: []const u8) ParseResult {
+    for (prefix, 0..) |ch, i| {
+        if (buf.len == i) return .partial;
+        if (buf[i] != ch) return .no_match;
+    }
+    return .match;
+}
+
+fn parseDeviceAttributes(
+    buf: []const u8,
+    prefix_last: u8,
+    size: *usize,
+    params_out: []u32,
+    n_out: *usize,
+) ParseResult {
+    const prefix = [3]u8{ '\x1b', '[', prefix_last };
+
+    size.* = 0;
+    n_out.* = 0;
+
+    switch (matchPrefix(buf, &prefix)) {
+        .match => {},
+        .partial => return .partial,
+        .no_match, .discard => return .no_match,
+    }
+
+    const max_params_len = 128;
+    var params_len: usize = 0;
+    while (params_len < max_params_len) : (params_len += 1) {
+        const idx = prefix.len + params_len;
+        if (idx == buf.len) return .partial;
+        if (buf[idx] >= 'a' and buf[idx] <= 'z') break;
+    }
+    if (params_len == max_params_len or buf[prefix.len + params_len] != 'c') return .no_match;
+
+    size.* = prefix.len + params_len + 1;
+
+    var it = std.mem.splitScalar(u8, buf[prefix.len .. prefix.len + params_len], ';');
+    var n: usize = 0;
+    while (it.next()) |tok| {
+        if (n >= params_out.len) break;
+        params_out[n] = std.fmt.parseInt(u32, tok, 10) catch 0;
+        n += 1;
+    }
+    n_out.* = n;
+    return .match;
+}
+
+const PayloadTerminator = enum {
+    st_only,
+    st_or_bel,
+};
+
+fn copyTerminatedPayload(
+    buf: []const u8,
+    prefix: []const u8,
+    size: *usize,
+    tmp_out: []u8,
+    terminator: PayloadTerminator,
+) ParseResult {
+    size.* = 0;
+
+    switch (matchPrefix(buf, prefix)) {
+        .match => {},
+        .partial => return .partial,
+        .no_match, .discard => return .no_match,
+    }
+
+    var i: usize = 0;
+    while (i < tmp_out.len - 1) : (i += 1) {
+        const idx = prefix.len + i;
+        if (idx == buf.len) return .partial;
+        if (i > 0 and buf[idx - 1] == '\x1b' and buf[idx] == '\\') break;
+        if (terminator == .st_or_bel and buf[idx] == '\x07') break;
+        tmp_out[i] = buf[idx];
+    }
+    if (i == tmp_out.len - 1) return .no_match;
+
+    size.* = prefix.len + i + 1;
+    if (i == 0) {
+        tmp_out[0] = 0;
+        return .match;
+    }
+    if (tmp_out[i - 1] == '\x1b')
+        tmp_out[i - 1] = 0
+    else
+        tmp_out[i] = 0;
+    return .match;
+}
+
 // ── DA1 / DA2 / XDA / XTVERSION / window-size parsers (stubs) ──────────────
 
 /// Parse a primary device attributes response: \033[?...c
@@ -965,44 +1055,8 @@ pub fn tty_keys_device_attributes(
     params_out: []u32,
     n_out: *usize,
 ) ParseResult {
-    size.* = 0;
-    n_out.* = 0;
     if (have_da) return .no_match;
-
-    if (buf.len < 1 or buf[0] != '\x1b') return .no_match;
-    if (buf.len == 1) return .partial;
-    if (buf[1] != '[') return .no_match;
-    if (buf.len == 2) return .partial;
-    if (buf[2] != '?') return .no_match;
-    if (buf.len == 3) return .partial;
-
-    // Scan until lowercase letter.
-    const TMP_MAX = 128;
-    var i: usize = 0;
-    while (i < TMP_MAX) : (i += 1) {
-        if (3 + i == buf.len) return .partial;
-        if (buf[3 + i] >= 'a' and buf[3 + i] <= 'z') break;
-    }
-    if (i == TMP_MAX) return .no_match;
-    if (buf[3 + i] != 'c') return .no_match;
-
-    size.* = 4 + i;
-
-    // Parse the semicolon-separated integers.
-    var tmp: [128]u8 = undefined;
-    @memcpy(tmp[0..i], buf[3..][0..i]);
-    tmp[i] = 0;
-
-    var it = std.mem.splitScalar(u8, tmp[0..i], ';');
-    var n: usize = 0;
-    while (it.next()) |tok| {
-        if (n >= params_out.len) break;
-        params_out[n] = std.fmt.parseInt(u32, tok, 10) catch 0;
-        n += 1;
-    }
-    n_out.* = n;
-
-    return .match;
+    return parseDeviceAttributes(buf, '?', size, params_out, n_out);
 }
 
 /// Parse a secondary device attributes response: \033[>...c
@@ -1016,41 +1070,8 @@ pub fn tty_keys_device_attributes2(
     params_out: []u32,
     n_out: *usize,
 ) ParseResult {
-    size.* = 0;
-    n_out.* = 0;
     if (have_da2) return .no_match;
-
-    if (buf.len < 1 or buf[0] != '\x1b') return .no_match;
-    if (buf.len == 1) return .partial;
-    if (buf[1] != '[') return .no_match;
-    if (buf.len == 2) return .partial;
-    if (buf[2] != '>') return .no_match;
-    if (buf.len == 3) return .partial;
-
-    const TMP_MAX = 128;
-    var i: usize = 0;
-    while (i < TMP_MAX) : (i += 1) {
-        if (3 + i == buf.len) return .partial;
-        if (buf[3 + i] >= 'a' and buf[3 + i] <= 'z') break;
-    }
-    if (i == TMP_MAX) return .no_match;
-    if (buf[3 + i] != 'c') return .no_match;
-
-    size.* = 4 + i;
-
-    var tmp: [128]u8 = undefined;
-    @memcpy(tmp[0..i], buf[3..][0..i]);
-
-    var it = std.mem.splitScalar(u8, tmp[0..i], ';');
-    var n: usize = 0;
-    while (it.next()) |tok| {
-        if (n >= params_out.len) break;
-        params_out[n] = std.fmt.parseInt(u32, tok, 10) catch 0;
-        n += 1;
-    }
-    n_out.* = n;
-
-    return .match;
+    return parseDeviceAttributes(buf, '>', size, params_out, n_out);
 }
 
 /// Parse an extended device attributes response (XDA): \033P>|...\033\\
@@ -1064,33 +1085,8 @@ pub fn tty_keys_extended_device_attributes(
     have_xda: bool,
     tmp_out: []u8,
 ) ParseResult {
-    size.* = 0;
     if (have_xda) return .no_match;
-
-    if (buf.len < 1 or buf[0] != '\x1b') return .no_match;
-    if (buf.len == 1) return .partial;
-    if (buf[1] != 'P') return .no_match;
-    if (buf.len == 2) return .partial;
-    if (buf[2] != '>') return .no_match;
-    if (buf.len == 3) return .partial;
-    if (buf[3] != '|') return .no_match;
-    if (buf.len == 4) return .partial;
-
-    var i: usize = 0;
-    while (i < tmp_out.len - 1) : (i += 1) {
-        if (4 + i == buf.len) return .partial;
-        if (i > 0 and buf[4 + i - 1] == '\x1b' and buf[4 + i] == '\\') break;
-        tmp_out[i] = buf[4 + i];
-    }
-    if (i == tmp_out.len - 1) return .no_match;
-
-    size.* = 5 + i;
-    if (i == 0) {
-        tmp_out[0] = 0;
-        return .match;
-    }
-    tmp_out[i - 1] = 0; // strip trailing ESC
-    return .match;
+    return copyTerminatedPayload(buf, "\x1bP>|", size, tmp_out, .st_only);
 }
 
 /// Parse a window size report: \033[8;sy;sxt or \033[4;ypixel;xpixelt
@@ -1160,40 +1156,7 @@ pub fn tty_keys_colours(
     is_fg: bool,
     tmp_out: []u8,
 ) ParseResult {
-    _ = is_fg;
-    size.* = 0;
-
-    if (buf.len < 1 or buf[0] != '\x1b') return .no_match;
-    if (buf.len == 1) return .partial;
-    if (buf[1] != ']') return .no_match;
-    if (buf.len == 2) return .partial;
-    if (buf[2] != '1') return .no_match;
-    if (buf.len == 3) return .partial;
-    if (buf[3] != '0' and buf[3] != '1') return .no_match;
-    if (buf.len == 4) return .partial;
-    if (buf[4] != ';') return .no_match;
-    if (buf.len == 5) return .partial;
-
-    var i: usize = 0;
-    while (i < tmp_out.len - 1) : (i += 1) {
-        if (5 + i == buf.len) return .partial;
-        if (i > 0 and buf[5 + i - 1] == '\x1b' and buf[5 + i] == '\\') break;
-        if (buf[5 + i] == '\x07') break;
-        tmp_out[i] = buf[5 + i];
-    }
-    if (i == tmp_out.len - 1) return .no_match;
-
-    size.* = 6 + i;
-    if (i == 0) {
-        tmp_out[0] = 0;
-        return .match;
-    }
-    if (tmp_out[i - 1] == '\x1b')
-        tmp_out[i - 1] = 0
-    else
-        tmp_out[i] = 0;
-
-    return .match;
+    return copyTerminatedPayload(buf, if (is_fg) "\x1b]10;" else "\x1b]11;", size, tmp_out, .st_or_bel);
 }
 
 /// Parse an OSC 4 palette colour response: \033]4;idx;rgb:...\033\\ or BEL.
@@ -1205,37 +1168,7 @@ pub fn tty_keys_palette(
     size: *usize,
     tmp_out: []u8,
 ) ParseResult {
-    size.* = 0;
-
-    if (buf.len < 1 or buf[0] != '\x1b') return .no_match;
-    if (buf.len == 1) return .partial;
-    if (buf[1] != ']') return .no_match;
-    if (buf.len == 2) return .partial;
-    if (buf[2] != '4') return .no_match;
-    if (buf.len == 3) return .partial;
-    if (buf[3] != ';') return .no_match;
-    if (buf.len == 4) return .partial;
-
-    var i: usize = 0;
-    while (i < tmp_out.len - 1) : (i += 1) {
-        if (4 + i == buf.len) return .partial;
-        if (i > 0 and buf[4 + i - 1] == '\x1b' and buf[4 + i] == '\\') break;
-        if (buf[4 + i] == '\x07') break;
-        tmp_out[i] = buf[4 + i];
-    }
-    if (i == tmp_out.len - 1) return .no_match;
-
-    size.* = 5 + i;
-    if (i == 0) {
-        tmp_out[0] = 0;
-        return .match;
-    }
-    if (tmp_out[i - 1] == '\x1b')
-        tmp_out[i - 1] = 0
-    else
-        tmp_out[i] = 0;
-
-    return .match;
+    return copyTerminatedPayload(buf, "\x1b]4;", size, tmp_out, .st_or_bel);
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────────

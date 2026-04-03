@@ -767,7 +767,13 @@ pub fn tty_keys_mouse(
             if (buf.len <= size.*) return .{ .result = .partial };
             const ch: u8 = buf[size.*];
             size.* += 1;
-            if (i == 0) { b = ch; } else if (i == 1) { x = ch; } else { y = ch; }
+            if (i == 0) {
+                b = ch;
+            } else if (i == 1) {
+                x = ch;
+            } else {
+                y = ch;
+            }
         }
 
         if (b < MOUSE_PARAM_BTN_OFF or x < MOUSE_PARAM_POS_OFF or y < MOUSE_PARAM_POS_OFF)
@@ -804,7 +810,10 @@ pub fn tty_keys_mouse(
             if (buf.len <= size.*) return .{ .result = .partial };
             const ch: u8 = buf[size.*];
             size.* += 1;
-            if (ch == 'M' or ch == 'm') { final_ch = ch; break; }
+            if (ch == 'M' or ch == 'm') {
+                final_ch = ch;
+                break;
+            }
             if (ch < '0' or ch > '9') return .{ .result = .no_match };
             y = 10 * y + (ch - '0');
         }
@@ -875,8 +884,14 @@ pub fn tty_keys_clipboard(
     var end: usize = 5;
     var terminator: usize = 0;
     while (end < buf.len) : (end += 1) {
-        if (buf[end] == '\x07') { terminator = 1; break; }
-        if (end > 5 and buf[end - 1] == '\x1b' and buf[end] == '\\') { terminator = 2; break; }
+        if (buf[end] == '\x07') {
+            terminator = 1;
+            break;
+        }
+        if (end > 5 and buf[end - 1] == '\x1b' and buf[end] == '\\') {
+            terminator = 2;
+            break;
+        }
     }
     if (end == buf.len) return .partial;
     size.* = end + 1;

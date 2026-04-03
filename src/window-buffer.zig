@@ -543,7 +543,6 @@ fn rebuildAfterDelete(wme: *T.WindowModeEntry) void {
     rebuildAndDraw(wme);
 }
 
-
 fn dispatchEditCommand(client: *T.Client, command: []const u8) void {
     if (edit_dispatch_hook) |hook| {
         hook(client, command);
@@ -622,7 +621,6 @@ fn finishEdit(ed: *EditData) void {
     xm.allocator.free(ed.name);
     xm.allocator.destroy(ed);
 }
-
 
 fn tagForBuffer(pb: *paste_mod.PasteBuffer) u64 {
     return @intFromPtr(pb);

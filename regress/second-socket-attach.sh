@@ -42,7 +42,13 @@ zmux2 new-session -d -s peer || exit 1
 zmux2 has-session -t peer || exit 1
 
 # Sessions on different sockets must be isolated
-zmux1 has-session -t peer 2>/dev/null && { echo "socket isolation failed"; exit 1; }
-zmux2 has-session -t main 2>/dev/null && { echo "socket isolation failed"; exit 1; }
+zmux1 has-session -t peer 2>/dev/null && {
+    echo "socket isolation failed"
+    exit 1
+}
+zmux2 has-session -t main 2>/dev/null && {
+    echo "socket isolation failed"
+    exit 1
+}
 
 exit 0

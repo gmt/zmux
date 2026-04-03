@@ -47,7 +47,7 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             const rendered = job_mod.job_render_summary(xm.allocator);
             defer xm.allocator.free(rendered);
             if (rendered.len != 0) {
-                if (out.items.len != 0) out.append( xm.allocator, '\n') catch unreachable;
+                if (out.items.len != 0) out.append(xm.allocator, '\n') catch unreachable;
                 out.appendSlice(xm.allocator, rendered) catch unreachable;
             }
         }

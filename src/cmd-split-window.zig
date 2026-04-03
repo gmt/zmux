@@ -101,7 +101,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         var input_cause: ?[]u8 = null;
         const input_rc = win.window_pane_start_input(new_wp, item, &input_cause);
         if (input_rc == -1) {
-            if (input_cause) |ic| { cmdq.cmdq_error(item, "{s}", .{ic}); xm.allocator.free(ic); }
+            if (input_cause) |ic| {
+                cmdq.cmdq_error(item, "{s}", .{ic});
+                xm.allocator.free(ic);
+            }
             layout_mod.layout_close_pane(new_wp);
             win.window_remove_pane(w, new_wp);
             return .@"error";

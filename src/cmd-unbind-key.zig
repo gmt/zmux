@@ -58,15 +58,13 @@ fn exec_unbind_key(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    const tablename = if (args.get('T')) |table|
-        blk: {
-            if (key_bindings.key_bindings_get_table(table, false) == null) {
-                if (!quiet) cmdq.cmdq_error(item, "table {s} doesn't exist", .{table});
-                return .@"error";
-            }
-            break :blk table;
+    const tablename = if (args.get('T')) |table| blk: {
+        if (key_bindings.key_bindings_get_table(table, false) == null) {
+            if (!quiet) cmdq.cmdq_error(item, "table {s} doesn't exist", .{table});
+            return .@"error";
         }
-    else if (args.has('n'))
+        break :blk table;
+    } else if (args.has('n'))
         "root"
     else
         "prefix";

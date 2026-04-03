@@ -36,6 +36,9 @@ smoke_cmd kill-session -t 0:
 sleep 3
 
 # The pane process should be gone
-kill -0 "$P" 2>/dev/null && { echo "pane process $P still alive"; exit 1; }
+kill -0 "$P" 2>/dev/null && {
+    echo "pane process $P still alive"
+    exit 1
+}
 
 exit 0

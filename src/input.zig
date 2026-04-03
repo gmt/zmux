@@ -158,7 +158,11 @@ pub fn input_start_ground_timer(wp: *T.WindowPane) void {
     const base = proc_mod.libevent orelse return;
     if (wp.ground_timer == null) {
         wp.ground_timer = c_bridge.libevent.event_new(
-            base, -1, 0, input_ground_timer_cb, wp,
+            base,
+            -1,
+            0,
+            input_ground_timer_cb,
+            wp,
         );
     }
     const ev = wp.ground_timer orelse return;
@@ -180,7 +184,11 @@ pub fn input_start_request_timer(wp: *T.WindowPane) void {
     const base = proc_mod.libevent orelse return;
     if (wp.input_request_timer == null) {
         wp.input_request_timer = c_bridge.libevent.event_new(
-            base, -1, 0, input_request_timer_cb, wp,
+            base,
+            -1,
+            0,
+            input_request_timer_cb,
+            wp,
         );
     }
     const ev = wp.input_request_timer orelse return;

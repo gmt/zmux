@@ -119,14 +119,11 @@ fn exec_lsc(_cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
     var target: T.CmdFindState = .{};
-    const target_session = if (args.get('t') != null)
-        blk: {
-            if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, 0) != 0)
-                return .@"error";
-            break :blk target.s;
-        }
-    else
-        null;
+    const target_session = if (args.get('t') != null) blk: {
+        if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, 0) != 0)
+            return .@"error";
+        break :blk target.s;
+    } else null;
 
     const clients = sort_mod.sorted_clients(sort_crit);
     defer xm.allocator.free(clients);

@@ -37,3 +37,31 @@ test "zmux protocol version and extern payload sizes stay C-compatible" {
     try std.testing.expectEqual(@alignOf(c_int), @alignOf(p.MsgCommand));
     try std.testing.expectEqual(@alignOf(u32), @alignOf(p.MsgResize));
 }
+
+test "zmux MsgType enum values match tmux wire numbering bands" {
+    try std.testing.expectEqual(@as(i32, 12), @intFromEnum(p.MsgType.version));
+    try std.testing.expectEqual(@as(i32, 100), @intFromEnum(p.MsgType.identify_flags));
+    try std.testing.expectEqual(@as(i32, 112), @intFromEnum(p.MsgType.identify_terminfo));
+    try std.testing.expectEqual(@as(i32, 200), @intFromEnum(p.MsgType.command));
+    try std.testing.expectEqual(@as(i32, 201), @intFromEnum(p.MsgType.detach));
+    try std.testing.expectEqual(@as(i32, 300), @intFromEnum(p.MsgType.read_open));
+    try std.testing.expectEqual(@as(i32, 400), @intFromEnum(p.MsgType.stdin_data));
+}
+
+test "zmux identify message types stay contiguous after identify_flags" {
+    try std.testing.expectEqual(@intFromEnum(p.MsgType.identify_flags) + 1, @intFromEnum(p.MsgType.identify_term));
+    try std.testing.expectEqual(@intFromEnum(p.MsgType.identify_term) + 1, @intFromEnum(p.MsgType.identify_ttyname));
+}
+
+test "zmux MsgResize round-trips four u32 fields" {
+    const m: p.MsgResize = .{
+        .sx = 80,
+        .sy = 24,
+        .xpixel = 640,
+        .ypixel = 480,
+    };
+    try std.testing.expectEqual(@as(u32, 80), m.sx);
+    try std.testing.expectEqual(@as(u32, 24), m.sy);
+    try std.testing.expectEqual(@as(u32, 640), m.xpixel);
+    try std.testing.expectEqual(@as(u32, 480), m.ypixel);
+}

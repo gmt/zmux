@@ -258,3 +258,25 @@ test "grid reader jump and indentation helpers stay on stored utf8 cells" {
     try std.testing.expectEqual(@as(u32, 2), gr.cx);
     try std.testing.expectEqual(@as(u32, 0), gr.cy);
 }
+
+test "grid_view_scroll_region_up shifts non-history grid lines inside region" {
+    const gd = grid.grid_create(4, 4, 0);
+    defer grid.grid_free(gd);
+
+    grid.set_ascii(gd, 1, 0, 'a');
+    grid.set_ascii(gd, 2, 0, 'b');
+    grid.grid_view_scroll_region_up(gd, 1, 2, 0);
+    try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(gd, 1, 0));
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(gd, 2, 0));
+}
+
+test "grid_view_scroll_region_down shifts lines back inside region" {
+    const gd = grid.grid_create(4, 4, 0);
+    defer grid.grid_free(gd);
+
+    grid.set_ascii(gd, 1, 0, 'x');
+    grid.set_ascii(gd, 2, 0, 'y');
+    grid.grid_view_scroll_region_down(gd, 1, 2, 0);
+    try std.testing.expectEqual(@as(u8, ' '), grid.ascii_at(gd, 1, 0));
+    try std.testing.expectEqual(@as(u8, 'x'), grid.ascii_at(gd, 2, 0));
+}

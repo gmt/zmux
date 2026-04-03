@@ -42,3 +42,10 @@ test "key-bindings-data module parses at comptime" {
         _ = @import("key-bindings-data.zig");
     }
 }
+
+test "key-bindings-data default specs use non-empty table names" {
+    const kbd = @import("key-bindings-data.zig");
+    for (kbd.default_binding_specs) |spec| {
+        try std.testing.expect(spec.table.len > 0);
+    }
+}

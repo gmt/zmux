@@ -701,6 +701,17 @@ export fn client_signal(signo: c_int) void {
 
 fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
+test "client_connect rejects overlong unix socket path" {
+    const base = c.libevent.event_base_new() orelse return error.OutOfMemory;
+    defer c.libevent.event_base_free(base);
+
+    var path_buf: [std.posix.sockaddr.un.path_len_including_null]u8 = undefined;
+    @memset(&path_buf, 'x');
+    const rc = client_connect(base, &path_buf, T.CLIENT_NOSTARTSERVER);
+    try std.testing.expectEqual(@as(i32, -1), rc);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(std.posix.E.NAMETOOLONG)), std.c._errno().*);
+}
+
 test "client detach payload preserves session name and kill reason" {
     defer if (client_exitsession) |session| {
         xm.allocator.free(session);

@@ -994,3 +994,50 @@ test "session_next_session and session_previous_session wrap in name order" {
     try std.testing.expectEqual(sa, session_previous_session(sb, &sort_crit).?);
 }
 
+test "session_alive is true for registered session only until destroy" {
+    const cmdq = @import("cmd-queue.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    session_init_globals(xm.allocator);
+
+    const opts_mod = @import("options.zig");
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = session_create(null, "alive-reg", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    try std.testing.expect(session_alive(s));
+    session_destroy(s, false, "test");
+    try std.testing.expect(session_find("alive-reg") == null);
+}
+
+test "session_update_activity sets explicit timestamp" {
+    const cmdq = @import("cmd-queue.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    session_init_globals(xm.allocator);
+
+    const opts_mod = @import("options.zig");
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = session_create(null, "act-ts", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (session_find("act-ts") != null) session_destroy(s, false, "test");
+
+    session_update_activity(s, 9_876_543_210);
+    try std.testing.expectEqual(@as(i64, 9_876_543_210), s.activity_time);
+}
+

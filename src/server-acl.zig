@@ -194,6 +194,26 @@ test "server_acl_user_deny removes a previously allowed uid" {
     try std.testing.expect(!server_acl_user_exists(uid));
 }
 
+test "server ACL multiple UIDs readonly query and deny_write allow_write cycle" {
+    server_acl_reset_for_tests();
+    server_acl_user_allow(1001);
+    server_acl_user_allow(2002);
+    try std.testing.expect(!server_acl_user_is_readonly(1001));
+    server_acl_user_deny_write(1001);
+    try std.testing.expect(server_acl_user_is_readonly(1001));
+    server_acl_user_allow_write(1001);
+    try std.testing.expect(!server_acl_user_is_readonly(1001));
+    server_acl_user_deny(2002);
+    try std.testing.expect(!server_acl_user_exists(2002));
+}
+
+test "server_acl_user_allow is idempotent for duplicate uid" {
+    server_acl_reset_for_tests();
+    server_acl_user_allow(4242);
+    server_acl_user_allow(4242);
+    try std.testing.expect(server_acl_user_exists(4242));
+}
+
 test "server ACL write toggles update live client flags" {
     server_acl_reset_for_tests();
     client_registry.clients.clearRetainingCapacity();

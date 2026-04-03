@@ -169,6 +169,18 @@ class SmokeHarness:
         "show-messages",
         "suspend-client",
     }
+    CONTROL_CLIENT_EXERCISE = {
+        "choose-buffer",
+        "choose-client",
+        "choose-tree",
+        "clock-mode",
+        "command-prompt",
+        "copy-mode",
+        "customize-mode",
+        "display-menu",
+        "display-panes",
+        "show-messages",
+    }
 
     def __init__(self, binary: str, artifact_root: pathlib.Path) -> None:
         self.binary = binary
@@ -340,6 +352,12 @@ class SmokeHarness:
         needs_client = row.context == "client" or row.command in self.CLIENTISH_COMMANDS
         client_name = self.setup_base_state(needs_client=needs_client)
         self.prepare_command_state(row.command)
+        if row.command == "attach-session":
+            self.exercise_attach_session_interactive()
+            return
+        if row.command in self.CONTROL_CLIENT_EXERCISE:
+            self.exercise_via_control_client(self.recipe_for(row.command, client_name))
+            return
         try:
             proc = self.mux(
                 self.recipe_for(row.command, client_name),
@@ -351,6 +369,31 @@ class SmokeHarness:
                 return
             raise
         self.verify_no_unknown_command(proc, row.command)
+
+    def exercise_attach_session_interactive(self) -> None:
+        attach_client = ControlClient(self, "control-attach", session="smoke")
+        self.control_clients.append(attach_client)
+        attach_client.wait_attached(minimum_clients=2)
+        if not attach_client.stderr_is_clean():
+            raise SmokeError("control-attach: unexpected stderr during attach-session")
+
+    def exercise_via_control_client(self, args: list[str]) -> None:
+        if not self.control_clients:
+            raise SmokeError(f"{args[0]}: no control client available")
+
+        client = self.control_clients[0]
+        if client.proc.poll() is not None:
+            raise SmokeError(f"{args[0]}: control client exited before command dispatch")
+
+        client.send(shlex.join(args))
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            if client.proc.poll() is not None:
+                raise SmokeError(f"{args[0]}: control client exited early with {client.proc.returncode}")
+            time.sleep(0.05)
+
+        if not client.stderr_is_clean():
+            raise SmokeError(f"{args[0]}: control client stderr was not clean")
 
     def prepare_command_state(self, command: str) -> None:
         if command in {"unlink-window"} and self.supports("link-window"):

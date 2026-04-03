@@ -184,6 +184,28 @@ test "popup_display succeeds then clear_overlay frees popup" {
     try std.testing.expect(cl.popup_data == null);
 }
 
+test "menu_add_item accepts utf8 label text" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = .{ .client = undefined, .sx = 120, .sy = 40 },
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+        .session = null,
+    };
+    cl.tty.client = &cl;
+
+    const m = menu.menu_create("UTF8");
+    defer m.deinit();
+
+    menu.menu_add_item(m, .{ .name = "日本語" }, null, &cl, null);
+    try std.testing.expectEqual(@as(usize, 1), m.items.len);
+    try std.testing.expectEqualStrings("日本語", m.items[0].display_text.?);
+}
+
 test "popup_clear_overlay is safe without popup" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);

@@ -312,6 +312,11 @@ fn requireStressTests() !void {
         return error.SkipZigTest;
 }
 
+test "file write reset clears state without pending work" {
+    reset_for_tests();
+    defer reset_for_tests();
+}
+
 test "client write handlers open, write, and close files" {
     try requireStressTests();
     reset_for_tests();

@@ -709,3 +709,11 @@ test "sixel_parse empty rejects" {
     const si2 = sixel_parse("x", 0, 8, 16);
     try @import("std").testing.expect(si2 == null);
 }
+
+test "sixel_get_pixel returns zero for out-of-range coordinates" {
+    const data = "q#0;2;100;0;0~";
+    const si = sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    defer sixel_free(si);
+    try @import("std").testing.expectEqual(@as(u32, 0), sixel_get_pixel(si, 9_999, 9_999));
+    try @import("std").testing.expectEqual(@as(u32, 0), sixel_get_pixel(si, 0, 9_999));
+}

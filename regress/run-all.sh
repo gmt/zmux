@@ -141,6 +141,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/new-session-size.sh" \
         "$SCRIPT_DIR/kill-session-process-exit.sh" \
         "$SCRIPT_DIR/shell-exit-cleanup.sh" \
+        "$SCRIPT_DIR/shell-size-sentinel.sh" \
         "$SCRIPT_DIR/control-client-size.sh" \
         "$SCRIPT_DIR/control-notify-smoke.sh" \
         "$SCRIPT_DIR/alerts-smoke.sh" \

@@ -13,18 +13,17 @@
 # IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-# shell-exit-cleanup.sh – "exit" in a shell pane must cleanly destroy
-# the pane and, if it was the last pane, the session.
+# shell-exit-cleanup.sh – "exit" in a default-shell-like pane process
+# must cleanly destroy the pane and, if it was the last pane, the
+# session.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
 smoke_init shell-exit-cleanup
+smoke_use_helper_shell exit-on-exit-line || exit $?
 
-# Allow override for oracle testing against real tmux
-MUX="${TEST_ZMUX}"
-
-# Start a session with a bash shell
+# Start a session with a deterministic default-shell helper.
 smoke_cmd new-session -d -s shellexit -x 80 -y 24 || exit 1
 
 # Get the pane PID
@@ -34,7 +33,7 @@ PID=$(smoke_cmd display-message -p -t shellexit '#{pane_pid}' 2>/dev/null)
 # Verify the process is alive
 kill -0 "$PID" 2>/dev/null || { echo "pane process $PID not running"; exit 1; }
 
-# Send "exit" to the shell
+# Send "exit" to the helper.
 smoke_cmd send-keys -t shellexit "exit" Enter
 
 # Wait for the session to disappear (up to 5 seconds)
@@ -43,10 +42,10 @@ if ! smoke_wait_for 5 sh -c "! \"$TEST_ZMUX\" -S \"$TEST_SOCKET\" -f/dev/null ha
     exit 1
 fi
 
-# The shell process should be gone
+# The pane process should be gone
 sleep 1
 if kill -0 "$PID" 2>/dev/null; then
-    echo "shell process $PID still alive after exit"
+    echo "pane process $PID still alive after exit"
     exit 1
 fi
 

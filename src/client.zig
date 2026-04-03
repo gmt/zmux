@@ -1176,3 +1176,346 @@ test "client_dispatch malformed write returns without exit" {
     client_dispatch(&imsg, null);
     try std.testing.expect(!proc.exit);
 }
+
+test "client_dispatch version sets lost_server and exits proc" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-version" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_exitreason = .none;
+    }
+
+    client_exitreason = .none;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.version)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = null,
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(T.ClientExitReason.lost_server, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch shell returns without trailing nul and does not exit proc" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-shell-bad" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer client_proc = null;
+
+    const payload = "nope-no-nul";
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.shell)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @constCast(payload.ptr),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expect(!proc.exit);
+}
+
+test "client_dispatch lock ignores payload without trailing nul" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-lock-bad" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_peer = null;
+        client_proc = null;
+    }
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+    defer {
+        std.posix.close(pair[0]);
+        std.posix.close(pair[1]);
+    }
+
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    const payload = "no-nul-lock";
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.lock)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @constCast(payload.ptr),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expect(!proc.exit);
+}
+
+test "client_dispatch routes write stream over 2 through file write handler" {
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+    const out_path = try std.fmt.allocPrint(xm.allocator, "{s}/dispatch-stream.bin", .{cwd});
+    defer xm.allocator.free(out_path);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-dispatch-write3" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+    }
+
+    client_proc = &proc;
+    client_flags = 0;
+    defer {
+        client_proc = null;
+        client_flags = 0;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const stream: i32 = 19;
+    var open_buf = std.ArrayList(u8){};
+    defer open_buf.deinit(xm.allocator);
+    const open_msg = protocol.MsgWriteOpen{
+        .stream = stream,
+        .fd = -1,
+        .flags = 0,
+    };
+    open_buf.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch unreachable;
+    open_buf.appendSlice(xm.allocator, out_path) catch unreachable;
+    open_buf.append(xm.allocator, 0) catch unreachable;
+
+    var open_imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.write_open)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + open_buf.items.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = open_buf.items.ptr,
+        .buf = null,
+    };
+    client_dispatch(&open_imsg, null);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var ready_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &ready_imsg) > 0);
+    defer c.imsg.imsg_free(&ready_imsg);
+
+    const chunk = "dispatch-write-payload";
+    var data_buf = std.ArrayList(u8){};
+    defer data_buf.deinit(xm.allocator);
+    const head = protocol.MsgWriteData{ .stream = stream };
+    data_buf.appendSlice(xm.allocator, std.mem.asBytes(&head)) catch unreachable;
+    data_buf.appendSlice(xm.allocator, chunk) catch unreachable;
+
+    var data_imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.write)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + data_buf.items.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = data_buf.items.ptr,
+        .buf = null,
+    };
+    client_dispatch(&data_imsg, null);
+
+    const disk = try std.fs.cwd().readFileAlloc(xm.allocator, out_path, 64);
+    defer xm.allocator.free(disk);
+    try std.testing.expectEqualStrings(chunk, disk);
+}
+
+test "client_dispatch read_open forwards to file read handler" {
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+    const path = try std.fmt.allocPrint(xm.allocator, "{s}/dispatch-read.txt", .{cwd});
+    defer xm.allocator.free(path);
+
+    const file = try std.fs.createFileAbsolute(path, .{});
+    try file.writeAll("via-dispatch");
+    file.close();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-dispatch-readopen" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+    }
+
+    client_proc = &proc;
+    client_flags = 0;
+    defer {
+        client_proc = null;
+        client_flags = 0;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var open_buf = std.ArrayList(u8){};
+    defer open_buf.deinit(xm.allocator);
+    const open_msg = protocol.MsgReadOpen{ .stream = 41, .fd = -1 };
+    open_buf.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch unreachable;
+    open_buf.appendSlice(xm.allocator, path) catch unreachable;
+    open_buf.append(xm.allocator, 0) catch unreachable;
+
+    var open_imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.read_open)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + open_buf.items.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = open_buf.items.ptr,
+        .buf = null,
+    };
+    client_dispatch(&open_imsg, null);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var read_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &read_imsg) > 0);
+    defer c.imsg.imsg_free(&read_imsg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.read))), c.imsg.imsg_get_type(&read_imsg));
+    const rlen = c.imsg.imsg_get_len(&read_imsg);
+    var rbuf = try xm.allocator.alloc(u8, rlen);
+    defer xm.allocator.free(rbuf);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&read_imsg, rbuf.ptr, rbuf.len));
+    var rd: protocol.MsgReadData = undefined;
+    @memcpy(std.mem.asBytes(&rd), rbuf[0..@sizeOf(protocol.MsgReadData)]);
+    try std.testing.expectEqual(@as(i32, 41), rd.stream);
+    try std.testing.expectEqualStrings("via-dispatch", rbuf[@sizeOf(protocol.MsgReadData)..]);
+}
+
+test "client_dispatch write_open no peer is a no-op" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-wo-nopeer" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    client_peer = null;
+    defer client_proc = null;
+
+    var open_buf = std.ArrayList(u8){};
+    defer open_buf.deinit(xm.allocator);
+    const open_msg = protocol.MsgWriteOpen{ .stream = 3, .fd = -1, .flags = 0 };
+    open_buf.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch unreachable;
+    open_buf.append(xm.allocator, "/tmp/nonexistent-zmux-test-path\x00") catch unreachable;
+
+    var open_imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.write_open)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + open_buf.items.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = open_buf.items.ptr,
+        .buf = null,
+    };
+    client_dispatch(&open_imsg, null);
+    try std.testing.expect(!proc.exit);
+}
+
+test "client_dispatch read_open with control client rejects stdin dup" {
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "client-dispatch-readopen-ctl" };
+    defer proc.peers.deinit(xm.allocator);
+
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
+    }
+
+    client_proc = &proc;
+    client_flags = T.CLIENT_CONTROL;
+    defer {
+        client_proc = null;
+        client_flags = 0;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var open_msg = protocol.MsgReadOpen{ .stream = 55, .fd = std.posix.STDIN_FILENO };
+    var open_imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.read_open)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(protocol.MsgReadOpen))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(&open_msg),
+        .buf = null,
+    };
+    client_dispatch(&open_imsg, null);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var done_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &done_imsg) > 0);
+    defer c.imsg.imsg_free(&done_imsg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.read_done))), c.imsg.imsg_get_type(&done_imsg));
+    const done: *const protocol.MsgReadDone = @ptrCast(@alignCast(done_imsg.data.?));
+    try std.testing.expectEqual(@as(i32, 55), done.stream);
+    try std.testing.expectEqual(@as(i32, @intFromEnum(std.posix.E.BADF)), done.@"error");
+}

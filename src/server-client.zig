@@ -68,7 +68,7 @@ pub fn server_client_create(fd: i32) *T.Client {
         .activity_time = now,
         .last_activity_time = now,
         .pid = std.os.linux.getpid(),
-        .fd = fd,
+        .fd = -1,
         .environ = env,
         .tty = .{ .client = cl },
         .status = .{},
@@ -138,6 +138,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     control_subscriptions.control_subscriptions_deinit(cl);
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
+    server_client_close_terminal_fds(cl);
     tty_draw.tty_draw_free(&cl.pane_cache);
     resize_mod.recalculate_sizes();
     srv.server_update_socket();
@@ -412,11 +413,29 @@ fn server_client_dispatch_identify(cl: *T.Client, imsg_msg: *c.imsg.imsg, msg_ty
                 cl.ttyname = xm.xstrdup(ttyname);
             }
         },
+        .identify_stdin => {
+            if (data_len == 0) {
+                const fd = c.imsg.imsg_get_fd(imsg_msg);
+                if (fd != -1) {
+                    if (cl.fd != -1) _ = c.posix_sys.close(cl.fd);
+                    cl.fd = fd;
+                }
+            }
+        },
         .identify_features => {
             if (data_len >= @sizeOf(i32)) {
                 var features: i32 = 0;
                 @memcpy(std.mem.asBytes(&features), data[0..@sizeOf(i32)]);
                 cl.term_features |= features;
+            }
+        },
+        .identify_stdout => {
+            if (data_len == 0) {
+                const fd = c.imsg.imsg_get_fd(imsg_msg);
+                if (fd != -1) {
+                    if (cl.out_fd != -1) _ = c.posix_sys.close(cl.out_fd);
+                    cl.out_fd = fd;
+                }
             }
         },
         .identify_cwd => {
@@ -457,6 +476,33 @@ pub fn server_client_finalize_identify(cl: *T.Client) void {
         cl.name = null;
     }
     cl.name = server_client_build_name(cl);
+
+    if ((cl.flags & T.CLIENT_CONTROL) != 0) {
+        server_client_close_terminal_fds(cl);
+        return;
+    }
+
+    if (cl.fd != -1 and c.posix_sys.isatty(cl.fd) != 0) {
+        cl.flags |= T.CLIENT_TERMINAL;
+        if (cl.out_fd != -1) {
+            _ = c.posix_sys.close(cl.out_fd);
+            cl.out_fd = -1;
+        }
+        return;
+    }
+
+    server_client_close_terminal_fds(cl);
+}
+
+fn server_client_close_terminal_fds(cl: *T.Client) void {
+    if (cl.out_fd != -1) {
+        _ = c.posix_sys.close(cl.out_fd);
+        cl.out_fd = -1;
+    }
+    if (cl.fd != -1) {
+        _ = c.posix_sys.close(cl.fd);
+        cl.fd = -1;
+    }
 }
 
 fn server_client_build_name(cl: *const T.Client) []const u8 {
@@ -2608,4 +2654,3 @@ pub fn server_client_default_command(item: *cmdq_mod.CmdqItem, _data: ?*anyopaqu
     server_client_dispatch_default_command(cl);
     return .normal;
 }
-

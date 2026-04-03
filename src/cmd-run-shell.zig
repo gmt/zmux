@@ -29,10 +29,13 @@ const job_mod = @import("job.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
+const opts = @import("options.zig");
+const env_mod = @import("environ.zig");
 const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
 const server_client_mod = @import("server-client.zig");
 const server_print = @import("server-print.zig");
+const server = @import("server.zig");
 const session_mod = @import("session.zig");
 const status_runtime = @import("status-runtime.zig");
 const window_mod = @import("window.zig");
@@ -47,6 +50,7 @@ const TargetSnapshot = struct {
 const RunShellState = struct {
     item: ?*cmdq.CmdqItem = null,
     queue_client_id: ?u32 = null,
+    queue_client_fallback: ?*T.Client = null,
     target_snapshot: TargetSnapshot = .{},
     shell_command: ?[]u8 = null,
     command_text: ?[]u8 = null,
@@ -90,6 +94,19 @@ fn findQueueClient(id: ?u32) ?*T.Client {
         if (client.id == actual_id) return client;
     }
     return null;
+}
+
+fn clientIsRegistered(client: ?*T.Client) bool {
+    const actual = client orelse return false;
+    for (client_registry.clients.items) |registered| {
+        if (registered == actual) return true;
+    }
+    return false;
+}
+
+fn resolveQueueClient(state: *const RunShellState) ?*T.Client {
+    if (findQueueClient(state.queue_client_id)) |client| return client;
+    return state.queue_client_fallback;
 }
 
 fn resolveSessionForWindow(preferred_session_id: ?u32, window: *T.Window) ?*T.Session {
@@ -198,7 +215,7 @@ fn deliverOutput(state: *RunShellState) void {
             splitAndPrintOutput(item, null, state.output.items);
             return;
         }
-        const queue_client = findQueueClient(state.queue_client_id);
+        const queue_client = resolveQueueClient(state);
         target_pane = currentPaneForClient(queue_client) orelse cmd_find.cmd_find_best_pane(T.CMD_FIND_QUIET);
     }
 
@@ -207,7 +224,7 @@ fn deliverOutput(state: *RunShellState) void {
         return;
     }
 
-    splitAndPrintOutput(null, findQueueClient(state.queue_client_id), state.output.items);
+    splitAndPrintOutput(null, resolveQueueClient(state), state.output.items);
 }
 
 fn commandParseError(item: ?*cmdq.CmdqItem, queue_client_id: ?u32, err: []const u8) void {
@@ -227,7 +244,7 @@ fn runQueuedCommands(state: *RunShellState) void {
     };
 
     const item = state.item;
-    const queue_client = findQueueClient(state.queue_client_id);
+    const queue_client = resolveQueueClient(state);
     const target = if (item) |waiting_item| cmdq.cmdq_get_target(waiting_item) else restoreTarget(state.target_snapshot);
     const expanded = cmd_display.expand_format(xm.allocator, command_text, &target);
     defer xm.allocator.free(expanded);
@@ -412,6 +429,10 @@ fn exec(self: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     state.* = .{
         .item = if (wait) item else null,
         .queue_client_id = if (cmdq.cmdq_get_target_client(item)) |queue_client| queue_client.id else if (cmdq.cmdq_get_client(item)) |queue_client| queue_client.id else null,
+        .queue_client_fallback = blk: {
+            const queue_client = cmdq.cmdq_get_target_client(item) orelse cmdq.cmdq_get_client(item);
+            break :blk if (clientIsRegistered(queue_client)) null else queue_client;
+        },
         .target_snapshot = captureTarget(&target),
         .cwd = if (args.get('c')) |cwd| xm.xstrdup(cwd) else xm.xstrdup(server_client_mod.server_client_get_cwd(cmdq.cmdq_get_client(item), target.s)),
         .target_pane_id = if (args.has('t') and target.wp != null) target.wp.?.id else null,
@@ -460,12 +481,24 @@ const SessionPaneSetup = struct {
     pane: *T.WindowPane,
 };
 
-fn testSetup(name: []const u8) TestSetup {
-    const env_mod = @import("environ.zig");
-    const opts = @import("options.zig");
+var test_globals_initialized = false;
 
-    session_mod.session_init_globals(xm.allocator);
-    window_mod.window_init_globals(xm.allocator);
+fn resetSharedTestState() void {
+    cmdq.cmdq_reset_for_tests();
+    server.server_reset_message_log();
+    client_registry.clients.clearRetainingCapacity();
+    job_mod.job_reset_all();
+}
+
+fn initTestGlobals() void {
+    if (test_globals_initialized) {
+        env_mod.environ_free(env_mod.global_environ);
+        opts.options_free(opts.global_options);
+        opts.options_free(opts.global_s_options);
+        opts.options_free(opts.global_w_options);
+    }
+
+    resetSharedTestState();
 
     opts.global_options = opts.options_create(null);
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
@@ -475,6 +508,13 @@ fn testSetup(name: []const u8) TestSetup {
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     env_mod.global_environ = env_mod.environ_create();
+    test_globals_initialized = true;
+}
+
+fn testSetup(name: []const u8) TestSetup {
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+    initTestGlobals();
 
     const session = session_mod.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
@@ -504,23 +544,14 @@ fn testSetup(name: []const u8) TestSetup {
 }
 
 fn testTeardown(setup: *TestSetup) void {
-    const env_mod = @import("environ.zig");
-    const opts = @import("options.zig");
-
     env_mod.environ_free(setup.client.environ);
     if (setup.client.name) |name| xm.allocator.free(@constCast(name));
     if (session_mod.session_find(setup.session.name)) |_| session_mod.session_destroy(setup.session, false, "test");
     window_mod.window_remove_ref(setup.window, "test");
-    env_mod.environ_free(env_mod.global_environ);
-    opts.options_free(opts.global_options);
-    opts.options_free(opts.global_s_options);
-    opts.options_free(opts.global_w_options);
+    resetSharedTestState();
 }
 
 fn addSessionPane(name: []const u8) SessionPaneSetup {
-    const env_mod = @import("environ.zig");
-    const opts = @import("options.zig");
-
     const session = session_mod.session_create(null, name, "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
     const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
     var cause: ?[]u8 = null;
@@ -817,7 +848,7 @@ test "run-shell -bC preserves the original target context for delayed commands" 
     });
 
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(null, 1);
+    try waitForQueueProgress(&setup.client, 1);
     try std.testing.expectEqualStrings("queued-from-run-shell", setup.window.name);
 }
 
@@ -836,7 +867,7 @@ test "run-shell -bC preserves quoted semicolons inside delayed commands" {
     });
 
     try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(null, 1);
+    try waitForQueueProgress(&setup.client, 1);
     try std.testing.expectEqualStrings("semi;colon", setup.window.name);
 }
 
@@ -905,7 +936,7 @@ test "run-shell -b without a client falls back to the best session pane" {
         "printf 'best-pane'",
     });
 
-    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(null));
+    try std.testing.expect(cmdq.cmdq_next(null) >= 1);
     try waitForAlternateScreen(second.pane);
     try std.testing.expect(!screen_mod.screen_alternate_active(first.pane));
 

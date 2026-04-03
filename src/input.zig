@@ -3099,3 +3099,11 @@ pub fn input_restore_state(wp: ?*T.WindowPane) void {
         screen_write.restore_cursor(&ctx);
     }
 }
+
+test "input lifecycle entrypoints tolerate null pane" {
+    input_init(null, null);
+    input_free(null);
+    input_reset(null, 0);
+    input_save_state(null);
+    input_restore_state(null);
+}

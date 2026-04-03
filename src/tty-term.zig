@@ -1411,3 +1411,9 @@ test "tty_term TtyTerm loadCaps replaces previous values" {
     term.loadCaps(caps2[0..]);
     try std.testing.expectEqual(@as(i32, 256), term.number(.COLORS));
 }
+
+test "tty_term TtyTerm number returns zero for unset numeric caps" {
+    var term = TtyTerm.init();
+    defer term.deinit();
+    try std.testing.expectEqual(@as(i32, 0), term.number(.COLORS));
+}

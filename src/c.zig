@@ -42,6 +42,7 @@ pub const imsg = @cImport({
 });
 
 pub const posix_sys = @cImport({
+    @cDefine("_GNU_SOURCE", "1");
     @cInclude("sys/types.h");
     @cInclude("sys/stat.h");
     @cInclude("sys/ioctl.h");

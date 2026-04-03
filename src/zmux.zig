@@ -351,6 +351,86 @@ test "parseMainArgs rejects nofork with command argv" {
     try std.testing.expectError(error.Usage, parseMainArgs(args[0..]));
 }
 
+test "parseMainArgs treats double dash as end of flags" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "--", "list-sessions" };
+    var parsed = try parseMainArgs(args[0..]);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.command_start);
+}
+
+test "parseMainArgs sets NOSTARTSERVER UTF8 and feature flags" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-Nu", "-2", "attach" };
+    var parsed = try parseMainArgs(args[0..]);
+    defer parsed.deinit();
+    try std.testing.expect((parsed.flags & T.CLIENT_NOSTARTSERVER) != 0);
+    try std.testing.expect((parsed.flags & T.CLIENT_UTF8) != 0);
+    try std.testing.expect(parsed.feat != 0);
+    try std.testing.expectEqual(@as(usize, 3), parsed.command_start);
+}
+
+test "parseMainArgs accepts inline -L and -S values" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-Lmyname", "-S/tmp/zmux.sock" };
+    var parsed = try parseMainArgs(args[0..]);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("myname", parsed.label.?);
+    try std.testing.expectEqualStrings("/tmp/zmux.sock", parsed.path.?);
+}
+
+test "parseMainArgs -h and -V set action without argv errors" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    {
+        const args = [_][]const u8{ "zmux", "-h" };
+        var parsed = try parseMainArgs(args[0..]);
+        defer parsed.deinit();
+        try std.testing.expectEqual(ParsedMainArgs.Action.usage, parsed.action);
+    }
+    {
+        const args = [_][]const u8{ "zmux", "-V" };
+        var parsed = try parseMainArgs(args[0..]);
+        defer parsed.deinit();
+        try std.testing.expectEqual(ParsedMainArgs.Action.version, parsed.action);
+    }
+}
+
+test "parseMainArgs rejects unknown short flags" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    const args = [_][]const u8{ "zmux", "-Z" };
+    try std.testing.expectError(error.Usage, parseMainArgs(args[0..]));
+}
+
+test "getshell returns non-empty path" {
+    const sh = getshell();
+    try std.testing.expect(sh.len > 0);
+}
+
+test "checkshell rejects null empty relative and missing paths" {
+    try std.testing.expect(!checkshell(null));
+    try std.testing.expect(!checkshell(""));
+    try std.testing.expect(!checkshell("sh"));
+    try std.testing.expect(!checkshell("/no/such/shell/zmux-test-404"));
+}
+
+test "checkshell accepts an absolute executable when present" {
+    if (std.fs.accessAbsolute("/bin/sh", .{})) {
+        try std.testing.expect(checkshell("/bin/sh"));
+    } else |_| {
+        // Non-FHS systems: skip strict assertion.
+    }
+}
+
 test {
     _ = @import("attributes.zig");
     _ = @import("alerts.zig");

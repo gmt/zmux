@@ -320,6 +320,41 @@ test "screen_redraw_pane draws visible pane lines" {
     screen_redraw_pane(&client, wp, true);
 }
 
+test "screen_redraw_screen tolerates multiple visible panes" {
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const s = sess.session_create(null, "screen-redraw-multi-pane", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("screen-redraw-multi-pane") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const wp_left = win_mod.window_add_pane(w, null, 4, 2);
+    const wp_right = win_mod.window_add_pane(w, null, 4, 2);
+    wp_left.xoff = 0;
+    wp_left.yoff = 0;
+    wp_right.xoff = 4;
+    wp_right.yoff = 0;
+    w.active = wp_left;
+    pane_io.pane_io_feed(wp_left, "L");
+    pane_io.pane_io_feed(wp_right, "R");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_STATUSOFF | T.CLIENT_REDRAWWINDOW,
+        .session = s,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 8, .sy = 2 };
+
+    screen_redraw_screen(&client);
+}
+
 test "screen_redraw_screen with full redraw flags" {
     initTestGlobals();
     defer deinitTestGlobals();

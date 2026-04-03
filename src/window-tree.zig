@@ -1744,3 +1744,8 @@ test "window-tree preview arrows translate pane clicks into scroll actions" {
     windowTreeKey(wme, null, session_ptr, wl, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), &right_mouse);
     try std.testing.expectEqual(@as(u32, 2), data.preview_start);
 }
+
+test "window-tree default choose command targets switch-client" {
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_COMMAND, "switch-client") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP_TEXT, "cancel") != null);
+}

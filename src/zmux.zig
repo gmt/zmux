@@ -477,6 +477,7 @@ test {
     _ = @import("cmd-session-lifecycle-test.zig");
     _ = @import("cmd-kill-destructive-test.zig");
     _ = @import("cmd-breadth-test.zig");
+    _ = @import("cmd-exec-groups-test.zig");
     _ = @import("image-sixel.zig");
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");

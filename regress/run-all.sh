@@ -17,6 +17,7 @@
 # Usage:
 #   ./run-all.sh fast
 #   ./run-all.sh oracle
+#   ./run-all.sh recursive
 #   ./run-all.sh soak
 #   ./run-all.sh docker
 #   ./run-all.sh all
@@ -168,6 +169,32 @@ run_oracle_suite() {
     run_py_test oracle-inside-session "$TEST_ORACLE_TMUX" inside
 }
 
+run_recursive_suite() {
+    require_bin "$TEST_ZMUX"
+    require_bin "$TEST_ORACLE_TMUX"
+
+    echo "recursive attach suite"
+    echo "----------------------------------------------"
+
+    log="$RUN_DIR/recursive-attach.log"
+    printf "  %-40s " "recursive-attach"
+    if TEST_ZMUX="$TEST_ZMUX" TEST_ORACLE_TMUX="$TEST_ORACLE_TMUX" SMOKE_ARTIFACT_ROOT="$SMOKE_ARTIFACT_ROOT" \
+        timeout "$SMOKE_PYTHON_TIMEOUT" python3 "$SCRIPT_DIR/recursive_attach_harness.py" run >"$log" 2>&1; then
+        printf "PASS\n"
+        PASS=$((PASS + 1))
+        reap_smoke_processes
+        return 0
+    else
+        status=$?
+    fi
+
+    printf "FAIL (exit %d)\n" "$status"
+    sed -n '1,120p' "$log"
+    FAIL=$((FAIL + 1))
+    reap_smoke_processes
+    return 0
+}
+
 run_soak_suite() {
     bin=$1
     require_bin "$bin"
@@ -195,6 +222,9 @@ case "$SUITE" in
     oracle)
         run_oracle_suite
         ;;
+    recursive)
+        run_recursive_suite
+        ;;
     soak)
         run_soak_suite "$TEST_ZMUX"
         ;;
@@ -207,7 +237,7 @@ case "$SUITE" in
         run_docker_suite
         ;;
     *)
-        echo "usage: $0 [fast|oracle|soak|docker|all]" >&2
+        echo "usage: $0 [fast|oracle|recursive|soak|docker|all]" >&2
         exit 2
         ;;
 esac

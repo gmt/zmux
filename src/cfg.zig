@@ -248,3 +248,12 @@ test "cfg source path reads stdin through the shared reduced file path" {
 
     try std.testing.expect(cfg_source_path(&client, "-", .{ .parse_only = true }));
 }
+
+test "cfg source path missing file records cause when not quiet" {
+    cfg_clear_causes();
+    defer cfg_show_causes(null);
+
+    const missing = "/zmux-unit-test-nonexistent-config-path/.conf";
+    try std.testing.expect(!cfg_source_path(null, missing, .{ .quiet = false }));
+    try std.testing.expect(cfg_causes.items.len >= 1);
+}

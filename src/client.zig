@@ -712,6 +712,34 @@ test "client detach payload preserves session name and kill reason" {
     try std.testing.expectEqualStrings("victim", client_exitsession.?);
 }
 
+test "client_record_detach uses detached reason for non-kill detach" {
+    if (client_exitsession) |old| xm.allocator.free(old);
+    client_exitsession = null;
+    client_exitreason = .none;
+    defer if (client_exitsession) |session| {
+        xm.allocator.free(session);
+        client_exitsession = null;
+    };
+
+    try std.testing.expect(client_record_detach(.detach, "plain-sess\x00"));
+    try std.testing.expectEqual(T.ClientExitReason.detached, client_exitreason);
+    try std.testing.expectEqualStrings("plain-sess", client_exitsession.?);
+}
+
+test "client_record_detach rejects payload without trailing nul" {
+    if (client_exitsession) |old| xm.allocator.free(old);
+    client_exitsession = null;
+    client_exitreason = .none;
+    defer if (client_exitsession) |session| {
+        xm.allocator.free(session);
+        client_exitsession = null;
+    };
+
+    try std.testing.expect(!client_record_detach(.detach, "no-nul"));
+    try std.testing.expectEqual(T.ClientExitReason.none, client_exitreason);
+    try std.testing.expect(client_exitsession == null);
+}
+
 test "client exec payload preserves command and shell" {
     defer client_clear_exec_request();
 

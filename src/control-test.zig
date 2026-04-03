@@ -80,3 +80,27 @@ test "control_subscriptions replace same name and remove clears the list" {
 
     ctl_sub.control_subscriptions_deinit(&cl);
 }
+
+test "control_notify_session_created ignores session pointer and tolerates empty registry" {
+    const cn = @import("control-notify.zig");
+    const registry = @import("client-registry.zig");
+
+    registry.clients.clearRetainingCapacity();
+    defer registry.clients.clearRetainingCapacity();
+
+    var dummy: T.Session = undefined;
+    cn.control_notify_session_created(&dummy);
+    try std.testing.expectEqual(@as(usize, 0), registry.clients.items.len);
+}
+
+test "control_notify_client_detached tolerates empty registry" {
+    const cn = @import("control-notify.zig");
+    const registry = @import("client-registry.zig");
+
+    registry.clients.clearRetainingCapacity();
+    defer registry.clients.clearRetainingCapacity();
+
+    var dummy: T.Client = undefined;
+    cn.control_notify_client_detached(&dummy);
+    try std.testing.expectEqual(@as(usize, 0), registry.clients.items.len);
+}

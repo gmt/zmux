@@ -108,10 +108,7 @@ pub fn proc_peer_check_version(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
 fn proc_update_event(peer: *T.ZmuxPeer) void {
     if (peer.event != null) return;
     const base = libevent orelse return;
-    peer.event = c.libevent.event_new(
-        base, peer.ibuf.fd,
-        @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
-        proc_event_cb, peer);
+    peer.event = c.libevent.event_new(base, peer.ibuf.fd, @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST), proc_event_cb, peer);
     if (peer.event) |ev| _ = c.libevent.event_add(ev, null);
 }
 
@@ -193,10 +190,7 @@ pub fn proc_set_signals(tp: *T.ZmuxProc, signalcb: *const fn (i32) callconv(.c) 
     };
     for (sig_list) |sig| {
         if (libevent) |base| {
-            const sig_ev = c.libevent.event_new(
-                base, sig,
-                @intCast(c.libevent.EV_SIGNAL | c.libevent.EV_PERSIST),
-                proc_signal_cb, tp);
+            const sig_ev = c.libevent.event_new(base, sig, @intCast(c.libevent.EV_SIGNAL | c.libevent.EV_PERSIST), proc_signal_cb, tp);
             if (sig_ev) |sev| {
                 _ = c.libevent.event_add(sev, null);
                 tp.sig_events.append(xm.allocator, sev) catch unreachable;
@@ -218,7 +212,7 @@ pub fn proc_clear_signals(tp: *T.ZmuxProc, defaults: bool) void {
             .flags = std.os.linux.SA.RESTART,
         };
         const sigs: []const u8 = &.{
-            std.posix.SIG.INT,  std.posix.SIG.HUP,  std.posix.SIG.CHLD,
+            std.posix.SIG.INT,  std.posix.SIG.HUP,   std.posix.SIG.CHLD,
             std.posix.SIG.CONT, std.posix.SIG.TERM,  std.posix.SIG.USR1,
             std.posix.SIG.USR2, std.posix.SIG.WINCH, std.posix.SIG.PIPE,
             std.posix.SIG.TSTP,

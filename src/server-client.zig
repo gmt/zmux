@@ -1779,8 +1779,8 @@ pub fn server_client_check_mouse(cl: *T.Client, event: *T.key_event) T.key_code 
     if (kind == .down or kind == .second or kind == .triple) {
         if (kind != .down and
             (m.b != cl.click_button or
-            @intFromEnum(where) != @intFromEnum(mouseWhereToTarget(where) orelse .pane) or
-            m.wp != cl.click_wp))
+                @intFromEnum(where) != @intFromEnum(mouseWhereToTarget(where) orelse .pane) or
+                m.wp != cl.click_wp))
         {
             kind = .down;
             log.log_debug("click sequence reset at {d},{d}", .{ x, y });
@@ -2194,8 +2194,8 @@ pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, data: ?*anyopaque) T
             if (cl.flags & T.CLIENT_REPEAT != 0 and bd.flags & T.KEY_BINDING_REPEAT == 0) {
                 server_client_set_key_table(cl, null);
                 cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
-            cl.flags |= T.CLIENT_REDRAWSTATUS;
-        } else {
+                cl.flags |= T.CLIENT_REDRAWSTATUS;
+            } else {
                 table.references += 1;
                 const repeat = server_client_repeat_time(cl, bd);
                 if (repeat != 0) {

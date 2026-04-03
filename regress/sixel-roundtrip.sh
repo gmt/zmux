@@ -24,7 +24,10 @@ smoke_init sixel-roundtrip
 smoke_use_helper_shell emit-sixel || exit $?
 
 # Skip if python3 or pty module is unavailable.
-python3 -c 'import pty, select' 2>/dev/null || { echo "python3 pty unavailable"; exit 77; }
+python3 -c 'import pty, select' 2>/dev/null || {
+    echo "python3 pty unavailable"
+    exit 77
+}
 
 # Start a detached session.
 smoke_cmd new-session -d -s sixel -x 80 -y 24 || exit 1
@@ -33,7 +36,10 @@ smoke_cmd new-session -d -s sixel -x 80 -y 24 || exit 1
 sleep 1
 
 # Verify the session survived sixel ingestion.
-smoke_cmd has-session -t sixel || { echo "session died after sixel input"; exit 1; }
+smoke_cmd has-session -t sixel || {
+    echo "session died after sixel input"
+    exit 1
+}
 
 # Attach a real PTY client and capture the rendered byte stream.
 # The DCS sixel data should appear in the output.
@@ -83,8 +89,14 @@ with open(outpath, "wb") as f:
 sys.exit(0)
 PYEOF
 
-[ $? -eq 0 ] || { echo "python capture failed"; exit 1; }
-[ -f "$CAPTURE" ] || { echo "no capture file"; exit 1; }
+[ $? -eq 0 ] || {
+    echo "python capture failed"
+    exit 1
+}
+[ -f "$CAPTURE" ] || {
+    echo "no capture file"
+    exit 1
+}
 
 # Verify: the rendered output must contain our sixel colour definition
 # and sixel data, proving the full parse → store → re-emit pipeline.
@@ -114,6 +126,6 @@ sys.exit(0 if ok else 1)
 " "$CAPTURE"; then
     exit 0
 else
-    echo "capture size: $(wc -c < "$CAPTURE") bytes"
+    echo "capture size: $(wc -c <"$CAPTURE") bytes"
     exit 1
 fi

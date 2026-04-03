@@ -728,22 +728,22 @@ fn colour_force_rgb(c: i32) i32 {
 /// Convert a 256-colour index to the closest 16-colour index.
 fn colour_256_to_16(c: i32) i32 {
     const table = [256]i8{
-         0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
-         0,  4,  4,  4, 12, 12,  2,  6,  4,  4, 12, 12,  2,  2,  6,  4,
-        12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10,
-        10, 10, 10, 14,  1,  5,  4,  4, 12, 12,  3,  8,  4,  4, 12, 12,
-         2,  2,  6,  4, 12, 12,  2,  2,  2,  6, 12, 12, 10, 10, 10, 10,
-        14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  5,  4, 12, 12,  1,  1,
-         5,  4, 12, 12,  3,  3,  8,  4, 12, 12,  2,  2,  2,  6, 12, 12,
-        10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,  1,  1,  1,  5,
-        12, 12,  1,  1,  1,  5, 12, 12,  1,  1,  1,  5, 12, 12,  3,  3,
-         3,  7, 12, 12, 10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,
-         9,  9,  9,  9, 13, 12,  9,  9,  9,  9, 13, 12,  9,  9,  9,  9,
-        13, 12,  9,  9,  9,  9, 13, 12, 11, 11, 11, 11,  7, 12, 10, 10,
-        10, 10, 10, 14,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,
-         9,  9,  9,  9,  9, 13,  9,  9,  9,  9,  9, 13,  9,  9,  9,  9,
-         9, 13, 11, 11, 11, 11, 11, 15,  0,  0,  0,  0,  0,  0,  8,  8,
-         8,  8,  8,  8,  7,  7,  7,  7,  7,  7, 15, 15, 15, 15, 15, 15,
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
+        0,  4,  4,  4,  12, 12, 2,  6,  4,  4,  12, 12, 2,  2,  6,  4,
+        12, 12, 2,  2,  2,  6,  12, 12, 10, 10, 10, 10, 14, 12, 10, 10,
+        10, 10, 10, 14, 1,  5,  4,  4,  12, 12, 3,  8,  4,  4,  12, 12,
+        2,  2,  6,  4,  12, 12, 2,  2,  2,  6,  12, 12, 10, 10, 10, 10,
+        14, 12, 10, 10, 10, 10, 10, 14, 1,  1,  5,  4,  12, 12, 1,  1,
+        5,  4,  12, 12, 3,  3,  8,  4,  12, 12, 2,  2,  2,  6,  12, 12,
+        10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14, 1,  1,  1,  5,
+        12, 12, 1,  1,  1,  5,  12, 12, 1,  1,  1,  5,  12, 12, 3,  3,
+        3,  7,  12, 12, 10, 10, 10, 10, 14, 12, 10, 10, 10, 10, 10, 14,
+        9,  9,  9,  9,  13, 12, 9,  9,  9,  9,  13, 12, 9,  9,  9,  9,
+        13, 12, 9,  9,  9,  9,  13, 12, 11, 11, 11, 11, 7,  12, 10, 10,
+        10, 10, 10, 14, 9,  9,  9,  9,  9,  13, 9,  9,  9,  9,  9,  13,
+        9,  9,  9,  9,  9,  13, 9,  9,  9,  9,  9,  13, 9,  9,  9,  9,
+        9,  13, 11, 11, 11, 11, 11, 15, 0,  0,  0,  0,  0,  0,  8,  8,
+        8,  8,  8,  8,  7,  7,  7,  7,  7,  7,  15, 15, 15, 15, 15, 15,
     };
     const idx: usize = @intCast(c & 0xff);
     return table[idx];
@@ -1850,7 +1850,6 @@ pub const tty_draw_line = tty_draw_mod.tty_draw_line;
 
 // ── C-name stubs: I/O, timers, offsets, pane clamp (tmux tty.c parity) ───────
 
-
 /// Libevent read callback for the client tty fd.
 /// Reads available bytes into the tty input buffer, then dispatches all
 /// complete keys via tty_keys_next (mirrors tmux tty_read_callback).
@@ -2313,16 +2312,12 @@ export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
 
 // tty_start_timer_callback — replaced by tty_start_timer_fire (above).
 
-
-
-
 pub fn tty_update_features(tty: *T.Tty) void {
     // Features might have changed since the first draw during attach.
     // For example, this happens when DA responses are received.
     server_fn.server_redraw_client(tty.client);
     tty_invalidate(tty);
 }
-
 
 pub fn tty_add(tty: *T.Tty, buf: [*]const u8, len: usize) void {
     if (len == 0) return;
@@ -2334,7 +2329,6 @@ pub fn tty_puts(tty: *T.Tty, s: [*:0]const u8) void {
     if (n == 0) return;
     tty_write(tty, s[0..n]);
 }
-
 
 pub fn tty_emulate_repeat(tty: *T.Tty, code: []const u8, code1: []const u8, n: u32) void {
     if (tty_term.hasCapability(tty, code)) {
@@ -2371,16 +2365,25 @@ pub fn tty_window_offset(tty: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i3
 fn tty_window_offset1(tty: *T.Tty, ox: *u32, oy: *u32, sx: *u32, sy: *u32) i32 {
     const c = tty.client;
     const s = c.session orelse {
-        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        ox.* = 0;
+        oy.* = 0;
+        sx.* = 0;
+        sy.* = 0;
         return 0;
     };
     const curw = s.curw orelse {
-        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        ox.* = 0;
+        oy.* = 0;
+        sx.* = 0;
+        sy.* = 0;
         return 0;
     };
     const w = curw.window;
     const wp = server_client_mod.server_client_get_pane(c) orelse {
-        ox.* = 0; oy.* = 0; sx.* = 0; sy.* = 0;
+        ox.* = 0;
+        oy.* = 0;
+        sx.* = 0;
+        sy.* = 0;
         return 0;
     };
     const lines = resize_mod.status_line_size(c);
@@ -2451,8 +2454,14 @@ pub fn tty_update_client_offset(c: *T.Client) void {
 
     log.log_debug("tty_update_client_offset: {s} offset changed ({d},{d} {d}x{d} -> {d},{d} {d}x{d})", .{
         c.name orelse "(unknown)",
-        c.tty.oox, c.tty.ooy, c.tty.osx, c.tty.osy,
-        ox, oy, sx, sy,
+        c.tty.oox,
+        c.tty.ooy,
+        c.tty.osx,
+        c.tty.osy,
+        ox,
+        oy,
+        sx,
+        sy,
     });
 
     c.tty.oox = ox;
@@ -2643,8 +2652,7 @@ pub fn tty_set_client_cb(ttyctx: *T.TtyCtx, c: *T.Client) i32 {
     if (curw.window != wp.window) return 0;
     if (wp.layout_cell == null) return 0;
 
-    ttyctx.bigger = tty_window_offset(&c.tty, &ttyctx.wox, &ttyctx.woy,
-        &ttyctx.wsx, &ttyctx.wsy) != 0;
+    ttyctx.bigger = tty_window_offset(&c.tty, &ttyctx.wox, &ttyctx.woy, &ttyctx.wsx, &ttyctx.wsy) != 0;
 
     ttyctx.yoff = wp.yoff;
     ttyctx.ryoff = wp.yoff;
@@ -2669,7 +2677,6 @@ pub fn tty_client_ready(ctx: *const T.TtyCtx, c: *T.Client) i32 {
     if ((c.tty.flags & @as(i32, @intCast(T.TTY_FREEZE))) != 0) return 0;
     return 1;
 }
-
 
 pub fn tty_window_default_style(gc: *T.GridCell, wp: *T.WindowPane) void {
     gc.* = T.grid_default_cell;
@@ -2820,13 +2827,12 @@ pub fn tty_set_selection(tty: *T.Tty, clip: ?[*:0]const u8, buf: ?[*]const u8, l
     tty_putcode_ss(tty, "Ms", clip_str, b64_str);
 }
 
-
 pub fn tty_cmd_insertcharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     if (ctx.bigger or
         !tty_full_width(tty, ctx) or
         tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
         (!tty_term.hasCapability(tty, "ich") and
-        !tty_term.hasCapability(tty, "ich1")))
+            !tty_term.hasCapability(tty, "ich1")))
     {
         tty_draw_pane(tty, ctx, ctx.ocy);
         return;
@@ -2842,7 +2848,7 @@ pub fn tty_cmd_deletecharacter(tty: *T.Tty, ctx: *const T.TtyCtx) void {
         !tty_full_width(tty, ctx) or
         tty_fake_bce(tty, &ctx.defaults, ctx.bg) or
         (!tty_term.hasCapability(tty, "dch") and
-        !tty_term.hasCapability(tty, "dch1")))
+            !tty_term.hasCapability(tty, "dch1")))
     {
         tty_draw_pane(tty, ctx, ctx.ocy);
         return;
@@ -2926,7 +2932,7 @@ pub fn tty_cmd_reverseindex(tty: *T.Tty, ctx: *const T.TtyCtx) void {
         tty_fake_bce(tty, &ctx.defaults, 8) or
         !tty_term.hasCapability(tty, "csr") or
         (!tty_term.hasCapability(tty, "ri") and
-        !tty_term.hasCapability(tty, "rin")) or
+            !tty_term.hasCapability(tty, "rin")) or
         ctx.sx == 1 or
         ctx.sy == 1)
     {
@@ -3014,7 +3020,7 @@ pub fn tty_cmd_scrolldown(tty: *T.Tty, ctx: *const T.TtyCtx) void {
         tty_fake_bce(tty, &ctx.defaults, 8) or
         !tty_term.hasCapability(tty, "csr") or
         (!tty_term.hasCapability(tty, "ri") and
-        !tty_term.hasCapability(tty, "rin")) or
+            !tty_term.hasCapability(tty, "rin")) or
         ctx.sx == 1 or
         ctx.sy == 1)
     {
@@ -3116,7 +3122,7 @@ pub fn tty_cmd_cells(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 
     if (ctx.bigger and
         (ctx.xoff + ctx.ocx < ctx.wox or
-        ctx.xoff + ctx.ocx + ctx.num > ctx.wox + ctx.wsx))
+            ctx.xoff + ctx.ocx + ctx.num > ctx.wox + ctx.wsx))
     {
         if (!ctx.wrapped or
             !tty_full_width(tty, ctx) or
@@ -3184,12 +3190,10 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     var y: u32 = 0;
     var rx: u32 = 0;
     var ry: u32 = 0;
-    if (tty_clamp_area(tty, ctx, ctx.ocx, ctx.ocy, ctx.sx, ctx.sy,
-            &i, &j, &x, &y, &rx, &ry) == 0)
+    if (tty_clamp_area(tty, ctx, ctx.ocx, ctx.ocy, ctx.sx, ctx.sy, &i, &j, &x, &y, &rx, &ry) == 0)
         return;
 
-    log.log_debug("tty_cmd_sixelimage: fallback={}, clamp ({d},{d})-({d},{d})",
-        .{ fallback, i, j, rx, ry });
+    log.log_debug("tty_cmd_sixelimage: fallback={}, clamp ({d},{d})-({d},{d})", .{ fallback, i, j, rx, ry });
 
     tty_region_off(tty);
     tty_margin_off(tty);
@@ -3207,8 +3211,7 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
             tty_invalidate(tty);
             return;
         }));
-        const scaled = sixel_mod.sixel_scale(si, i, j, rx -| i, ry -| j,
-            rx -| i, ry -| j, false) orelse {
+        const scaled = sixel_mod.sixel_scale(si, i, j, rx -| i, ry -| j, rx -| i, ry -| j, false) orelse {
             // Scale failed — use fallback text.
             const data = ctx.ptr orelse return;
             tty_add(tty, data, ctx.num);

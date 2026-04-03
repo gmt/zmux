@@ -53,7 +53,6 @@ fn write_format_test_line(gd: *T.Grid, row: u32, text: []const u8) void {
     }
 }
 
-
 test "format_expand resolves mouse pane keys from queued item state" {
     const env_mod = @import("environ.zig");
 

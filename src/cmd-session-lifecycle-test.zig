@@ -59,7 +59,7 @@ test "start-server command entry returns normal" {
     defer deinit_harness();
 
     var cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "start-server" }, null, &cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{"start-server"}, null, &cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
@@ -127,7 +127,7 @@ test "list-clients command entry succeeds with no registered clients" {
     defer deinit_harness();
 
     var cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-clients" }, null, &cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{"list-clients"}, null, &cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
@@ -141,7 +141,7 @@ test "list-sessions command entry succeeds with no sessions" {
     defer deinit_harness();
 
     var cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-sessions" }, null, &cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{"list-sessions"}, null, &cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};

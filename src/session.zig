@@ -1040,4 +1040,3 @@ test "session_update_activity sets explicit timestamp" {
     session_update_activity(s, 9_876_543_210);
     try std.testing.expectEqual(@as(i64, 9_876_543_210), s.activity_time);
 }
-

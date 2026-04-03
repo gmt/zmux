@@ -918,7 +918,6 @@ fn targetName(item: *const TreeItem) ?[]u8 {
     };
 }
 
-
 fn focusTarget(data: *WindowTreeModeData) void {
     switch (data.kind) {
         .session => {

@@ -51,8 +51,10 @@ smoke_try_kill_server
 
 cmp -s "$TMP3" "$TMP4" || {
     echo "window order mismatch:"
-    echo "multiline:"; cat "$TMP3"
-    echo "one-liner:"; cat "$TMP4"
+    echo "multiline:"
+    cat "$TMP3"
+    echo "one-liner:"
+    cat "$TMP4"
     exit 1
 }
 

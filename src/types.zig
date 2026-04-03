@@ -1175,9 +1175,9 @@ pub const Environ = struct {
 
 /// Type of request sent to the outer terminal on behalf of a pane.
 pub const InputRequestType = enum {
-    palette,   // OSC 4 colour-index query
+    palette, // OSC 4 colour-index query
     clipboard, // OSC 52 clipboard read
-    queue,     // deferred reply queued behind another request
+    queue, // deferred reply queued behind another request
 };
 
 /// Timeout in milliseconds after which an unanswered request is discarded.
@@ -1197,7 +1197,7 @@ pub const InputRequestClipboardData = struct {
 
 /// Whether the originating OSC string was terminated by BEL (0x07) or ST.
 pub const InputEndType = enum(u8) {
-    st = 0,  // ESC backslash  (String Terminator)
+    st = 0, // ESC backslash  (String Terminator)
     bel = 1, // BEL (0x07)
 };
 

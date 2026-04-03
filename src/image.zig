@@ -309,12 +309,17 @@ test "image_check_line overlap" {
     // Create two sixel images.
     const data = "q#0;2;100;0;0~";
     const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
-    const si2 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse { sixel_mod.sixel_free(si1); return error.SkipZigTest; };
+    const si2 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse {
+        sixel_mod.sixel_free(si1);
+        return error.SkipZigTest;
+    };
 
     // Place first image at row 2, second at row 10.
-    s.cx = 0; s.cy = 2;
+    s.cx = 0;
+    s.cy = 2;
     _ = image_store(s, si1);
-    s.cx = 0; s.cy = 10;
+    s.cx = 0;
+    s.cy = 10;
     _ = image_store(s, si2);
     try testing.expectEqual(@as(usize, 2), s.images.items.len);
 

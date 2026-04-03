@@ -398,7 +398,8 @@ fn build_child_environment(
     // inherited value from the outer terminal (e.g. TERM=alacritty).
     if (@import("options.zig").options_ready) {
         const term = @import("options.zig").options_get_string(
-            @import("options.zig").global_options, "default-terminal",
+            @import("options.zig").global_options,
+            "default-terminal",
         );
         env_mod.environ_set(child, "TERM", 0, term);
     }

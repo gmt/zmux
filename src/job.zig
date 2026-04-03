@@ -1229,3 +1229,15 @@ test "job accessors return correct values" {
     try std.testing.expectEqual(@as(?*anyopaque, @ptrFromInt(0xdeadbeef)), job_get_data(job));
     try std.testing.expectEqual(@as(?*c.libevent.bufferevent, null), job_get_event(job));
 }
+
+test "job_finished overwrites status when invoked repeatedly" {
+    defer job_reset_all();
+
+    const j = job_register("noop", 0);
+    defer job_free(j);
+    job_started(j, 1, -1);
+    job_finished(j, 3);
+    try std.testing.expectEqual(@as(i32, 3), job_get_status(j));
+    job_finished(j, 7);
+    try std.testing.expectEqual(@as(i32, 7), job_get_status(j));
+}

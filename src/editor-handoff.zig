@@ -248,3 +248,38 @@ test "editor handoff reports a failed editor exit as no save" {
     try std.testing.expect(capture.called);
     try std.testing.expect(capture.saw_null);
 }
+
+test "editor begin rejects a second handoff while the first is pending" {
+    const env_mod = @import("environ.zig");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmpdir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmpdir);
+
+    test_tmpdir_override = tmpdir;
+    test_editor_override = "/bin/sh";
+    defer resetForTests();
+
+    const environ = env_mod.environ_create();
+    defer env_mod.environ_free(environ);
+
+    var client = T.Client{
+        .id = 11,
+        .environ = environ,
+        .tty = undefined,
+        .status = .{},
+    };
+    client.tty = .{ .client = &client };
+
+    const noop = struct {
+        fn close(_: ?[]u8, _: ?*anyopaque) void {}
+    }.close;
+
+    const first = begin(&client, "", noop, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(first);
+    try std.testing.expect(begin(&client, "", noop, null) == null);
+
+    handleUnlock(&client, 1);
+}

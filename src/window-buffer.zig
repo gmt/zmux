@@ -1378,3 +1378,9 @@ test "window-buffer filter command updates the live mode filter through the shar
     try std.testing.expectEqualStrings("buffer1", mode_tree.getCurrentName(data.tree).?);
     try std.testing.expect(status_prompt.status_prompt_input(&chooser) == null);
 }
+
+test "paste stack reports empty immediately after test reset" {
+    paste_mod.paste_reset_for_tests();
+    defer paste_mod.paste_reset_for_tests();
+    try std.testing.expect(paste_mod.paste_is_empty());
+}

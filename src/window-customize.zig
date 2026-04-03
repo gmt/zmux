@@ -1654,3 +1654,10 @@ test "window-customize reset-current clears local and inherited overrides back t
     try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(opts.global_s_options, "status-left"));
     try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(setup.session.options, "status-left"));
 }
+
+test "window-customize scope kinds follow server to pane ordering" {
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(ScopeKind.server));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(ScopeKind.session));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(ScopeKind.window));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(ScopeKind.pane));
+}

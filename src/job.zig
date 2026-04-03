@@ -993,6 +993,21 @@ fn requireStressTests() !void {
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
+test "job_register returns distinct heap jobs with copied commands" {
+    defer job_reset_all();
+
+    const a = job_register("alpha", JOB_NOWAIT);
+    const b = job_register("beta", JOB_NOWAIT);
+    defer {
+        job_free(a);
+        job_free(b);
+    }
+
+    try std.testing.expect(a != b);
+    try std.testing.expectEqualStrings("alpha", a.cmd);
+    try std.testing.expectEqualStrings("beta", b.cmd);
+}
+
 test "job registry renders reduced tmux-style summaries" {
     defer job_reset_all();
 

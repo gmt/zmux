@@ -12,15 +12,19 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-//! proc-test.zig – narrow unit tests for [proc.zig](proc.zig).
+//! proc-test.zig – unit tests for [proc.zig](proc.zig).
 //!
-//! `proc_event_cb`, `proc_add_peer`, `proc_loop`, and `proc_send` on live peers
-//! need a valid `imsg` buffer and libevent base; those paths are covered by
-//! [job.zig](job.zig) tests and the shell regress/smoke harnesses.
+//! `proc_event_cb` and `proc_loop` still need a live libevent base; socketpair
+//! tests below cover `proc_send`, `proc_peer_check_version`, and imsg wiring.
 
 const std = @import("std");
 const T = @import("types.zig");
+const xm = @import("xmalloc.zig");
 const proc = @import("proc.zig");
+const protocol = @import("zmux-protocol.zig");
+const c = @import("c.zig");
+
+fn noop_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
 test "proc_get_peer_uid reads stored uid field" {
     var dummy_proc: T.ZmuxProc = .{ .name = "test" };
@@ -45,4 +49,137 @@ test "proc_kill_peer marks peer with PEER_BAD" {
     };
     proc.proc_kill_peer(&peer);
     try std.testing.expect((peer.flags & T.PEER_BAD) != 0);
+}
+
+test "proc_peer_check_version accepts MsgType.version regardless of peerid low byte" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = noop_dispatch,
+    };
+    var imsg_msg: c.imsg.imsg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.version)));
+    imsg_msg.hdr.peerid = 0;
+    try std.testing.expectEqual(@as(i32, 0), proc.proc_peer_check_version(&peer, &imsg_msg));
+    try std.testing.expect((peer.flags & T.PEER_BAD) == 0);
+}
+
+test "proc_peer_check_version accepts non-version when peerid encodes PROTOCOL_VERSION" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = noop_dispatch,
+    };
+    var imsg_msg: c.imsg.imsg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.peerid = protocol.PROTOCOL_VERSION;
+    try std.testing.expectEqual(@as(i32, 0), proc.proc_peer_check_version(&peer, &imsg_msg));
+    try std.testing.expect((peer.flags & T.PEER_BAD) == 0);
+}
+
+test "proc_peer_check_version rejects mismatch, marks peer bad, sends version imsg" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = noop_dispatch,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var imsg_msg: c.imsg.imsg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.peerid = 0;
+
+    try std.testing.expectEqual(@as(i32, -1), proc.proc_peer_check_version(&peer, &imsg_msg));
+    try std.testing.expect((peer.flags & T.PEER_BAD) != 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var got: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &got) > 0);
+    defer c.imsg.imsg_free(&got);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.version))), c.imsg.imsg_get_type(&got));
+}
+
+test "proc_send delivers message to peer socket" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = noop_dispatch,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    try std.testing.expectEqual(@as(i32, 0), proc.proc_send(&peer, .detach, -1, null, 0));
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var got: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &got) > 0);
+    defer c.imsg.imsg_free(&got);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.detach))), c.imsg.imsg_get_type(&got));
+}
+
+test "proc_send returns -1 when peer is PEER_BAD" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = T.PEER_BAD,
+        .dispatchcb = noop_dispatch,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+        std.posix.close(pair[1]);
+    }
+
+    try std.testing.expectEqual(@as(i32, -1), proc.proc_send(&peer, .detach, -1, null, 0));
 }

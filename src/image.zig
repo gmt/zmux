@@ -326,3 +326,56 @@ test "image_check_line overlap" {
     // Clean up remaining.
     _ = image_free_all(s);
 }
+
+test "image_free_all on empty screen returns false" {
+    const grid_mod = @import("grid.zig");
+    const s = blk: {
+        const screen = xm.allocator.create(T.Screen) catch unreachable;
+        screen.* = .{ .grid = grid_mod.grid_create(8, 4, 0) };
+        break :blk screen;
+    };
+    defer {
+        grid_mod.grid_free(s.grid);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(!image_free_all(s));
+}
+
+test "image_check_area frees only overlapping rectangles" {
+    const grid_mod = @import("grid.zig");
+
+    const s = blk: {
+        const screen = xm.allocator.create(T.Screen) catch unreachable;
+        screen.* = .{ .grid = grid_mod.grid_create(80, 24, 0) };
+        break :blk screen;
+    };
+    defer {
+        grid_mod.grid_free(s.grid);
+        xm.allocator.destroy(s);
+    }
+
+    const data = "q#0;2;100;0;0~";
+    const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si2 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse {
+        sixel_mod.sixel_free(si1);
+        return error.SkipZigTest;
+    };
+
+    s.cx = 0;
+    s.cy = 2;
+    _ = image_store(s, si1);
+    s.cx = 20;
+    s.cy = 10;
+    _ = image_store(s, si2);
+    try std.testing.expectEqual(@as(usize, 2), s.images.items.len);
+
+    try std.testing.expect(!image_check_area(s, 0, 0, 1, 1));
+    try std.testing.expectEqual(@as(usize, 2), s.images.items.len);
+
+    const redraw = image_check_area(s, 0, 2, 80, 1);
+    try std.testing.expect(redraw);
+    try std.testing.expectEqual(@as(usize, 1), s.images.items.len);
+
+    _ = image_free_all(s);
+}

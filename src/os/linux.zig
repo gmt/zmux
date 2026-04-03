@@ -20,6 +20,7 @@
 //! os/linux.zig – Linux platform-specific helpers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const xm = @import("../xmalloc.zig");
 const c = @import("../c.zig");
 
@@ -27,11 +28,25 @@ const c = @import("../c.zig");
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
 
+fn errno_from_syscall(rc: usize) std.posix.E {
+    const signed: isize = @bitCast(rc);
+    const int = if (signed > -4096 and signed < 0) -signed else 0;
+    return @enumFromInt(int);
+}
+
+fn tcgetpgrp_or_null(fd: i32) ?std.posix.pid_t {
+    var pgrp: std.posix.pid_t = undefined;
+    const rc = std.os.linux.tcgetpgrp(fd, &pgrp);
+    return switch (errno_from_syscall(rc)) {
+        .SUCCESS => pgrp,
+        else => null,
+    };
+}
+
 /// Get the name of the foreground process for a TTY fd via /proc.
 /// Returns a newly allocated slice or null on failure.
 pub fn osdep_get_name(fd: i32) ?[]u8 {
-    const pgrp = std.c.tcgetpgrp(fd);
-    if (pgrp < 0) return null;
+    const pgrp = tcgetpgrp_or_null(fd) orelse return null;
 
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pgrp}) catch return null;
@@ -56,8 +71,7 @@ pub fn osdep_get_cwd(fd: i32) ?[]const u8 {
         var target: [std.posix.PATH_MAX + 1]u8 = undefined;
     };
 
-    const pgrp = std.c.tcgetpgrp(fd);
-    if (pgrp < 0) return null;
+    const pgrp = tcgetpgrp_or_null(fd) orelse return null;
 
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pgrp}) catch return null;
@@ -65,8 +79,8 @@ pub fn osdep_get_cwd(fd: i32) ?[]const u8 {
     const n = std.posix.readlink(path, &Static.target) catch blk: {
         // Fallback: try the session ID
         var sid: std.posix.pid_t = undefined;
-        const rc = std.c.ioctl(fd, std.os.linux.T.IOCGSID, &sid);
-        if (rc < 0) return null;
+        const rc = std.os.linux.ioctl(fd, std.os.linux.T.IOCGSID, @intFromPtr(&sid));
+        if (errno_from_syscall(rc) != .SUCCESS) return null;
         const path2 = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{sid}) catch return null;
         break :blk std.posix.readlink(path2, &Static.target) catch return null;
     };
@@ -83,4 +97,11 @@ pub fn osdep_event_init() *c.libevent.event_base {
     const base = c.libevent.event_init() orelse @panic("event_init failed");
     _ = unsetenv("EVENT_NOEPOLL");
     return base;
+}
+
+test "linux osdep_get_name returns null on non-tty fd" {
+    if (builtin.os.tag != .linux) return;
+    const fd = try std.posix.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    defer std.posix.close(fd);
+    try std.testing.expect(osdep_get_name(fd) == null);
 }

@@ -1033,6 +1033,84 @@ test "server border redraw helper only marks attached clients viewing the target
     try std.testing.expect(client3.flags & T.CLIENT_REDRAWBORDERS == 0);
 }
 
+test "server_redraw_window marks attached clients that have the window" {
+    const env_mod = @import("environ.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const s1 = sess.session_create(null, "server-rw-session-1", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-rw-session-1") != null) sess.session_destroy(s1, false, "test");
+    const s2 = sess.session_create(null, "server-rw-session-2", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-rw-session-2") != null) sess.session_destroy(s2, false, "test");
+    const s3 = sess.session_create(null, "server-rw-session-3", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-rw-session-3") != null) sess.session_destroy(s3, false, "test");
+
+    const w_shared = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const w_isolated = win.window_create(8, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    _ = sess.session_attach(s1, w_shared, 0, &cause) orelse unreachable;
+    _ = sess.session_attach(s2, w_shared, 0, &cause) orelse unreachable;
+    _ = sess.session_attach(s3, w_isolated, 0, &cause) orelse unreachable;
+    s1.curw = sess.winlink_find_by_window(&s1.windows, w_shared);
+    s2.curw = sess.winlink_find_by_window(&s2.windows, w_shared);
+    s3.curw = sess.winlink_find_by_window(&s3.windows, w_isolated);
+
+    var c1 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s1,
+    };
+    defer env_mod.environ_free(c1.environ);
+    c1.tty = .{ .client = &c1 };
+    var c2 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s2,
+    };
+    defer env_mod.environ_free(c2.environ);
+    c2.tty = .{ .client = &c2 };
+    var c3 = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s3,
+    };
+    defer env_mod.environ_free(c3.environ);
+    c3.tty = .{ .client = &c3 };
+
+    client_registry.add(&c1);
+    client_registry.add(&c2);
+    client_registry.add(&c3);
+
+    server_redraw_window(w_shared);
+
+    try std.testing.expect(c1.flags & T.CLIENT_REDRAWWINDOW != 0);
+    try std.testing.expect(c2.flags & T.CLIENT_REDRAWWINDOW != 0);
+    try std.testing.expect(c3.flags & T.CLIENT_REDRAWWINDOW == 0);
+}
+
 test "server pane redraw helper only marks attached clients viewing the target pane window" {
     const env_mod = @import("environ.zig");
 

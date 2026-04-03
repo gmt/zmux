@@ -1236,3 +1236,79 @@ test "server_client_set_key_table replaces the stored table name" {
     sc.server_client_set_key_table(&cl, null);
     try std.testing.expect(cl.key_table_name == null);
 }
+
+test "server_client_get_flags lists attached and UTF-8 bits" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED | T.CLIENT_UTF8 | T.CLIENT_READONLY,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    const f = sc.server_client_get_flags(&cl);
+    defer xm.allocator.free(@constCast(f));
+    try std.testing.expect(std.mem.indexOf(u8, f, "attached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f, "UTF-8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f, "read-only") != null);
+}
+
+test "server_client_get_key_table uses root without session" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+    try std.testing.expectEqualStrings("root", sc.server_client_get_key_table(&cl));
+}
+
+test "server_client_get_key_table reads session key-table option" {
+    var so = T.Options.init(xm.allocator, null);
+    defer so.deinit();
+    opts.options_set_string(&so, false, "key-table", "vi");
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var session = T.Session{
+        .id = 77,
+        .name = @constCast("kt-test"),
+        .cwd = "/",
+        .options = &so,
+        .environ = &env,
+    };
+
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = &session,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expectEqualStrings("vi", sc.server_client_get_key_table(&cl));
+}
+
+test "server_client_is_bracket_paste toggles CLIENT_FOCUSED across paste markers" {
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl };
+
+    try std.testing.expect(!sc.server_client_is_bracket_paste(&cl, T.KEYC_PASTE_START));
+    try std.testing.expect((cl.flags & T.CLIENT_FOCUSED) != 0);
+
+    try std.testing.expect(!sc.server_client_is_bracket_paste(&cl, T.KEYC_PASTE_END));
+    try std.testing.expect((cl.flags & T.CLIENT_FOCUSED) == 0);
+
+    cl.flags |= T.CLIENT_FOCUSED;
+    try std.testing.expect(sc.server_client_is_bracket_paste(&cl, T.KEYC_FOCUS_IN));
+}

@@ -280,11 +280,11 @@ pub fn main() !void {
     if (std.posix.getenv("ZMUX")) |_| {
         flags |= T.CLIENT_UTF8;
     } else {
-        const s = std.posix.getenv("LC_ALL") orelse
-            std.posix.getenv("LC_CTYPE") orelse
-            std.posix.getenv("LANG") orelse "";
-        if (std.ascii.indexOfIgnoreCase(s, "UTF-8")) |_| flags |= T.CLIENT_UTF8;
-        if (std.ascii.indexOfIgnoreCase(s, "UTF8")) |_| flags |= T.CLIENT_UTF8;
+        flags |= client_utf8_flags_from_locale(
+            std.posix.getenv("LC_ALL"),
+            std.posix.getenv("LC_CTYPE"),
+            std.posix.getenv("LANG"),
+        );
     }
 
     // Initialise libevent
@@ -306,11 +306,21 @@ pub fn getshell() []const u8 {
     return "/bin/sh";
 }
 
-fn make_label(label: ?[]u8) ?[]u8 {
-    const lname = if (label) |l| l else "default";
-    const uid = std.os.linux.getuid();
-    const tmpdir = std.posix.getenv("ZMUX_TMPDIR") orelse "/tmp";
+/// OR-together of `CLIENT_UTF8` bits implied by locale variables (excluding `ZMUX`).
+pub fn client_utf8_flags_from_locale(
+    lc_all: ?[]const u8,
+    lc_ctype: ?[]const u8,
+    lang: ?[]const u8,
+) u64 {
+    const s = lc_all orelse lc_ctype orelse lang orelse "";
+    var out: u64 = 0;
+    if (std.ascii.indexOfIgnoreCase(s, "UTF-8")) |_| out |= T.CLIENT_UTF8;
+    if (std.ascii.indexOfIgnoreCase(s, "UTF8")) |_| out |= T.CLIENT_UTF8;
+    return out;
+}
 
+/// Build `{tmpdir}/zmux-{uid}/{label_name}` after ensuring the base directory exists.
+pub fn make_socket_label_path(tmpdir: []const u8, uid: u32, label_name: []const u8) ?[]u8 {
     const base = xm.xasprintf("{s}/zmux-{d}", .{ tmpdir, uid });
     defer xm.allocator.free(base);
 
@@ -318,7 +328,14 @@ fn make_label(label: ?[]u8) ?[]u8 {
         if (err != error.PathAlreadyExists) return null;
     };
 
-    return xm.xasprintf("{s}/{s}", .{ base, lname });
+    return xm.xasprintf("{s}/{s}", .{ base, label_name });
+}
+
+fn make_label(label: ?[]u8) ?[]u8 {
+    const lname = if (label) |l| l else "default";
+    const uid: u32 = @truncate(std.os.linux.getuid());
+    const tmpdir = std.posix.getenv("ZMUX_TMPDIR") orelse "/tmp";
+    return make_socket_label_path(tmpdir, uid, lname);
 }
 
 // ── Module re-exports needed by other files ───────────────────────────────
@@ -422,6 +439,45 @@ test "parseMainArgs rejects unknown short flags" {
 
     const args = [_][]const u8{ "zmux", "-Z" };
     try std.testing.expectError(error.Usage, parseMainArgs(args[0..]));
+}
+
+test "client_utf8_flags_from_locale detects UTF-8 spellings" {
+    try std.testing.expect((client_utf8_flags_from_locale("en_US.UTF-8", null, null) & T.CLIENT_UTF8) != 0);
+    try std.testing.expect((client_utf8_flags_from_locale(null, "en_US.utf8", null) & T.CLIENT_UTF8) != 0);
+    try std.testing.expect((client_utf8_flags_from_locale(null, null, "C.UTF-8") & T.CLIENT_UTF8) != 0);
+    try std.testing.expectEqual(@as(u64, 0), client_utf8_flags_from_locale(null, null, "C"));
+}
+
+test "make_socket_label_path creates directory and labeled socket path" {
+    var tmp = std.testing.tmpDir(.{});
+    const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir);
+
+    const sock = make_socket_label_path(dir, 424242, "tr6").?;
+    defer xm.allocator.free(sock);
+
+    try std.testing.expect(std.mem.endsWith(u8, sock, "/zmux-424242/tr6"));
+    const parent = std.fs.path.dirname(sock).?;
+    var base_dir = try std.fs.openDirAbsolute(parent, .{});
+    defer base_dir.close();
+}
+
+test "make_socket_label_path reuses existing base and accepts long labels" {
+    var tmp = std.testing.tmpDir(.{});
+    const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir);
+
+    const first = make_socket_label_path(dir, 7, "first").?;
+    defer xm.allocator.free(first);
+    const long_label = try xm.allocator.alloc(u8, 180);
+    defer xm.allocator.free(long_label);
+    @memset(long_label, 'x');
+    const second = make_socket_label_path(dir, 7, long_label).?;
+    defer xm.allocator.free(second);
+
+    try std.testing.expect(std.mem.endsWith(u8, second, long_label));
+    try std.testing.expect(std.mem.indexOf(u8, second, "/zmux-7/") != null);
+    try std.testing.expect(std.mem.endsWith(u8, first, "/first"));
 }
 
 test "getshell returns non-empty path" {

@@ -185,6 +185,15 @@ test "server ACL join and readonly toggles follow stored entries" {
     try std.testing.expect(client.flags & T.CLIENT_READONLY != 0);
 }
 
+test "server_acl_user_deny removes a previously allowed uid" {
+    server_acl_reset_for_tests();
+    const uid: std.posix.uid_t = 88888;
+    server_acl_user_allow(uid);
+    try std.testing.expect(server_acl_user_exists(uid));
+    server_acl_user_deny(uid);
+    try std.testing.expect(!server_acl_user_exists(uid));
+}
+
 test "server ACL write toggles update live client flags" {
     server_acl_reset_for_tests();
     client_registry.clients.clearRetainingCapacity();

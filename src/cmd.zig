@@ -1191,3 +1191,17 @@ test "cmd_parse_from_string: unterminated %if returns error" {
     try std.testing.expect(result.@"error" != null);
     if (result.@"error") |err| xm.allocator.free(err);
 }
+
+test "cmd_parse_from_string: whitespace-only input succeeds with empty list" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("  \n\t  ", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head == null);
+        cmd_list_free(list);
+    }
+}

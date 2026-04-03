@@ -20,6 +20,7 @@
 //! server-print.zig - shared reduced command-output/view-mode helpers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
 const grid_mod = @import("grid.zig");
@@ -55,8 +56,47 @@ pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const
         }
     }
 
+    if (builtin.is_test and stream == 2 and suppressExpectedTestStderr(data)) return;
+
     const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
     _ = file.writeAll(data) catch {};
+}
+
+fn suppressExpectedTestStderr(data: []const u8) bool {
+    const exact = [_][]const u8{
+        "No such file or directory: /zmux-unit-test-nonexistent-config-path/.conf\n",
+        "no current target\n",
+        "invalid sort order\n",
+        "pane input failed\n",
+        "format expansion not supported yet\n",
+        "pane is not empty\n",
+        "sessions should be nested with care, unset $TMUX to force\n",
+        "missing user argument\n",
+        "-a and -d cannot be used together\n",
+        "-r and -w cannot be used together\n",
+        "owner owns the server, can't change access\n",
+        "not a control client\n",
+        "Bad file descriptor\n",
+        "invalid confirm key\n",
+        "invalid type: bogus\n",
+        "create window failed: index in use: 0\n",
+        "invalid option: status-left\n",
+        "already set: after-show-options[2]\n",
+        "not an array: status-left[0]\n",
+        "not an array: @local[1]\n",
+        "already set: status-left\n",
+        "duplicate session: beta\n",
+        "window only linked to one session\n",
+        "invalid environment: BROKEN\n",
+        "can't move window, sessions are grouped\n",
+        "target pane has exited\n",
+        "respawn pane failed: pane respawn-pane-live:0.0 still active\n",
+        "not able to wait\n",
+    };
+    for (exact) |line| {
+        if (std.mem.eql(u8, data, line)) return true;
+    }
+    return false;
 }
 
 pub fn server_client_control_message(client: *T.Client, message: []const u8) void {

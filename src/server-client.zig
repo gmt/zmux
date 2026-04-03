@@ -227,6 +227,11 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
     }
 }
 
+/// Same as `server_client_dispatch` libevent callback; exposed for Zig unit tests.
+pub fn server_client_dispatch_for_test(imsg_ptr: ?*c.imsg.imsg, cl: *T.Client) void {
+    server_client_dispatch(imsg_ptr, @ptrCast(cl));
+}
+
 fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (imsg_msg.data == null) return;
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);

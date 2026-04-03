@@ -29,6 +29,7 @@ const c = @import("c.zig");
 const client_registry = @import("client-registry.zig");
 const resize_mod = @import("resize.zig");
 const sc = @import("server-client.zig");
+const file_mod = @import("file.zig");
 
 const server_client_resolve_cwd = sc.server_client_resolve_cwd;
 const server_client_finalize_identify = sc.server_client_finalize_identify;
@@ -1311,4 +1312,157 @@ test "server_client_is_bracket_paste toggles CLIENT_FOCUSED across paste markers
 
     cl.flags |= T.CLIENT_FOCUSED;
     try std.testing.expect(sc.server_client_is_bracket_paste(&cl, T.KEYC_FOCUS_IN));
+}
+
+fn buildDispatchImsg(msg_type: u32, payload: []const u8) c.imsg.imsg {
+    return .{
+        .hdr = .{
+            .type = msg_type,
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = if (payload.len == 0) null else @constCast(payload.ptr),
+        .buf = null,
+    };
+}
+
+const ReadCbCtx = struct {
+    errno_val: c_int = -9999,
+    data: std.ArrayList(u8) = .{},
+
+    fn callback(path: []const u8, errno_value: c_int, buf: []const u8, ud: ?*anyopaque) void {
+        _ = path;
+        const self: *ReadCbCtx = @ptrCast(@alignCast(ud));
+        self.errno_val = errno_value;
+        self.data.appendSlice(xm.allocator, buf) catch {};
+    }
+};
+
+test "server_client_dispatch_for_test routes read and read_done through file read pending map" {
+    file_mod.resetForTests();
+    defer file_mod.resetForTests();
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-dispatch-read-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+        .fd = -1,
+    };
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(cwd);
+    const fpath = try std.fmt.allocPrint(xm.allocator, "{s}/dispatch-read.txt", .{cwd});
+    defer xm.allocator.free(fpath);
+    {
+        const file = try std.fs.createFileAbsolute(fpath, .{});
+        defer file.close();
+        try file.writeAll("zmux-read");
+    }
+
+    var cb_ctx = ReadCbCtx{};
+    defer cb_ctx.data.deinit(xm.allocator);
+
+    const start = file_mod.startRemoteRead(&client, fpath, ReadCbCtx.callback, &cb_ctx);
+    switch (start) {
+        .wait => {},
+        .err => |e| {
+            std.debug.print("startRemoteRead unexpected err {d}\n", .{e});
+            return error.StartRemoteReadFailed;
+        },
+    }
+
+    while (c.imsg.imsgbuf_read(&reader) == 1) {
+        var open_imsg: c.imsg.imsg = undefined;
+        if (c.imsg.imsg_get(&reader, &open_imsg) <= 0) continue;
+        defer c.imsg.imsg_free(&open_imsg);
+        if (c.imsg.imsg_get_type(&open_imsg) != @intFromEnum(protocol.MsgType.read_open)) continue;
+
+        const data_len = c.imsg.imsg_get_len(&open_imsg);
+        const open_buf = try xm.allocator.alloc(u8, data_len);
+        defer xm.allocator.free(open_buf);
+        _ = c.imsg.imsg_get_data(&open_imsg, open_buf.ptr, open_buf.len);
+        const ro: *const protocol.MsgReadOpen = @ptrCast(@alignCast(open_buf.ptr));
+        const stream_id = ro.stream;
+
+        var chunk = std.ArrayList(u8){};
+        defer chunk.deinit(xm.allocator);
+        const hdr = protocol.MsgReadData{ .stream = stream_id };
+        chunk.appendSlice(xm.allocator, std.mem.asBytes(&hdr)) catch unreachable;
+        chunk.appendSlice(xm.allocator, "chunk") catch unreachable;
+        var read_imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.read), chunk.items);
+        sc.server_client_dispatch_for_test(&read_imsg, &client);
+
+        const done = protocol.MsgReadDone{ .stream = stream_id, .@"error" = 0 };
+        var done_imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.read_done), std.mem.asBytes(&done));
+        sc.server_client_dispatch_for_test(&done_imsg, &client);
+        break;
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), cb_ctx.errno_val);
+    try std.testing.expectEqualStrings("chunk", cb_ctx.data.items);
+}
+
+test "server_client_dispatch_for_test wakeup clears CLIENT_SUSPENDED" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_SUSPENDED,
+        .fd = -1,
+        .session = null,
+    };
+    client.tty = .{ .client = &client };
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.wakeup), &.{});
+    sc.server_client_dispatch_for_test(&imsg, &client);
+    try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
+}
+
+test "server_client_dispatch_for_test ignores unknown wire message type" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+    };
+    client.tty = .{ .client = &client };
+
+    var imsg = buildDispatchImsg(7, &.{});
+    sc.server_client_dispatch_for_test(&imsg, &client);
+    try std.testing.expect((client.flags & T.CLIENT_DEAD) == 0);
 }

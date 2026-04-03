@@ -123,3 +123,15 @@ test "next-window command parses session target" {
 test "show-hooks command parses target pane" {
     try std.testing.expectEqualStrings("show-hooks", try parseName(&.{ "show-hooks", "-t", "%0" }));
 }
+
+test "list-commands command parses format flag" {
+    try std.testing.expectEqualStrings("list-commands", try parseName(&.{ "list-commands", "-F", "#{command_list_name}" }));
+}
+
+test "show-environment command parses -g" {
+    try std.testing.expectEqualStrings("show-environment", try parseName(&.{ "show-environment", "-g" }));
+}
+
+test "list-sessions command parses format flag" {
+    try std.testing.expectEqualStrings("list-sessions", try parseName(&.{ "list-sessions", "-F", "#{session_name}" }));
+}

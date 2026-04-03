@@ -1819,3 +1819,7 @@ test "grid_default_cell uses default palette indices" {
     try std.testing.expectEqual(@as(i32, 8), grid_default_cell.bg);
     try std.testing.expectEqual(@as(i32, 8), grid_default_cell.us);
 }
+
+test "CLIENT_ATTACHED and CLIENT_EXIT flag bits are distinct" {
+    try std.testing.expect((CLIENT_ATTACHED & CLIENT_EXIT) == 0);
+}

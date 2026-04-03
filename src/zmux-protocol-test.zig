@@ -83,3 +83,19 @@ test "zmux read/write open structs are packed c_int fields only" {
 test "zmux PROTOCOL_VERSION fits in peerid low byte" {
     try std.testing.expect(p.PROTOCOL_VERSION <= 0xff);
 }
+
+test "zmux MsgResize round-trips through byte buffer" {
+    const m: p.MsgResize = .{
+        .sx = 80,
+        .sy = 24,
+        .xpixel = 640,
+        .ypixel = 480,
+    };
+    var buf: [@sizeOf(p.MsgResize)]u8 align(@alignOf(p.MsgResize)) = undefined;
+    @memcpy(buf[0..], std.mem.asBytes(&m));
+    const m2 = std.mem.bytesToValue(p.MsgResize, &buf);
+    try std.testing.expectEqual(m.sx, m2.sx);
+    try std.testing.expectEqual(m.sy, m2.sy);
+    try std.testing.expectEqual(m.xpixel, m2.xpixel);
+    try std.testing.expectEqual(m.ypixel, m2.ypixel);
+}

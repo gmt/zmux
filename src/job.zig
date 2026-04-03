@@ -1241,3 +1241,20 @@ test "job_finished overwrites status when invoked repeatedly" {
     job_finished(j, 7);
     try std.testing.expectEqual(@as(i32, 7), job_get_status(j));
 }
+
+test "job_render_summary lists multiple registered jobs in order" {
+    defer job_reset_all();
+
+    const first = job_register("echo one", 0);
+    const second = job_register("echo two", JOB_NOWAIT);
+    defer job_free(first);
+    defer job_free(second);
+
+    const rendered = job_render_summary(std.testing.allocator);
+    defer std.testing.allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Job 0:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Job 1:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "echo one") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "echo two") != null);
+}

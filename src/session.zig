@@ -953,3 +953,34 @@ test "session_check_name sanitizes separators and escapes controls" {
 
     try std.testing.expectEqualStrings("bad_name_\\n", checked);
 }
+
+test "session_next_session and session_previous_session wrap in name order" {
+    const cmdq = @import("cmd-queue.zig");
+    const opts_mod = @import("options.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    session_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const sa = session_create(null, "aa-nextprev", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (session_find("aa-nextprev") != null) session_destroy(sa, false, "test");
+    const sb = session_create(null, "bb-nextprev", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (session_find("bb-nextprev") != null) session_destroy(sb, false, "test");
+
+    var sort_crit = T.SortCriteria{ .order = .name, .reversed = false };
+    try std.testing.expectEqual(sb, session_next_session(sa, &sort_crit).?);
+    try std.testing.expectEqual(sb, session_previous_session(sa, &sort_crit).?);
+    try std.testing.expectEqual(sa, session_next_session(sb, &sort_crit).?);
+    try std.testing.expectEqual(sa, session_previous_session(sb, &sort_crit).?);
+}
+

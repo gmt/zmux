@@ -258,10 +258,10 @@ fn job_run_child(cmd: []const u8, cwd: ?[]const u8, flags: u32) noreturn {
         .flags = 0,
     };
     const reset_sigs: []const u8 = &.{
-        std.posix.SIG.INT,  std.posix.SIG.HUP,  std.posix.SIG.CHLD,
-        std.posix.SIG.CONT, std.posix.SIG.TERM,  std.posix.SIG.PIPE,
-        std.posix.SIG.TSTP, std.posix.SIG.TTIN,  std.posix.SIG.TTOU,
-        std.posix.SIG.QUIT, std.posix.SIG.USR1,  std.posix.SIG.USR2,
+        std.posix.SIG.INT,   std.posix.SIG.HUP,  std.posix.SIG.CHLD,
+        std.posix.SIG.CONT,  std.posix.SIG.TERM, std.posix.SIG.PIPE,
+        std.posix.SIG.TSTP,  std.posix.SIG.TTIN, std.posix.SIG.TTOU,
+        std.posix.SIG.QUIT,  std.posix.SIG.USR1, std.posix.SIG.USR2,
         std.posix.SIG.WINCH,
     };
     for (reset_sigs) |sig| std.posix.sigaction(sig, &sa_dfl, null);

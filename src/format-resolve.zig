@@ -60,7 +60,6 @@ pub const Resolver = struct {
     func: *const fn (std.mem.Allocator, *const FormatContext) ?[]u8,
 };
 
-
 pub const FORMAT_LOOP_LIMIT: u32 = 100;
 
 pub const resolver_table = [_]Resolver{
@@ -2393,8 +2392,7 @@ fn resolve_start_path(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 
 fn resolve_tree_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8,
-        "#{?pane_format," ++
+    return alloc.dupe(u8, "#{?pane_format," ++
         "#{?pane_marked,#[reverse],}" ++
         "#{pane_current_command}#{?pane_active,*,}#{?pane_marked,M,}" ++
         "#{?#{&&:#{pane_title},#{!=:#{pane_title},#{host_short}}},: \"#{pane_title}\",}" ++
@@ -2406,8 +2404,7 @@ fn resolve_tree_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext)
         "#{session_windows} windows" ++
         "#{?session_grouped, (group #{session_group}: #{session_group_list}),}" ++
         "#{?session_attached, (attached),}" ++
-        "}}"
-    ) catch unreachable;
+        "}}") catch unreachable;
 }
 
 fn resolve_uid(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2556,4 +2553,3 @@ fn resolve_window_start_flag(alloc: std.mem.Allocator, ctx: *const FormatContext
     const value: []const u8 = if (min_idx != null and wl.idx == min_idx.?) "1" else "0";
     return alloc.dupe(u8, value) catch unreachable;
 }
-

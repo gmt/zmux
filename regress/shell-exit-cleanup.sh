@@ -28,10 +28,16 @@ smoke_cmd new-session -d -s shellexit -x 80 -y 24 || exit 1
 
 # Get the pane PID
 PID=$(smoke_cmd display-message -p -t shellexit '#{pane_pid}' 2>/dev/null)
-[ -z "$PID" ] && { echo "could not get pane pid"; exit 1; }
+[ -z "$PID" ] && {
+    echo "could not get pane pid"
+    exit 1
+}
 
 # Verify the process is alive
-kill -0 "$PID" 2>/dev/null || { echo "pane process $PID not running"; exit 1; }
+kill -0 "$PID" 2>/dev/null || {
+    echo "pane process $PID not running"
+    exit 1
+}
 
 # Send "exit" to the helper.
 smoke_cmd send-keys -t shellexit "exit" Enter

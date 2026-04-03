@@ -33,20 +33,28 @@ smoke_cmd new-window -t test || exit 1
 smoke_cmd select-window -t test:0 || exit 1
 
 # Attach small 20x6 control client; move it to window 1
-(echo "refresh-client -C 20,6"; echo "select-window -t :1"; sleep 5) |
+(
+    echo "refresh-client -C 20,6"
+    echo "select-window -t :1"
+    sleep 5
+) |
     smoke_bin -f/dev/null -C attach -t test >"$TMP1" 2>&1 &
 
 # Wait for client to land on window 1
 n=0
 while [ $n -lt 20 ]; do
-    smoke_cmd list-clients -F '#{client_name} #{window_index}' 2>/dev/null \
-        | grep -q " 1$" && break
+    smoke_cmd list-clients -F '#{client_name} #{window_index}' 2>/dev/null |
+        grep -q " 1$" && break
     sleep 0.1
     n=$((n + 1))
 done
 
 # Attach a larger 30x10 grouped session; switch-client to window 1
-(echo "refresh-client -C 30,10"; echo "switch-client -t :=1"; sleep 5) |
+(
+    echo "refresh-client -C 30,10"
+    echo "switch-client -t :=1"
+    sleep 5
+) |
     smoke_bin -f/dev/null -C new-session -t test -x 30 -y 10 >"$TMP2" 2>&1 &
 
 # Poll for resize instead of fixed sleep
@@ -59,7 +67,11 @@ while [ $n -lt 20 ]; do
 done
 
 # Attach a 25x8 grouped session; use select-window instead
-(echo "refresh-client -C 25,8"; echo "select-window -t :1"; sleep 5) |
+(
+    echo "refresh-client -C 25,8"
+    echo "select-window -t :1"
+    sleep 5
+) |
     smoke_bin -f/dev/null -C new-session -t test -x 25 -y 8 >"$TMP3" 2>&1 &
 
 # Wait for resize – poll with backoff instead of a blind sleep
@@ -71,7 +83,13 @@ while [ $n -lt 20 ]; do
     n=$((n + 1))
 done
 
-[ "$OUT1" = "30x10" ] || { echo "switch-client resize failed: $OUT1"; exit 1; }
-[ "$OUT2" = "25x8" ]  || { echo "select-window resize failed: $OUT2"; exit 1; }
+[ "$OUT1" = "30x10" ] || {
+    echo "switch-client resize failed: $OUT1"
+    exit 1
+}
+[ "$OUT2" = "25x8" ] || {
+    echo "select-window resize failed: $OUT2"
+    exit 1
+}
 
 exit 0

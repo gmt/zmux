@@ -152,8 +152,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/list-and-display.sh" \
         "$SCRIPT_DIR/formatter-smoke.sh" \
         "$SCRIPT_DIR/kill-server-cleanup.sh" \
-        "$SCRIPT_DIR/sixel-roundtrip.sh" \
-    ; do
+        "$SCRIPT_DIR/sixel-roundtrip.sh"; do
         [ -f "$f" ] && run_sh_test "$(basename "$f" .sh)" "$bin" "$f"
     done
 
@@ -217,30 +216,30 @@ run_docker_suite() {
 }
 
 case "$SUITE" in
-    fast)
-        run_fast_suite "$TEST_ZMUX"
-        ;;
-    oracle)
-        run_oracle_suite
-        ;;
-    recursive)
-        run_recursive_suite
-        ;;
-    soak)
-        run_soak_suite "$TEST_ZMUX"
-        ;;
-    docker)
-        run_docker_suite
-        ;;
-    all)
-        run_fast_suite "$TEST_ZMUX"
-        run_oracle_suite
-        run_docker_suite
-        ;;
-    *)
-        echo "usage: $0 [fast|oracle|recursive|soak|docker|all]" >&2
-        exit 2
-        ;;
+fast)
+    run_fast_suite "$TEST_ZMUX"
+    ;;
+oracle)
+    run_oracle_suite
+    ;;
+recursive)
+    run_recursive_suite
+    ;;
+soak)
+    run_soak_suite "$TEST_ZMUX"
+    ;;
+docker)
+    run_docker_suite
+    ;;
+all)
+    run_fast_suite "$TEST_ZMUX"
+    run_oracle_suite
+    run_docker_suite
+    ;;
+*)
+    echo "usage: $0 [fast|oracle|recursive|soak|docker|all]" >&2
+    exit 2
+    ;;
 esac
 
 echo "----------------------------------------------"

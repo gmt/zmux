@@ -19,7 +19,7 @@ mkdir -p /run/sshd /root/.ssh
 chmod 700 /root/.ssh
 
 if [ -n "${AUTHORIZED_KEY:-}" ]; then
-    printf '%s\n' "$AUTHORIZED_KEY" > /root/.ssh/authorized_keys
+    printf '%s\n' "$AUTHORIZED_KEY" >/root/.ssh/authorized_keys
     chmod 600 /root/.ssh/authorized_keys
 fi
 

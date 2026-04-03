@@ -32,7 +32,7 @@ session_alerts() {
 has_flag() {
     flag=$1
     case "$(window_flags)" in
-        *"$flag"*) return 0 ;;
+    *"$flag"*) return 0 ;;
     esac
     return 1
 }
@@ -40,7 +40,7 @@ has_flag() {
 session_has_flag() {
     flag=$1
     case "$(session_alerts)" in
-        *"$flag"*) return 0 ;;
+    *"$flag"*) return 0 ;;
     esac
     return 1
 }

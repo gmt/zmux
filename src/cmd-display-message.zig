@@ -77,7 +77,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         var cause: ?[]u8 = null;
         const rc = win.window_pane_start_input(wp, item, &cause);
         if (rc == -1) {
-            if (cause) |c| { cmdq.cmdq_error(item, "{s}", .{c}); xm.allocator.free(c); }
+            if (cause) |c| {
+                cmdq.cmdq_error(item, "{s}", .{c});
+                xm.allocator.free(c);
+            }
             return .@"error";
         }
         if (rc == 0) return .wait;

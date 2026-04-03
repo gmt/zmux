@@ -129,12 +129,11 @@ EOF
 smoke_cmd source-file -F "$TEST_TMPDIR/#{host_short}.formatter.conf" || exit 1
 SHOW_LOADED=$(smoke_cmd show-options -gv @loaded) || exit 1
 case "$SHOW_LOADED" in
-    yes|@loaded\ yes)
-        ;;
-    *)
-        echo "source-file -F or show-options mismatch: $SHOW_LOADED"
-        exit 1
-        ;;
+yes | @loaded\ yes) ;;
+*)
+    echo "source-file -F or show-options mismatch: $SHOW_LOADED"
+    exit 1
+    ;;
 esac
 
 smoke_cmd send-keys -F -t fmtcheck:1.0 'session=#{session_name}' Enter || exit 1

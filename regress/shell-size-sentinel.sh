@@ -44,12 +44,11 @@ STTY_SIZE=$(tr -d '\r' <"$STTY_OUT")
 if [ -s "$VARS_OUT" ]; then
     VARS=$(tr -d '\r' <"$VARS_OUT")
     case "$VARS" in
-        "37 91"|""|" " )
-            ;;
-        *)
-            echo "shell line/column vars mismatch: $VARS"
-            exit 1
-            ;;
+    "37 91" | "" | " ") ;;
+    *)
+        echo "shell line/column vars mismatch: $VARS"
+        exit 1
+        ;;
     esac
 fi
 

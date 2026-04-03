@@ -4,9 +4,9 @@ set -e
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 bin=${1:-"$root/zig-out/bin/zmux-input-fuzzer"}
 for f in "$root/fuzz/corpus"/*; do
-  [ -f "$f" ] || continue
-  case "$f" in
+    [ -f "$f" ] || continue
+    case "$f" in
     *.sh) continue ;;
-  esac
-  "$bin" < "$f"
+    esac
+    "$bin" <"$f"
 done

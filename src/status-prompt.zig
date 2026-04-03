@@ -1528,9 +1528,9 @@ pub fn status_prompt_complete_list(word: []const u8, at_start: bool) std.ArrayLi
     }
 
     const layouts = [_][]const u8{
-        "even-horizontal",       "even-vertical",
-        "main-horizontal",       "main-horizontal-mirrored",
-        "main-vertical",         "main-vertical-mirrored",
+        "even-horizontal", "even-vertical",
+        "main-horizontal", "main-horizontal-mirrored",
+        "main-vertical",   "main-vertical-mirrored",
         "tiled",
     };
     for (&layouts) |layout| {
@@ -1763,9 +1763,9 @@ pub fn status_prompt_complete(word: []const u8, at_start: bool) ?[]u8 {
 
     // Match against layout names
     const layouts = [_][]const u8{
-        "even-horizontal",       "even-vertical",
-        "main-horizontal",       "main-horizontal-mirrored",
-        "main-vertical",         "main-vertical-mirrored",
+        "even-horizontal", "even-vertical",
+        "main-horizontal", "main-horizontal-mirrored",
+        "main-vertical",   "main-vertical-mirrored",
         "tiled",
     };
     for (&layouts) |layout| {

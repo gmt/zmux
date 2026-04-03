@@ -261,9 +261,9 @@ const job_mod = @import("job.zig");
 
 /// One entry in the module-level format job cache.
 const FormatJob = struct {
-    cmd: []const u8,    // owned copy of the shell command (same slice as map key)
-    out: ?[]u8,         // last captured output (owned); null while pending
-    last: i64,          // unix time of last launch
+    cmd: []const u8, // owned copy of the shell command (same slice as map key)
+    out: ?[]u8, // last captured output (owned); null while pending
+    last: i64, // unix time of last launch
     async_shell: ?*job_mod.AsyncShell = null,
 };
 
@@ -1605,7 +1605,6 @@ fn format_dirname(s: []const u8) []u8 {
     return xm.xstrdup(std.fs.path.dirname(s) orelse ".");
 }
 
-
 pub fn format_timestamp_local(alloc: std.mem.Allocator, seconds_text: []const u8, fmt: []const u8) ?[]u8 {
     const seconds = std.fmt.parseInt(i64, seconds_text, 10) catch return null;
     var when: c.posix_sys.time_t = @intCast(seconds);
@@ -1657,7 +1656,6 @@ fn format_strftime_now(alloc: std.mem.Allocator, fmt: []const u8) ?[]u8 {
     return format_strftime_tm(alloc, fmt, &tm_value);
 }
 
-
 fn format_strftime_tm(alloc: std.mem.Allocator, fmt: []const u8, tm_value: *c.posix_sys.struct_tm) ?[]u8 {
     var cap: usize = 128;
     while (cap <= 4096) : (cap *= 2) {
@@ -1680,4 +1678,3 @@ const child_context_for_winlink = fmt_resolve.child_context_for_winlink;
 const child_context_for_pane = fmt_resolve.child_context_for_pane;
 const child_context_for_client = fmt_resolve.child_context_for_client;
 const session_is_active = fmt_resolve.session_is_active;
-

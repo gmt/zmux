@@ -1923,11 +1923,9 @@ pub fn screen_write_sixelimage(ctx: *T.ScreenWriteCtx, si_arg: *T.SixelImage, bg
     screen_write_set_cursor(ctx, 0, @intCast(cy + y));
 }
 
-
 pub fn screen_write_set_client_cb(_: *T.TtyCtx, _: ?*T.Client) i32 {
     return 0;
 }
-
 
 pub fn screen_write_sync_callback(_: i32, _: i32, wp: ?*T.WindowPane) void {
     if (wp) |w| w.base.mode &= ~T.MODE_SYNC;

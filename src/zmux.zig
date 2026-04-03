@@ -388,6 +388,7 @@ test {
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");
     _ = @import("format-test.zig");
+    _ = @import("format-resolve-grid-test.zig");
     _ = @import("options-test.zig");
     _ = @import("popup-menu-test.zig");
     _ = @import("control-test.zig");

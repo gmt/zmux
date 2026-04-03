@@ -1169,3 +1169,10 @@ test "server pane redraw helper only marks attached clients viewing the target p
     try std.testing.expect(client2.flags & T.CLIENT_REDRAWPANES == 0);
     try std.testing.expect(client3.flags & T.CLIENT_REDRAWPANES == 0);
 }
+
+test "server_update_socket returns early when socket path is empty" {
+    const old = socket_path;
+    defer socket_path = old;
+    socket_path = "";
+    server_update_socket();
+}

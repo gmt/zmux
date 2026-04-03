@@ -51,3 +51,23 @@ test "pipe-pane command parses no flag shell command" {
 test "list-buffers command parses format flag" {
     try std.testing.expectEqualStrings("list-buffers", try parseName(&.{ "list-buffers", "-F", "#{buffer_name}" }));
 }
+
+test "kill-server command parses without arguments" {
+    try std.testing.expectEqualStrings("kill-server", try parseName(&.{"kill-server"}));
+}
+
+test "kill-session command parses target flag" {
+    try std.testing.expectEqualStrings("kill-session", try parseName(&.{ "kill-session", "-t", "foo" }));
+}
+
+test "list-clients command parses format flag" {
+    try std.testing.expectEqualStrings("list-clients", try parseName(&.{ "list-clients", "-F", "#{client_name}" }));
+}
+
+test "new-window command parses shell flag" {
+    try std.testing.expectEqualStrings("new-window", try parseName(&.{ "new-window", "-n", "win", "vi" }));
+}
+
+test "start-server command parses bare invocation" {
+    try std.testing.expectEqualStrings("start-server", try parseName(&.{"start-server"}));
+}

@@ -328,3 +328,11 @@ test "options_cmp orders entry names" {
     const eb = opts.OptionsEntry{ .oo = oo, .name = "b" };
     try std.testing.expect(opts.options_cmp(ea, eb) == .lt);
 }
+
+test "options_get_number reads back set numeric option" {
+    const oo = opts.options_create(null);
+    defer opts.options_free(oo);
+    opts.options_default_all(oo, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_number(oo, "pane-base-index", 7);
+    try std.testing.expectEqual(@as(i64, 7), opts.options_get_number(oo, "pane-base-index"));
+}

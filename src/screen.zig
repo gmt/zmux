@@ -769,3 +769,64 @@ test "screen_reset_hyperlinks keeps the set but drops stored ids" {
     try std.testing.expectEqual(original, s.hyperlinks.?);
     try std.testing.expect(!hyperlinks.hyperlinks_get(s.hyperlinks.?, first, null, null, null));
 }
+
+test "screen_save_cursor and screen_restore_cursor clamp to grid bounds" {
+    const s = screen_init(4, 4, 10);
+    defer {
+        screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    s.cx = 3;
+    s.cy = 3;
+    screen_save_cursor(s);
+    s.cx = 0;
+    s.cy = 0;
+    s.saved_cx = 99;
+    s.saved_cy = 99;
+    screen_restore_cursor(s);
+    try std.testing.expectEqual(@as(u32, 3), s.cx);
+    try std.testing.expectEqual(@as(u32, 3), s.cy);
+}
+
+test "screen_clear_tab and screen_set_tab toggle default tab stops" {
+    const s = screen_init(24, 2, 10);
+    defer {
+        screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(screen_has_tab(s, 8));
+    screen_clear_tab(s, 8);
+    try std.testing.expect(!screen_has_tab(s, 8));
+    screen_set_tab(s, 8);
+    try std.testing.expect(screen_has_tab(s, 8));
+}
+
+test "screen_next_tabstop finds the next marked column" {
+    const s = screen_init(24, 2, 10);
+    defer {
+        screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    s.cx = 0;
+    try std.testing.expectEqual(@as(u32, 8), screen_next_tabstop(s));
+    s.cx = 8;
+    try std.testing.expectEqual(@as(u32, 16), screen_next_tabstop(s));
+}
+
+test "screen_push_title and screen_pop_title restore the stacked title" {
+    const s = screen_init(2, 2, 10);
+    defer {
+        screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    try std.testing.expect(screen_set_title(s, "outer"));
+    screen_push_title(s);
+    try std.testing.expect(screen_set_title(s, "inner"));
+    try std.testing.expectEqualStrings("inner", s.title.?);
+    screen_pop_title(s);
+    try std.testing.expectEqualStrings("outer", s.title.?);
+}

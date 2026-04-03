@@ -44,6 +44,8 @@ test "zmux MsgType enum values match tmux wire numbering bands" {
     try std.testing.expectEqual(@as(i32, 112), @intFromEnum(p.MsgType.identify_terminfo));
     try std.testing.expectEqual(@as(i32, 200), @intFromEnum(p.MsgType.command));
     try std.testing.expectEqual(@as(i32, 201), @intFromEnum(p.MsgType.detach));
+    try std.testing.expectEqual(@as(i32, 208), @intFromEnum(p.MsgType.resize));
+    try std.testing.expectEqual(@as(i32, 218), @intFromEnum(p.MsgType.flags));
     try std.testing.expectEqual(@as(i32, 300), @intFromEnum(p.MsgType.read_open));
     try std.testing.expectEqual(@as(i32, 400), @intFromEnum(p.MsgType.stdin_data));
 }

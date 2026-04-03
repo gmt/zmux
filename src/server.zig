@@ -653,6 +653,59 @@ test "server status helpers mark attached clients for status-only redraw" {
     try std.testing.expect(client2.flags & T.CLIENT_REDRAWWINDOW == 0);
 }
 
+test "server_status_client marks only the given client" {
+    const env_mod = @import("environ.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "server-status-client-one", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("server-status-client-one") != null) sess.session_destroy(s, false, "test");
+
+    var client_a = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer env_mod.environ_free(client_a.environ);
+    client_a.tty = .{ .client = &client_a };
+
+    var client_b = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer env_mod.environ_free(client_b.environ);
+    client_b.tty = .{ .client = &client_b };
+
+    client_registry.add(&client_a);
+    client_registry.add(&client_b);
+
+    server_status_client(&client_a);
+    try std.testing.expect(client_a.flags & T.CLIENT_REDRAWSTATUS != 0);
+    try std.testing.expect(client_b.flags & T.CLIENT_REDRAWSTATUS == 0);
+}
+
 test "server loop keeps server alive while shared jobs still run" {
     cmdq.cmdq_reset_for_tests();
     defer cmdq.cmdq_reset_for_tests();

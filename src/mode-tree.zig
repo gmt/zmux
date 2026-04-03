@@ -1563,3 +1563,60 @@ test "mode-tree tagging clears parent child conflicts and can fall back to curre
     eachTagged(mtd, Collector.visit, null, T.KEYC_NONE, true);
     try std.testing.expectEqual(@as(usize, 11), Collector.value);
 }
+
+test "mode-tree three-level nesting produces flat line list" {
+    const pane = initTestPane();
+    defer freeTestPane(pane);
+
+    const spec = TestTreeSpec{
+        .nodes = &.{
+            .{
+                .tag = 1,
+                .name = "level-one",
+                .expanded = 1,
+                .children = &.{
+                    .{
+                        .tag = 2,
+                        .name = "level-two",
+                        .expanded = 1,
+                        .children = &.{
+                            .{ .tag = 3, .name = "level-three" },
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    const mtd = start(pane, .{
+        .modedata = @ptrCast(@constCast(&spec)),
+        .buildcb = testBuildCallback,
+    });
+    defer free(mtd);
+
+    build(mtd);
+    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(mtd.line_list.items.len)));
+    try std.testing.expectEqualStrings("level-one", getCurrentName(mtd).?);
+}
+
+test "mode-tree searchSet returns false when no line matches" {
+    const pane = initTestPane();
+    defer freeTestPane(pane);
+
+    const spec = TestTreeSpec{
+        .nodes = &.{
+            .{ .tag = 1, .name = "only" },
+        },
+    };
+
+    const mtd = start(pane, .{
+        .modedata = @ptrCast(@constCast(&spec)),
+        .buildcb = testBuildCallback,
+    });
+    defer free(mtd);
+
+    build(mtd);
+    setSearch(mtd, "no-such-label-xyz");
+    mtd.search_dir = .forward;
+    try std.testing.expect(!searchSet(mtd));
+}

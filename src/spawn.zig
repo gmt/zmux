@@ -534,6 +534,22 @@ fn client_size(sc: *T.SpawnContext) struct { u32, u32 } {
     return .{ 80, 24 };
 }
 
+test "spawn_window returns null without a session" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    var sc: T.SpawnContext = .{ .s = null, .idx = -1, .flags = T.SPAWN_EMPTY };
+    try std.testing.expect(spawn_window(&sc, &cause) == null);
+    try std.testing.expectEqualStrings("no session", cause.?);
+}
+
+test "spawn_window with respawn flag requires a window link" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    var sc: T.SpawnContext = .{ .s = null, .wl = null, .flags = T.SPAWN_RESPAWN };
+    try std.testing.expect(spawn_window(&sc, &cause) == null);
+    try std.testing.expectEqualStrings("no window", cause.?);
+}
+
 test "build_child_environment carries the zmux session marker into pane children" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);

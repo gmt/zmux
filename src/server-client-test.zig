@@ -17,6 +17,8 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const cmd_mod = @import("cmd.zig");
+const cfg_mod = @import("cfg.zig");
 const env_mod = @import("environ.zig");
 const opts = @import("options.zig");
 const sess = @import("session.zig");
@@ -1689,4 +1691,334 @@ test "server_client_check_redraw returns early for control clients" {
     cl.tty = .{ .client = &cl };
     sc.server_client_check_redraw(&cl);
     try std.testing.expect((cl.flags & T.CLIENT_REDRAWWINDOW) != 0);
+}
+
+fn imsgReaderSetNonblock(fd: i32) void {
+    const fl = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (fl < 0) return;
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(fd, std.posix.F.SETFL, fl | O_NONBLOCK);
+}
+
+fn drainPeerUntilExit(reader: *c.imsg.imsgbuf, reader_fd: i32) !i32 {
+    imsgReaderSetNonblock(reader_fd);
+    var iter: u32 = 0;
+    while (iter < 64) : (iter += 1) {
+        const nr = c.imsg.imsgbuf_read(reader);
+        if (nr < 0) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.AGAIN))
+                return error.TestExpectedExit;
+            return error.TestExpectedExit;
+        }
+        if (nr == 0) return error.TestExpectedExit;
+        var out: c.imsg.imsg = undefined;
+        if (c.imsg.imsg_get(reader, &out) <= 0) return error.TestExpectedExit;
+        const ty = c.imsg.imsg_get_type(&out);
+        if (ty == @intFromEnum(protocol.MsgType.exit)) {
+            var rv: i32 = 0;
+            _ = c.imsg.imsg_get_data(&out, std.mem.asBytes(&rv).ptr, @sizeOf(i32));
+            c.imsg.imsg_free(&out);
+            return rv;
+        }
+        c.imsg.imsg_free(&out);
+    }
+    return error.TestExpectedExit;
+}
+
+fn testImsg(msg_type: protocol.MsgType, payload: []u8) c.imsg.imsg {
+    return .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(msg_type)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = if (payload.len == 0) null else payload.ptr,
+        .buf = null,
+    };
+}
+
+fn deferFreeClientIdentifyState(cl: *T.Client) void {
+    if (cl.term_name) |p| xm.allocator.free(p);
+    if (cl.ttyname) |p| xm.allocator.free(p);
+    if (cl.cwd) |p| xm.allocator.free(@constCast(p));
+    if (cl.name) |p| xm.allocator.free(@constCast(p));
+    if (cl.term_caps) |caps| {
+        for (caps) |s| xm.allocator.free(s);
+        xm.allocator.free(caps);
+    }
+    cl.term_name = null;
+    cl.ttyname = null;
+    cl.cwd = null;
+    cl.name = null;
+    cl.term_caps = null;
+}
+
+test "server_client identify messages merge client identity and done sets flag" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const real = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(real);
+    const cwd_z = try xm.allocator.dupe(u8, real);
+    defer xm.allocator.free(cwd_z);
+    const cwd_payload = try std.mem.concat(xm.allocator, u8, &.{ cwd_z, &[_]u8{0} });
+    defer xm.allocator.free(cwd_payload);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .pid = 9001,
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = 0,
+        .session = null,
+        .term_features = 0,
+    };
+    cl.tty = .{ .client = &cl };
+    defer deferFreeClientIdentifyState(&cl);
+
+    var pay: [512]u8 = undefined;
+
+    const lf: u64 = T.CLIENT_UTF8;
+    @memcpy(pay[0..@sizeOf(u64)], std.mem.asBytes(&lf));
+    var im = testImsg(.identify_longflags, pay[0..@sizeOf(u64)]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expect((cl.flags & T.CLIENT_UTF8) != 0);
+
+    const term = "unit-term\x00";
+    @memcpy(pay[0..term.len], term);
+    im = testImsg(.identify_term, pay[0..term.len]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqualStrings("unit-term", cl.term_name.?);
+
+    const tty = "/dev/pts/fake\x00";
+    @memcpy(pay[0..tty.len], tty);
+    im = testImsg(.identify_ttyname, pay[0..tty.len]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqualStrings("/dev/pts/fake", cl.ttyname.?);
+
+    const c1 = "cap_a\x00";
+    @memcpy(pay[0..c1.len], c1);
+    im = testImsg(.identify_terminfo, pay[0..c1.len]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    const c2 = "cap_b\x00";
+    @memcpy(pay[0..c2.len], c2);
+    im = testImsg(.identify_terminfo, pay[0..c2.len]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqual(@as(usize, 2), cl.term_caps.?.len);
+    try std.testing.expectEqualStrings("cap_a", cl.term_caps.?[0]);
+    try std.testing.expectEqualStrings("cap_b", cl.term_caps.?[1]);
+
+    im = testImsg(.identify_cwd, cwd_payload);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqualStrings(real, cl.cwd.?);
+
+    const ev = "TRANCHE4=z\x00";
+    @memcpy(pay[0..ev.len], ev);
+    im = testImsg(.identify_environ, pay[0..ev.len]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    const ev_ent = env_mod.environ_find(cl.environ, "TRANCHE4").?;
+    try std.testing.expectEqualStrings("z", ev_ent.value.?);
+
+    const pid = std.os.linux.getpid();
+    @memcpy(pay[0..@sizeOf(std.posix.pid_t)], std.mem.asBytes(&pid));
+    im = testImsg(.identify_clientpid, pay[0..@sizeOf(std.posix.pid_t)]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqual(pid, cl.pid);
+
+    const feat: i32 = 0x55;
+    @memcpy(pay[0..@sizeOf(i32)], std.mem.asBytes(&feat));
+    im = testImsg(.identify_features, pay[0..@sizeOf(i32)]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expectEqual(@as(i32, 0x55), cl.term_features);
+
+    im = testImsg(.identify_done, pay[0..0]);
+    sc.server_client_dispatch_for_test(&im, &cl);
+    try std.testing.expect((cl.flags & T.CLIENT_IDENTIFIED) != 0);
+    try std.testing.expectEqualStrings("/dev/pts/fake", cl.name.?);
+}
+
+test "server_client_set_flags merges control options and notifies peer" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-set-flags" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        cl.peer = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    sc.server_client_set_flags(&cl, "read-only,no-output,pause-after=2");
+
+    try std.testing.expect((cl.flags & T.CLIENT_READONLY) != 0);
+    try std.testing.expect((cl.flags & T.CLIENT_CONTROL_NOOUTPUT) != 0);
+    try std.testing.expect((cl.flags & T.CLIENT_CONTROL_PAUSEAFTER) != 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var out: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
+    defer c.imsg.imsg_free(&out);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.flags))), c.imsg.imsg_get_type(&out));
+}
+
+test "server_client_dispatch_command bad default-client-command sends exit" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_command(opts.global_options, "default-client-command", "not-a-valid-zmux-command-xyz");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-bad-default" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+        .session = null,
+        .pane_cache = .{},
+        .stdin_pending = .{},
+    };
+    defer client.stdin_pending.deinit(xm.allocator);
+    client.tty = .{ .client = &client };
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client.peer = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var payload = protocol.MsgCommand{ .argc = 0 };
+    var imsg_msg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.len = @as(@TypeOf(imsg_msg.hdr.len), @sizeOf(c.imsg.imsg_hdr) + @sizeOf(protocol.MsgCommand));
+    imsg_msg.data = @ptrCast(&payload);
+
+    server_client_dispatch_command(&client, &imsg_msg);
+
+    const rv = try drainPeerUntilExit(&reader, pair[1]);
+    try std.testing.expectEqual(@as(i32, 1), rv);
+}
+
+test "server_client readonly enqueue rejects non-readonly command list" {
+    cfg_mod.cfg_reset_files();
+    defer cfg_mod.cfg_reset_files();
+
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-ro-enq" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_READONLY,
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        cl.peer = null;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var cause: ?[]u8 = null;
+    const parsed = try cmd_mod.cmd_parse_one(&.{ "new-session", "-s", "tr4ro" }, null, &cause);
+
+    const list_on_heap = try xm.allocator.create(cmd_mod.CmdList);
+    list_on_heap.* = .{};
+    list_on_heap.append(parsed);
+
+    sc.server_client_enqueue_command_list_for_tests(&cl, list_on_heap);
+
+    try std.testing.expect(!cmdq_mod.cmdq_has_pending(&cl));
+    const rv = try drainPeerUntilExit(&reader, pair[1]);
+    try std.testing.expectEqual(@as(i32, 1), rv);
 }

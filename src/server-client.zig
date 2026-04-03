@@ -565,6 +565,11 @@ fn server_client_enqueue_command_list(cl: *T.Client, cmd_list: *cmd_mod.CmdList)
     _ = cmdq_mod.cmdq_append_item(cl, cmdq_mod.cmdq_get_callback1("server-client-command-done", server_client_command_done, null));
 }
 
+/// Exposed for Zig unit tests (`server-client-test.zig`).
+pub fn server_client_enqueue_command_list_for_tests(cl: *T.Client, cmd_list: *cmd_mod.CmdList) void {
+    server_client_enqueue_command_list(cl, cmd_list);
+}
+
 fn server_client_dispatch_default_command(cl: *T.Client) void {
     const command = opts.options_get_command_string(opts.global_options, "default-client-command");
     var parse_input = T.CmdParseInput{ .c = cl };

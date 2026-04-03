@@ -117,6 +117,18 @@ pub fn build(b: *std.Build) void {
     oracle_step.dependOn(&oracle_cmd.step);
 
     // --------------------------------------------------
+    // `zig build smoke-recursive-attach` – nested recursive attach characterization
+    // --------------------------------------------------
+    const recursive_attach_step = b.step(
+        "smoke-recursive-attach",
+        "Run the nested recursive attach characterization harness",
+    );
+    recursive_attach_step.dependOn(b.getInstallStep());
+    const recursive_attach_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "recursive" });
+    recursive_attach_cmd.step.dependOn(b.getInstallStep());
+    recursive_attach_step.dependOn(&recursive_attach_cmd.step);
+
+    // --------------------------------------------------
     // `zig build smoke-soak` – heavy soak harness against zmux
     // --------------------------------------------------
     const soak_step = b.step("smoke-soak", "Run the heavy soak harness against zig-out/bin/zmux");

@@ -27,6 +27,7 @@ Run the automated suites before any manual inspection:
 ```sh
 zig build smoke
 zig build smoke-oracle
+zig build smoke-recursive-attach
 zig build smoke-soak
 zig build smoke-docker
 ```
@@ -35,6 +36,11 @@ Use `/tmp` for ephemeral sockets and stress artifacts by default.
 
 If any automated suite fails, stop and inspect that failure before manual smoke.
 Manual validation is not a substitute for a deterministic breakage.
+
+`zig build smoke-recursive-attach` is a separate characterization suite for
+nested recursive attach weirdness. It is intentionally opt-in and not part of
+`smoke-all`: use it when working on client/attach semantics or when you need to
+reproduce tmux-versus-zmux behavior under nested mux containers.
 
 ## Manual Skill Workflow
 

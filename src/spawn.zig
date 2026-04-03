@@ -550,6 +550,13 @@ test "spawn_window with respawn flag requires a window link" {
     try std.testing.expectEqualStrings("no window", cause.?);
 }
 
+test "spawn_pane returns null without a window link" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    var sc: T.SpawnContext = .{ .wl = null, .idx = -1, .flags = 0 };
+    try std.testing.expect(spawn_pane(&sc, &cause) == null);
+}
+
 test "build_child_environment carries the zmux session marker into pane children" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);

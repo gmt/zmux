@@ -2148,6 +2148,18 @@ test "layout_set_size_check validates minimum sizes" {
     try testing.expect(!layout_set_size_check(w, lc, .leftright, 0));
 }
 
+test "layout_set_size_check validates topbottom minimum sizes" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp);
+
+    const lc = wp.layout_cell.?;
+    try testing.expect(layout_set_size_check(w, lc, .topbottom, @intCast(T.PANE_MINIMUM)));
+    try testing.expect(!layout_set_size_check(w, lc, .topbottom, 0));
+}
+
 test "layout_new_pane_size gives remaining space to last cell" {
     const w = test_setup_window(80, 24);
     defer test_teardown_window(w);

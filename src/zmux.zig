@@ -382,6 +382,7 @@ test {
     _ = @import("window-test.zig");
     _ = @import("cmd-find-test.zig");
     _ = @import("cmd-session-lifecycle-test.zig");
+    _ = @import("cmd-breadth-test.zig");
     _ = @import("image-sixel.zig");
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");
@@ -391,4 +392,6 @@ test {
     _ = @import("control-test.zig");
     _ = @import("small-modules-test.zig");
     _ = @import("zmux-protocol-test.zig");
+    _ = @import("clipboard.zig");
+    _ = @import("pane-empty-input.zig");
 }

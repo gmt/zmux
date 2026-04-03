@@ -3817,3 +3817,9 @@ test "expand_tparm handles literal text without parameters" {
     defer xm.allocator.free(result);
     try std.testing.expectEqualStrings("\x1b[2J", result);
 }
+
+test "expand_tparm_2 copies literal templates without tparm codes" {
+    const result = try expand_tparm_2("no-csi-here", 9, 8);
+    defer xm.allocator.free(result);
+    try std.testing.expectEqualStrings("no-csi-here", result);
+}

@@ -395,4 +395,5 @@ test {
     _ = @import("clipboard.zig");
     _ = @import("pane-empty-input.zig");
     _ = @import("proc-test.zig");
+    _ = @import("xmalloc-log-test.zig");
 }

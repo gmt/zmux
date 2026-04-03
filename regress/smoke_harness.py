@@ -66,6 +66,7 @@ class ControlClient:
             stderr=self.stderr_file,
             text=True,
             env=harness.env,
+            start_new_session=True,
         )
         if self.proc.stdin is not None:
             self.proc.stdin.write("refresh-client -C 90,30\n")
@@ -213,6 +214,7 @@ class SmokeHarness:
                 capture_output=True,
                 timeout=timeout,
                 env=self.env,
+                start_new_session=True,
             )
         except subprocess.TimeoutExpired as exc:
             raise SmokeTimeoutError(args) from exc

@@ -286,7 +286,10 @@ fn handle_osc_52_reply(client: ?*T.Client, payload: []const u8, event: *T.key_ev
 
     const decoded = xm.allocator.alloc(u8, decoded_len) catch unreachable;
     errdefer xm.allocator.free(decoded);
-    std.base64.standard.Decoder.decode(decoded, encoded) catch return ignore_event(event, consumed);
+    std.base64.standard.Decoder.decode(decoded, encoded) catch {
+        xm.allocator.free(decoded);
+        return ignore_event(event, consumed);
+    };
 
     if (client) |cl| {
         if ((cl.tty.flags & @as(i32, @intCast(T.TTY_OSC52QUERY))) != 0) {
@@ -1074,6 +1077,30 @@ test "input_key_get_client keeps OSC 52 reply prefixes partial and discards unso
 
     const reply = "\x1b]52;c;aGVsbG8=\x07";
     try std.testing.expectEqual(reply.len, input_key_get_client(&client, reply, &event).?);
+    try std.testing.expect(paste_mod.paste_get_top(null) == null);
+}
+
+test "input_key_get_client ignores malformed OSC 52 replies without changing paste state" {
+    paste_mod.paste_reset_for_tests();
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+
+    var env = T.Environ.init(std.testing.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+    };
+    tty_mod.tty_init(&client.tty, &client);
+    client.tty.flags |= @as(i32, @intCast(T.TTY_OSC52QUERY));
+
+    var event: T.key_event = .{};
+    const reply = "\x1b]52;c;not-base64\x07";
+    try std.testing.expectEqual(reply.len, input_key_get_client(&client, reply, &event).?);
+    try std.testing.expectEqual(@as(T.key_code, T.KEYC_UNKNOWN), event.key);
     try std.testing.expect(paste_mod.paste_get_top(null) == null);
 }
 

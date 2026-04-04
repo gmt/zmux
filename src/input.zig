@@ -2097,6 +2097,43 @@ test "input tracks keypad cursor mouse and extended-key modes" {
     try std.testing.expect(cleared & T.EXTENDED_KEY_MODES == 0);
 }
 
+test "input toggles standard and all-motion mouse private modes" {
+    const win = @import("window.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(@import("xmalloc.zig").allocator);
+
+    const w = win.window_create(8, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(@import("xmalloc.zig").allocator);
+        w.last_panes.deinit(@import("xmalloc.zig").allocator);
+        opts.options_free(w.options);
+        @import("xmalloc.zig").allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        @import("xmalloc.zig").allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 8, 3);
+
+    input_parse_screen(wp, "\x1b[?1000h");
+    try std.testing.expect((screen_mod.screen_current(wp).mode & T.ALL_MOUSE_MODES) == T.MODE_MOUSE_STANDARD);
+
+    input_parse_screen(wp, "\x1b[?1000l");
+    try std.testing.expect((screen_mod.screen_current(wp).mode & T.ALL_MOUSE_MODES) == 0);
+
+    input_parse_screen(wp, "\x1b[?1003h");
+    try std.testing.expect((screen_mod.screen_current(wp).mode & T.ALL_MOUSE_MODES) == T.MODE_MOUSE_ALL);
+
+    input_parse_screen(wp, "\x1b[?1003l");
+    try std.testing.expect((screen_mod.screen_current(wp).mode & T.ALL_MOUSE_MODES) == 0);
+}
+
 test "input handles VT, FF, SO, SI and MODE_CRLF" {
     const win = @import("window.zig");
     const grid = @import("grid.zig");

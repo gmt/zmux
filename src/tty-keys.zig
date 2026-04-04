@@ -1326,6 +1326,15 @@ test "tty_keys_mouse: X10 mouse event" {
     try std.testing.expectEqual(@as(u32, 0), res.m.y);
 }
 
+test "tty_keys_mouse keeps partial SGR mouse prefixes pending" {
+    var size: usize = 0;
+    var lx: u32 = 0;
+    var ly: u32 = 0;
+    var lb: u32 = 0;
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_mouse("\x1b[<0;12;34", &size, &lx, &ly, &lb).result);
+    try std.testing.expectEqual(ParseResult.partial, tty_keys_mouse("\x1b[M", &size, &lx, &ly, &lb).result);
+}
+
 test "tty_keys_device_attributes: basic DA1" {
     var size: usize = 0;
     var params: [32]u32 = undefined;

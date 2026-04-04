@@ -32,6 +32,7 @@ const win = @import("window.zig");
 const marked_pane_mod = @import("marked-pane.zig");
 const notify = @import("notify.zig");
 const proc_mod = @import("proc.zig");
+const tty_mod = @import("tty.zig");
 const utf8 = @import("utf8.zig");
 
 // ── Global state ──────────────────────────────────────────────────────────
@@ -593,6 +594,9 @@ pub fn session_set_current(s: *T.Session, wl: *T.Winlink) bool {
         if (old) |o| win.window_update_focus(o.window);
         win.window_update_focus(wl.window);
     }
+    win.winlink_clear_flags(wl);
+    win.window_update_activity(wl.window);
+    tty_mod.tty_update_window_offset(wl.window);
     notify.notify_session("session-window-changed", s);
     return true;
 }
@@ -853,9 +857,22 @@ pub fn session_previous_session(
 
 test "session_set_current maintains last-window history" {
     const cmdq = @import("cmd-queue.zig");
+    const opts_mod = @import("options.zig");
     cmdq.cmdq_reset_for_tests();
     defer cmdq.cmdq_reset_for_tests();
     session_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_ready = true;
+    defer opts_mod.options_ready = false;
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     var s = T.Session{
         .id = 1,
@@ -877,10 +894,12 @@ test "session_set_current maintains last-window history" {
     const w2 = xm.allocator.create(T.Window) catch unreachable;
     defer xm.allocator.destroy(w1);
     defer xm.allocator.destroy(w2);
-    w1.* = .{ .id = 1, .name = xm.xstrdup("one"), .sx = 80, .sy = 24, .options = undefined };
-    w2.* = .{ .id = 2, .name = xm.xstrdup("two"), .sx = 80, .sy = 24, .options = undefined };
+    w1.* = .{ .id = 1, .name = xm.xstrdup("one"), .sx = 80, .sy = 24, .options = opts_mod.options_create(opts_mod.global_w_options) };
+    w2.* = .{ .id = 2, .name = xm.xstrdup("two"), .sx = 80, .sy = 24, .options = opts_mod.options_create(opts_mod.global_w_options) };
     defer xm.allocator.free(w1.name);
     defer xm.allocator.free(w2.name);
+    defer opts_mod.options_free(w1.options);
+    defer opts_mod.options_free(w2.options);
     defer w1.panes.deinit(xm.allocator);
     defer w1.last_panes.deinit(xm.allocator);
     defer w1.winlinks.deinit(xm.allocator);
@@ -908,6 +927,18 @@ test "session_set_current maintains last-window history" {
 }
 
 test "session_repair_current drops non-live winlinks" {
+    const opts_mod = @import("options.zig");
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
     var s = T.Session{
         .id = 2,
         .name = xm.xstrdup("session-repair"),
@@ -926,8 +957,9 @@ test "session_repair_current drops non-live winlinks" {
 
     const w = xm.allocator.create(T.Window) catch unreachable;
     defer xm.allocator.destroy(w);
-    w.* = .{ .id = 3, .name = xm.xstrdup("live"), .sx = 80, .sy = 24, .options = undefined };
+    w.* = .{ .id = 3, .name = xm.xstrdup("live"), .sx = 80, .sy = 24, .options = opts_mod.options_create(opts_mod.global_w_options) };
     defer xm.allocator.free(w.name);
+    defer opts_mod.options_free(w.options);
     defer w.panes.deinit(xm.allocator);
     defer w.last_panes.deinit(xm.allocator);
     defer w.winlinks.deinit(xm.allocator);
@@ -1039,4 +1071,54 @@ test "session_update_activity sets explicit timestamp" {
 
     session_update_activity(s, 9_876_543_210);
     try std.testing.expectEqual(@as(i64, 9_876_543_210), s.activity_time);
+}
+
+test "session_set_current clears alerts and updates activity on the destination window" {
+    const cmdq = @import("cmd-queue.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    const opts_mod = @import("options.zig");
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = session_create(null, "set-current-side-effects", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (session_find("set-current-side-effects") != null) session_destroy(s, false, "test");
+
+    const first_window = win.window_create(120, 40, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const second_window = win.window_create(120, 40, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+
+    _ = win.window_add_pane(first_window, null, 120, 40);
+    const second_pane = win.window_add_pane(second_window, null, 120, 40);
+    second_window.active = second_pane;
+
+    var cause: ?[]u8 = null;
+    const first = session_attach(s, first_window, 0, &cause).?;
+    const second = session_attach(s, second_window, 1, &cause).?;
+    s.curw = first;
+    s.attached = 1;
+
+    second.flags |= T.WINLINK_ACTIVITY;
+    second_window.flags |= T.WINDOW_ACTIVITY;
+    second_window.activity_time = 0;
+
+    try std.testing.expect(session_set_current(s, second));
+    try std.testing.expectEqual(second, s.curw.?);
+    try std.testing.expectEqual(@as(u32, 0), second.flags & T.WINLINK_ALERTFLAGS);
+    try std.testing.expect((second_window.flags & T.WINDOW_ACTIVITY) != 0);
+    try std.testing.expect(second_window.activity_time != 0);
 }

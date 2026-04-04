@@ -541,7 +541,7 @@ test "window clock timer callback redraws when the second changes" {
     enter_mode(setup.pane);
     const wme = window_mod.window_pane_mode(setup.pane).?;
     const data = window_clock_mode_data(wme);
-    data.tim = 0;
+    data.tim = c.posix_sys.time(null) - 1;
     setup.pane.flags = 0;
 
     window_clock_timer_callback_inner(-1, 0, wme);

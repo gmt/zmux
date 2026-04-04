@@ -30,6 +30,7 @@ const regsub_mod = @import("regsub.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const sess = @import("session.zig");
+const server_client_mod = @import("server-client.zig");
 const window_mod = @import("window.zig");
 
 /// Dynamic key-value dictionary for per-context format variables
@@ -261,14 +262,16 @@ const job_mod = @import("job.zig");
 
 /// One entry in the module-level format job cache.
 const FormatJob = struct {
-    cmd: []const u8, // owned copy of the shell command (same slice as map key)
+    key: []const u8, // owned composite cache key (cwd + NUL + command)
+    cmd: []const u8, // owned copy of the shell command
+    cwd: []const u8, // owned copy of the execution cwd
     out: ?[]u8, // last captured output (owned); null while pending
     last: i64, // unix time of last launch
     async_shell: ?*job_mod.AsyncShell = null,
 };
 
-/// Module-level job cache: keyed by command string.  Keys are owned by the
-/// FormatJob.cmd field; the map borrows them as slices.
+/// Module-level job cache: keyed by cwd + command so the same shell snippet can
+/// be expanded independently for different client/session working directories.
 var format_job_cache: std.StringHashMapUnmanaged(FormatJob) = .{};
 var format_job_cache_lock: std.Thread.Mutex = .{};
 
@@ -277,7 +280,13 @@ fn format_job_cache_tidy(force: bool) void {
     // Collect expired entries under the lock, then free async shells outside
     // the lock (async_shell_free may join a thread that calls back into the
     // cache lock, which would deadlock if we held it).
-    const Expired = struct { key: []const u8, shell: ?*job_mod.AsyncShell, out: ?[]u8 };
+    const Expired = struct {
+        key: []const u8,
+        cmd: []const u8,
+        cwd: []const u8,
+        shell: ?*job_mod.AsyncShell,
+        out: ?[]u8,
+    };
     var expired: std.ArrayListUnmanaged(Expired) = .{};
     defer expired.deinit(xm.allocator);
 
@@ -292,7 +301,9 @@ fn format_job_cache_tidy(force: bool) void {
             if (!force and fj.last > now) continue;
             if (!force and (now - fj.last) < 3600) continue;
             expired.append(xm.allocator, .{
-                .key = entry.key_ptr.*,
+                .key = fj.key,
+                .cmd = fj.cmd,
+                .cwd = fj.cwd,
                 .shell = fj.async_shell,
                 .out = fj.out,
             }) catch unreachable;
@@ -304,6 +315,8 @@ fn format_job_cache_tidy(force: bool) void {
         if (e.shell) |ash| job_mod.async_shell_free(ash);
         if (e.out) |out| xm.allocator.free(out);
         xm.allocator.free(e.key);
+        xm.allocator.free(e.cmd);
+        xm.allocator.free(e.cwd);
     }
 }
 
@@ -334,21 +347,25 @@ fn format_job_complete_cb(ash: *job_mod.AsyncShell, arg: ?*anyopaque) void {
 /// Expand a #(cmd) shell expression: return cached output or launch a new job.
 /// Returns a heap-allocated string (caller frees).
 fn format_job_get(alloc: std.mem.Allocator, cmd: []const u8, ctx: *const FormatContext) FormatExpandResult {
-    _ = ctx; // client cwd lookup not yet wired; use "/"
-    const cwd: []const u8 = "/";
+    const cwd = server_client_mod.server_client_get_cwd(ctx.client, ctx.session);
+    const cache_key = std.mem.concat(xm.allocator, u8, &.{ cwd, &[_]u8{0}, cmd }) catch unreachable;
 
     format_job_cache_lock.lock();
     defer format_job_cache_lock.unlock();
 
     const now: i64 = std.time.timestamp();
-    const gop = format_job_cache.getOrPut(xm.allocator, cmd) catch unreachable;
+    const gop = format_job_cache.getOrPut(xm.allocator, cache_key) catch unreachable;
     if (!gop.found_existing) {
-        gop.key_ptr.* = xm.allocator.dupe(u8, cmd) catch unreachable;
+        gop.key_ptr.* = cache_key;
         gop.value_ptr.* = .{
-            .cmd = gop.key_ptr.*,
+            .key = cache_key,
+            .cmd = xm.allocator.dupe(u8, cmd) catch unreachable,
+            .cwd = xm.allocator.dupe(u8, cwd) catch unreachable,
             .out = null,
             .last = 0,
         };
+    } else {
+        xm.allocator.free(cache_key);
     }
     const fj = gop.value_ptr;
 
@@ -357,7 +374,7 @@ fn format_job_get(alloc: std.mem.Allocator, cmd: []const u8, ctx: *const FormatC
         const ash = job_mod.async_shell_start(
             null,
             fj.cmd,
-            .{ .cwd = cwd, .capture_output = true },
+            .{ .cwd = fj.cwd, .capture_output = true },
             format_job_complete_cb,
             null,
         );
@@ -373,6 +390,78 @@ fn format_job_get(alloc: std.mem.Allocator, cmd: []const u8, ctx: *const FormatC
         return .{ .text = alloc.dupe(u8, out) catch unreachable, .complete = true };
     }
     return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = true };
+}
+
+fn wait_for_shell_format_output(template: []const u8, ctx: *const FormatContext) ![]u8 {
+    const proc_mod = @import("proc.zig");
+
+    var spins: usize = 0;
+    while (spins < 200) : (spins += 1) {
+        const expanded = format_require_complete(xm.allocator, template, ctx) orelse return error.TestUnexpectedResult;
+        if (expanded.len != 0 and !std.mem.startsWith(u8, expanded, "<'"))
+            return expanded;
+        xm.allocator.free(expanded);
+
+        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "format #(shell-command) uses client cwd and caches per cwd" {
+    const builtin = @import("builtin");
+    const env_mod = @import("environ.zig");
+    const os_mod = @import("os/linux.zig");
+    const proc_mod = @import("proc.zig");
+
+    if (builtin.os.tag != .linux) return;
+
+    var first_tmp = std.testing.tmpDir(.{});
+    defer first_tmp.cleanup();
+    var second_tmp = std.testing.tmpDir(.{});
+    defer second_tmp.cleanup();
+
+    const first_cwd = try first_tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(first_cwd);
+    const second_cwd = try second_tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(second_cwd);
+
+    const old_base = proc_mod.libevent;
+    proc_mod.libevent = os_mod.osdep_event_init();
+    defer {
+        format_job_cache_tidy(true);
+        if (proc_mod.libevent) |base| c.libevent.event_base_free(base);
+        proc_mod.libevent = old_base;
+    }
+
+    var first_client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .cwd = first_cwd,
+    };
+    defer env_mod.environ_free(first_client.environ);
+    first_client.tty = .{ .client = &first_client };
+
+    var second_client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .cwd = second_cwd,
+    };
+    defer env_mod.environ_free(second_client.environ);
+    second_client.tty = .{ .client = &second_client };
+
+    const first_ctx = FormatContext{ .client = &first_client };
+    const second_ctx = FormatContext{ .client = &second_client };
+
+    const first = try wait_for_shell_format_output("#(pwd)", &first_ctx);
+    defer xm.allocator.free(first);
+    try std.testing.expectEqualStrings(first_cwd, first);
+
+    const second = try wait_for_shell_format_output("#(pwd)", &second_ctx);
+    defer xm.allocator.free(second);
+    try std.testing.expectEqualStrings(second_cwd, second);
 }
 
 fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext, depth: u32) FormatExpandResult {

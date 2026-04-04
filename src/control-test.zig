@@ -298,6 +298,93 @@ test "control_sub_cmp orders subscriptions lexicographically by name" {
     try std.testing.expectEqual(@as(i32, 1), ctl.control_sub_cmp(&z, &m));
 }
 
+test "control_check_subscriptions only emits session updates when the formatted value changes" {
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session_options = T.Options.init(xm.allocator, null);
+    defer session_options.deinit();
+
+    var session = T.Session{
+        .id = 41,
+        .name = xm.xstrdup("alpha"),
+        .cwd = "/",
+        .options = &session_options,
+        .environ = &session_env,
+    };
+    defer xm.allocator.free(session.name);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = &session,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+
+    ctl.control_add_sub(&client, "watch", T.ControlSubType.session, 0, "#{session_name}");
+    defer ctl_sub.control_subscriptions_deinit(&client);
+
+    var first_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&first_pipe));
+    defer {
+        std.posix.close(first_pipe[0]);
+        if (first_pipe[1] != -1) std.posix.close(first_pipe[1]);
+    }
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+    try std.posix.dup2(first_pipe[1], std.posix.STDOUT_FILENO);
+    ctl_sub.control_check_subscriptions(&client);
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(first_pipe[1]);
+    first_pipe[1] = -1;
+
+    var first_buf: [256]u8 = undefined;
+    const first_len = try std.posix.read(first_pipe[0], &first_buf);
+    try std.testing.expectEqualStrings(
+        "%subscription-changed watch $41 - - - : alpha\n",
+        first_buf[0..first_len],
+    );
+
+    var second_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&second_pipe));
+    defer {
+        std.posix.close(second_pipe[0]);
+        if (second_pipe[1] != -1) std.posix.close(second_pipe[1]);
+    }
+    try std.posix.dup2(second_pipe[1], std.posix.STDOUT_FILENO);
+    ctl_sub.control_check_subscriptions(&client);
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(second_pipe[1]);
+    second_pipe[1] = -1;
+
+    var second_buf: [64]u8 = undefined;
+    const second_len = try std.posix.read(second_pipe[0], &second_buf);
+    try std.testing.expectEqual(@as(usize, 0), second_len);
+
+    xm.allocator.free(session.name);
+    session.name = xm.xstrdup("beta");
+
+    var third_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&third_pipe));
+    defer {
+        std.posix.close(third_pipe[0]);
+        if (third_pipe[1] != -1) std.posix.close(third_pipe[1]);
+    }
+    try std.posix.dup2(third_pipe[1], std.posix.STDOUT_FILENO);
+    ctl_sub.control_check_subscriptions(&client);
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(third_pipe[1]);
+    third_pipe[1] = -1;
+
+    var third_buf: [256]u8 = undefined;
+    const third_len = try std.posix.read(third_pipe[0], &third_buf);
+    try std.testing.expectEqualStrings(
+        "%subscription-changed watch $41 - - - : beta\n",
+        third_buf[0..third_len],
+    );
+}
+
 test "control_reset_offsets clears an empty control pane list" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);

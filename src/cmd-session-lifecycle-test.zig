@@ -54,6 +54,44 @@ fn deinit_harness() void {
     cmdq.cmdq_reset_for_tests();
 }
 
+fn capture_stdout(argv: []const []const u8) ![]u8 {
+    var stdout_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&stdout_pipe));
+    defer {
+        std.posix.close(stdout_pipe[0]);
+        if (stdout_pipe[1] != -1) std.posix.close(stdout_pipe[1]);
+    }
+
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+
+    try std.posix.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO);
+    defer std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO) catch {};
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(argv, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(stdout_pipe[1]);
+    stdout_pipe[1] = -1;
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try std.posix.read(stdout_pipe[0], &buf);
+        if (n == 0) break;
+        try out.appendSlice(xm.allocator, buf[0..n]);
+    }
+    return out.toOwnedSlice(xm.allocator);
+}
+
 test "start-server command entry returns normal" {
     init_harness();
     defer deinit_harness();
@@ -134,6 +172,145 @@ test "list-clients command entry succeeds with no registered clients" {
     var item = cmdq.CmdqItem{ .cmdlist = &list };
 
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "list-clients sorts by name and scopes results to the target session" {
+    init_harness();
+    defer deinit_harness();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const alpha = sess.session_create(null, "coverage-alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("coverage-alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "coverage-beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("coverage-beta") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    var alpha_sc: T.SpawnContext = .{ .s = alpha, .idx = -1, .flags = T.SPAWN_EMPTY };
+    alpha.curw = spawn.spawn_window(&alpha_sc, &cause).?;
+    var beta_sc: T.SpawnContext = .{ .s = beta, .idx = -1, .flags = T.SPAWN_EMPTY };
+    beta.curw = spawn.spawn_window(&beta_sc, &cause).?;
+
+    var zed = T.Client{
+        .name = "zed",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = alpha,
+    };
+    defer env_mod.environ_free(zed.environ);
+    zed.tty = .{ .client = &zed, .sx = 90, .sy = 25 };
+
+    var amy = T.Client{
+        .name = "amy",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = alpha,
+    };
+    defer env_mod.environ_free(amy.environ);
+    amy.tty = .{ .client = &amy, .sx = 120, .sy = 30 };
+
+    var bob = T.Client{
+        .name = "bob",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = beta,
+    };
+    defer env_mod.environ_free(bob.environ);
+    bob.tty = .{ .client = &bob, .sx = 200, .sy = 40 };
+
+    client_registry.add(&zed);
+    client_registry.add(&amy);
+    client_registry.add(&bob);
+
+    const output = try capture_stdout(&.{ "list-clients", "-t", "coverage-alpha", "-O", "name", "-F", "#{client_name}:#{session_name}" });
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings(
+        "amy:coverage-alpha\n" ++
+            "zed:coverage-alpha\n",
+        output,
+    );
+}
+
+test "list-clients applies filters before printing and honors size ordering" {
+    init_harness();
+    defer deinit_harness();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const alpha = sess.session_create(null, "coverage-filter-alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("coverage-filter-alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "coverage-filter-beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("coverage-filter-beta") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    var alpha_sc: T.SpawnContext = .{ .s = alpha, .idx = -1, .flags = T.SPAWN_EMPTY };
+    alpha.curw = spawn.spawn_window(&alpha_sc, &cause).?;
+    var beta_sc: T.SpawnContext = .{ .s = beta, .idx = -1, .flags = T.SPAWN_EMPTY };
+    beta.curw = spawn.spawn_window(&beta_sc, &cause).?;
+
+    var tall = T.Client{
+        .name = "tall",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = alpha,
+    };
+    defer env_mod.environ_free(tall.environ);
+    tall.tty = .{ .client = &tall, .sx = 80, .sy = 40 };
+
+    var wide = T.Client{
+        .name = "wide",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = alpha,
+    };
+    defer env_mod.environ_free(wide.environ);
+    wide.tty = .{ .client = &wide, .sx = 120, .sy = 24 };
+
+    var outsider = T.Client{
+        .name = "outsider",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = beta,
+    };
+    defer env_mod.environ_free(outsider.environ);
+    outsider.tty = .{ .client = &outsider, .sx = 200, .sy = 50 };
+
+    client_registry.add(&tall);
+    client_registry.add(&wide);
+    client_registry.add(&outsider);
+
+    const output = try capture_stdout(&.{
+        "list-clients",
+        "-f",
+        "#{==:#{session_name},coverage-filter-alpha}",
+        "-O",
+        "size",
+        "-r",
+        "-F",
+        "#{client_name}:#{client_width}x#{client_height}",
+    });
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings(
+        "wide:120x24\n" ++
+            "tall:80x40\n",
+        output,
+    );
 }
 
 test "list-sessions command entry succeeds with no sessions" {

@@ -79,6 +79,8 @@ export fn proc_event_cb(_fd: c_int, events: c_short, arg: ?*anyopaque) void {
         peer.dispatchcb(null, peer.arg);
         return;
     }
+
+    proc_update_event(peer);
 }
 
 export fn proc_signal_cb(signo: c_int, _: c_short, arg: ?*anyopaque) void {
@@ -106,9 +108,18 @@ pub fn proc_peer_check_version(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg) i32 {
 }
 
 fn proc_update_event(peer: *T.ZmuxPeer) void {
-    if (peer.event != null) return;
     const base = libevent orelse return;
-    peer.event = c.libevent.event_new(base, peer.ibuf.fd, @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST), proc_event_cb, peer);
+    if (peer.event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        peer.event = null;
+    }
+
+    var events: c_short = @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST);
+    if (c.imsg.imsgbuf_queuelen(&peer.ibuf) > 0)
+        events |= @intCast(c.libevent.EV_WRITE);
+
+    peer.event = c.libevent.event_new(base, peer.ibuf.fd, events, proc_event_cb, peer);
     if (peer.event) |ev| _ = c.libevent.event_add(ev, null);
 }
 
@@ -126,7 +137,10 @@ pub fn proc_send(peer: *T.ZmuxPeer, msg_type: protocol.MsgType, fd: i32, buf: ?[
         len,
     );
     if (retval != 1) return -1;
-    _ = c.imsg.imsgbuf_flush(&peer.ibuf);
+    if (libevent != null)
+        proc_update_event(peer)
+    else
+        _ = c.imsg.imsgbuf_flush(&peer.ibuf);
     return 0;
 }
 

@@ -1083,6 +1083,131 @@ test "refresh-client -B emits %subscription-changed for control clients" {
     try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }
 
+test "refresh-client -B control subscriptions stay quiet when unchanged and emit again after a state change" {
+    const c = @import("c.zig");
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const session_mod = @import("session.zig");
+    const xm = @import("xmalloc.zig");
+
+    const helpers = struct {
+        fn noopDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+        fn readerSetNonblock(fd: i32) void {
+            const fl = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+            if (fl < 0) return;
+            const O_NONBLOCK: c_int = 0x800;
+            _ = std.c.fcntl(fd, std.posix.F.SETFL, fl | O_NONBLOCK);
+        }
+
+        fn expectSubscriptionLine(reader: *c.imsg.imsgbuf, expected: []const u8) !void {
+            try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(reader));
+
+            var imsg_msg: c.imsg.imsg = undefined;
+            try std.testing.expect(c.imsg.imsg_get(reader, &imsg_msg) > 0);
+            defer c.imsg.imsg_free(&imsg_msg);
+
+            try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+            const payload_len = c.imsg.imsg_get_len(&imsg_msg);
+            var payload = try xm.allocator.alloc(u8, payload_len);
+            defer xm.allocator.free(payload);
+            try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+            var stream: i32 = 0;
+            @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+            try std.testing.expectEqual(@as(i32, 1), stream);
+            try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
+
+            var extra: c.imsg.imsg = undefined;
+            try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get(reader, &extra));
+        }
+
+    };
+
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = session_mod.session_create(null, "refresh-subscriptions-repeat", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (session_mod.session_find("refresh-subscriptions-repeat") != null) session_mod.session_destroy(session, false, "test");
+
+    const window = window_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const pane = window_mod.window_add_pane(window, null, 80, 24);
+    window.active = pane;
+
+    var attach_cause: ?[]u8 = null;
+    const wl = session_mod.session_attach(session, window, -1, &attach_cause).?;
+    session.curw = wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "refresh-client-subscription-repeat-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var target_client = T.Client{
+        .name = "control",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = session,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_UTF8,
+    };
+    defer env_mod.environ_free(target_client.environ);
+    defer control_subscriptions.control_subscriptions_deinit(&target_client);
+    target_client.tty = .{ .client = &target_client };
+    target_client.peer = proc_mod.proc_add_peer(&proc, pair[0], helpers.noopDispatch, null);
+    defer {
+        const peer = target_client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var cause: ?[]u8 = null;
+    const refresh = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-B", "watch::#{session_name}" }, null, &cause);
+    defer cmd_mod.cmd_free(refresh);
+
+    var item = cmdq.CmdqItem{ .target_client = &target_client };
+    try std.testing.expectEqual(T.CmdRetval.normal, exec(refresh, &item));
+
+    control_subscriptions.control_check_subscriptions(&target_client);
+    const first_expected = xm.xasprintf("%subscription-changed watch ${d} - - - : refresh-subscriptions-repeat\n", .{session.id});
+    defer xm.allocator.free(first_expected);
+    try helpers.expectSubscriptionLine(&reader, first_expected);
+
+    xm.allocator.free(session.name);
+    session.name = xm.xstrdup("refresh-subscriptions-renamed");
+
+    control_subscriptions.control_check_subscriptions(&target_client);
+    const second_expected = xm.xasprintf("%subscription-changed watch ${d} - - - : refresh-subscriptions-renamed\n", .{session.id});
+    defer xm.allocator.free(second_expected);
+    try helpers.expectSubscriptionLine(&reader, second_expected);
+}
+
 test "refresh-client -r stores OSC report colours on the target pane" {
     const opts = @import("options.zig");
     const xm = @import("xmalloc.zig");

@@ -17,6 +17,7 @@ tmux-museum/rebuild/
 *.swp
 *~
 .codex
+.omx/
 .claude/
 
 # Python cache artifacts

@@ -60,6 +60,17 @@ pub fn tty_resize(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void 
     // Convert total pixel dimensions to per-cell (matching tmux tty_resize).
     const cw = if (sx > 0 and xpixel > 0) xpixel / sx else 0;
     const ch = if (sy > 0 and ypixel > 0) ypixel / sy else 0;
+
+    if ((cw == 0 or ch == 0) and
+        tty.client.peer != null and
+        (tty.client.flags & T.CLIENT_CONTROL) == 0 and
+        tty_term.isVt100Like(tty) and
+        (tty.flags & @as(i32, @intCast(T.TTY_WINSIZEQUERY))) == 0)
+    {
+        tty_puts_str(tty, "\x1b[18t\x1b[14t");
+        tty.flags |= @as(i32, @intCast(T.TTY_WINSIZEQUERY));
+    }
+
     tty_set_size(tty, sx, sy, cw, ch);
     tty_invalidate(tty);
 }
@@ -2112,6 +2123,19 @@ fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
 
     // 9. Window size report (CSI 8;...t / CSI 4;...t).
     if (tty_keys_mod.tty_keys_winsz(buf, &size)) |winsz| {
+        if ((tty.flags & @as(i32, @intCast(T.TTY_WINSIZEQUERY))) == 0) {
+            const key_size: usize = 2;
+
+            // Treat unsolicited replies as ordinary Esc-[ input so they do not
+            // pin later bytes behind a completed winsize report.
+            event.key = @as(T.key_code, @intCast(buf[1])) | T.KEYC_META;
+            event.len = @min(key_size, event.data.len);
+            @memcpy(event.data[0..event.len], buf[0..event.len]);
+            drainInBuf(tty, key_size);
+            tty_keys_cancel_timer(tty);
+            dispatchKeyEvent(cl, &event);
+            return true;
+        }
         switch (winsz.kind) {
             .chars => tty_set_size(tty, winsz.v1, winsz.v2, 0, 0),
             .pixels => {
@@ -2123,6 +2147,7 @@ fn tty_keys_next_inner(tty: *T.Tty, expired: bool) bool {
                         tty_set_size(tty, tty.sx, tty.sy, cw, ch);
                 }
                 tty_invalidate(tty);
+                tty.flags &= ~@as(i32, @intCast(T.TTY_WINSIZEQUERY));
             },
         }
         drainInBuf(tty, size);
@@ -3351,6 +3376,62 @@ test "tty_resize clamps size and restores default pixels" {
     try std.testing.expectEqual(@as(u32, 1), cl.tty.sy);
     try std.testing.expectEqual(T.DEFAULT_XPIXEL, cl.tty.xpixel);
     try std.testing.expectEqual(T.DEFAULT_YPIXEL, cl.tty.ypixel);
+}
+
+test "tty_resize requests winsize replies for vt100 terminals without pixel dimensions" {
+    const proc_mod_local = @import("proc.zig");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "tty-resize-query-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var caps = [_][]u8{
+        @constCast("clear=\x1b[H\x1b[J"),
+    };
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{},
+        .term_caps = caps[0..],
+    };
+    tty_init(&cl.tty, &cl);
+    tty_start_tty(&cl.tty);
+    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c_zig.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c_zig.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    tty_resize(&cl.tty, 80, 24, 0, 0);
+
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_WINSIZEQUERY))) != 0);
+    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c_zig.imsg.imsg = undefined;
+    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c_zig.imsg.imsg_free(&imsg_msg);
+
+    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+    try std.testing.expectEqualStrings("\x1b[18t\x1b[14t", payload[@sizeOf(i32)..]);
 }
 
 test "tty_append_mode_update emits reduced outer mouse, bracketed-paste, and focus negotiation" {

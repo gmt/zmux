@@ -775,6 +775,7 @@ pub const TTY_HAVEDA: u32 = 0x0100;
 pub const TTY_HAVEXDA: u32 = 0x0200;
 pub const TTY_SYNCING: u32 = 0x0400;
 pub const TTY_HAVEDA2: u32 = 0x0800;
+pub const TTY_WINSIZEQUERY: u32 = 0x1000;
 pub const TTY_WAITFG: u32 = 0x2000;
 pub const TTY_WAITBG: u32 = 0x4000;
 /// Combination of all DA/XDA/XTVERSION request-complete flags.

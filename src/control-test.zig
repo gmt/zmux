@@ -17,9 +17,36 @@
 const std = @import("std");
 const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
+const c = @import("c.zig");
 const env_mod = @import("environ.zig");
+const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
+const sess = @import("session.zig");
+const win_mod = @import("window.zig");
 const ctl = @import("control.zig");
 const ctl_sub = @import("control-subscriptions.zig");
+
+fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+fn readPeerStreamPayloadAlloc(reader: *c.imsg.imsgbuf) ![]u8 {
+    while (true) {
+        var imsg_msg: c.imsg.imsg = undefined;
+        const got = c.imsg.imsg_get(reader, &imsg_msg);
+        if (got == 0) {
+            try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(reader));
+            continue;
+        }
+        try std.testing.expect(got > 0);
+        defer c.imsg.imsg_free(&imsg_msg);
+
+        const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+        try std.testing.expect(data_len >= @sizeOf(i32));
+        const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+        const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
+        try std.testing.expectEqual(@as(i32, 1), stream.*);
+        return try xm.allocator.dupe(u8, raw[@sizeOf(i32)..data_len]);
+    }
+}
 
 test "control_pane_cmp and subscription comparators use stable ordering" {
     const pa = T.ControlPane{ .pane = 10 };
@@ -417,4 +444,85 @@ test "control_ready sets control_ready_flag" {
 
     ctl.control_ready(&cl);
     try std.testing.expect(cl.control_ready_flag);
+}
+
+test "control_write_output flushes escaped pane data for control clients" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "control-output", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("control-output") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const wp = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+    wp.fd = try std.posix.dup(std.posix.STDERR_FILENO);
+    try wp.input_pending.appendSlice(xm.allocator, "A\x01\\B");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "control-output-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+        .session = s,
+        .control_all_blocks = .{},
+        .control_panes = .{},
+    };
+    cl.tty = .{ .client = &cl };
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        ctl.control_stop(&cl);
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        cl.peer = null;
+    }
+    ctl.control_start(&cl);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    ctl.control_write_output(&cl, wp);
+    try std.testing.expectEqual(@as(u32, 1), cl.control_pending_count);
+    try std.testing.expectEqual(@as(usize, 1), cl.control_panes.items.len);
+    try std.testing.expectEqual(@as(usize, 4), cl.control_panes.items[0].queued.used);
+
+    ctl.control_write_callback(&cl);
+
+    const payload = try readPeerStreamPayloadAlloc(&reader);
+    defer xm.allocator.free(payload);
+    const expected = try std.fmt.allocPrint(xm.allocator, "%output %{d} A\\001\\134B\n", .{wp.id});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload);
+    try std.testing.expectEqual(@as(u32, 0), cl.control_pending_count);
+    try std.testing.expectEqual(@as(usize, 0), cl.control_all_blocks.items.len);
+    try std.testing.expectEqual(@as(usize, 4), cl.control_panes.items[0].offset.used);
 }

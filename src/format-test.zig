@@ -683,6 +683,128 @@ test "format_expand handles conditionals and comparisons" {
     try std.testing.expectEqualStrings("attached 1 1 1 1", out.text);
 }
 
+test "format_expand handles upstream escape and literal round-trips" {
+    const ctx = FormatContext{};
+
+    const plain_cases = [_]struct {
+        template: []const u8,
+        expected: []const u8,
+    }{
+        .{ .template = "##", .expected = "#" },
+        .{ .template = "#,", .expected = "," },
+        .{ .template = "##{", .expected = "#{" },
+        .{ .template = "#}", .expected = "}" },
+        .{ .template = "###}", .expected = "#}" },
+    };
+    inline for (plain_cases) |case| {
+        const expanded = format_require_complete(xm.allocator, case.template, &ctx).?;
+        defer xm.allocator.free(expanded);
+        try std.testing.expectEqualStrings(case.expected, expanded);
+    }
+
+    const literal_cases = [_]struct {
+        template: []const u8,
+        expected: []const u8,
+    }{
+        .{ .template = "#{l:#{}}", .expected = "#{}" },
+        .{ .template = "#{l:#{pane_in_mode}}", .expected = "#{pane_in_mode}" },
+        .{ .template = "#{l:##{}", .expected = "#{" },
+        .{ .template = "#{l:#{#}}}", .expected = "#{#}}" },
+    };
+    inline for (literal_cases) |case| {
+        const expanded = format_require_complete(xm.allocator, case.template, &ctx).?;
+        defer xm.allocator.free(expanded);
+        try std.testing.expectEqualStrings(case.expected, expanded);
+    }
+}
+
+test "format_expand handles upstream conditional escape branches" {
+    const args_mod = @import("arguments.zig");
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "Summer", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 20, 6);
+    w.active = wp;
+
+    const false_ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+    const false_cases = [_]struct {
+        template: []const u8,
+        expected: []const u8,
+    }{
+        .{ .template = "#{?pane_in_mode,##{,xyz}", .expected = "xyz" },
+        .{ .template = "#{?pane_in_mode,###},xyz}", .expected = "xyz" },
+        .{ .template = "#{?pane_in_mode,abc,##{}", .expected = "#{" },
+        .{ .template = "#{?pane_in_mode,abc,###}}", .expected = "#}" },
+        .{ .template = "#{?pane_in_mode,##{,###}}", .expected = "#}" },
+    };
+    inline for (false_cases) |case| {
+        const expanded = format_require_complete(xm.allocator, case.template, &false_ctx).?;
+        defer xm.allocator.free(expanded);
+        try std.testing.expectEqualStrings(case.expected, expanded);
+    }
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = window_copy.enterMode(wp, wp, &args);
+
+    const true_ctx = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+    };
+    const true_cases = [_]struct {
+        template: []const u8,
+        expected: []const u8,
+    }{
+        .{ .template = "#{?pane_in_mode,##{,xyz}", .expected = "#{" },
+        .{ .template = "#{?pane_in_mode,###},xyz}", .expected = "#}" },
+        .{ .template = "#{?pane_in_mode,abc,##{}", .expected = "abc" },
+        .{ .template = "#{?pane_in_mode,abc,###}}", .expected = "abc" },
+        .{ .template = "#{?pane_in_mode,##{,###}}", .expected = "#{" },
+    };
+    inline for (true_cases) |case| {
+        const expanded = format_require_complete(xm.allocator, case.template, &true_ctx).?;
+        defer xm.allocator.free(expanded);
+        try std.testing.expectEqualStrings(case.expected, expanded);
+    }
+
+    xm.allocator.free(s.name);
+    s.name = xm.xstrdup(",");
+
+    const comparison = format_require_complete(
+        xm.allocator,
+        "#{?#{==:#,,#{session_name}},abc,xyz}",
+        &true_ctx,
+    ).?;
+    defer xm.allocator.free(comparison);
+    try std.testing.expectEqualStrings("abc", comparison);
+}
+
 test "format_expand renders tmux-style session_alerts per window index" {
     var s = T.Session{
         .id = 12,

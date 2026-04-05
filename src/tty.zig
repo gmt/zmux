@@ -649,71 +649,25 @@ fn tty_putcode_ii(tty: *T.Tty, name: []const u8, a: u32, b: u32) void {
 }
 
 /// Expand a terminfo string with one integer parameter.
-/// Handles %i (increment), %p1%d (print param 1 as decimal), and literal text.
+/// Uses ncurses tparm so feature-provided capabilities can use the same
+/// conditional and arithmetic operators as upstream tmux.
 fn expand_tparm_1(template: []const u8, a: u32) ![]u8 {
-    var pa = a;
-    return expand_tparm_impl(template, &pa, null);
+    const template_z = xm.xm_dupeZ(template);
+    defer xm.allocator.free(template_z);
+    const result = c_zig.ncurses.tparm(template_z.ptr, @as(c_long, a), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+    if (result == null) return error.TparmFailed;
+    return xm.allocator.dupe(u8, std.mem.span(result.?));
 }
 
 /// Expand a terminfo string with two integer parameters.
-/// Handles %i (increment), %p1%d / %p2%d (print params as decimal), and literal text.
+/// Uses ncurses tparm so feature-provided capabilities can use the same
+/// conditional and arithmetic operators as upstream tmux.
 fn expand_tparm_2(template: []const u8, a: u32, b: u32) ![]u8 {
-    var pa = a;
-    var pb = b;
-    return expand_tparm_impl(template, &pa, &pb);
-}
-
-/// Core terminfo parameter expansion for up to 2 integer parameters.
-/// Supports: %i (increment both params), %p1%d (param 1 decimal),
-/// %p2%d (param 2 decimal), %% (literal %), and literal characters.
-fn expand_tparm_impl(template: []const u8, pa: *u32, pb: ?*u32) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-
-    var idx: usize = 0;
-    while (idx < template.len) {
-        if (template[idx] != '%') {
-            try out.append(xm.allocator, template[idx]);
-            idx += 1;
-            continue;
-        }
-        idx += 1;
-        if (idx >= template.len) break;
-        switch (template[idx]) {
-            '%' => {
-                try out.append(xm.allocator, '%');
-                idx += 1;
-            },
-            'i' => {
-                pa.* += 1;
-                if (pb) |b| b.* += 1;
-                idx += 1;
-            },
-            'p' => {
-                idx += 1;
-                if (idx >= template.len) break;
-                const param_num = template[idx];
-                idx += 1;
-                // Skip format specifier (e.g. %d)
-                if (idx < template.len and template[idx] == 'd') {
-                    idx += 1;
-                }
-                const val: u32 = switch (param_num) {
-                    '1' => pa.*,
-                    '2' => if (pb) |b| b.* else 0,
-                    else => 0,
-                };
-                const digits = std.fmt.allocPrint(xm.allocator, "{d}", .{val}) catch unreachable;
-                defer xm.allocator.free(digits);
-                try out.appendSlice(xm.allocator, digits);
-            },
-            else => {
-                idx += 1;
-            },
-        }
-    }
-
-    return out.toOwnedSlice(xm.allocator);
+    const template_z = xm.xm_dupeZ(template);
+    defer xm.allocator.free(template_z);
+    const result = c_zig.ncurses.tparm(template_z.ptr, @as(c_long, a), @as(c_long, b), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+    if (result == null) return error.TparmFailed;
+    return xm.allocator.dupe(u8, std.mem.span(result.?));
 }
 
 // ── Colour helpers ──────────────────────────────────────────────────────────
@@ -1136,26 +1090,55 @@ fn expand_tparm_ss(template: []const u8, a: []const u8, b: []const u8) ![]u8 {
 
     var idx: usize = 0;
     while (idx < template.len) {
-        if (std.mem.startsWith(u8, template[idx..], "%p1%s")) {
-            try out.appendSlice(xm.allocator, a);
-            idx += "%p1%s".len;
+        if (std.mem.startsWith(u8, template[idx..], "%?%p1%l%t")) {
+            idx += "%?%p1%l%t".len;
+            if (a.len != 0) {
+                while (idx < template.len and !std.mem.startsWith(u8, template[idx..], "%e") and !std.mem.startsWith(u8, template[idx..], "%;")) {
+                    try append_tparm_ss_atom(&out, template, &idx, a, b);
+                }
+                if (idx < template.len and std.mem.startsWith(u8, template[idx..], "%e")) {
+                    idx += 2;
+                    while (idx < template.len and !std.mem.startsWith(u8, template[idx..], "%;")) : (idx += 1) {}
+                }
+            } else {
+                while (idx < template.len and !std.mem.startsWith(u8, template[idx..], "%e") and !std.mem.startsWith(u8, template[idx..], "%;")) : (idx += 1) {}
+                if (idx < template.len and std.mem.startsWith(u8, template[idx..], "%e")) {
+                    idx += 2;
+                    while (idx < template.len and !std.mem.startsWith(u8, template[idx..], "%;")) {
+                        try append_tparm_ss_atom(&out, template, &idx, a, b);
+                    }
+                }
+            }
+            if (idx < template.len and std.mem.startsWith(u8, template[idx..], "%;")) idx += 2;
             continue;
         }
-        if (std.mem.startsWith(u8, template[idx..], "%p2%s")) {
-            try out.appendSlice(xm.allocator, b);
-            idx += "%p2%s".len;
-            continue;
-        }
-        if (std.mem.startsWith(u8, template[idx..], "%%")) {
-            try out.append(xm.allocator, '%');
-            idx += 2;
-            continue;
-        }
-        try out.append(xm.allocator, template[idx]);
-        idx += 1;
+
+        try append_tparm_ss_atom(&out, template, &idx, a, b);
     }
 
     return out.toOwnedSlice(xm.allocator);
+}
+
+fn append_tparm_ss_atom(out: *std.ArrayList(u8), template: []const u8, idx: *usize, a: []const u8, b: []const u8) !void {
+    if (std.mem.startsWith(u8, template[idx.*..], "%p1%s")) {
+        try out.appendSlice(xm.allocator, a);
+        idx.* += "%p1%s".len;
+        return;
+    }
+    if (std.mem.startsWith(u8, template[idx.*..], "%p2%s")) {
+        try out.appendSlice(xm.allocator, b);
+        idx.* += "%p2%s".len;
+        return;
+    }
+    if (std.mem.startsWith(u8, template[idx.*..], "%%")) {
+        try out.append(xm.allocator, '%');
+        idx.* += 2;
+        return;
+    }
+    if (template[idx.*] == '%') return error.TparmFailed;
+
+    try out.append(xm.allocator, template[idx.*]);
+    idx.* += 1;
 }
 
 // ── Colour pipeline ─────────────────────────────────────────────────────────
@@ -1515,105 +1498,33 @@ fn tty_putcode_iii(tty: *T.Tty, name: []const u8, a: u32, b: u32, c: u32) void {
 
 /// Expand a terminfo string with three integer parameters.
 fn expand_tparm_3(template: []const u8, a: u32, b: u32, c: u32) ![]u8 {
-    var pa = a;
-    var pb = b;
-    var pc = c;
-    return expand_tparm_impl3(template, &pa, &pb, &pc);
-}
-
-/// Core terminfo parameter expansion for up to 3 integer parameters.
-fn expand_tparm_impl3(template: []const u8, pa: *u32, pb: *u32, pc: *u32) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-
-    var idx: usize = 0;
-    while (idx < template.len) {
-        if (template[idx] != '%') {
-            try out.append(xm.allocator, template[idx]);
-            idx += 1;
-            continue;
-        }
-        idx += 1;
-        if (idx >= template.len) break;
-        switch (template[idx]) {
-            '%' => {
-                try out.append(xm.allocator, '%');
-                idx += 1;
-            },
-            'i' => {
-                pa.* += 1;
-                pb.* += 1;
-                pc.* += 1;
-                idx += 1;
-            },
-            'p' => {
-                idx += 1;
-                if (idx >= template.len) break;
-                const param_num = template[idx];
-                idx += 1;
-                // Skip format specifier (e.g. %d)
-                if (idx < template.len and template[idx] == 'd') {
-                    idx += 1;
-                }
-                const val: u32 = switch (param_num) {
-                    '1' => pa.*,
-                    '2' => pb.*,
-                    '3' => pc.*,
-                    else => 0,
-                };
-                const digits = std.fmt.allocPrint(xm.allocator, "{d}", .{val}) catch unreachable;
-                defer xm.allocator.free(digits);
-                try out.appendSlice(xm.allocator, digits);
-            },
-            else => {
-                idx += 1;
-            },
-        }
-    }
-
-    return out.toOwnedSlice(xm.allocator);
+    const template_z = xm.xm_dupeZ(template);
+    defer xm.allocator.free(template_z);
+    const result = c_zig.ncurses.tparm(template_z.ptr, @as(c_long, a), @as(c_long, b), @as(c_long, c), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0), @as(c_long, 0));
+    if (result == null) return error.TparmFailed;
+    return xm.allocator.dupe(u8, std.mem.span(result.?));
 }
 
 /// Expand a terminfo string with a string parameter (%s substitution).
 fn expand_tparm_s(template: []const u8, str_param: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-
-    var idx: usize = 0;
-    while (idx < template.len) {
-        if (template[idx] != '%') {
-            try out.append(xm.allocator, template[idx]);
-            idx += 1;
-            continue;
-        }
-        idx += 1;
-        if (idx >= template.len) break;
-        switch (template[idx]) {
-            '%' => {
-                try out.append(xm.allocator, '%');
-                idx += 1;
-            },
-            's' => {
-                try out.appendSlice(xm.allocator, str_param);
-                idx += 1;
-            },
-            'p' => {
-                idx += 1;
-                if (idx >= template.len) break;
-                idx += 1; // skip param number
-                // If followed by %s, insert the string parameter.
-                if (idx + 1 < template.len and template[idx] == '%' and template[idx + 1] == 's') {
-                    try out.appendSlice(xm.allocator, str_param);
-                    idx += 2;
-                }
-            },
-            else => {
-                idx += 1;
-            },
-        }
-    }
-
-    return out.toOwnedSlice(xm.allocator);
+    const template_z = xm.xm_dupeZ(template);
+    defer xm.allocator.free(template_z);
+    const param_z = xm.xm_dupeZ(str_param);
+    defer xm.allocator.free(param_z);
+    const result = c_zig.ncurses.tparm(
+        template_z.ptr,
+        @as(c_long, @intCast(@intFromPtr(param_z.ptr))),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+        @as(c_long, 0),
+    );
+    if (result == null) return error.TparmFailed;
+    return xm.allocator.dupe(u8, std.mem.span(result.?));
 }
 
 pub fn tty_set_title(tty: *T.Tty, title: []const u8) void {
@@ -3945,4 +3856,28 @@ test "expand_tparm_1 ignores numeric argument for templates without tparm codes"
     const result = try expand_tparm_1("status", 999);
     defer xm.allocator.free(result);
     try std.testing.expectEqualStrings("status", result);
+}
+
+test "expand_tparm_1 expands sync capability conditionals" {
+    const template = "\x1b[?2026%?%p1%{1}%-%tl%eh%;";
+
+    const start = try expand_tparm_1(template, 1);
+    defer xm.allocator.free(start);
+    try std.testing.expectEqualStrings("\x1b[?2026h", start);
+
+    const stop = try expand_tparm_1(template, 2);
+    defer xm.allocator.free(stop);
+    try std.testing.expectEqualStrings("\x1b[?2026l", stop);
+}
+
+test "expand_tparm_ss expands hyperlink conditionals" {
+    const template = "\x1b]8;%?%p1%l%tid=%p1%s%;;%p2%s\x1b\\";
+
+    const with_id = try expand_tparm_ss(template, "link-id", "https://example.com");
+    defer xm.allocator.free(with_id);
+    try std.testing.expectEqualStrings("\x1b]8;id=link-id;https://example.com\x1b\\", with_id);
+
+    const without_id = try expand_tparm_ss(template, "", "https://example.com");
+    defer xm.allocator.free(without_id);
+    try std.testing.expectEqualStrings("\x1b]8;;https://example.com\x1b\\", without_id);
 }

@@ -810,6 +810,7 @@ pub fn server_client_check_redraw(cl: *T.Client) void {
     // Payload-based fallback for borders, scrollbars, status, overlay.
     const redraw_flags = cl.flags & T.CLIENT_ALLREDRAWFLAGS;
     server_client_draw(cl, redraw_flags);
+    tty_mod.tty_sync_end(&cl.tty);
 
     cl.flags &= ~@as(u64, T.CLIENT_ALLREDRAWFLAGS);
 }

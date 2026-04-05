@@ -647,6 +647,37 @@ test "display-panes key selection runs the default select-pane command" {
     try std.testing.expectEqual(setup.window.panes.items[1], setup.window.active.?);
 }
 
+test "display-panes key selection dispatches a custom template with the chosen pane id" {
+    var setup = test_setup("display-panes-custom-dispatch");
+    defer test_teardown(&setup);
+
+    const second = win.window_add_pane(setup.window, null, 80, 24);
+
+    var parse_cause: ?[]u8 = null;
+    const display_cmd = try cmd_mod.cmd_parse_one(
+        &.{ "display-panes", "-b", "-d", "0", "display-message -d 0 pane=%1" },
+        null,
+        &parse_cause,
+    );
+    defer cmd_mod.cmd_free(display_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.target_client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(display_cmd, &item));
+    try std.testing.expect(overlay_active(&setup.target_client));
+
+    var event = T.key_event{ .key = '1', .data = std.mem.zeroes([16]u8), .len = 1 };
+    event.data[0] = '1';
+    try std.testing.expect(handle_key(&setup.target_client, &event));
+    try std.testing.expect(!overlay_active(&setup.target_client));
+
+    _ = cmdq.cmdq_next(&setup.target_client);
+
+    var expected: [64]u8 = undefined;
+    const expected_message = try std.fmt.bufPrint(&expected, "pane=%{d}", .{second.id});
+    try std.testing.expectEqualStrings(expected_message, setup.target_client.message_string.?);
+}
+
 test "display-panes overlay renders centered pane labels" {
     var setup = test_setup("display-panes-render");
     defer test_teardown(&setup);

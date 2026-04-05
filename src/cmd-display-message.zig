@@ -26,6 +26,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const cmd_find = @import("cmd-find.zig");
 const format_mod = @import("format.zig");
+const grid_mod = @import("grid.zig");
 const server_print = @import("server-print.zig");
 const win = @import("window.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -327,6 +328,12 @@ fn test_teardown_session(name: []const u8, s: *T.Session) void {
     opts.options_free(opts.global_options);
 }
 
+fn grid_row_string(gd: *T.Grid, row: u32) ![]u8 {
+    return grid_mod.string_cells(gd, row, gd.sx, .{
+        .trim_trailing_spaces = true,
+    });
+}
+
 test "display-message expands default template time directives" {
     const setup = try test_session_with_empty_pane("display-message-template");
     defer test_teardown_session("display-message-template", setup.s);
@@ -441,6 +448,138 @@ test "display-message -v keeps ordinary expansion working" {
     var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("display-message-verbose", client.message_string.?);
+}
+
+test "display-message -p -F expands formats through the shared print path" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session = sess.session_create(
+        null,
+        "display-message-format-print",
+        "/",
+        env_mod.environ_create(),
+        opts.options_create(opts.global_s_options),
+        null,
+    );
+    defer sess.session_destroy(session, false, "test");
+
+    const window = win_mod.window_create(80, 23, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, -1, &attach_cause).?;
+    session.curw = wl;
+    const pane = win_mod.window_add_pane(window, null, 80, 23);
+    window.active = pane;
+
+    var client = T.Client{
+        .name = "display-message-format-print-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer env_mod.environ_free(client.environ);
+    defer if (win_mod.window_pane_mode(pane)) |_| server_print.server_client_close_view_mode(pane);
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(
+        &.{ "display-message", "-p", "-F", "#{session_name}:#{window_index}.#{pane_index}" },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expect(client.message_string == null);
+    const wme = win_mod.window_pane_mode(pane) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server-print-view", wme.mode.name);
+
+    const row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(row);
+    try std.testing.expectEqualStrings("display-message-format-print:0.0", row);
+}
+
+test "display-message rejects using -F together with a message argument" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session = sess.session_create(
+        null,
+        "display-message-format-conflict",
+        "/",
+        env_mod.environ_create(),
+        opts.options_create(opts.global_s_options),
+        null,
+    );
+    defer sess.session_destroy(session, false, "test");
+
+    const window = win_mod.window_create(80, 23, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    const wl = sess.session_attach(session, window, -1, &attach_cause).?;
+    session.curw = wl;
+    const pane = win_mod.window_add_pane(window, null, 80, 23);
+    window.active = pane;
+
+    var client = T.Client{
+        .name = "display-message-format-conflict-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(
+        &.{ "display-message", "-F", "#{session_name}", "hello" },
+        null,
+        &cause,
+    );
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("Only one of -F or argument must be given", client.message_string.?);
+    try std.testing.expect(win_mod.window_pane_mode(pane) == null);
 }
 
 test "display-message -I feeds detached stdin into the empty pane parser" {

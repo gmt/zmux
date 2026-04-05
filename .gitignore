@@ -23,3 +23,7 @@ tmux-museum/rebuild/
 # Python cache artifacts
 __pycache__/
 *.pyc
+
+# ai
+
+AGENTS.md

@@ -21,10 +21,12 @@ const args_mod = @import("arguments.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const client_registry = @import("client-registry.zig");
+const grid = @import("grid.zig");
 const key_bindings = @import("key-bindings.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 const screen_mod = @import("screen.zig");
+const window_copy = @import("window-copy.zig");
 const window_mod = @import("window.zig");
 
 fn test_session_with_empty_pane(name: []const u8) !struct { s: *T.Session, wp: *T.WindowPane } {
@@ -64,6 +66,16 @@ fn test_teardown_session(name: []const u8, s: *T.Session, fd_read: i32, fd_write
     opts.options_free(opts.global_w_options);
     opts.options_free(opts.global_s_options);
     opts.options_free(opts.global_options);
+}
+
+fn setPaneLineText(wp: *T.WindowPane, row: u32, text: []const u8) void {
+    var col: u32 = 0;
+    while (col < text.len and col < wp.base.grid.sx) : (col += 1) {
+        var cell = T.grid_default_cell;
+        cell.data = T.grid_default_cell.data;
+        cell.data.data[0] = text[col];
+        grid.set_cell(wp.base.grid, row, col, &cell);
+    }
 }
 
 const ModeKeyState = struct {
@@ -409,8 +421,6 @@ test "send-keys expands formats before writing" {
 }
 
 test "send-keys -R resets pane state before writing keys" {
-    const grid = @import("grid.zig");
-
     const setup = try test_session_with_empty_pane("send-reset-test");
     const pipe_fds = try std.posix.pipe();
     defer test_teardown_session("send-reset-test", setup.s, pipe_fds[0], -1);
@@ -443,8 +453,6 @@ test "send-keys -R resets pane state before writing keys" {
 }
 
 test "send-keys -R with no arguments resets pane state without replaying the triggering key" {
-    const grid = @import("grid.zig");
-
     const setup = try test_session_with_empty_pane("send-reset-noargs");
     const pipe_fds = try std.posix.pipe();
     defer test_teardown_session("send-reset-noargs", setup.s, pipe_fds[0], -1);
@@ -1071,6 +1079,34 @@ test "send-keys -X uses the active mode command and repeat prefix" {
     try std.testing.expectEqual(@as(usize, 1), state.arg_count);
     try std.testing.expect(state.first_arg_is_enter);
     try std.testing.expect(state.saw_mouse);
+}
+
+test "send-keys -X drives copy-mode commands through the active runtime" {
+    const setup = try test_session_with_empty_pane("send-copy-mode-runtime");
+    defer test_teardown_session("send-copy-mode-runtime", setup.s, -1, -1);
+
+    opts.options_set_string(setup.s.options, false, "word-separators", ",");
+    setPaneLineText(setup.wp, 0, "foo,  bar baz");
+
+    var cause: ?[]u8 = null;
+    const copy_mode_cmd = try cmd_mod.cmd_parse_one(&.{ "copy-mode", "-t", "send-copy-mode-runtime:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(copy_mode_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(copy_mode_cmd, &item));
+
+    const wme = window_mod.window_pane_mode(setup.wp).?;
+    try std.testing.expectEqual(&window_copy.window_copy_mode, wme.mode);
+    try std.testing.expectEqual(@as(u32, 0), window_copy.modeData(wme).cx);
+
+    const send_cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-X", "-N", "2", "-t", "send-copy-mode-runtime:0.0", "next-word" }, null, &cause);
+    defer cmd_mod.cmd_free(send_cmd);
+
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(send_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 6), window_copy.modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), window_copy.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 1), wme.prefix);
 }
 
 test "send-keys pane_in_mode reflects the reduced active mode stack" {

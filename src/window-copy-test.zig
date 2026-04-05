@@ -507,6 +507,115 @@ test "window-copy word and space motions use session separators and mode keys" {
     try std.testing.expectEqual(@as(u32, 3), wc.modeData(wme).cx);
 }
 
+test "window-copy select-word keeps separator-delimited selection bounds" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_options = opts_mod.options_create(opts_mod.global_s_options);
+    defer opts_mod.options_free(session_options);
+    opts_mod.options_set_string(session_options, false, "word-separators", ",");
+
+    var session = T.Session{
+        .id = 64,
+        .name = xm.xstrdup("copy-select-word-session"),
+        .cwd = "/",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = session_options,
+        .environ = &env,
+    };
+    defer xm.allocator.free(session.name);
+    defer session.lastw.deinit(xm.allocator);
+    defer session.windows.deinit();
+
+    var window_ = T.Window{
+        .id = 65,
+        .name = xm.xstrdup("copy-select-word-window"),
+        .sx = 14,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 66,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 67,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "foo,  bar baz");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    wc.modeData(wme).cx = 7;
+    try runCopyModeTestCommandWithSession(wme, &session, "select-word");
+
+    try std.testing.expectEqual(wc.CursorDrag.endsel, wc.modeData(wme).cursordrag);
+    try std.testing.expectEqual(@as(u32, 6), wc.modeData(wme).selrx);
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).selry);
+    try std.testing.expectEqual(@as(u32, 9), wc.modeData(wme).endselrx);
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).endselry);
+    try std.testing.expectEqual(@as(u32, 9), wc.modeData(wme).cx);
+    try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
+}
+
 test "window-copy jump char motions remember direction and target character" {
     initWindowCopyTestGlobals();
 

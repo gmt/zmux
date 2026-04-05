@@ -1134,7 +1134,6 @@ pub fn tty_keys_winsz(
     if (end == buf.len) return null;
     if (end >= TMP_MAX or buf[end] != 't') return null;
 
-    size.* = end + 1;
     const tmp = buf[2..end];
 
     // \033[8;sy;sxt – window size in characters.
@@ -1144,6 +1143,7 @@ pub fn tty_keys_winsz(
         const sxs = it.next() orelse return null;
         const sy = std.fmt.parseInt(u32, sys, 10) catch return null;
         const sx = std.fmt.parseInt(u32, sxs, 10) catch return null;
+        size.* = end + 1;
         return .{ .kind = .chars, .v1 = sx, .v2 = sy };
     }
 
@@ -1154,6 +1154,7 @@ pub fn tty_keys_winsz(
         const xps = it.next() orelse return null;
         const ypixel = std.fmt.parseInt(u32, yps, 10) catch return null;
         const xpixel = std.fmt.parseInt(u32, xps, 10) catch return null;
+        size.* = end + 1;
         return .{ .kind = .pixels, .v1 = xpixel, .v2 = ypixel };
     }
 

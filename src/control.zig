@@ -359,14 +359,14 @@ fn control_encode_output(cl: *T.Client, cp: *T.ControlPane, wp: *T.WindowPane, s
         return xm.allocator.alloc(u8, 0) catch unreachable;
     }
 
-    var buf = std.ArrayList(u8).init(xm.allocator);
+    var buf: std.ArrayList(u8) = .{};
     if ((cl.flags & T.CLIENT_CONTROL_PAUSEAFTER) != 0) {
         const header = std.fmt.allocPrint(xm.allocator, "%extended-output %{d} {d} : ", .{ wp.id, age }) catch unreachable;
-        buf.appendSlice(header) catch unreachable;
+        buf.appendSlice(xm.allocator, header) catch unreachable;
         xm.allocator.free(header);
     } else {
         const header = std.fmt.allocPrint(xm.allocator, "%output %{d} ", .{wp.id}) catch unreachable;
-        buf.appendSlice(header) catch unreachable;
+        buf.appendSlice(xm.allocator, header) catch unreachable;
         xm.allocator.free(header);
     }
 
@@ -375,16 +375,16 @@ fn control_encode_output(cl: *T.Client, cp: *T.ControlPane, wp: *T.WindowPane, s
         const byte = if (i < new_data.len) new_data[i] else 0;
         if (byte < ' ' or byte == '\\') {
             const esc = std.fmt.allocPrint(xm.allocator, "\\{o:0>3}", .{byte}) catch unreachable;
-            buf.appendSlice(esc) catch unreachable;
+            buf.appendSlice(xm.allocator, esc) catch unreachable;
             xm.allocator.free(esc);
         } else {
-            buf.append(byte) catch unreachable;
+            buf.append(xm.allocator, byte) catch unreachable;
         }
     }
 
-    buf.append('\n') catch unreachable;
+    buf.append(xm.allocator, '\n') catch unreachable;
     window_mod.window_pane_update_used_data(wp, &cp.offset, size);
-    return buf.toOwnedSlice() catch unreachable;
+    return buf.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 /// Append escaped pane bytes to a buffer (tmux `control_append_data`).

@@ -58,6 +58,26 @@ extern fn openpty(
 
 fn test_peer_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
+fn readPeerStreamPayloadAlloc(reader: *c.imsg.imsgbuf) ![]u8 {
+    while (true) {
+        var imsg_msg: c.imsg.imsg = undefined;
+        const got = c.imsg.imsg_get(reader, &imsg_msg);
+        if (got == 0) {
+            try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(reader));
+            continue;
+        }
+        try std.testing.expect(got > 0);
+        defer c.imsg.imsg_free(&imsg_msg);
+
+        const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+        try std.testing.expect(data_len >= @sizeOf(i32));
+        const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
+        const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
+        try std.testing.expectEqual(@as(i32, 1), stream.*);
+        return try xm.allocator.dupe(u8, raw[@sizeOf(i32)..data_len]);
+    }
+}
+
 test "server_client_resolve_cwd prefers accessible directories and falls back" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -193,6 +213,7 @@ test "server_client_check_nested requires ZMUX and a live pane tty match" {
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
     sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
     win_mod.window_init_globals(xm.allocator);
 
     const s = sess.session_create(null, "server-client-nested-check", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
@@ -1940,6 +1961,137 @@ test "server_client_set_flags merges control options and notifies peer" {
     try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
     defer c.imsg.imsg_free(&out);
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.flags))), c.imsg.imsg_get_type(&out));
+}
+
+test "server_client_set_path follows the active pane path and clears when absent" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "client-path", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("client-path") != null) sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause) orelse unreachable;
+    s.curw = wl;
+
+    const wp = win_mod.window_add_pane(w, null, 80, 24);
+    w.active = wp;
+
+    var cl = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+    defer env_mod.environ_free(cl.environ);
+    defer if (cl.path) |path| xm.allocator.free(path);
+    cl.tty = .{ .client = &cl };
+
+    wp.screen.path = xm.xstrdup("/tmp/zmux-pane-path");
+    sc.server_client_set_path(&cl);
+    try std.testing.expectEqualStrings("/tmp/zmux-pane-path", cl.path.?);
+
+    xm.allocator.free(wp.screen.path.?);
+    wp.screen.path = xm.xstrdup("/tmp/zmux-pane-next");
+    sc.server_client_set_path(&cl);
+    try std.testing.expectEqualStrings("/tmp/zmux-pane-next", cl.path.?);
+
+    xm.allocator.free(wp.screen.path.?);
+    wp.screen.path = null;
+    sc.server_client_set_path(&cl);
+    try std.testing.expect(cl.path == null);
+}
+
+test "server_client_set_session emits control notification for peer clients" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const alpha = sess.session_create(null, "alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("beta") != null) sess.session_destroy(beta, false, "test");
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-session-change" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var changed = T.Client{
+        .name = "mover",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = alpha,
+    };
+    defer env_mod.environ_free(changed.environ);
+    changed.tty = .{ .client = &changed };
+
+    var observer = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+        .session = alpha,
+    };
+    defer env_mod.environ_free(observer.environ);
+    observer.tty = .{ .client = &observer };
+    observer.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = observer.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        observer.peer = null;
+    }
+
+    alpha.attached = 2;
+    beta.attached = 0;
+    client_registry.add(&changed);
+    client_registry.add(&observer);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    sc.server_client_set_session(&changed, beta);
+
+    try std.testing.expect(changed.session == beta);
+    try std.testing.expectEqual(alpha, changed.last_session.?);
+    try std.testing.expectEqual(@as(u32, 1), alpha.attached);
+    try std.testing.expectEqual(@as(u32, 1), beta.attached);
+
+    const payload = try readPeerStreamPayloadAlloc(&reader);
+    defer xm.allocator.free(payload);
+    const expected = try std.fmt.allocPrint(xm.allocator, "%client-session-changed mover ${d} beta\n", .{beta.id});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload);
 }
 
 test "server_client_dispatch_command bad default-client-command sends exit" {

@@ -27,7 +27,24 @@ const c = @import("c.zig");
 
 fn noop_dispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
+const DispatchRecorder = struct {
+    null_calls: usize = 0,
+    msg_calls: usize = 0,
+    last_type: ?u32 = null,
+};
+
+fn record_dispatch(imsg_msg: ?*c.imsg.imsg, arg: ?*anyopaque) callconv(.c) void {
+    const recorder: *DispatchRecorder = @ptrCast(@alignCast(arg.?));
+    if (imsg_msg) |msg| {
+        recorder.msg_calls += 1;
+        recorder.last_type = c.imsg.imsg_get_type(msg);
+    } else {
+        recorder.null_calls += 1;
+    }
+}
+
 extern fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: c_uint) c_int;
+extern fn proc_event_cb(fd: c_int, events: c_short, arg: ?*anyopaque) void;
 const SOL_SOCKET: c_int = 1;
 const SO_SNDBUF: c_int = 7;
 
@@ -312,4 +329,62 @@ test "proc_send re-arms EV_WRITE when flush leaves queued backlog" {
 
     try std.testing.expect(flushed_after_loop > 0);
     try std.testing.expect(queued_after < queued_before);
+}
+
+test "proc_event_cb dispatches null when EV_READ hits peer EOF" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var recorder = DispatchRecorder{};
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = 0,
+        .dispatchcb = record_dispatch,
+        .arg = &recorder,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+    }
+
+    std.posix.close(pair[1]);
+    proc_event_cb(peer.ibuf.fd, @intCast(c.libevent.EV_READ), &peer);
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.null_calls);
+    try std.testing.expectEqual(@as(usize, 0), recorder.msg_calls);
+}
+
+test "proc_event_cb dispatches null immediately for drained bad peers" {
+    var dummy_proc: T.ZmuxProc = .{ .name = "test" };
+    defer dummy_proc.peers.deinit(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var recorder = DispatchRecorder{};
+    var peer: T.ZmuxPeer = .{
+        .parent = &dummy_proc,
+        .ibuf = undefined,
+        .uid = 0,
+        .flags = T.PEER_BAD,
+        .dispatchcb = record_dispatch,
+        .arg = &recorder,
+    };
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&peer.ibuf, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(pair[0]);
+        std.posix.close(pair[1]);
+    }
+
+    proc_event_cb(peer.ibuf.fd, 0, &peer);
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.null_calls);
+    try std.testing.expectEqual(@as(usize, 0), recorder.msg_calls);
 }

@@ -16,8 +16,12 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const args_mod = @import("arguments.zig");
+const env_mod = @import("environ.zig");
 const xm = @import("xmalloc.zig");
 const opts = @import("options.zig");
+const sess = @import("session.zig");
+const window_mod = @import("window.zig");
 
 test "options_create child inherits parent values until overridden" {
     const parent = opts.options_create(null);
@@ -335,4 +339,96 @@ test "options_get_number reads back set numeric option" {
     opts.options_default_all(oo, T.OPTIONS_TABLE_WINDOW);
     opts.options_set_number(oo, "pane-base-index", 7);
     try std.testing.expectEqual(@as(i64, 7), opts.options_get_number(oo, "pane-base-index"));
+}
+
+test "options_scope_from_name routes server session window and pane targets" {
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "scope-routing", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var attach_cause: ?[]u8 = null;
+    defer if (attach_cause) |c| xm.allocator.free(c);
+    const wl = sess.session_attach(s, w, 0, &attach_cause).?;
+    s.curw = wl;
+    const wp = window_mod.window_add_pane(w, null, 20, 6);
+    w.active = wp;
+
+    const fs = T.CmdFindState{ .s = s, .wl = wl, .w = w, .wp = wp, .idx = wl.idx };
+    var cause: ?[]u8 = null;
+    defer if (cause) |c| xm.allocator.free(c);
+    var resolved = opts.global_options;
+
+    var empty_args = args_mod.Arguments.init(xm.allocator);
+    defer empty_args.deinit();
+    try std.testing.expectEqual(.server, opts.options_scope_from_name(&empty_args, false, "buffer-limit", &fs, &resolved, &cause));
+    try std.testing.expect(resolved == opts.global_options);
+
+    try std.testing.expectEqual(.session, opts.options_scope_from_name(&empty_args, false, "status", &fs, &resolved, &cause));
+    try std.testing.expect(resolved == s.options);
+
+    try std.testing.expectEqual(.window, opts.options_scope_from_name(&empty_args, false, "pane-base-index", &fs, &resolved, &cause));
+    try std.testing.expect(resolved == w.options);
+
+    var pane_args = try args_mod.args_parse(xm.allocator, &.{"-p"}, "p", 0, -1, &cause);
+    defer pane_args.deinit();
+    try std.testing.expectEqual(.pane, opts.options_scope_from_name(&pane_args, false, "allow-rename", &fs, &resolved, &cause));
+    try std.testing.expect(resolved == wp.options);
+
+    var global_args = try args_mod.args_parse(xm.allocator, &.{"-g"}, "g", 0, -1, &cause);
+    defer global_args.deinit();
+    try std.testing.expectEqual(.window, opts.options_scope_from_name(&global_args, false, "allow-rename", &fs, &resolved, &cause));
+    try std.testing.expect(resolved == opts.global_w_options);
+}
+
+test "options_scope_from_name and flags report missing pane window and session targets" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+
+    const fs = T.CmdFindState{ .idx = -1 };
+    var resolved = opts.global_options;
+
+    var cause: ?[]u8 = null;
+    var pane_args = try args_mod.args_parse(xm.allocator, &.{ "-p", "-t", "missing-pane" }, "pt:", 0, -1, &cause);
+    defer pane_args.deinit();
+    try std.testing.expectEqual(.none, opts.options_scope_from_name(&pane_args, false, "allow-rename", &fs, &resolved, &cause));
+    try std.testing.expectEqualStrings("no such pane: missing-pane", cause.?);
+    xm.allocator.free(cause.?);
+    cause = null;
+
+    var window_args = try args_mod.args_parse(xm.allocator, &.{ "-w", "-t", "missing-window" }, "wt:", 0, -1, &cause);
+    defer window_args.deinit();
+    try std.testing.expectEqual(.none, opts.options_scope_from_flags(&window_args, false, &fs, &resolved, &cause));
+    try std.testing.expectEqualStrings("no such window: missing-window", cause.?);
+    xm.allocator.free(cause.?);
+    cause = null;
+
+    var session_args = try args_mod.args_parse(xm.allocator, &.{ "-t", "missing-session" }, "t:", 0, -1, &cause);
+    defer session_args.deinit();
+    try std.testing.expectEqual(.none, opts.options_scope_from_name(&session_args, false, "status", &fs, &resolved, &cause));
+    try std.testing.expectEqualStrings("no such session: missing-session", cause.?);
+    xm.allocator.free(cause.?);
+    cause = null;
+
+    var empty_args = args_mod.Arguments.init(xm.allocator);
+    defer empty_args.deinit();
+    try std.testing.expectEqual(.none, opts.options_scope_from_flags(&empty_args, true, &fs, &resolved, &cause));
+    try std.testing.expectEqualStrings("no current window", cause.?);
+    xm.allocator.free(cause.?);
 }

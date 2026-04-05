@@ -24,8 +24,7 @@ tmux-museum/rebuild/
 __pycache__/
 *.pyc
 
-.sisyphus/
-
 # ai
+.sisyphus/
 
 AGENTS.md

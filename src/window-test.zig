@@ -21,8 +21,11 @@ const opts = @import("options.zig");
 const win = @import("window.zig");
 const colour_mod = @import("colour.zig");
 const client_registry = @import("client-registry.zig");
+const env_mod = @import("environ.zig");
+const layout_mod = @import("layout.zig");
 const screen_mod = @import("screen.zig");
 const grid_mod = @import("grid.zig");
+const sess = @import("session.zig");
 const c = @import("c.zig");
 
 // ── Test helpers ─────────────────────────────────────────────────────────
@@ -46,6 +49,27 @@ fn write_test_line(gd: *T.Grid, row: u32, text: []const u8) void {
     for (text, 0..) |ch, col| {
         grid_mod.set_ascii(gd, row, @intCast(col), ch);
     }
+}
+
+fn init_session_window_test_globals() void {
+    opts.global_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.global_s_options = opts.options_create(null);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_set_string(opts.global_s_options, false, "default-shell", "/bin/true");
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+}
+
+fn deinit_session_window_test_globals() void {
+    env_mod.environ_free(env_mod.global_environ);
+    opts.options_free(opts.global_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_w_options);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -269,8 +293,6 @@ test "window_detach_pane clears client-local active pane references" {
 
 test "window_set_active_pane updates active metadata, focus hooks, and redraw flags" {
     const cmdq = @import("cmd-queue.zig");
-    const env_mod = @import("environ.zig");
-    const sess = @import("session.zig");
 
     cmdq.cmdq_reset_for_tests();
     defer cmdq.cmdq_reset_for_tests();
@@ -598,6 +620,188 @@ fn destroyTestWindow(w: *T.Window) void {
     xm.allocator.free(w.name);
     _ = win.windows.remove(w.id);
     xm.allocator.destroy(w);
+}
+
+test "window_resize updates size while honoring default and unchanged pixel dimensions" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, 900, 700);
+    defer destroyTestWindow(w);
+
+    win.window_resize(w, 100, 30, 1440, 960);
+    try std.testing.expectEqual(@as(u32, 100), w.sx);
+    try std.testing.expectEqual(@as(u32, 30), w.sy);
+    try std.testing.expectEqual(@as(u32, 1440), w.xpixel);
+    try std.testing.expectEqual(@as(u32, 960), w.ypixel);
+
+    win.window_resize(w, 90, 20, 0, 0);
+    try std.testing.expectEqual(@as(u32, 90), w.sx);
+    try std.testing.expectEqual(@as(u32, 20), w.sy);
+    try std.testing.expectEqual(@as(u32, T.DEFAULT_XPIXEL), w.xpixel);
+    try std.testing.expectEqual(@as(u32, T.DEFAULT_YPIXEL), w.ypixel);
+
+    win.window_resize(w, 70, 10, -1, -1);
+    try std.testing.expectEqual(@as(u32, 70), w.sx);
+    try std.testing.expectEqual(@as(u32, 10), w.sy);
+    try std.testing.expectEqual(@as(u32, T.DEFAULT_XPIXEL), w.xpixel);
+    try std.testing.expectEqual(@as(u32, T.DEFAULT_YPIXEL), w.ypixel);
+}
+
+test "window_push_zoom restores split geometry and window_pop_zoom reapplies zoom" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const first = win.window_add_pane(w, null, 80, 24);
+    layout_mod.layout_init(w, first);
+
+    const second_cell = layout_mod.layout_split_pane(first, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const second = win.window_add_pane(w, null, 40, 24);
+    layout_mod.layout_assign_pane(second_cell, second, 0);
+
+    const original_first_width = first.sx;
+    const original_second_width = second.sx;
+
+    try std.testing.expect(win.window_zoom(second));
+    try std.testing.expect(!win.window_pane_visible(first));
+    try std.testing.expect(win.window_pane_visible(second));
+
+    try std.testing.expect(win.window_push_zoom(w, false, true));
+    try std.testing.expectEqual(@as(u32, 0), w.flags & T.WINDOW_ZOOMED);
+    try std.testing.expect(w.flags & T.WINDOW_WASZOOMED != 0);
+    try std.testing.expect(win.window_pane_visible(first));
+    try std.testing.expect(win.window_pane_visible(second));
+    try std.testing.expectEqual(original_first_width, first.sx);
+    try std.testing.expectEqual(original_second_width, second.sx);
+
+    try std.testing.expect(win.window_pop_zoom(w));
+    try std.testing.expect(w.flags & T.WINDOW_ZOOMED != 0);
+    try std.testing.expectEqual(@as(u32, 0), w.flags & T.WINDOW_WASZOOMED);
+    try std.testing.expect(!win.window_pane_visible(first));
+    try std.testing.expect(win.window_pane_visible(second));
+    try std.testing.expectEqual(second, w.active.?);
+}
+
+test "window_destroy_all_panes clears pane membership active state and history" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const first = win.window_add_pane(w, null, 80, 24);
+    const second = win.window_add_pane(w, null, 80, 24);
+    const third = win.window_add_pane(w, null, 80, 24);
+
+    try std.testing.expect(win.window_set_active_pane(w, second, true));
+    try std.testing.expect(win.window_set_active_pane(w, third, true));
+    try std.testing.expectEqual(second, win.window_get_last_pane(w).?);
+
+    win.window_destroy_all_panes(w);
+
+    try std.testing.expectEqual(@as(usize, 0), win.window_count_panes(w));
+    try std.testing.expect(w.active == null);
+    try std.testing.expectEqual(@as(usize, 0), w.last_panes.items.len);
+    try std.testing.expect(win.window_pane_find_by_id(first.id) == null);
+    try std.testing.expect(win.window_pane_find_by_id(second.id) == null);
+    try std.testing.expect(win.window_pane_find_by_id(third.id) == null);
+}
+
+test "window_lost_pane promotes pane history and prunes stale last references" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const first = win.window_add_pane(w, null, 80, 24);
+    const second = win.window_add_pane(w, null, 80, 24);
+    const third = win.window_add_pane(w, null, 80, 24);
+
+    try std.testing.expect(win.window_set_active_pane(w, second, true));
+    try std.testing.expect(win.window_set_active_pane(w, third, true));
+    try std.testing.expectEqual(second, win.window_get_last_pane(w).?);
+
+    win.window_lost_pane(w, third);
+    try std.testing.expectEqual(second, w.active.?);
+    try std.testing.expectEqual(first, win.window_get_last_pane(w).?);
+    try std.testing.expect((second.flags & T.PANE_CHANGED) != 0);
+
+    win.window_lost_pane(w, first);
+    try std.testing.expect(win.window_get_last_pane(w) == null);
+}
+
+test "grouped session attach and detach keep peer current window while pruning stale history" {
+    init_session_window_test_globals();
+    defer deinit_session_window_test_globals();
+
+    const leader = sess.session_create(null, "window-group-leader", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("window-group-leader") != null) sess.session_destroy(leader, false, "test");
+    const peer = sess.session_create(null, "window-group-peer", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("window-group-peer") != null) sess.session_destroy(peer, false, "test");
+
+    const group = sess.session_group_new("window-group-sync");
+    sess.session_group_add(group, leader);
+    sess.session_group_add(group, peer);
+
+    var cause: ?[]u8 = null;
+
+    const first_window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const first_wl = sess.session_attach(leader, first_window, -1, &cause).?;
+    first_window.active = win.window_add_pane(first_window, null, 80, 24);
+    leader.curw = first_wl;
+    const leader_first = sess.winlink_find_by_index(&leader.windows, first_wl.idx).?;
+    const peer_first = sess.winlink_find_by_index(&peer.windows, first_wl.idx).?;
+    peer.curw = peer_first;
+
+    const second_window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const second_wl = sess.session_attach(leader, second_window, -1, &cause).?;
+    second_window.active = win.window_add_pane(second_window, null, 80, 24);
+    const second_idx = second_wl.idx;
+
+    try std.testing.expectEqual(@as(usize, 2), leader.windows.count());
+    try std.testing.expectEqual(@as(usize, 2), peer.windows.count());
+
+    const leader_second = sess.winlink_find_by_index(&leader.windows, second_idx).?;
+    const peer_second = sess.winlink_find_by_index(&peer.windows, second_idx).?;
+    try std.testing.expect(sess.session_set_current(peer, peer_second));
+    try std.testing.expect(sess.session_set_current(peer, peer_first));
+    try std.testing.expect(sess.session_set_current(leader, leader_second));
+    try std.testing.expectEqual(peer_first, peer.curw.?);
+    try std.testing.expectEqual(@as(usize, 1), peer.lastw.items.len);
+    try std.testing.expectEqual(peer_second, peer.lastw.items[0]);
+
+    const third_window = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const third_wl = sess.session_attach(leader, third_window, -1, &cause).?;
+    third_window.active = win.window_add_pane(third_window, null, 80, 24);
+
+    try std.testing.expectEqual(@as(usize, 3), leader.windows.count());
+    try std.testing.expectEqual(@as(usize, 3), peer.windows.count());
+    try std.testing.expectEqual(peer_first, peer.curw.?);
+    try std.testing.expectEqual(@as(usize, 1), peer.lastw.items.len);
+    try std.testing.expectEqual(second_idx, peer.lastw.items[0].idx);
+    try std.testing.expectEqual(third_wl.window, sess.winlink_find_by_index(&peer.windows, third_wl.idx).?.window);
+
+    try std.testing.expect(!sess.session_detach(leader, leader_second));
+    try std.testing.expectEqual(@as(usize, 2), leader.windows.count());
+    try std.testing.expectEqual(@as(usize, 2), peer.windows.count());
+    try std.testing.expect(sess.winlink_find_by_index(&leader.windows, second_idx) == null);
+    try std.testing.expect(sess.winlink_find_by_index(&peer.windows, second_idx) == null);
+    try std.testing.expectEqual(leader_first.window, peer.curw.?.window);
+    try std.testing.expectEqual(peer_first.idx, peer.curw.?.idx);
+    try std.testing.expectEqual(@as(usize, 0), peer.lastw.items.len);
 }
 
 test "window_cmp orders windows by id" {

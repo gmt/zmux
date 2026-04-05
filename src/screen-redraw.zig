@@ -233,7 +233,6 @@ pub fn screen_redraw_screen(cl: *T.Client) void {
     if (cl.overlay_draw != null and (flags & T.CLIENT_REDRAWOVERLAY != 0))
         log.log_debug("screen_redraw_screen: redrawing overlay", .{});
 
-    tty_mod.tty_sync_end(&cl.tty);
     tty_mod.tty_reset(&cl.tty);
 }
 
@@ -257,7 +256,6 @@ pub fn screen_redraw_pane(cl: *T.Client, wp: *T.WindowPane, scrollbar_only: bool
     if (win_mod.window_pane_show_scrollbar(wp))
         _ = &ctx;
 
-    tty_mod.tty_sync_end(&cl.tty);
     tty_mod.tty_reset(&cl.tty);
 }
 

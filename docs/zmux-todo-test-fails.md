@@ -31,3 +31,4 @@ Keep honest failing tests visible here. Do not convert them into skips or commen
 
 <!-- APPEND_HERE: New failure entries go below this line using the template above -->
 
+<!-- `tty-winsz-query-gate` closed on 2026-04-04 after adding `TTY_WINSIZEQUERY` gating in `src/tty.zig`; character replies keep the gate set and pixel replies clear it. -->

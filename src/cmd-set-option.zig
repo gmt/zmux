@@ -1016,6 +1016,29 @@ test "set-option accepts tty compatibility options across scopes" {
     try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(opts.global_w_options, "xterm-keys"));
 }
 
+test "set-option -a appends to existing string options" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_string(opts.global_s_options, false, "status-right", "prefix");
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-ag", "status-right", " suffix" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("prefix suffix", opts.options_get_string(opts.global_s_options, "status-right"));
+}
+
 test "set-window-option marks active panes changed when automatic rename is enabled globally" {
     const sess = @import("session.zig");
     const env_mod = @import("environ.zig");

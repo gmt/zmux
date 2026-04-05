@@ -123,3 +123,45 @@ test "set-environment sets and clears session environment" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqualStrings("nvim", env_mod.environ_find(env_mod.global_environ, "EDITOR").?.value.?);
 }
+
+test "set-environment -r keeps a cleared marker while -u removes the entry" {
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    var cause: ?[]u8 = null;
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+
+    const set_cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-g", "EDITOR", "nvim" }, null, &cause);
+    defer cmd_mod.cmd_free(set_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_cmd, &item));
+
+    const clear_cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-gr", "EDITOR" }, null, &cause);
+    defer cmd_mod.cmd_free(clear_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(clear_cmd, &item));
+
+    const cleared = env_mod.environ_find(env_mod.global_environ, "EDITOR") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(cleared.value == null);
+
+    const unset_cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-gu", "EDITOR" }, null, &cause);
+    defer cmd_mod.cmd_free(unset_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(unset_cmd, &item));
+    try std.testing.expect(env_mod.environ_find(env_mod.global_environ, "EDITOR") == null);
+}
+
+test "set-environment -h stores a hidden entry" {
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-gh", "SECRET", "token" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    const entry_val = env_mod.environ_find(env_mod.global_environ, "SECRET") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("token", entry_val.value.?);
+    try std.testing.expect(entry_val.flags & T.ENVIRON_HIDDEN != 0);
+}

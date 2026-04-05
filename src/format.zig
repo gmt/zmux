@@ -491,6 +491,12 @@ fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const F
             continue;
         }
 
+        if (std.mem.indexOfScalar(u8, ",}:", next) != null) {
+            out.append(alloc, next) catch unreachable;
+            i += 2;
+            continue;
+        }
+
         if (next == '(') {
             const end = find_paren_end(template, i + 2) orelse {
                 out.appendSlice(alloc, template[i..]) catch unreachable;
@@ -1478,6 +1484,10 @@ fn index_of_top_level(input: []const u8, delim: u8) ?usize {
     var depth: u32 = 0;
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
+        if (input[i] == '#' and i + 1 < input.len and (input[i + 1] == '#' or std.mem.indexOfScalar(u8, ",}:", input[i + 1]) != null)) {
+            i += 1;
+            continue;
+        }
         if (input[i] == '#' and i + 1 < input.len and input[i + 1] == '{') {
             depth += 1;
             i += 1;
@@ -1496,6 +1506,10 @@ fn index_of_top_level_any(input: []const u8, delims: []const u8) ?usize {
     var depth: u32 = 0;
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
+        if (input[i] == '#' and i + 1 < input.len and (input[i + 1] == '#' or std.mem.indexOfScalar(u8, ",}:", input[i + 1]) != null)) {
+            i += 1;
+            continue;
+        }
         if (input[i] == '#' and i + 1 < input.len and input[i + 1] == '{') {
             depth += 1;
             i += 1;
@@ -1514,6 +1528,10 @@ fn find_format_end(input: []const u8, start: usize) ?usize {
     var depth: u32 = 0;
     var i = start;
     while (i < input.len) : (i += 1) {
+        if (input[i] == '#' and i + 1 < input.len and (input[i + 1] == '#' or std.mem.indexOfScalar(u8, ",}:", input[i + 1]) != null)) {
+            i += 1;
+            continue;
+        }
         if (input[i] == '#' and i + 1 < input.len and input[i + 1] == '{') {
             depth += 1;
             i += 1;

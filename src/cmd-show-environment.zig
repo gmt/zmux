@@ -106,6 +106,44 @@ pub const entry: cmd_mod.CmdEntry = .{
     .exec = exec,
 };
 
+fn capture_stdout(argv: []const []const u8) ![]u8 {
+    var stdout_pipe: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&stdout_pipe));
+    defer {
+        std.posix.close(stdout_pipe[0]);
+        if (stdout_pipe[1] != -1) std.posix.close(stdout_pipe[1]);
+    }
+
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+
+    try std.posix.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO);
+    defer std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO) catch {};
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(argv, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(stdout_pipe[1]);
+    stdout_pipe[1] = -1;
+
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(xm.allocator);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try std.posix.read(stdout_pipe[0], &buf);
+        if (n == 0) break;
+        try out.appendSlice(xm.allocator, buf[0..n]);
+    }
+    return out.toOwnedSlice(xm.allocator);
+}
+
 test "show-environment renders shell output" {
     var entry_val = T.EnvironEntry{ .name = xm.xstrdup("EDITOR"), .value = xm.xstrdup("a\"b"), .flags = 0 };
     defer xm.allocator.free(entry_val.name);
@@ -118,4 +156,37 @@ test "show-environment renders shell output" {
     const line = render_env_entry(cmd_mod.cmd_get_args(cmd), &entry_val);
     defer xm.allocator.free(line);
     try std.testing.expectEqualStrings("EDITOR=\"a\\\"b\"; export EDITOR;", line);
+}
+
+test "show-environment hides hidden entries unless -h is present" {
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    env_mod.environ_set(env_mod.global_environ, "EDITOR", 0, "nvim");
+    env_mod.environ_set(env_mod.global_environ, "SECRET", T.ENVIRON_HIDDEN, "token");
+
+    const visible = try capture_stdout(&.{ "show-environment", "-g" });
+    defer xm.allocator.free(visible);
+    try std.testing.expect(std.mem.containsAtLeast(u8, visible, 1, "EDITOR=nvim"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, visible, "SECRET=token"));
+
+    const hidden = try capture_stdout(&.{ "show-environment", "-gh" });
+    defer xm.allocator.free(hidden);
+    try std.testing.expect(std.mem.containsAtLeast(u8, hidden, 1, "SECRET=token"));
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, hidden, "EDITOR=nvim"));
+}
+
+test "show-environment renders cleared entries as tmux-style unset lines" {
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    env_mod.environ_clear(env_mod.global_environ, "EMPTY");
+
+    const plain = try capture_stdout(&.{ "show-environment", "-g", "EMPTY" });
+    defer xm.allocator.free(plain);
+    try std.testing.expectEqualStrings("-EMPTY\n", plain);
+
+    const shell = try capture_stdout(&.{ "show-environment", "-gs", "EMPTY" });
+    defer xm.allocator.free(shell);
+    try std.testing.expectEqualStrings("unset EMPTY;\n", shell);
 }

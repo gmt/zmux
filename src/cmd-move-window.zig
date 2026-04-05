@@ -273,3 +273,50 @@ test "move-window without -s renumbers the source session when configured" {
     try std.testing.expect(sess.winlink_find_by_index(&src.windows, 2) == null);
     try std.testing.expect(sess.winlink_find_by_index(&dst.windows, 3) != null);
 }
+
+test "link-window rejects sessions that already belong to the same group" {
+    const env_mod = @import("environ.zig");
+    const spawn = @import("spawn.zig");
+    const win = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const src = sess.session_create(null, "grouped-link-src", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("grouped-link-src") != null) sess.session_destroy(src, false, "test");
+    const dst = sess.session_create(null, "grouped-link-dst", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("grouped-link-dst") != null) sess.session_destroy(dst, false, "test");
+
+    const group = sess.session_group_new("grouped-link-group");
+    sess.session_group_add(group, src);
+    sess.session_group_add(group, dst);
+
+    var cause: ?[]u8 = null;
+    var src_ctx: T.SpawnContext = .{ .s = src, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
+    sess.session_group_synchronize_from(src);
+
+    var parse_cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "link-window", "-s", "grouped-link-src:0", "-t", "grouped-link-dst:1" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(usize, 1), dst.windows.count());
+    try std.testing.expectEqual(src_wl.window, sess.winlink_find_by_index(&dst.windows, 0).?.window);
+    try std.testing.expect(sess.winlink_find_by_index(&dst.windows, 1) == null);
+}

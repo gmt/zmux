@@ -470,6 +470,85 @@ test "select-window records latest client on the newly selected window across se
     try std.testing.expectEqual(driver.first, driver.session.curw.?);
 }
 
+test "select-window applies latest client size when a grouped session changes windows" {
+    const opts = @import("options.zig");
+
+    init_test_state();
+    defer deinit_test_state();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const leader = make_select_window_test_session("select-window-group-latest-leader");
+    defer if (sess.session_find("select-window-group-latest-leader") != null) sess.session_destroy(leader.session, false, "test");
+
+    const peer = sess.session_create(null, "select-window-group-latest-peer", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("select-window-group-latest-peer") != null) sess.session_destroy(peer, false, "test");
+
+    const group = sess.session_group_new("select-window-group-latest");
+    sess.session_group_add(group, leader.session);
+    sess.session_group_add(group, peer);
+    sess.session_group_synchronize_from(leader.session);
+
+    opts.options_set_number(leader.session.options, "status", 0);
+    opts.options_set_number(peer.options, "status", 0);
+    opts.options_set_number(leader.second.window.options, "window-size", T.WINDOW_SIZE_LATEST);
+
+    const peer_first = sess.winlink_find_by_index(&peer.windows, leader.first.idx).?;
+    const peer_second = sess.winlink_find_by_index(&peer.windows, leader.second.idx).?;
+
+    leader.session.curw = leader.second;
+    peer.curw = peer_first;
+
+    var leader_client = T.Client{
+        .name = "select-window-group-latest-leader-client",
+        .environ = env_mod.environ_create(),
+        .tty = .{ .client = undefined },
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = leader.session,
+    };
+    defer env_mod.environ_free(leader_client.environ);
+    tty_mod.tty_init(&leader_client.tty, &leader_client);
+    leader_client.tty.sx = 120;
+    leader_client.tty.sy = 40;
+
+    var peer_client = T.Client{
+        .name = "select-window-group-latest-peer-client",
+        .environ = env_mod.environ_create(),
+        .tty = .{ .client = undefined },
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = peer,
+    };
+    defer env_mod.environ_free(peer_client.environ);
+    tty_mod.tty_init(&peer_client.tty, &peer_client);
+    peer_client.tty.sx = 90;
+    peer_client.tty.sy = 30;
+
+    client_registry.add(&leader_client);
+    client_registry.add(&peer_client);
+
+    server_client_mod.server_client_apply_session_size(&leader_client, leader.session);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&leader_client)), leader.second.window.latest);
+    try std.testing.expectEqual(@as(u32, 120), leader.second.window.sx);
+    try std.testing.expectEqual(@as(u32, 40), leader.second.window.sy);
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-t", "select-window-group-latest-peer:1" }, &peer_client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &peer_client, .target_client = &peer_client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    try std.testing.expectEqual(peer_second, peer.curw.?);
+    try std.testing.expectEqual(leader.second, leader.session.curw.?);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&peer_client)), peer_second.window.latest);
+    try std.testing.expectEqual(@as(u32, 90), peer_second.window.sx);
+    try std.testing.expectEqual(@as(u32, 30), peer_second.window.sy);
+}
+
 test "new-window synchronizes grouped peers and uses shared group status-only invalidation for detached creates" {
     const opts = @import("options.zig");
 

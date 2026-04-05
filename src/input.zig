@@ -55,14 +55,47 @@ pub fn input_send_reply(wp: *T.WindowPane, reply: []const u8) void {
     }
 }
 
-/// Terminal reply: format and send a reply string to the pane's PTY.
-/// Mirrors tmux input_reply. The `add` parameter is accepted for API
-/// compatibility (tmux uses it for request queuing) but currently ignored
-/// since zmux does not yet have the request queue infrastructure.
-pub fn input_reply(wp: *T.WindowPane, _: bool, comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
-    const reply = std.fmt.bufPrint(&buf, fmt, args) catch return;
+fn input_send_or_queue_reply(wp: *T.WindowPane, add: bool, reply: []const u8) void {
+    if (add and wp.input_request_list.items.len != 0) {
+        const owned = xm.allocator.dupe(u8, reply) catch return;
+        errdefer xm.allocator.free(owned);
+
+        const ir = xm.allocator.create(T.InputRequest) catch return;
+        errdefer xm.allocator.destroy(ir);
+
+        ir.* = .{
+            .wp = wp,
+            .type = .queue,
+            .t = @intCast(@max(std.time.milliTimestamp(), 0)),
+            .idx = std.math.cast(i32, owned.len) orelse return,
+            .data = owned.ptr,
+        };
+
+        wp.input_request_list.append(xm.allocator, ir) catch return;
+        wp.input_request_count += 1;
+        if (wp.input_request_count == 1)
+            input_start_request_timer(wp);
+        return;
+    }
+
     input_send_reply(wp, reply);
+}
+
+/// Terminal reply: format and send a reply string to the pane's PTY.
+/// Mirrors tmux input_reply, including deferring replies behind an existing
+/// outer-terminal request queue when `add` is set.
+pub fn input_reply(wp: *T.WindowPane, add: bool, comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const reply = std.fmt.bufPrint(&buf, fmt, args) catch |err| switch (err) {
+        error.NoSpaceLeft => {
+            const owned = std.fmt.allocPrint(xm.allocator, fmt, args) catch return;
+            defer xm.allocator.free(owned);
+            input_send_or_queue_reply(wp, add, owned);
+            return;
+        },
+        else => return,
+    };
+    input_send_or_queue_reply(wp, add, reply);
 }
 
 /// Reply to a colour query (OSC 4/10/11/12).
@@ -223,6 +256,20 @@ fn input_free_request_at(wp: *T.WindowPane, idx: usize) void {
             }
         }
     }
+    if (ir.data) |d| {
+        switch (ir.type) {
+            .queue => {
+                const bytes: [*]u8 = @ptrCast(@alignCast(d));
+                xm.allocator.free(bytes[0..@as(usize, @intCast(ir.idx))]);
+            },
+            .palette => xm.allocator.destroy(@as(*T.InputRequestPaletteData, @ptrCast(@alignCast(d)))),
+            .clipboard => {
+                const clip: *T.InputRequestClipboardData = @ptrCast(@alignCast(d));
+                if (clip.buf) |buf| xm.allocator.free(buf);
+                xm.allocator.destroy(clip);
+            },
+        }
+    }
     wp.input_request_count -|= 1;
     xm.allocator.destroy(ir);
     _ = wp.input_request_list.orderedRemove(idx);
@@ -307,7 +354,17 @@ pub fn input_request_reply(cl: *T.Client, req_type_raw: u32, data: ?*anyopaque) 
             }
         }
         input_free_request_at(wp, 0);
-        if (is_match) break;
+        if (is_match) {
+            while (wp.input_request_list.items.len > 0 and wp.input_request_list.items[0].type == .queue) {
+                const queued = wp.input_request_list.items[0];
+                if (queued.data) |d| {
+                    const bytes: [*]const u8 = @ptrCast(@alignCast(d));
+                    input_send_reply(wp, bytes[0..@as(usize, @intCast(queued.idx))]);
+                }
+                input_free_request_at(wp, 0);
+            }
+            break;
+        }
     }
 }
 
@@ -322,6 +379,20 @@ pub fn input_cancel_requests(cl: *T.Client) void {
                     _ = wp.input_request_list.orderedRemove(pi);
                     break;
                 }
+            }
+        }
+        if (ir.data) |d| {
+            switch (ir.type) {
+                .queue => {
+                    const bytes: [*]u8 = @ptrCast(@alignCast(d));
+                    xm.allocator.free(bytes[0..@as(usize, @intCast(ir.idx))]);
+                },
+                .palette => xm.allocator.destroy(@as(*T.InputRequestPaletteData, @ptrCast(@alignCast(d)))),
+                .clipboard => {
+                    const clip: *T.InputRequestClipboardData = @ptrCast(@alignCast(d));
+                    if (clip.buf) |buf| xm.allocator.free(buf);
+                    xm.allocator.destroy(clip);
+                },
             }
         }
         xm.allocator.destroy(ir);

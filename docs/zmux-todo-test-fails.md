@@ -29,4 +29,5 @@ Keep honest failing tests visible here. Do not convert them into skips or commen
 
 ## Known Failing Tests
 
-_Add entries here as the sprint exposes real gaps._
+<!-- APPEND_HERE: New failure entries go below this line using the template above -->
+

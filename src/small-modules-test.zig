@@ -210,3 +210,48 @@ test "shouldUseRemotePathIO is true only for detached clients with a peer" {
 
     try std.testing.expect(!file_mod.shouldUseRemotePathIO(null));
 }
+
+test "marked_pane rebind and targeted clears follow the current winlink" {
+    const sess = @import("session.zig");
+    const window_mod = @import("window.zig");
+    const opts = @import("options.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const s = sess.session_create(null, "marked-pane", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl0 = sess.session_attach(s, w, 0, &cause).?;
+    var wl1 = T.Winlink{ .idx = 5, .session = s, .window = w };
+    const wp = window_mod.window_add_pane(w, null, 20, 6);
+    w.active = wp;
+
+    marked_pane_mod.set(s, wl0, wp);
+    try std.testing.expect(marked_pane_mod.marked_pane.wl == wl0);
+    try std.testing.expect(marked_pane_mod.marked_pane.w == w);
+    try std.testing.expectEqual(@as(i32, 0), marked_pane_mod.marked_pane.idx);
+
+    marked_pane_mod.rebind_winlink(wl0, &wl1);
+    try std.testing.expect(marked_pane_mod.marked_pane.wl == &wl1);
+    try std.testing.expect(marked_pane_mod.marked_pane.w == w);
+    try std.testing.expectEqual(@as(i32, 5), marked_pane_mod.marked_pane.idx);
+
+    marked_pane_mod.clear_if_winlink(wl0);
+    try std.testing.expect(marked_pane_mod.marked_pane.wl == &wl1);
+
+    marked_pane_mod.clear_if_winlink(&wl1);
+    try std.testing.expect(marked_pane_mod.marked_pane.wl == null);
+}

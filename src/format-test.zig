@@ -1545,3 +1545,88 @@ test "format_truthy normalizes common false spellings" {
 test "format_timestamp_local rejects non-numeric seconds" {
     try std.testing.expect(format_timestamp_local(xm.allocator, "not-a-timestamp", "%Y") == null);
 }
+
+test "format_expand handles name checks and pane loops with active template" {
+    const env_mod = @import("environ.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const alpha = sess.session_create(null, "alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer sess.session_destroy(beta, false, "test");
+
+    const w = window_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    xm.allocator.free(w.name);
+    w.name = xm.xstrdup("editor");
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(alpha, w, 0, &cause).?;
+    alpha.curw = wl;
+    const first = window_mod.window_add_pane(w, null, 10, 6);
+    const second = window_mod.window_add_pane(w, null, 9, 6);
+    w.active = second;
+
+    const ctx = FormatContext{
+        .session = alpha,
+        .winlink = wl,
+        .window = w,
+        .pane = second,
+    };
+
+    const names = format_require_complete(xm.allocator, "#{N:editor}:#{N:missing}:#{N/s:alpha}:#{N/s:missing}", &ctx).?;
+    defer xm.allocator.free(names);
+    try std.testing.expectEqualStrings("1:0:1:0", names);
+
+    const panes = format_require_complete(xm.allocator, "#{P:#{pane_index}#{?loop_last_flag,,|},[#{pane_index}]#{?loop_last_flag,,|}}", &ctx).?;
+    defer xm.allocator.free(panes);
+    try std.testing.expectEqualStrings("0|[1]", panes);
+
+    _ = first;
+}
+
+test "format_expand handles client loops plus multibyte width and style quoting" {
+    const env_mod = @import("environ.zig");
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    var first = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+    };
+    defer env_mod.environ_free(first.environ);
+    first.tty = .{ .client = &first, .sx = 81, .sy = 24 };
+
+    var second = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+    };
+    defer env_mod.environ_free(second.environ);
+    second.tty = .{ .client = &second, .sx = 92, .sy = 30 };
+
+    client_registry.add(&first);
+    client_registry.add(&second);
+
+    const loop_ctx = FormatContext{ .client = &second };
+    const loop = format_require_complete(xm.allocator, "#{L:#{client_width}#{?loop_last_flag,,|},[#{client_width}]#{?loop_last_flag,,|}}", &loop_ctx).?;
+    defer xm.allocator.free(loop);
+    try std.testing.expectEqualStrings("81|[92]", loop);
+
+    const text_ctx = FormatContext{ .message_text = "é#" };
+    const rendered = format_require_complete(xm.allocator, "#{n:message_text}:#{w:message_text}:#{q/h:message_text}", &text_ctx).?;
+    defer xm.allocator.free(rendered);
+    try std.testing.expectEqualStrings("3:2:é##", rendered);
+}

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# museum-lookup — non-interactive cscope query on the tmux museum.
+# Suitable for use from scripts and agents.
+# Builds the xref database first if it does not exist.
+#
+# Usage: museum-lookup <type> <symbol>
+#
+# Types:
+#   def      — global definition of symbol (cscope query 1)
+#   callers  — functions calling symbol    (cscope query 3)
+#   callees  — functions called by symbol  (cscope query 2)
+#   symbol   — all uses of symbol          (cscope query 0)
+#   text     — literal text string         (cscope query 4)
+#   file     — file whose name matches     (cscope query 7)
+#   0-9      — raw cscope query number
+#
+# Output: one match per line, tab-separated: file  function  line  text
+
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+XREF_OUT="$LAB_ROOT/out/xref"
+DB="$XREF_OUT/cscope.out"
+
+usage() {
+    sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# \?//' >&2
+    exit 1
+}
+
+[[ $# -eq 2 ]] || usage
+
+case "$1" in
+    def)     N=1 ;;
+    callers) N=3 ;;
+    callees) N=2 ;;
+    symbol)  N=0 ;;
+    text)    N=4 ;;
+    file)    N=7 ;;
+    [0-9])   N=$1 ;;
+    *)       usage ;;
+esac
+
+if [[ ! -f "$DB" ]]; then
+    echo "xref database not found — building..." >&2
+    "$LAB_ROOT/bin/refresh-museum.sh" xref
+fi
+
+cscope -d -L -"$N" "$2" -f "$DB"

@@ -213,6 +213,15 @@ pub fn main() !void {
     const default_shell = getshell();
     opts.options_set_string(opts.global_s_options, false, "default-shell", default_shell);
 
+    // Set editor from $VISUAL or $EDITOR; switch to vi keys if editor basename contains "vi"
+    if (std.posix.getenv("VISUAL") orelse std.posix.getenv("EDITOR")) |editor| {
+        opts.options_set_string(opts.global_options, false, "editor", editor);
+        const basename = if (std.mem.lastIndexOfScalar(u8, editor, '/')) |i| editor[i + 1 ..] else editor;
+        const keys: u32 = if (std.mem.indexOf(u8, basename, "vi") != null) T.MODEKEY_VI else T.MODEKEY_EMACS;
+        opts.options_set_number(opts.global_s_options, "status-keys", @intCast(keys));
+        opts.options_set_number(opts.global_w_options, "mode-keys", @intCast(keys));
+    }
+
     // Parse command line
     const raw_args = try std.process.argsAlloc(xm.allocator);
     defer std.process.argsFree(xm.allocator, raw_args);

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# museum-cscope — open an interactive cscope session on the tmux museum.
+# Builds the xref database first if it does not exist.
+#
+# Usage: museum-cscope
+
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+XREF_OUT="$LAB_ROOT/out/xref"
+DB="$XREF_OUT/cscope.out"
+
+if [[ ! -f "$DB" ]]; then
+    echo "xref database not found — building..." >&2
+    "$LAB_ROOT/bin/refresh-museum.sh" xref
+fi
+
+cd "$XREF_OUT"
+exec cscope -d -f cscope.out

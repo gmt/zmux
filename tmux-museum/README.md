@@ -43,3 +43,47 @@ Pass explicit sources if you want more:
 ```bash
 bin/refresh-museum.sh pp cmd-split-window.c grid.c
 ```
+
+## Browsing the source
+
+### Interactive cscope session
+
+```bash
+bin/museum-cscope
+```
+
+Builds the xref database automatically if needed, then opens a full cscope TUI
+for navigating function definitions, callers, and callees.
+
+### Quick symbol lookups (scriptable)
+
+```bash
+bin/museum-lookup <type> <symbol>
+```
+
+| Type | What it finds |
+|------|--------------|
+| `def` | global definition of symbol |
+| `callers` | functions that call this function |
+| `callees` | functions called by this function |
+| `symbol` | every use of this symbol |
+| `text` | literal string |
+| `file` | files matching this name |
+
+Examples:
+
+```bash
+bin/museum-lookup def screen_alternate_on
+bin/museum-lookup callers screen_write_alternateon
+bin/museum-lookup callees window_copy_init
+```
+
+Output is tab-separated: `file  function  line  text`
+
+### Plain grep
+
+For a quick one-off search without building the database:
+
+```bash
+grep -rn "function_name" src/
+```

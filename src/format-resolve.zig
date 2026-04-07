@@ -62,7 +62,9 @@ pub const Resolver = struct {
 
 pub const FORMAT_LOOP_LIMIT: u32 = 100;
 
-pub const resolver_table = [_]Resolver{
+/// Source table of format resolvers, grouped by category for readability.
+/// Use `resolver_table` (the comptime-sorted version) for lookups.
+const resolver_table_unsorted = [_]Resolver{
     .{ .name = "message", .func = resolve_message },
     .{ .name = "message_number", .func = resolve_message_number },
     .{ .name = "message_time", .func = resolve_message_time },
@@ -319,6 +321,43 @@ pub const resolver_table = [_]Resolver{
     .{ .name = "selection_present", .func = resolve_selection_present },
     .{ .name = "selection_mode", .func = resolve_selection_mode },
 };
+
+fn resolverNameLessThan(_: void, a: Resolver, b: Resolver) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
+/// Resolver table sorted alphabetically by name at comptime, enabling
+/// O(log n) binary search lookups instead of O(n) linear scans.
+pub const resolver_table = blk: {
+    var sorted = resolver_table_unsorted;
+    @setEvalBranchQuota(resolver_table_unsorted.len * resolver_table_unsorted.len * 4);
+    std.sort.insertion(Resolver, &sorted, {}, resolverNameLessThan);
+    break :blk sorted;
+};
+
+comptime {
+    @setEvalBranchQuota(resolver_table_unsorted.len * 100);
+    // Guard against future edits that break the sort invariant.
+    if (!std.sort.isSorted(Resolver, &resolver_table, {}, resolverNameLessThan)) {
+        @compileError("resolver_table is not sorted by name");
+    }
+}
+
+/// Look up a resolver by name using binary search over the sorted table.
+/// Returns the Resolver if found, or null.
+pub fn lookupResolver(name: []const u8) ?Resolver {
+    const idx = std.sort.binarySearch(
+        Resolver,
+        &resolver_table,
+        name,
+        struct {
+            fn cmp(key: []const u8, entry: Resolver) std.math.Order {
+                return std.mem.order(u8, key, entry.name);
+            }
+        }.cmp,
+    ) orelse return null;
+    return resolver_table[idx];
+}
 
 fn c_string_bytes(bytes: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;

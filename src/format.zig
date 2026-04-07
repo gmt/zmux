@@ -112,6 +112,7 @@ const fmt_resolve = @import("format-resolve.zig");
 
 const Resolver = fmt_resolve.Resolver;
 const resolver_table = fmt_resolve.resolver_table;
+const lookupResolver = fmt_resolve.lookupResolver;
 const FORMAT_LOOP_LIMIT = fmt_resolve.FORMAT_LOOP_LIMIT;
 
 pub fn format_expand(alloc: std.mem.Allocator, template: []const u8, ctx: *const FormatContext) FormatExpandResult {
@@ -1345,7 +1346,7 @@ fn resolve_base_value(
         return expanded;
     }
 
-    if (lookup_resolver(expr)) |resolver| {
+    if (lookupResolver(expr)) |resolver| {
         const value = resolver.func(alloc, ctx) orelse return unresolved_key(alloc, expr, null);
         return .{ .text = value, .complete = true };
     }
@@ -1368,7 +1369,7 @@ fn expand_value_expr(alloc: std.mem.Allocator, expr: []const u8, ctx: *const For
     if (std.mem.indexOfScalar(u8, expr, '#') != null) {
         return expand_template(alloc, expr, ctx, depth + 1);
     }
-    if (lookup_resolver(expr)) |resolver| {
+    if (lookupResolver(expr)) |resolver| {
         const value = resolver.func(alloc, ctx) orelse {
             return .{ .text = alloc.dupe(u8, "") catch unreachable, .complete = false };
         };
@@ -1381,7 +1382,7 @@ fn expand_value_expr(alloc: std.mem.Allocator, expr: []const u8, ctx: *const For
 }
 
 fn resolve_direct_key(alloc: std.mem.Allocator, key: []const u8, ctx: *const FormatContext, short_alias: ?u8) FormatExpandResult {
-    if (lookup_resolver(key)) |resolver| {
+    if (lookupResolver(key)) |resolver| {
         const value = resolver.func(alloc, ctx) orelse return unresolved_key(alloc, key, short_alias);
         return .{ .text = value, .complete = true };
     }
@@ -1414,13 +1415,6 @@ fn unresolved_expr(alloc: std.mem.Allocator, expr: []const u8) FormatExpandResul
         .text = xm.xasprintf("#{{{s}}}", .{expr}),
         .complete = false,
     };
-}
-
-fn lookup_resolver(name: []const u8) ?Resolver {
-    for (resolver_table) |resolver| {
-        if (std.mem.eql(u8, resolver.name, name)) return resolver;
-    }
-    return null;
 }
 
 fn short_alias_key(ch: u8) ?[]const u8 {

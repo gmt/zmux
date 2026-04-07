@@ -29,6 +29,7 @@ const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status_runtime = @import("status-runtime.zig");
+const style_mod = @import("style.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
@@ -1199,19 +1200,20 @@ fn startSelection(wme: *T.WindowModeEntry) void {
     data.endselx = data.selx;
     data.endsely = data.sely;
     data.cursordrag = .endsel;
+
+    _ = window_copy_set_selection(wme, true, false);
 }
 
 fn clearSelection(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
+    screen.screen_clear_selection(data.backing);
     data.cursordrag = .none;
     data.lineflag = .none;
     data.selflag = .char;
 }
 
 fn updateSelection(wme: *T.WindowModeEntry) bool {
-    const data = modeData(wme);
-    if (data.cursordrag == .none and data.lineflag == .none) return false;
-    return true;
+    return window_copy_update_selection(wme, true, false);
 }
 
 fn adjustSelection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) enum { above, on_screen, below } {
@@ -2681,12 +2683,11 @@ pub fn window_copy_clear_selection(wme: *T.WindowModeEntry) void {
     clearSelection(wme);
 }
 
-pub fn window_copy_update_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
-    _ = _may_redraw;
+pub fn window_copy_update_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
     const data = modeData(wme);
-    if (data.cursordrag == .none and data.lineflag == .none) return false;
-    window_copy_synchronize_cursor(wme, no_reset);
-    return true;
+    if (data.backing.sel == null and data.lineflag == .none)
+        return false;
+    return window_copy_set_selection(wme, may_redraw, no_reset);
 }
 
 pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) i32 {
@@ -2698,11 +2699,53 @@ pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *
     };
 }
 
-pub fn window_copy_set_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
-    _ = _may_redraw;
+pub fn window_copy_set_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
     const data = modeData(wme);
+    const s = data.backing;
+
     if (data.cursordrag == .none and data.lineflag == .none) return false;
     window_copy_synchronize_cursor(wme, no_reset);
+
+    // Adjust the selection start.
+    var sx = data.selx;
+    var sy = data.sely;
+    const startrelpos = adjustSelection(wme, &sx, &sy);
+
+    // Adjust the selection end.
+    var endsx = data.endselx;
+    var endsy = data.endsely;
+    const endrelpos = adjustSelection(wme, &endsx, &endsy);
+
+    // Selection is entirely outside the current screen view.
+    if (startrelpos == endrelpos and startrelpos != .on_screen) {
+        screen.screen_hide_selection(s);
+        return false;
+    }
+
+    // Build the selection style cell.
+    var gc = T.grid_default_cell;
+    const oo = wme.wp.window.options;
+    style_mod.style_apply(&gc, oo, "copy-mode-selection-style", null);
+    gc.flags |= T.GRID_FLAG_NOPALETTE;
+
+    const modekeys: u32 = @intCast(opts.options_get_number(oo, "mode-keys"));
+    screen.screen_set_selection(s, sx, sy, endsx, endsy, data.rectflag, modekeys, &gc);
+
+    if (data.rectflag and may_redraw) {
+        const cy = data.cy;
+        if (data.cursordrag == .endsel) {
+            if (sy < cy)
+                window_copy_redraw_lines(wme, sy, cy - sy + 1)
+            else
+                window_copy_redraw_lines(wme, cy, sy - cy + 1);
+        } else {
+            if (endsy < cy)
+                window_copy_redraw_lines(wme, endsy, cy - endsy + 1)
+            else
+                window_copy_redraw_lines(wme, cy, endsy - cy + 1);
+        }
+    }
+
     return true;
 }
 

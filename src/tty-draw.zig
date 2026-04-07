@@ -118,7 +118,7 @@ pub fn tty_draw_pane_offset(
     }
 
     for (0..row_count) |row_idx| {
-        const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), sx, scrollbar, screen.hyperlinks);
+        const rendered = try render_pane_row(wp, screen, @intCast(row_idx), sx, scrollbar, screen.hyperlinks);
         defer xm.allocator.free(rendered);
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
@@ -199,7 +199,7 @@ pub fn tty_draw_render_window_region(
             const absolute_row = region.start_y + @as(u32, @intCast(row_idx));
             const rendered = try render_pane_row_region(
                 wp,
-                screen.grid,
+                screen,
                 absolute_row - bounds.yoff,
                 region.start_x - bounds.xoff,
                 region.width,
@@ -279,7 +279,7 @@ pub fn tty_draw_render_dirty_panes_region(
             const absolute_row = region.start_y + @as(u32, @intCast(row_idx));
             const rendered = try render_pane_row_region(
                 wp,
-                screen.grid,
+                screen,
                 absolute_row - bounds.yoff,
                 region.start_x - bounds.xoff,
                 region.width,
@@ -428,7 +428,7 @@ pub fn tty_draw_render_screen_region(
     for (0..sy) |row_idx| {
         const row = view_y + @as(u32, @intCast(row_idx));
         if (row >= screen.grid.sy) break;
-        const rendered = try render_text_row_region(screen.grid, row, view_x, sx, screen.hyperlinks);
+        const rendered = try render_text_row_region(screen.grid, row, view_x, sx, screen);
         defer xm.allocator.free(rendered);
         try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, col_offset + 1);
         try out.appendSlice(xm.allocator, rendered);
@@ -604,25 +604,25 @@ pub fn tty_draw_line_get_empty(gc: *const T.GridCell, nx: u32) u32 {
 
 fn render_pane_row(
     wp: *T.WindowPane,
-    gd: *T.Grid,
+    s: *T.Screen,
     row: u32,
     sx: u32,
     scrollbar: ?window_mod.ScrollbarLayout,
     hl: ?*hyperlinks_mod.Hyperlinks,
 ) ![]u8 {
-    return render_pane_row_region(wp, gd, row, 0, sx, scrollbar, hl);
+    return render_pane_row_region(wp, s, row, 0, sx, scrollbar, hl);
 }
 
 fn render_pane_row_region(
     wp: *T.WindowPane,
-    gd: *T.Grid,
+    s: *T.Screen,
     row: u32,
     start_col: u32,
     sx: u32,
     scrollbar: ?window_mod.ScrollbarLayout,
     hl: ?*hyperlinks_mod.Hyperlinks,
 ) ![]u8 {
-    if (scrollbar == null) return render_text_row_region(gd, row, start_col, sx, hl);
+    if (scrollbar == null) return render_text_row_region(s.grid, row, start_col, sx, s);
 
     const layout = scrollbar.?;
     const extra = layout.width + layout.pad;
@@ -637,11 +637,11 @@ fn render_pane_row_region(
         const text_start = @max(start_col, extra) - extra;
         const text_width = overlap_width(start_col, sx, extra, wp.sx);
         if (text_width != 0)
-            try append_text_cells_range(&renderer, gd, row, text_start, text_width);
+            try append_text_cells_range(&renderer, s.grid, row, text_start, text_width, s);
     } else {
         const text_width = overlap_width(start_col, sx, 0, wp.sx);
         if (text_width != 0)
-            try append_text_cells_range(&renderer, gd, row, start_col, text_width);
+            try append_text_cells_range(&renderer, s.grid, row, start_col, text_width, s);
 
         const scrollbar_start = @max(start_col, wp.sx) - wp.sx;
         const scrollbar_width = overlap_width(start_col, sx, wp.sx, extra);
@@ -652,22 +652,22 @@ fn render_pane_row_region(
     return renderer.finish();
 }
 
-fn render_text_row(gd: *T.Grid, row: u32, sx: u32, hl: ?*hyperlinks_mod.Hyperlinks) ![]u8 {
-    return render_text_row_region(gd, row, 0, sx, hl);
+fn render_text_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
+    return render_text_row_region(gd, row, 0, sx, null);
 }
 
-fn render_text_row_region(gd: *T.Grid, row: u32, start_col: u32, sx: u32, hl: ?*hyperlinks_mod.Hyperlinks) ![]u8 {
-    var renderer = RowRenderer{ .hyperlinks = hl };
+fn render_text_row_region(gd: *T.Grid, row: u32, start_col: u32, sx: u32, s: ?*T.Screen) ![]u8 {
+    var renderer = RowRenderer{ .hyperlinks = if (s) |scr| scr.hyperlinks else null };
     errdefer renderer.deinit();
-    try append_text_cells_range(&renderer, gd, row, start_col, sx);
+    try append_text_cells_range(&renderer, gd, row, start_col, sx, s);
     return renderer.finish();
 }
 
 fn append_text_cells(renderer: *RowRenderer, gd: *T.Grid, row: u32, sx: u32) !void {
-    try append_text_cells_range(renderer, gd, row, 0, sx);
+    try append_text_cells_range(renderer, gd, row, 0, sx, null);
 }
 
-fn append_text_cells_range(renderer: *RowRenderer, gd: *T.Grid, row: u32, start_col: u32, sx: u32) !void {
+fn append_text_cells_range(renderer: *RowRenderer, gd: *T.Grid, row: u32, start_col: u32, sx: u32, s: ?*T.Screen) !void {
     var col = start_col;
     const end_col = start_col + sx;
     while (col < end_col) {
@@ -691,7 +691,13 @@ fn append_text_cells_range(renderer: *RowRenderer, gd: *T.Grid, row: u32, start_
             break;
         }
 
-        try renderer.appendCell(&cell);
+        var ngc: T.GridCell = undefined;
+        const render_cell = if (s) |screen| blk: {
+            break :blk if (cell.flags & T.GRID_FLAG_SELECTED != 0 and
+                screen_mod.screen_select_cell(screen, &ngc, &cell)) &ngc else &cell;
+        } else &cell;
+
+        try renderer.appendCell(render_cell);
         col += cell_width;
     }
 }

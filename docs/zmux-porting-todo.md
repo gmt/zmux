@@ -44,6 +44,4 @@ landed and been tested.
 
 ## Documentation Debt
 
-| Item | Location | Remediation |
-|------|----------|-------------|
-| `docs/smoke.md` is an agent skill document in the wrong place — written as LLM prompting instructions ("the agent should treat..."), not human documentation; the BSD license header is also an AI artifact | `docs/smoke.md` | Rewrite as human-readable smoke test guide (how to run, what passes/fails mean, when to use each suite); if the agent-skill version has value, move it to `.agents/skills/smoke/SKILL.md` instead |
+(No open items.)

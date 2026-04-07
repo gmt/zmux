@@ -2668,8 +2668,97 @@ pub fn tty_check_overlay_range(tty: *T.Tty, px: u32, py: u32, nx: u32) *VisibleR
     return &tty_stub_overlay_storage;
 }
 
-pub fn tty_update_cursor(_: *T.Tty, mode: i32, _: ?*T.Screen) i32 {
-    return mode;
+/// Update cursor visibility, style, and colour.
+/// Ported from tmux tty_update_cursor() (tty.c:765-855).
+pub fn tty_update_cursor(tty: *T.Tty, mode: i32, s: ?*T.Screen) i32 {
+    const CURSOR_MODES = T.MODE_CURSOR | T.MODE_CURSOR_BLINKING | T.MODE_CURSOR_VERY_VISIBLE;
+
+    var cmode = mode;
+
+    // Set cursor colour if changed.
+    if (s) |scr| {
+        var ccolour = scr.ccolour;
+        if (scr.ccolour == -1)
+            ccolour = scr.default_ccolour;
+        tty_force_cursor_colour(tty, ccolour);
+    }
+
+    // If cursor is off, set as invisible.
+    if ((cmode & T.MODE_CURSOR) == 0) {
+        if ((tty.mode & T.MODE_CURSOR) != 0)
+            tty_putcode(tty, "civis");
+        return cmode;
+    }
+
+    // Check if blinking or very visible flag changed or style changed.
+    var cstyle: T.ScreenCursorStyle = undefined;
+    if (s) |scr| {
+        cstyle = scr.cstyle;
+        if (cstyle == .default) {
+            if ((cmode & T.MODE_CURSOR_BLINKING_SET) == 0) {
+                if ((scr.default_mode & T.MODE_CURSOR_BLINKING) != 0)
+                    cmode |= T.MODE_CURSOR_BLINKING
+                else
+                    cmode &= ~T.MODE_CURSOR_BLINKING;
+            }
+            cstyle = scr.default_cstyle;
+        }
+    } else {
+        cstyle = tty.cstyle;
+    }
+
+    // If nothing changed, do nothing.
+    const changed = cmode ^ tty.mode;
+    if ((changed & CURSOR_MODES) == 0 and cstyle == tty.cstyle)
+        return cmode;
+
+    // Set cursor style. If an explicit style has been set with DECSCUSR,
+    // set it if supported, otherwise send cvvis for blinking styles.
+    //
+    // If no style has been set (default), then send cvvis if either the
+    // blinking or very visible flags are set.
+    tty_putcode(tty, "cnorm");
+    switch (cstyle) {
+        .default => {
+            if (tty.cstyle != .default) {
+                if (tty_term.hasCapability(tty, "Se"))
+                    tty_putcode(tty, "Se")
+                else
+                    tty_putcode_i(tty, "Ss", 0);
+            }
+            if ((cmode & (T.MODE_CURSOR_BLINKING | T.MODE_CURSOR_VERY_VISIBLE)) != 0)
+                tty_putcode(tty, "cvvis");
+        },
+        .block => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    tty_putcode_i(tty, "Ss", 1)
+                else
+                    tty_putcode_i(tty, "Ss", 2);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                tty_putcode(tty, "cvvis");
+        },
+        .underline => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    tty_putcode_i(tty, "Ss", 3)
+                else
+                    tty_putcode_i(tty, "Ss", 4);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                tty_putcode(tty, "cvvis");
+        },
+        .bar => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    tty_putcode_i(tty, "Ss", 5)
+                else
+                    tty_putcode_i(tty, "Ss", 6);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                tty_putcode(tty, "cvvis");
+        },
+    }
+    tty.cstyle = cstyle;
+    return cmode;
 }
 
 pub fn tty_update_mode(tty: *T.Tty, mode: i32, s: ?*T.Screen) void {

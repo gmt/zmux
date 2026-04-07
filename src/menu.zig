@@ -337,6 +337,10 @@ pub fn clear_overlay(client: *T.Client) void {
 
     if (md.item) |item| cmdq.cmdq_continue(item);
 
+    // Notify the callback that the menu was dismissed (port of tmux
+    // menu_free_cb calling cb with KEYC_NONE).
+    if (md.cb) |cb| cb(md.menu, -1, T.KEYC_NONE, md.data);
+
     md.deinit();
     xm.allocator.destroy(md);
 }

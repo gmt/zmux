@@ -1452,12 +1452,20 @@ const StatusPromptMenu = struct {
 
 /// Menu callback for prompt completion
 /// (port of tmux status_prompt_menu_callback).
-fn status_prompt_menu_callback(spm: *StatusPromptMenu, idx: u32) void {
-    const c = spm.c;
-    const state = find_state(c) orelse return;
-    if (idx >= spm.size) return;
-    const actual_idx = spm.start + idx;
+/// Matches `menu_mod.MenuChoiceCb` signature.
+fn status_prompt_menu_callback(_: *menu_mod.Menu, idx: i32, key: T.key_code, data: ?*anyopaque) void {
+    const spm: *StatusPromptMenu = @ptrCast(@alignCast(data orelse return));
+    defer status_prompt_menu_free(spm);
+
+    if (key == T.KEYC_NONE) return; // menu dismissed without selection
+
+    const uidx: u32 = if (idx >= 0) @intCast(idx) else return;
+    if (uidx >= spm.size) return;
+    const actual_idx = spm.start + uidx;
     if (actual_idx >= spm.list.len) return;
+
+    const c = spm.c;
+    const pstate = find_state(c) orelse return;
 
     var s: []u8 = undefined;
     if (spm.flag == 0) {
@@ -1467,10 +1475,10 @@ fn status_prompt_menu_callback(spm: *StatusPromptMenu, idx: u32) void {
     }
     defer xm.allocator.free(s);
 
-    if (state.prompt_type == .window_target) {
-        set_prompt_input(state, s);
+    if (pstate.prompt_type == .window_target) {
+        set_prompt_input(pstate, s);
         request_status_redraw(c);
-    } else if (replace_prompt_complete(c, state, s)) {
+    } else if (replace_prompt_complete(c, pstate, s)) {
         request_status_redraw(c);
     }
 }
@@ -1480,6 +1488,64 @@ fn status_prompt_menu_free(spm: *StatusPromptMenu) void {
     for (spm.list) |item| xm.allocator.free(item);
     xm.allocator.free(spm.list);
     xm.allocator.destroy(spm);
+}
+
+/// Position and display a completion menu, returning true on success.
+/// On failure the menu and spm are freed.  Shared by both list and window
+/// completion paths.
+fn display_completion_menu(
+    c: *T.Client,
+    menu: *menu_mod.Menu,
+    spm: *StatusPromptMenu,
+    offset: u32,
+    height: u32,
+    lines: u32,
+) bool {
+    const pstate = find_state(c) orelse {
+        menu.deinit();
+        status_prompt_menu_free(spm);
+        return false;
+    };
+
+    var ax: u32 = 0;
+    var aw: u32 = 0;
+    status_mod.status_prompt_area(c, &ax, &aw);
+
+    const sess = c.session orelse {
+        menu.deinit();
+        status_prompt_menu_free(spm);
+        return false;
+    };
+
+    const py: u32 = if (opts.options_get_number(sess.options, "status-position") == 0)
+        lines
+    else
+        c.tty.sy -| (3 + height);
+
+    var px: u32 = offset + utf8.utf8_cstrwidth(pstate.prompt_string) + ax;
+    if (px > 2) px -= 2 else px = 0;
+
+    if (menu_mod.menu_display(
+        menu,
+        menu_mod.MENU_NOMOUSE | menu_mod.MENU_TAB,
+        0,
+        null,
+        px,
+        py,
+        c,
+        0,
+        null,
+        null,
+        null,
+        null,
+        status_prompt_menu_callback,
+        @ptrCast(spm),
+    ) != 0) {
+        menu.deinit();
+        status_prompt_menu_free(spm);
+        return false;
+    }
+    return true;
 }
 
 /// Sort completion list (port of tmux status_prompt_complete_sort).
@@ -1583,19 +1649,37 @@ pub fn status_prompt_complete_session(
 
 /// Complete window targets from a session
 /// (port of tmux status_prompt_complete_window_menu).
-/// Returns the sole match if unique, otherwise null (menu display deferred).
+/// Returns the sole match if unique, otherwise null (menu displayed for
+/// multiple matches).
 pub fn status_prompt_complete_window_menu(
     c: *T.Client,
     s: *T.Session,
     word: []const u8,
+    offset: u32,
     flag: u8,
 ) ?[]u8 {
-    const state = find_state(c) orelse return null;
-    var items = std.ArrayList([]u8).init(xm.allocator);
-    defer {
-        for (items.items) |item| xm.allocator.free(item);
-        items.deinit(xm.allocator);
-    }
+    const pstate = find_state(c) orelse return null;
+
+    const lines = resize_mod.status_line_size(c);
+    if (c.tty.sy <= lines + 2) return null;
+
+    const spm = xm.allocator.create(StatusPromptMenu) catch unreachable;
+    spm.* = .{
+        .c = c,
+        .flag = flag,
+        .start = 0,
+        .size = 0,
+        .list = &.{},
+    };
+
+    var height: u32 = c.tty.sy - lines - 2;
+    if (height > 10) height = 10;
+
+    const menu = menu_mod.menu_create("");
+
+    // Temporary list for callback data and display labels for menu items.
+    var list_buf = std.ArrayList([]u8).init(xm.allocator);
+    defer list_buf.deinit(xm.allocator);
 
     var wl_it = s.windows.valueIterator();
     while (wl_it.next()) |wl_ptr| {
@@ -1606,51 +1690,115 @@ pub fn status_prompt_complete_window_menu(
             if (idx_str.len < word.len or !std.mem.eql(u8, idx_str[0..word.len], word)) continue;
         }
 
-        if (state.prompt_type == .window_target) {
-            items.append(
-                xm.allocator,
-                std.fmt.allocPrint(xm.allocator, "{d}", .{wl.idx}) catch unreachable,
-            ) catch unreachable;
+        // Build display label (with window name) for the menu item,
+        // and the plain target string for the callback list.
+        var display_label: []u8 = undefined;
+        var list_entry: []u8 = undefined;
+        if (pstate.prompt_type == .window_target) {
+            display_label = std.fmt.allocPrint(xm.allocator, "{d} ({s})", .{ wl.idx, wl.window.name }) catch unreachable;
+            list_entry = std.fmt.allocPrint(xm.allocator, "{d}", .{wl.idx}) catch unreachable;
         } else {
-            items.append(
-                xm.allocator,
-                std.fmt.allocPrint(xm.allocator, "{s}:{d}", .{ s.name, wl.idx }) catch unreachable,
-            ) catch unreachable;
+            display_label = std.fmt.allocPrint(xm.allocator, "{s}:{d} ({s})", .{ s.name, wl.idx, wl.window.name }) catch unreachable;
+            list_entry = std.fmt.allocPrint(xm.allocator, "{s}:{d}", .{ s.name, wl.idx }) catch unreachable;
         }
-        if (items.items.len >= 10) break;
+        defer xm.allocator.free(display_label);
+
+        list_buf.append(xm.allocator, list_entry) catch unreachable;
+
+        const size: u32 = @intCast(list_buf.items.len);
+        menu_mod.menu_add_item(menu, .{
+            .name = display_label,
+            .key = '0' + size - 1,
+            .command = null,
+        }, null, c, null);
+
+        if (size >= height) break;
     }
 
-    if (items.items.len == 0) return null;
-    if (items.items.len == 1) {
+    const size: u32 = @intCast(list_buf.items.len);
+    if (size == 0) {
+        menu.deinit();
+        xm.allocator.destroy(spm);
+        return null;
+    }
+    if (size == 1) {
+        menu.deinit();
+        const result = list_buf.items[0];
+        var out: []u8 = undefined;
         if (flag != 0) {
-            const tmp = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ flag, items.items[0] }) catch unreachable;
-            return tmp;
+            out = std.fmt.allocPrint(xm.allocator, "-{c}{s}", .{ flag, result }) catch unreachable;
+            xm.allocator.free(result);
+        } else {
+            out = result;
         }
-        return xm.xstrdup(items.items[0]);
+        xm.allocator.destroy(spm);
+        return out;
     }
+    if (height > size) height = size;
 
-    const const_items = @as([][]const u8, items.items);
-    return status_prompt_complete_prefix(const_items);
+    // Transfer list ownership to spm.  The ArrayList's backing buffer will
+    // be freed by the deferred deinit, but the individual strings are now
+    // owned by spm.list — ArrayList.deinit only frees the pointer array.
+    const owned = xm.allocator.alloc([]u8, size) catch unreachable;
+    @memcpy(owned, list_buf.items[0..size]);
+
+    spm.size = size;
+    spm.list = owned;
+
+    _ = display_completion_menu(c, menu, spm, offset, height, lines);
+    return null;
 }
 
 /// Show the completion list as a popup menu
 /// (port of tmux status_prompt_complete_list_menu).
-/// Returns true if a menu was shown (currently a no-op placeholder since
-/// the zmux menu infrastructure does not yet support arbitrary callbacks).
 pub fn status_prompt_complete_list_menu(
     c: *T.Client,
     list: *std.ArrayList([]const u8),
-    _offset: u32,
-    _flag: u8,
+    offset: u32,
+    flag: u8,
 ) bool {
-    _ = _offset;
-    _ = _flag;
-    if (list.items.len <= 1) return false;
+    const size: u32 = @intCast(list.items.len);
+    if (size <= 1) return false;
 
     const lines = resize_mod.status_line_size(c);
     if (c.tty.sy <= lines + 2) return false;
 
-    return false;
+    // Allocate the callback data, transferring ownership of the list items.
+    const spm = xm.allocator.create(StatusPromptMenu) catch unreachable;
+    spm.* = .{
+        .c = c,
+        .flag = flag,
+        .size = size,
+        .start = 0,
+        .list = undefined,
+    };
+
+    // Copy the string pointers into an owned slice — the ArrayList itself is
+    // the caller's, but we take ownership of the individual strings.
+    const owned = xm.allocator.alloc([]u8, size) catch unreachable;
+    for (list.items, 0..) |item, i| {
+        owned[i] = xm.xstrdup(item);
+    }
+    spm.list = owned;
+
+    // Determine how many items to show (at most 10, capped by terminal height).
+    var height: u32 = c.tty.sy - lines - 2;
+    if (height > 10) height = 10;
+    if (height > size) height = size;
+    spm.start = size - height;
+
+    // Build the menu.
+    const menu = menu_mod.menu_create("");
+    var i: u32 = spm.start;
+    while (i < size) : (i += 1) {
+        menu_mod.menu_add_item(menu, .{
+            .name = spm.list[i],
+            .key = '0' + (i - spm.start),
+            .command = null,
+        }, null, c, null);
+    }
+
+    return display_completion_menu(c, menu, spm, offset, height, lines);
 }
 
 /// Replace completion at cursor (port of tmux status_prompt_replace_complete).
@@ -1698,6 +1846,7 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
 
     var s: []const u8 = undefined;
     var flag: u8 = 0;
+    var adj_offset = offset;
     if (state.prompt_type == .target or state.prompt_type == .window_target) {
         s = word;
         flag = 0;
@@ -1705,12 +1854,12 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
         if (word.len < 2) return null;
         s = word[2..];
         flag = word[1];
+        adj_offset += 2;
     }
 
     if (state.prompt_type == .window_target) {
         const sess = c.session orelse return null;
-        const out = status_prompt_complete_window_menu(c, sess, s, 0);
-        return out;
+        return status_prompt_complete_window_menu(c, sess, s, adj_offset, 0);
     }
 
     const colon_pos = std.mem.indexOfScalar(u8, s, ':');
@@ -1730,7 +1879,7 @@ pub fn status_prompt_complete_full(c: *T.Client, word: []const u8, offset: u32) 
                 break :blk session_mod.session_find(sess_name);
             }
         } orelse return null;
-        return status_prompt_complete_window_menu(c, sess, s[colon + 1 ..], flag);
+        return status_prompt_complete_window_menu(c, sess, s[colon + 1 ..], adj_offset, flag);
     }
 
     return null;

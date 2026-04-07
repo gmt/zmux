@@ -2165,6 +2165,8 @@ pub fn window_copy_common_init(wme: *T.WindowModeEntry) *CopyModeData {
     data.* = .{
         .backing = screen.screen_init(wme.wp.screen.grid.sx, wme.wp.screen.grid.sy, 0),
     };
+    if (opts.options_ready)
+        screen.screen_set_default_cursor(data.backing, opts.global_w_options);
     wme.data = @ptrCast(data);
     return data;
 }

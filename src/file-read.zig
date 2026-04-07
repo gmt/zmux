@@ -23,6 +23,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
+const file_mod = @import("file.zig");
 
 const max_imsg_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(protocol.MsgReadData);
 
@@ -173,6 +174,32 @@ pub fn fail_pending_reads_for_client(client: *T.Client) void {
     }
 }
 
+var client_read_files: T.ClientFiles = undefined;
+var client_read_files_init = false;
+
+fn ensure_client_read_files() void {
+    if (client_read_files_init) return;
+    client_read_files = T.ClientFiles.init(xm.allocator);
+    client_read_files_init = true;
+}
+
+const set_nonblocking = file_mod.setNonblocking;
+
+fn client_close_read_file(stream: i32) void {
+    if (!client_read_files_init) return;
+    const cf = client_read_files.get(stream) orelse return;
+    if (cf.event) |bev| {
+        c.libevent.bufferevent_free(bev);
+        cf.event = null;
+    }
+    if (cf.fd != -1) {
+        _ = c.posix_sys.close(cf.fd);
+        cf.fd = -1;
+    }
+    _ = client_read_files.remove(stream);
+    file_mod.fileFree(cf);
+}
+
 pub fn client_handle_read_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_streams: bool, close_received: bool) void {
     _ = close_received;
 
@@ -186,7 +213,7 @@ pub fn client_handle_read_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_
     if (msg.fd == -1) {
         const path_z = xm.xm_dupeZ(path);
         defer xm.allocator.free(path_z);
-        fd = c.posix_sys.open(path_z, c.posix_sys.O_RDONLY, @as(c.posix_sys.mode_t, 0));
+        fd = c.posix_sys.open(path_z, c.posix_sys.O_NONBLOCK | c.posix_sys.O_RDONLY, @as(c.posix_sys.mode_t, 0));
     } else if (allow_streams and msg.fd == std.posix.STDIN_FILENO) {
         fd = c.posix_sys.dup(msg.fd);
     } else {
@@ -197,6 +224,28 @@ pub fn client_handle_read_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_
         send_read_done(peer, msg.stream, std.c._errno().*);
         return;
     }
+
+    if (proc_mod.libevent) |base| {
+        ensure_client_read_files();
+        const cf = file_mod.createWithPeer(peer, &client_read_files, msg.stream, null, null);
+        cf.fd = fd;
+
+        set_nonblocking(fd);
+        cf.event = c.libevent.bufferevent_socket_new(base, fd, 0);
+        if (cf.event) |bev| {
+            c.libevent.bufferevent_setcb(
+                bev,
+                file_mod.fileReadCallback,
+                null,
+                file_mod.fileReadErrorCallback,
+                cf,
+            );
+            _ = c.libevent.bufferevent_enable(bev, c.libevent.EV_READ);
+            return;
+        }
+        client_close_read_file(msg.stream);
+    }
+
     defer _ = c.posix_sys.close(fd);
 
     var buf: [4096]u8 = undefined;
@@ -218,34 +267,58 @@ pub fn client_handle_read_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_
 }
 
 pub fn client_handle_read_cancel(imsg_msg: *c.imsg.imsg) void {
-    _ = imsg_msg;
+    if (!client_read_files_init) return;
+
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    if (data_len < @sizeOf(protocol.MsgReadCancel) or imsg_msg.data == null) return;
+
+    const msg_data: *const protocol.MsgReadCancel = @ptrCast(@alignCast(imsg_msg.data.?));
+    client_close_read_file(msg_data.stream);
 }
 
 pub fn reset_for_tests() void {
-    if (!pending_reads_init) {
-        next_stream = 3;
-        return;
+    if (pending_reads_init) {
+        var it = pending_reads.valueIterator();
+        while (it.next()) |pending_ptr| free_pending_read(pending_ptr.*);
+        pending_reads.deinit();
+        pending_reads_init = false;
     }
 
-    var it = pending_reads.valueIterator();
-    while (it.next()) |pending_ptr| free_pending_read(pending_ptr.*);
-    pending_reads.deinit();
-    pending_reads_init = false;
+    if (client_read_files_init) {
+        var streams_to_close = std.ArrayList(i32){};
+        defer streams_to_close.deinit(xm.allocator);
+        var it = client_read_files.keyIterator();
+        while (it.next()) |key| streams_to_close.append(xm.allocator, key.*) catch unreachable;
+        for (streams_to_close.items) |stream| client_close_read_file(stream);
+        client_read_files.deinit();
+        client_read_files_init = false;
+    }
+
     next_stream = 3;
 }
 
 pub fn client_cleanup() void {
-    if (!pending_reads_init) return;
-
-    var it = pending_reads.iterator();
-    var doomed = std.ArrayList(i32){};
-    defer doomed.deinit(xm.allocator);
-    while (it.next()) |entry| {
-        doomed.append(xm.allocator, entry.key_ptr.*) catch unreachable;
+    if (pending_reads_init) {
+        var it = pending_reads.iterator();
+        var doomed = std.ArrayList(i32){};
+        defer doomed.deinit(xm.allocator);
+        while (it.next()) |entry| {
+            doomed.append(xm.allocator, entry.key_ptr.*) catch unreachable;
+        }
+        for (doomed.items) |stream| {
+            const pending = pending_reads.get(stream) orelse continue;
+            finish_pending_read(pending, @intFromEnum(std.posix.E.PIPE));
+        }
     }
-    for (doomed.items) |stream| {
-        const pending = pending_reads.get(stream) orelse continue;
-        finish_pending_read(pending, @intFromEnum(std.posix.E.PIPE));
+
+    if (client_read_files_init) {
+        var streams_to_close = std.ArrayList(i32){};
+        defer streams_to_close.deinit(xm.allocator);
+        var it = client_read_files.keyIterator();
+        while (it.next()) |key| streams_to_close.append(xm.allocator, key.*) catch unreachable;
+        for (streams_to_close.items) |stream| client_close_read_file(stream);
+        client_read_files.deinit();
+        client_read_files_init = false;
     }
 }
 

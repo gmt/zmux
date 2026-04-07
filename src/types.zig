@@ -1526,6 +1526,7 @@ pub const ClientFile = struct {
     stream: i32 = 0,
     path: ?[]u8 = null,
 
+    event: ?*c.libevent.bufferevent = null,
     buffer: std.ArrayList(u8) = .{},
     cb: ClientFileCb = null,
     data: ?*anyopaque = null,

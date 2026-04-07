@@ -39,6 +39,14 @@ pub fn getPath(client: ?*T.Client, file: []const u8) []u8 {
 
 const max_stream_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(i32);
 
+/// Set a file descriptor to non-blocking mode.
+pub fn setNonblocking(fd: i32) void {
+    const flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return;
+    const O_NONBLOCK: c_int = 0x800;
+    _ = std.c.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+}
+
 pub const ReadResult = union(enum) {
     data: []u8,
     err: c_int,
@@ -227,9 +235,8 @@ pub fn clientCleanup() void {
 // ── Ported from tmux file.c ───────────────────────────────────────────────
 //
 // The types and functions below mirror the tmux client_file lifecycle.
-// Callbacks that require libevent bufferevent (file_push, fire_done via
-// event_once, bufferevent read/write callbacks) are stubbed because zmux
-// does not yet integrate libevent's bufferevent layer.
+// File I/O uses libevent bufferevent for async read/write on the client
+// side, matching tmux's file.c implementation.
 
 const log = @import("log.zig");
 const server_client_mod = @import("server-client.zig");
@@ -311,6 +318,10 @@ pub fn fileFree(cf: *ClientFile) void {
     cf.references -|= 1;
     if (cf.references != 0) return;
 
+    if (cf.event) |bev| {
+        c.libevent.bufferevent_free(bev);
+        cf.event = null;
+    }
     cf.buffer.deinit(xm.allocator);
     if (cf.path) |p| xm.allocator.free(p);
 
@@ -519,7 +530,14 @@ pub fn writeLeft(files: *ClientFiles) bool {
     var it = files.valueIterator();
     while (it.next()) |cf_ptr| {
         const cf = cf_ptr.*;
-        if (cf.buffer.items.len != 0) {
+        if (cf.event) |bev| {
+            const output = c.libevent.bufferevent_get_output(bev);
+            const left = if (output != null) c.libevent.evbuffer_get_length(output) else 0;
+            if (left != 0) {
+                log.log_debug("file {d} {d} bytes left", .{ cf.stream, left });
+                return true;
+            }
+        } else if (cf.buffer.items.len != 0) {
             log.log_debug("file {d} {d} bytes left", .{ cf.stream, cf.buffer.items.len });
             return true;
         }
@@ -529,10 +547,18 @@ pub fn writeLeft(files: *ClientFiles) bool {
 
 /// Client file write error callback. (tmux: file_write_error_callback)
 ///
-/// Stub: requires libevent bufferevent.  Logs the error and cleans up
-/// the fd.
-pub fn fileWriteErrorCallback(cf: *ClientFile) void {
+/// Invoked by libevent when a bufferevent write encounters an error.
+/// Frees the bufferevent, closes the fd, and fires the check callback.
+pub export fn fileWriteErrorCallback(_bev: ?*c.libevent.bufferevent, _what: c_short, arg: ?*anyopaque) void {
+    _ = _bev;
+    _ = _what;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
     log.log_debug("write error file {d}", .{cf.stream});
+
+    if (cf.event) |bev| {
+        c.libevent.bufferevent_free(bev);
+        cf.event = null;
+    }
 
     if (cf.fd != -1) {
         _ = c.posix_sys.close(cf.fd);
@@ -544,28 +570,45 @@ pub fn fileWriteErrorCallback(cf: *ClientFile) void {
 
 /// Client file write callback. (tmux: file_write_callback)
 ///
-/// Stub: requires libevent bufferevent.  Fires the check callback and
-/// cleans up when all data has been written.
-pub fn fileWriteCallback(cf: *ClientFile) void {
+/// Invoked by libevent when buffered write data has been flushed to the fd.
+/// Fires the check callback, and if the file is closed and the output buffer
+/// is fully drained, cleans up.
+pub export fn fileWriteCallback(_bev: ?*c.libevent.bufferevent, arg: ?*anyopaque) void {
+    _ = _bev;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
     log.log_debug("write check file {d}", .{cf.stream});
 
     if (cf.cb) |cb| cb(null, null, 0, -1, null, cf.data);
 
-    if (cf.closed and cf.buffer.items.len == 0) {
-        if (cf.fd != -1) {
-            _ = c.posix_sys.close(cf.fd);
-            cf.fd = -1;
+    if (cf.closed) {
+        const output_empty = if (cf.event) |bev| blk: {
+            const output = c.libevent.bufferevent_get_output(bev);
+            break :blk output == null or c.libevent.evbuffer_get_length(output) == 0;
+        } else true;
+
+        if (output_empty) {
+            if (cf.event) |bev| {
+                c.libevent.bufferevent_free(bev);
+                cf.event = null;
+            }
+            if (cf.fd != -1) {
+                _ = c.posix_sys.close(cf.fd);
+                cf.fd = -1;
+            }
+            if (cf.tree) |tree| _ = tree.remove(cf.stream);
+            fileFree(cf);
         }
-        if (cf.tree) |tree| _ = tree.remove(cf.stream);
-        fileFree(cf);
     }
 }
 
 /// Client file read error callback. (tmux: file_read_error_callback)
 ///
-/// Stub: requires libevent bufferevent.  Sends MSG_READ_DONE and cleans
-/// up the fd.
-pub fn fileReadErrorCallback(cf: *ClientFile) void {
+/// Invoked by libevent when a bufferevent read encounters an error or EOF.
+/// Sends MSG_READ_DONE to the peer and cleans up.
+pub export fn fileReadErrorCallback(_bev: ?*c.libevent.bufferevent, _what: c_short, arg: ?*anyopaque) void {
+    _ = _bev;
+    _ = _what;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
     log.log_debug("read error file {d}", .{cf.stream});
 
     if (cf.peer) |peer| {
@@ -576,6 +619,10 @@ pub fn fileReadErrorCallback(cf: *ClientFile) void {
         _ = proc_mod.proc_send(peer, .read_done, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgReadDone));
     }
 
+    if (cf.event) |bev| {
+        c.libevent.bufferevent_free(bev);
+        cf.event = null;
+    }
     if (cf.fd != -1) {
         _ = c.posix_sys.close(cf.fd);
         cf.fd = -1;
@@ -584,36 +631,31 @@ pub fn fileReadErrorCallback(cf: *ClientFile) void {
     fileFree(cf);
 }
 
-/// Read available data from `cf.fd` and send MSG_READ chunks to the peer.
-/// (tmux: file_read_callback)
-pub fn fileReadCallback(cf: *ClientFile) void {
+/// Read available data from the bufferevent input buffer and send MSG_READ
+/// chunks to the peer. (tmux: file_read_callback)
+pub export fn fileReadCallback(_bev: ?*c.libevent.bufferevent, arg: ?*anyopaque) void {
+    _ = _bev;
+    const cf: *ClientFile = @ptrCast(@alignCast(arg orelse return));
     const peer = cf.peer orelse return;
-    if (cf.fd < 0) return;
+    const bev = cf.event orelse return;
 
-    // Single allocation for header + payload, reused across loop iterations.
-    const msg_buf_len = @sizeOf(protocol.MsgReadData) + max_stream_payload;
-    var msg_buf: [msg_buf_len]u8 = undefined;
+    const input = c.libevent.bufferevent_get_input(bev) orelse return;
+
     const header_size = @sizeOf(protocol.MsgReadData);
+    const msg_buf_len = header_size + max_stream_payload;
+    var msg_buf: [msg_buf_len]u8 = undefined;
     const header = protocol.MsgReadData{ .stream = cf.stream };
     @memcpy(msg_buf[0..header_size], std.mem.asBytes(&header));
 
     while (true) {
-        const data_buf = msg_buf[header_size..];
-        const got = c.posix_sys.read(cf.fd, @ptrCast(data_buf.ptr), data_buf.len);
-        if (got < 0) {
-            const errno_value = std.c._errno().*;
-            if (errno_value == @intFromEnum(std.posix.E.INTR)) continue;
-            if (errno_value == @intFromEnum(std.posix.E.AGAIN) or
-                errno_value == @intFromEnum(std.posix.E.WOULDBLOCK)) break;
-            fileReadErrorCallback(cf);
-            return;
-        }
-        if (got == 0) {
-            fileReadErrorCallback(cf);
-            return;
-        }
+        const bsize = c.libevent.evbuffer_get_length(input);
+        if (bsize == 0) break;
+        const chunk_size = @min(bsize, max_stream_payload);
 
-        const chunk: usize = @intCast(got);
+        const removed = c.libevent.evbuffer_remove(input, @ptrCast(&msg_buf[header_size]), @intCast(chunk_size));
+        if (removed <= 0) break;
+        const chunk: usize = @intCast(removed);
+
         log.log_debug("read {d} from file {d}", .{ chunk, cf.stream });
         _ = proc_mod.proc_send(peer, .read, -1, @ptrCast(&msg_buf), header_size + chunk);
     }

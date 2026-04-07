@@ -1737,7 +1737,42 @@ pub fn server_client_check_mouse(cl: *T.Client, event: *T.key_event) T.key_code 
         y >= @as(u32, @intCast(m.statusat)) and
         y < @as(u32, @intCast(m.statusat)) + m.statuslines)
     {
-        where = .status_default;
+        if (status.status_get_range(cl, x, y - @as(u32, @intCast(m.statusat)))) |sr| {
+            switch (sr.type) {
+                .none => return T.KEYC_UNKNOWN,
+                .left => {
+                    log.log_debug("mouse range: left", .{});
+                    where = .status_left;
+                },
+                .right => {
+                    log.log_debug("mouse range: right", .{});
+                    where = .status_right;
+                },
+                .pane => {
+                    _ = win_mod.window_pane_find_by_id(sr.argument) orelse return T.KEYC_UNKNOWN;
+                    m.wp = @intCast(sr.argument);
+                    log.log_debug("mouse range: pane %%{d}", .{m.wp});
+                    where = .status_area;
+                },
+                .window => {
+                    const fwl = sess.winlink_find_by_index(&s.windows, @intCast(sr.argument)) orelse return T.KEYC_UNKNOWN;
+                    m.w = @intCast(fwl.window.id);
+                    log.log_debug("mouse range: window @{d}", .{m.w});
+                    where = .status_area;
+                },
+                .session => {
+                    _ = sess.session_find_by_id(sr.argument) orelse return T.KEYC_UNKNOWN;
+                    m.s = @intCast(sr.argument);
+                    log.log_debug("mouse range: session ${d}", .{m.s});
+                    where = .status_area;
+                },
+                .user => {
+                    where = .status_area;
+                },
+            }
+        } else {
+            where = .status_default;
+        }
     }
 
     if (where == .nowhere) {

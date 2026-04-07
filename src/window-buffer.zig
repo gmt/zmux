@@ -106,6 +106,7 @@ var edit_dispatch_hook: ?*const fn (*T.Client, []const u8) void = null;
 
 pub const window_buffer_mode = T.WindowMode{
     .name = "buffer-mode",
+    .resize = window_buffer_resize,
     .key_table = windowBufferKeyTable,
     .command = windowBufferCommand,
     .close = windowBufferClose,

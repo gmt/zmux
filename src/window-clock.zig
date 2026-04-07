@@ -57,6 +57,7 @@ pub const window_clock_table = [14][5][5]u8{
 
 pub const window_clock_mode = T.WindowMode{
     .name = "clock-mode",
+    .resize = window_clock_resize,
     .key = window_clock_key,
     .close = window_clock_free,
     .get_screen = window_clock_get_screen,

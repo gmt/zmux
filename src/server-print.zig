@@ -34,6 +34,7 @@ const xm = @import("xmalloc.zig");
 
 const server_print_view_mode = T.WindowMode{
     .name = "server-print-view",
+    .resize = server_print_view_resize,
     .key = server_print_view_key,
     .close = server_print_view_close,
     .get_screen = server_print_view_get_screen,
@@ -223,6 +224,10 @@ fn server_print_view_key(
     _ = _key;
     _ = _mouse;
     server_client_close_view_mode(wme.wp);
+}
+
+fn server_print_view_resize(wme: *T.WindowModeEntry, _: u32, _: u32) void {
+    wme.wp.flags |= T.PANE_REDRAW;
 }
 
 fn server_print_view_close(wme: *T.WindowModeEntry) void {

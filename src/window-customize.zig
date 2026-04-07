@@ -74,6 +74,7 @@ const CustomizeModeData = struct {
 
 pub const window_customize_mode = T.WindowMode{
     .name = "options-mode",
+    .resize = window_customize_resize,
     .key = windowCustomizeKey,
     .key_table = windowCustomizeKeyTable,
     .command = windowCustomizeCommand,

@@ -118,6 +118,7 @@ pub const CopyModeData = struct {
 
 pub const window_copy_mode = T.WindowMode{
     .name = "copy-mode",
+    .resize = window_copy_resize,
     .key = copyModeKey,
     .key_table = copyModeKeyTable,
     .command = copyModeCommand,
@@ -2202,6 +2203,7 @@ pub const CmdState = struct {
 
 pub const window_view_mode = T.WindowMode{
     .name = "view-mode",
+    .resize = window_copy_resize,
     .key = copyModeKey,
     .key_table = copyModeKeyTable,
     .command = copyModeCommand,

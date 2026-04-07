@@ -1747,6 +1747,7 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
 
     _ = file_mod.sendPeerStream(peer, 1, payload);
+    tty.client.written += payload.len;
 }
 
 // ── C-name stubs: tmux screen-write / overlay API ─────────────────────────

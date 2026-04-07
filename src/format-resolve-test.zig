@@ -27,9 +27,11 @@ const screen_mod = @import("screen.zig");
 const sess = @import("session.zig");
 const utf8 = @import("utf8.zig");
 const win = @import("window.zig");
+const tty_features = @import("tty-features.zig");
 const xm = @import("xmalloc.zig");
 
 const FormatContext = fmt.FormatContext;
+const format_require_complete = fmt.format_require_complete;
 
 test "lookup_option_value reads server-scoped option from global_options" {
     opts.global_options = opts.options_create(null);
@@ -332,4 +334,89 @@ test "child_context_for_winlink sets window pane and loop_last_flag" {
 
 test "ctx_session returns null for empty FormatContext" {
     try std.testing.expect(null == fmt_resolve.ctx_session(&FormatContext{}));
+}
+
+test "sixel_support returns null without client and reflects term_features" {
+    // Without a client context, sixel_support should return null (not "0").
+    {
+        const ctx = FormatContext{};
+        const result = format_require_complete(xm.allocator, "#{sixel_support}", &ctx);
+        try std.testing.expect(result == null);
+    }
+
+    // With a client that lacks TERM_SIXEL, should return "0".
+    {
+        var client = T.Client{
+            .environ = env_mod.environ_create(),
+            .tty = undefined,
+            .status = .{},
+            .term_features = 0,
+        };
+        defer env_mod.environ_free(client.environ);
+        client.tty = .{ .client = &client };
+
+        const ctx = FormatContext{ .client = &client };
+        const result = format_require_complete(xm.allocator, "#{sixel_support}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("0", result);
+    }
+
+    // With a client that has TERM_SIXEL set, should return "1".
+    {
+        var client = T.Client{
+            .environ = env_mod.environ_create(),
+            .tty = undefined,
+            .status = .{},
+            .term_features = tty_features.TERM_SIXEL,
+        };
+        defer env_mod.environ_free(client.environ);
+        client.tty = .{ .client = &client };
+
+        const ctx = FormatContext{ .client = &client };
+        const result = format_require_complete(xm.allocator, "#{sixel_support}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("1", result);
+    }
+}
+
+test "client_written returns null without client and reflects written field" {
+    // Without a client context, client_written should return null.
+    {
+        const ctx = FormatContext{};
+        const result = format_require_complete(xm.allocator, "#{client_written}", &ctx);
+        try std.testing.expect(result == null);
+    }
+
+    // With a client at default (0 written), should return "0".
+    {
+        var client = T.Client{
+            .environ = env_mod.environ_create(),
+            .tty = undefined,
+            .status = .{},
+        };
+        defer env_mod.environ_free(client.environ);
+        client.tty = .{ .client = &client };
+
+        const ctx = FormatContext{ .client = &client };
+        const result = format_require_complete(xm.allocator, "#{client_written}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("0", result);
+    }
+
+    // With a client that has written bytes, should return the count.
+    {
+        var client = T.Client{
+            .environ = env_mod.environ_create(),
+            .tty = undefined,
+            .status = .{},
+            .written = 42567,
+        };
+        defer env_mod.environ_free(client.environ);
+        client.tty = .{ .client = &client };
+
+        const ctx = FormatContext{ .client = &client };
+        const result = format_require_complete(xm.allocator, "#{client_written}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("42567", result);
+    }
 }

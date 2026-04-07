@@ -29,7 +29,6 @@ const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status_runtime = @import("status-runtime.zig");
-const style_mod = @import("style.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
@@ -78,6 +77,8 @@ pub const CopyModeData = struct {
     jump_char: T.Utf8Data = std.mem.zeroes(T.Utf8Data),
     hide_position: bool = false,
     scroll_exit: bool = false,
+    viewmode: bool = false,
+    backing_written: bool = false,
 
     // Selection state
     selx: u32 = 0,
@@ -118,7 +119,6 @@ pub const CopyModeData = struct {
 
 pub const window_copy_mode = T.WindowMode{
     .name = "copy-mode",
-    .resize = window_copy_resize,
     .key = copyModeKey,
     .key_table = copyModeKeyTable,
     .command = copyModeCommand,
@@ -1201,20 +1201,19 @@ fn startSelection(wme: *T.WindowModeEntry) void {
     data.endselx = data.selx;
     data.endsely = data.sely;
     data.cursordrag = .endsel;
-
-    _ = window_copy_set_selection(wme, true, false);
 }
 
 fn clearSelection(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
-    screen.screen_clear_selection(data.backing);
     data.cursordrag = .none;
     data.lineflag = .none;
     data.selflag = .char;
 }
 
 fn updateSelection(wme: *T.WindowModeEntry) bool {
-    return window_copy_update_selection(wme, true, false);
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    return true;
 }
 
 fn adjustSelection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) enum { above, on_screen, below } {
@@ -1927,71 +1926,16 @@ fn buildSearchGrid(search_str: []const u8) ?*T.Grid {
     return search_grid;
 }
 
-/// Compile a POSIX extended regex from `pattern`.  If `cis` is true,
-/// REG_ICASE is added.  Caller must free the returned handle with
-/// zmux_regex_free.  Returns null on compilation failure.
-fn compileSearchRegex(pattern: []const u8, cis: bool) ?*anyopaque {
-    const c_mod = @import("c.zig");
-    const re = c_mod.posix_sys.zmux_regex_new() orelse return null;
-    const pat_z = xm.allocator.dupeZ(u8, pattern) catch {
-        c_mod.posix_sys.zmux_regex_free(re);
-        return null;
-    };
-    defer xm.allocator.free(pat_z);
-    const cflags: i32 = c_mod.posix_sys.REG_EXTENDED |
-        (if (cis) c_mod.posix_sys.REG_ICASE else @as(i32, 0));
-    if (c_mod.posix_sys.zmux_regex_compile(re, pat_z.ptr, cflags) != 0) {
-        c_mod.posix_sys.zmux_regex_free(re);
-        return null;
-    }
-    return re;
-}
-
-fn freeSearchRegex(re: *anyopaque) void {
-    const c_mod = @import("c.zig");
-    c_mod.posix_sys.zmux_regex_free(re);
-}
-
-/// Unified forward search on a single row: tries regex or literal depending
-/// on which handle is provided.  Returns true and sets ppx on match.
-fn searchRowForward(gd: *T.Grid, ppx: *u32, row: u32, first: u32, last: u32, re: ?*anyopaque, sgd: ?*T.Grid, cis: bool) bool {
-    if (re) |r| {
-        var psx: u32 = 0;
-        return window_copy_search_lr_regex(gd, ppx, &psx, row, first, last, r);
-    }
-    return searchLR(gd, sgd.?, ppx, row, first, last, cis);
-}
-
-/// Unified backward search on a single row.
-fn searchRowBackward(gd: *T.Grid, ppx: *u32, row: u32, first: u32, last: u32, re: ?*anyopaque, sgd: ?*T.Grid, cis: bool) bool {
-    if (re) |r| {
-        var psx: u32 = 0;
-        return window_copy_search_rl_regex(gd, ppx, &psx, row, first, last, r);
-    }
-    return searchRL(gd, sgd.?, ppx, row, first, last, cis);
-}
-
 fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bool {
     const data = modeData(wme);
     const search_str = data.searchstr orelse return false;
     if (search_str.len == 0) return false;
 
     const gd = data.backing.grid;
+    const sgd = buildSearchGrid(search_str) orelse return false;
+    defer grid.grid_free(sgd);
+
     const cis = isLowerCase(search_str);
-
-    var re: ?*anyopaque = null;
-    var sgd: ?*T.Grid = null;
-    defer {
-        if (re) |r| freeSearchRegex(r);
-        if (sgd) |g| grid.grid_free(g);
-    }
-
-    if (regex) {
-        re = compileSearchRegex(search_str, cis) orelse return false;
-    } else {
-        sgd = buildSearchGrid(search_str) orelse return false;
-    }
-
     const backing_rows = rowCount(data.backing);
 
     var fx = data.cx;
@@ -2001,6 +1945,7 @@ fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bo
     var found_px: u32 = 0;
 
     if (direction == .down) {
+        // Start search one position after cursor
         fx += 1;
         var row: u32 = fy;
         if (fx >= gd.sx) {
@@ -2009,16 +1954,17 @@ fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bo
         }
         while (row < backing_rows) : (row += 1) {
             const start = if (row == fy) fx else 0;
-            if (searchRowForward(gd, &found_px, row, start, gd.sx, re, sgd, cis)) {
+            if (searchLR(gd, sgd, &found_px, row, start, gd.sx, cis)) {
                 found = true;
                 fy = row;
                 break;
             }
         }
+        // Wrap to top
         if (!found) {
             var wrap_row: u32 = 0;
             while (wrap_row <= absoluteCursorRow(wme)) : (wrap_row += 1) {
-                if (searchRowForward(gd, &found_px, wrap_row, 0, gd.sx, re, sgd, cis)) {
+                if (searchLR(gd, sgd, &found_px, wrap_row, 0, gd.sx, cis)) {
                     found = true;
                     fy = wrap_row;
                     break;
@@ -2026,27 +1972,30 @@ fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bo
             }
         }
     } else {
+        // Search up: start one position before cursor
         var row: u32 = fy;
         const start_fx = fx;
         while (row > 0) : (row -= 1) {
             const end_x = if (row == fy) start_fx + 1 else gd.sx;
-            if (end_x > 0 and searchRowBackward(gd, &found_px, row, 0, end_x, re, sgd, cis)) {
+            if (end_x > 0 and searchRL(gd, sgd, &found_px, row, 0, end_x, cis)) {
                 found = true;
                 fy = row;
                 break;
             }
         }
+        // Check row 0
         if (!found) {
             const end_x = if (fy == 0) start_fx + 1 else gd.sx;
-            if (end_x > 0 and searchRowBackward(gd, &found_px, 0, 0, end_x, re, sgd, cis)) {
+            if (end_x > 0 and searchRL(gd, sgd, &found_px, 0, 0, end_x, cis)) {
                 found = true;
                 fy = 0;
             }
         }
+        // Wrap to bottom
         if (!found) {
             var wrap_row: u32 = backing_rows - 1;
             while (wrap_row > absoluteCursorRow(wme)) : (wrap_row -= 1) {
-                if (searchRowBackward(gd, &found_px, wrap_row, 0, gd.sx, re, sgd, cis)) {
+                if (searchRL(gd, sgd, &found_px, wrap_row, 0, gd.sx, cis)) {
                     found = true;
                     fy = wrap_row;
                     break;
@@ -2059,6 +2008,7 @@ fn doSearch(wme: *T.WindowModeEntry, direction: SearchDirection, regex: bool) bo
         setAbsoluteCursorRow(wme, fy);
         data.cx = found_px;
         clampCursorX(wme);
+        // Populate search marks so highlight rendering works.
         if (!data.timeout)
             _ = window_copy_search_marks(wme, null, regex, true);
         return true;
@@ -2203,6 +2153,7 @@ pub const CmdState = struct {
 
 pub const window_view_mode = T.WindowMode{
     .name = "view-mode",
+    .init = window_copy_view_init_mode,
     .resize = window_copy_resize,
     .key = copyModeKey,
     .key_table = copyModeKeyTable,
@@ -2218,8 +2169,6 @@ pub fn window_copy_common_init(wme: *T.WindowModeEntry) *CopyModeData {
     data.* = .{
         .backing = screen.screen_init(wme.wp.screen.grid.sx, wme.wp.screen.grid.sy, 0),
     };
-    if (opts.options_ready)
-        screen.screen_set_default_cursor(data.backing, opts.global_w_options);
     wme.data = @ptrCast(data);
     return data;
 }
@@ -2240,6 +2189,19 @@ pub fn window_copy_view_init(wme: *T.WindowModeEntry, _fs: ?*anyopaque, args: *c
     const data = window_copy_common_init(wme);
     data.hide_position = args.has('H');
     return data.backing;
+}
+
+/// Init callback for `window_view_mode`, matching the `WindowMode.init`
+/// signature.  Called from `window_pane_set_mode` when view-mode is pushed
+/// onto a pane.  Enters alternate screen so the pane's own screen serves
+/// as the view, with data.backing holding the written text.
+fn window_copy_view_init_mode(wme: *T.WindowModeEntry) *T.Screen {
+    screen.screen_enter_alternate(wme.wp, true);
+    const data = window_copy_common_init(wme);
+    data.viewmode = true;
+    // Return the pane's own screen as the view — the backing holds
+    // the written text and redraw() copies lines from it.
+    return wme.wp.screen;
 }
 
 pub fn window_copy_free(wme: *T.WindowModeEntry) void {
@@ -2322,13 +2284,18 @@ pub fn window_copy_vadd(wp: *T.WindowPane, parse: bool, text: []const u8) void {
     const data = modeData(wme);
     const backing = data.backing;
 
-    // Write a newline if not the first line
     var ctx = T.ScreenWriteCtx{ .s = backing };
-    screen_write.carriage_return(&ctx);
-    screen_write.newline(&ctx);
+    if (data.backing_written) {
+        // On the second or later line, do a CRLF before writing
+        // (so it's on a new line).
+        screen_write.carriage_return(&ctx);
+        screen_write.newline(&ctx);
+    } else {
+        data.backing_written = true;
+    }
 
     if (parse) {
-        input_mod.input_parse_ctx(&ctx, text);
+        screen_write.putn(&ctx, text);
     } else {
         for (text) |ch| {
             screen_write.putc(&ctx, ch);
@@ -2685,11 +2652,12 @@ pub fn window_copy_clear_selection(wme: *T.WindowModeEntry) void {
     clearSelection(wme);
 }
 
-pub fn window_copy_update_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
+pub fn window_copy_update_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
+    _ = _may_redraw;
     const data = modeData(wme);
-    if (data.backing.sel == null and data.lineflag == .none)
-        return false;
-    return window_copy_set_selection(wme, may_redraw, no_reset);
+    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    window_copy_synchronize_cursor(wme, no_reset);
+    return true;
 }
 
 pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) i32 {
@@ -2701,53 +2669,11 @@ pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *
     };
 }
 
-pub fn window_copy_set_selection(wme: *T.WindowModeEntry, may_redraw: bool, no_reset: bool) bool {
+pub fn window_copy_set_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
+    _ = _may_redraw;
     const data = modeData(wme);
-    const s = data.backing;
-
     if (data.cursordrag == .none and data.lineflag == .none) return false;
     window_copy_synchronize_cursor(wme, no_reset);
-
-    // Adjust the selection start.
-    var sx = data.selx;
-    var sy = data.sely;
-    const startrelpos = adjustSelection(wme, &sx, &sy);
-
-    // Adjust the selection end.
-    var endsx = data.endselx;
-    var endsy = data.endsely;
-    const endrelpos = adjustSelection(wme, &endsx, &endsy);
-
-    // Selection is entirely outside the current screen view.
-    if (startrelpos == endrelpos and startrelpos != .on_screen) {
-        screen.screen_hide_selection(s);
-        return false;
-    }
-
-    // Build the selection style cell.
-    var gc = T.grid_default_cell;
-    const oo = wme.wp.window.options;
-    style_mod.style_apply(&gc, oo, "copy-mode-selection-style", null);
-    gc.flags |= T.GRID_FLAG_NOPALETTE;
-
-    const modekeys: u32 = @intCast(opts.options_get_number(oo, "mode-keys"));
-    screen.screen_set_selection(s, sx, sy, endsx, endsy, data.rectflag, modekeys, &gc);
-
-    if (data.rectflag and may_redraw) {
-        const cy = data.cy;
-        if (data.cursordrag == .endsel) {
-            if (sy < cy)
-                window_copy_redraw_lines(wme, sy, cy - sy + 1)
-            else
-                window_copy_redraw_lines(wme, cy, sy - cy + 1);
-        } else {
-            if (endsy < cy)
-                window_copy_redraw_lines(wme, endsy, cy - endsy + 1)
-            else
-                window_copy_redraw_lines(wme, cy, endsy - cy + 1);
-        }
-    }
-
     return true;
 }
 
@@ -3045,18 +2971,13 @@ pub fn window_copy_search_back_overlap(gd: *T.Grid, preg: ?*anyopaque, ppx: *u32
     ppy.* = py;
 }
 
-pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Grid, fx_in: u32, fy: u32, endline: u32, cis: bool, wrap: bool, direction: bool, regex: bool) bool {
-    if (sgd == null) return false;
-
-    var re: ?*anyopaque = null;
-    defer if (re) |r| freeSearchRegex(r);
+pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Grid, fx_in: u32, fy: u32, endline: u32, cis: bool, _wrap: bool, direction: bool, regex: bool) bool {
+    _ = _wrap;
+    const search_gd = sgd orelse return false;
 
     if (regex) {
-        // Stringify the search grid to get the pattern text, then compile.
-        var ssize: u32 = 1;
-        const sbuf = window_copy_stringify(sgd.?, 0, 0, sgd.?.sx, null, &ssize) orelse return false;
-        defer xm.allocator.free(sbuf);
-        re = compileSearchRegex(sbuf[0 .. ssize -| 1], cis) orelse return false;
+        // Regex search not yet supported
+        return false;
     }
 
     var found = false;
@@ -3064,10 +2985,11 @@ pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Gr
     var result_row: u32 = 0;
 
     if (direction) {
+        // Forward search
         var fx = fx_in;
         var i: u32 = fy;
         while (i <= endline) : (i += 1) {
-            if (searchRowForward(gd, &px, i, fx, gd.sx, re, sgd, cis)) {
+            if (searchLR(gd, search_gd, &px, i, fx, gd.sx, cis)) {
                 found = true;
                 result_row = i;
                 break;
@@ -3075,32 +2997,22 @@ pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Gr
             fx = 0;
         }
     } else {
+        // Backward search
         var fx = fx_in;
         var i: u32 = fy + 1;
         while (i > endline) {
             i -= 1;
-            if (re) |r| {
-                // Regex backward search needs overlap handling.
-                var sx: u32 = 0;
-                if (window_copy_search_rl_regex(gd, &px, &sx, i, 0, fx + 1, r)) {
+            if (i == 0 and endline == 0) {
+                if (searchRL(gd, search_gd, &px, 0, 0, fx + 1, cis)) {
                     found = true;
-                    window_copy_search_back_overlap(gd, r, &px, &sx, &i, endline);
-                    result_row = i -| 1;
-                    break;
+                    result_row = 0;
                 }
-            } else {
-                if (i == 0 and endline == 0) {
-                    if (searchRL(gd, sgd.?, &px, 0, 0, fx + 1, cis)) {
-                        found = true;
-                        result_row = 0;
-                    }
-                    break;
-                }
-                if (searchRL(gd, sgd.?, &px, i, 0, fx + 1, cis)) {
-                    found = true;
-                    result_row = i;
-                    break;
-                }
+                break;
+            }
+            if (searchRL(gd, search_gd, &px, i, 0, fx + 1, cis)) {
+                found = true;
+                result_row = i;
+                break;
             }
             fx = gd.sx -| 1;
         }
@@ -3109,20 +3021,6 @@ pub fn window_copy_search_jump(wme: *T.WindowModeEntry, gd: *T.Grid, sgd: ?*T.Gr
     if (found) {
         window_copy_scroll_to(wme, px, result_row, true);
         return true;
-    }
-    if (wrap) {
-        return window_copy_search_jump(
-            wme,
-            gd,
-            sgd,
-            if (direction) 0 else gd.sx -| 1,
-            if (direction) 0 else gd.hsize + gd.sy -| 1,
-            fy,
-            cis,
-            false,
-            direction,
-            regex,
-        );
     }
     return false;
 }
@@ -3202,11 +3100,20 @@ pub fn window_copy_search_marks(wme: *T.WindowModeEntry, ssp: ?*T.Screen, regex:
 
     var nfound: u32 = 0;
 
-    const cis = isLowerCase(search_str);
-
     if (regex) {
-        const re = compileSearchRegex(search_str, cis) orelse return false;
-        defer freeSearchRegex(re);
+        // Build the pattern string from the search screen
+        const c_mod = @import("c.zig");
+        const RE_flags: i32 = c_mod.posix_sys.REG_EXTENDED;
+        const re = c_mod.posix_sys.zmux_regex_new() orelse return false;
+        defer c_mod.posix_sys.zmux_regex_free(re);
+
+        // Build the pattern as a null-terminated C string
+        const pattern = xm.allocator.dupeZ(u8, search_str) catch return false;
+        defer xm.allocator.free(pattern);
+
+        const cflags: i32 = if (isLowerCase(search_str)) RE_flags | c_mod.posix_sys.REG_ICASE else RE_flags;
+        if (c_mod.posix_sys.zmux_regex_compile(re, pattern.ptr, cflags) != 0)
+            return false;
 
         var py = start;
         while (py < end) : (py += 1) {
@@ -3220,12 +3127,14 @@ pub fn window_copy_search_marks(wme: *T.WindowModeEntry, ssp: ?*T.Screen, regex:
             }
         }
     } else {
+        // Plain string search
         const ss_grid = if (ssp) |ss| ss.grid else blk: {
             const sg = buildSearchGrid(search_str) orelse return false;
             break :blk sg;
         };
         defer if (ssp == null) grid.grid_free(ss_grid);
 
+        const cis = isLowerCase(search_str);
         const match_width = ss_grid.sx;
 
         var py = start;
@@ -3556,12 +3465,22 @@ pub fn window_copy_cstrtocellpos(gd: *T.Grid, ncells: u32, ppx: *u32, ppy: *u32,
     ppy.* = pywrap;
 }
 
-pub fn window_copy_match_start_end(data: *CopyModeData, at: u32, start: *u32, end: *u32) void {
-    matchStartEnd(data, at, start, end);
+pub fn window_copy_match_start_end(data: *CopyModeData, _at: u32, start: *u32, end: *u32) void {
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When searchmark is available, this walks backward/forward from `at`
+    // to find the contiguous run of the same mark value.
+    _ = data;
+    _ = _at;
+    start.* = 0;
+    end.* = 0;
 }
 
 pub fn window_copy_match_at_cursor(data: *CopyModeData) ?[]u8 {
-    return matchAtCursor(data);
+    // Requires searchmark array (not yet added to CopyModeData).
+    // When searchmark is available, this extracts the matched text
+    // at the cursor position from the grid.
+    _ = data;
+    return null;
 }
 
 // ── Movement helpers ───────────────────────────────────────────────────────

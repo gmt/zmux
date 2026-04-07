@@ -891,6 +891,7 @@ pub const PANE_UNSEENCHANGES: u32 = 0x4000;
 
 pub const WindowMode = struct {
     name: []const u8 = "",
+    init: ?*const fn (*WindowModeEntry) *Screen = null,
     update: ?*const fn (*WindowModeEntry) void = null,
     resize: ?*const fn (*WindowModeEntry, u32, u32) void = null,
     key: ?*const fn (*WindowModeEntry, ?*Client, *Session, *Winlink, key_code, ?*const MouseEvent) void = null,

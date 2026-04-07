@@ -1494,7 +1494,11 @@ pub fn window_pane_set_mode(
         .prefix = 1,
     };
     wp.modes.insert(xm.allocator, 0, wme) catch unreachable;
-    wp.screen = if (wme.mode.get_screen) |gs| gs(wme) else &wp.base;
+    if (wme.mode.init) |init_fn| {
+        wp.screen = init_fn(wme);
+    } else {
+        wp.screen = if (wme.mode.get_screen) |gs| gs(wme) else &wp.base;
+    }
 
     wp.flags |= T.PANE_REDRAW | T.PANE_CHANGED;
     notify.notify_pane("pane-mode-changed", wp);

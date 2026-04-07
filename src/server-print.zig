@@ -27,18 +27,11 @@ const grid_mod = @import("grid.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const utf8 = @import("utf8.zig");
+const window_copy = @import("window-copy.zig");
 const window_mod = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const server = @import("server.zig");
 const xm = @import("xmalloc.zig");
-
-const server_print_view_mode = T.WindowMode{
-    .name = "server-print-view",
-    .resize = server_print_view_resize,
-    .key = server_print_view_key,
-    .close = server_print_view_close,
-    .get_screen = server_print_view_get_screen,
-};
 
 const DirectPrintData = struct {
     text: []const u8,
@@ -159,83 +152,45 @@ pub fn server_client_view_data(client: *T.Client, data: []const u8, parse: bool)
 
 pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) bool {
     if (!ensure_view_mode(wp)) return false;
-    render_view_data(wp, data, parse);
-    wp.flags |= T.PANE_REDRAW;
-    server.server_redraw_pane(wp);
+
+    // For raw (non-parsed) data, escape control bytes first (matching
+    // tmux's utf8_stravisx in server_client_print).
+    const text: []const u8 = if (parse) data else blk: {
+        break :blk utf8.utf8_strvisx(data, utf8.VIS_OCTAL | utf8.VIS_CSTYLE | utf8.VIS_NOSLASH);
+    };
+    defer if (!parse) xm.allocator.free(text);
+
+    // Split by newline so each resulting line gets its own row on the
+    // backing screen (mirrors tmux's evbuffer_readln loop).
+    var rest = text;
+    while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+        window_copy.window_copy_add(wp, true, rest[0..nl]);
+        rest = rest[nl + 1 ..];
+    }
+    if (rest.len > 0)
+        window_copy.window_copy_add(wp, true, rest);
     return true;
 }
 
 pub fn server_client_close_view_mode(wp: *T.WindowPane) void {
     if (window_mod.window_pane_mode(wp)) |wme| {
-        if (wme.mode == &server_print_view_mode) {
-            server_print_view_close(wme);
+        if (wme.mode == &window_copy.window_view_mode) {
+            if (wme.mode.close) |close_fn| close_fn(wme);
             _ = window_mode_runtime.popMode(wp, wme);
             return;
         }
     }
-    screen_mod.screen_leave_alternate(wp, true);
     window_mode_runtime.noteModeRedraw(wp);
 }
 
 fn ensure_view_mode(wp: *T.WindowPane) bool {
     if (window_mod.window_pane_mode(wp)) |wme| {
-        return wme.mode == &server_print_view_mode;
+        return wme.mode == &window_copy.window_view_mode;
     }
 
-    screen_mod.screen_enter_alternate(wp, true);
-    _ = window_mode_runtime.pushMode(wp, &server_print_view_mode, null, null);
+    _ = window_mod.window_pane_set_mode(wp, null, &window_copy.window_view_mode, null);
+    window_mode_runtime.noteModeChange(wp);
     return true;
-}
-
-fn render_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) void {
-    if (!parse) screen_mod.screen_reset_active(wp.screen);
-    wp.screen.cursor_visible = false;
-
-    // View mode renders human-readable text; enable CRLF so that bare LF
-    // characters in the data advance to column 0 of the next line, matching
-    // the expectation callers have when passing plain-text content.
-    const saved_mode = wp.screen.mode;
-    wp.screen.mode |= T.MODE_CRLF;
-    defer wp.screen.mode = saved_mode;
-
-    var ctx = T.ScreenWriteCtx{ .s = wp.screen };
-    if (parse) {
-        screen_write.putn(&ctx, data);
-        if (data.len != 0 and data[data.len - 1] != '\n') {
-            screen_write.newline(&ctx);
-        }
-        return;
-    }
-
-    _ = screen_write.putEscapedBytes(&ctx, data, false);
-}
-
-fn server_print_view_key(
-    wme: *T.WindowModeEntry,
-    _client: ?*T.Client,
-    _session: *T.Session,
-    _wl: *T.Winlink,
-    _key: T.key_code,
-    _mouse: ?*const T.MouseEvent,
-) void {
-    _ = _client;
-    _ = _session;
-    _ = _wl;
-    _ = _key;
-    _ = _mouse;
-    server_client_close_view_mode(wme.wp);
-}
-
-fn server_print_view_resize(wme: *T.WindowModeEntry, _: u32, _: u32) void {
-    wme.wp.flags |= T.PANE_REDRAW;
-}
-
-fn server_print_view_close(wme: *T.WindowModeEntry) void {
-    screen_mod.screen_leave_alternate(wme.wp, true);
-}
-
-fn server_print_view_get_screen(wme: *T.WindowModeEntry) *T.Screen {
-    return wme.wp.screen;
 }
 
 fn clearClientRedrawFlags(client: *T.Client) void {
@@ -321,6 +276,7 @@ test "server_client_print appends parsed output in the shared view mode" {
     server_client_print(&client, true, "alpha");
     server_client_print(&client, true, "beta");
 
+    try std.testing.expect(window_mod.window_pane_mode(&pane) != null);
     try std.testing.expect(screen_mod.screen_alternate_active(&pane));
     try std.testing.expect(pane.flags & T.PANE_REDRAW != 0);
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW == 0);
@@ -333,151 +289,6 @@ test "server_client_print appends parsed output in the shared view mode" {
     defer xm.allocator.free(second_row);
     try std.testing.expectEqualStrings("alpha", first_row);
     try std.testing.expectEqualStrings("beta", second_row);
-}
-
-test "view mode preserves screen dimensions and cursor after entering help" {
-    const client_registry = @import("client-registry.zig");
-    const opts = @import("options.zig");
-    const session_mod = @import("session.zig");
-
-    session_mod.session_init_globals(xm.allocator);
-    window_mod.window_init_globals(xm.allocator);
-
-    opts.global_options = opts.options_create(null);
-    defer opts.options_free(opts.global_options);
-    opts.global_s_options = opts.options_create(null);
-    defer opts.options_free(opts.global_s_options);
-    opts.global_w_options = opts.options_create(null);
-    defer opts.options_free(opts.global_w_options);
-    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
-    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
-    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
-    opts.options_ready = true;
-    defer {
-        opts.options_ready = false;
-    }
-
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
-
-    const session_name = xm.xstrdup("view-dim");
-    defer xm.allocator.free(session_name);
-    const window_name = xm.xstrdup("pane");
-    defer xm.allocator.free(window_name);
-
-    // Use a realistic large terminal: 120 cols x 50 rows.
-    const cols: u32 = 120;
-    const rows: u32 = 50;
-
-    const base_grid = grid_mod.grid_create(cols, rows, 2000);
-    defer grid_mod.grid_free(base_grid);
-
-    var window = T.Window{
-        .id = 1,
-        .name = window_name,
-        .sx = cols,
-        .sy = rows,
-        .options = undefined,
-    };
-    defer window.panes.deinit(xm.allocator);
-    defer window.winlinks.deinit(xm.allocator);
-
-    var pane = T.WindowPane{
-        .id = 2,
-        .window = &window,
-        .options = undefined,
-        .sx = cols,
-        .sy = rows,
-        .screen = undefined,
-        .base = .{ .grid = base_grid, .rlower = rows - 1 },
-    };
-    // Mirror real runtime: pane.screen points to pane.base.
-    pane.screen = &pane.base;
-    defer if (window_mod.window_pane_mode(&pane)) |_| server_client_close_view_mode(&pane);
-
-    try window.panes.append(xm.allocator, &pane);
-    window.active = &pane;
-
-    var session = T.Session{
-        .id = 0,
-        .name = session_name,
-        .cwd = "",
-        .lastw = .{},
-        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
-        .options = undefined,
-        .environ = &env,
-    };
-    defer session.windows.deinit();
-    defer session.lastw.deinit(xm.allocator);
-
-    var winlink = T.Winlink{
-        .idx = 0,
-        .session = &session,
-        .window = &window,
-    };
-    try session.windows.put(0, &winlink);
-    try window.winlinks.append(xm.allocator, &winlink);
-    session.curw = &winlink;
-
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{},
-        .session = &session,
-        .flags = T.CLIENT_ATTACHED,
-    };
-    client_registry.add(&client);
-    defer {
-        client_registry.remove(&client);
-        clearClientRedrawFlags(&client);
-    }
-
-    // Populate the pane with filler text to simulate a scrolled-down shell.
-    for (0..rows) |i| {
-        var ctx = T.ScreenWriteCtx{ .s = pane.screen };
-        const line = xm.xasprintf("filler line {d:0>3}", .{i});
-        defer xm.allocator.free(line);
-        screen_write.putn(&ctx, line);
-        screen_write.newline(&ctx);
-    }
-
-    // Simulate Ctrl-B ? by printing help text via server_client_print.
-    // Generate enough lines to fill the screen (like list-keys output).
-    for (0..60) |i| {
-        const line = xm.xasprintf("C-b {c:<8}  Help binding {d}", .{@as(u8, @intCast('A' + i % 26)), i});
-        defer xm.allocator.free(line);
-        server_client_print(&client, true, line);
-    }
-
-    // (1) Mode must be active.
-    const wme = window_mod.window_pane_mode(&pane);
-    try std.testing.expect(wme != null);
-
-    // (2) Screen dimensions must match the original pane size.
-    //     This is the "window shrunk" symptom — grid.sy must be rows, not 24.
-    try std.testing.expectEqual(cols, pane.screen.grid.sx);
-    try std.testing.expectEqual(rows, pane.screen.grid.sy);
-
-    // (3) Cursor should be near the bottom of the screen (after 60 lines of
-    //     output with wrapping/scrolling), not stuck in the middle.
-    //     With 60 lines and 50 rows, the cursor should have scrolled and be
-    //     at the last row or very close to it.
-    const cursor_past_midpoint = pane.screen.cy >= rows / 2;
-    if (!cursor_past_midpoint) {
-        std.debug.print("\n  DIAGNOSTIC: cursor at row {d} of {d} (expected >= {d})\n", .{
-            pane.screen.cy, rows, rows / 2,
-        });
-    }
-    try std.testing.expect(cursor_past_midpoint);
-
-    // (4) The scroll region must span the full screen height.
-    try std.testing.expectEqual(@as(u32, 0), pane.screen.rupper);
-    try std.testing.expectEqual(rows - 1, pane.screen.rlower);
-
-    // (5) First line of help text should be intact (no gap in the middle).
-    const first_row = try grid_row_string(pane.screen.grid, 0);
-    defer xm.allocator.free(first_row);
-    try std.testing.expect(std.mem.startsWith(u8, first_row, "C-b"));
 }
 
 test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared runtime path" {

@@ -1842,15 +1842,11 @@ pub fn puts(ctx: *T.ScreenWriteCtx, gcp: *const T.GridCell, str: []const u8) voi
 }
 
 pub fn screen_write_alternateon(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, cursor: i32) void {
-    _ = gc;
-    if (ctx.wp) |wp|
-        screen_mod.screen_enter_alternate(wp, cursor != 0);
+    screen_mod.screen_alternate_on(ctx.s, gc, cursor != 0);
 }
 
 pub fn screen_write_alternateoff(ctx: *T.ScreenWriteCtx, gc: *T.GridCell, cursor: i32) void {
-    _ = gc;
-    if (ctx.wp) |wp|
-        screen_mod.screen_leave_alternate(wp, cursor != 0);
+    screen_mod.screen_alternate_off(ctx.s, gc, cursor != 0);
 }
 
 pub fn screen_write_menu(

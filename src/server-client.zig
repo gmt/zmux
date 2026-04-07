@@ -1114,6 +1114,7 @@ pub fn server_client_set_key_table(cl: *T.Client, name: ?[]const u8) void {
         cl.key_table_name = null;
     }
     if (name) |new_name| cl.key_table_name = xm.xstrdup(new_name);
+    cl.key_table_activity_time = std.time.milliTimestamp();
 }
 
 pub fn server_client_get_cwd(cl: ?*T.Client, s: ?*T.Session) []const u8 {
@@ -2377,9 +2378,9 @@ pub fn server_client_is_assume_paste(cl: *T.Client) bool {
 
 pub fn server_client_key_table_activity_diff(cl: *T.Client) u64 {
     // Milliseconds between client activity and key table activity.
+    // Mirrors tmux: timersub(&c->activity_time, &c->keytable->activity_time, &diff)
     const c_ms: u64 = @intCast(@max(cl.activity_time, 0));
-    const kt = key_bindings.key_bindings_get_table(cl.keytable_name orelse "root");
-    const kt_ms: u64 = if (kt) |t| @intCast(@max(t.activity_time, 0)) else 0;
+    const kt_ms: u64 = @intCast(@max(cl.key_table_activity_time, 0));
     return if (c_ms >= kt_ms) c_ms - kt_ms else 0;
 }
 

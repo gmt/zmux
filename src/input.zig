@@ -685,7 +685,8 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_type: OscEndType) void 
             wp.palette.bg = 8;
         },
         112 => {
-            // OSC 112 — reset cursor colour (stub)
+            // OSC 112 — reset cursor colour
+            screen_mod.screen_set_cursor_colour(screen_mod.screen_current(wp), -1);
         },
         133 => {
             // OSC 133 ; marker — semantic prompt markers A/B/C/D (stub)
@@ -799,7 +800,13 @@ fn apply_osc_12(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
         input_osc_colour_reply(wp, true, 12, 0, c, end_type);
         return;
     }
-    // Set cursor colour — stub (would need colour_parseX11)
+    const c = colour_mod.colour_parseX11(value);
+    if (c == -1) {
+        log.log_debug("bad OSC 12: {s}", .{value});
+        return;
+    }
+    const current = screen_mod.screen_current(wp);
+    screen_mod.screen_set_cursor_colour(current, c);
 }
 
 /// Handle OSC 52 — clipboard access.
@@ -1529,42 +1536,10 @@ fn apply_decscusr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
     // 5 = blinking bar, 6 = steady bar.
     const style = first_param(params, 0);
     const s = ctx.s;
-    switch (style) {
-        0 => {
-            s.cstyle = .default;
-            s.mode &= ~T.MODE_CURSOR_BLINKING_SET;
-        },
-        1 => {
-            s.cstyle = .block;
-            s.mode |= T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        2 => {
-            s.cstyle = .block;
-            s.mode &= ~T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        3 => {
-            s.cstyle = .underline;
-            s.mode |= T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        4 => {
-            s.cstyle = .underline;
-            s.mode &= ~T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        5 => {
-            s.cstyle = .bar;
-            s.mode |= T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        6 => {
-            s.cstyle = .bar;
-            s.mode &= ~T.MODE_CURSOR_BLINKING;
-            s.mode |= T.MODE_CURSOR_BLINKING_SET;
-        },
-        else => {},
+    screen_mod.screen_set_cursor_style(style, &s.cstyle, &s.mode);
+    if (style == 0) {
+        // Go back to default blinking state.
+        screen_write.mode_clear(ctx, T.MODE_CURSOR_BLINKING_SET);
     }
 }
 
@@ -2556,7 +2531,7 @@ test "input swallows OSC 10/11/12 colour sequences" {
     input_parse_screen(wp, "\x1b]10;#aabbcc\x07");
     // OSC 11 — set background colour (swallow)
     input_parse_screen(wp, "\x1b]11;#112233\x07");
-    // OSC 12 — set cursor colour (swallow)
+    // OSC 12 — set cursor colour
     input_parse_screen(wp, "\x1b]12;#ddeeff\x07");
     // Verify normal operation continues
     input_parse_screen(wp, "XY");
@@ -2626,7 +2601,7 @@ test "input swallows OSC 110/111/112 colour resets" {
     input_parse_screen(wp, "\x1b]110\x07");
     // OSC 111 — reset background (swallow)
     input_parse_screen(wp, "\x1b]111\x07");
-    // OSC 112 — reset cursor colour (swallow)
+    // OSC 112 — reset cursor colour
     input_parse_screen(wp, "\x1b]112\x07");
     // Verify normal operation continues
     input_parse_screen(wp, "CD");

@@ -701,9 +701,10 @@ fn redraw(wme: *T.WindowModeEntry) void {
     const rows = viewRows(wme.wp);
     const width = @min(backing.grid.sx, view.grid.sx);
     var row: u32 = 0;
+    const total_backing_rows = backing.grid.hsize + backing.grid.sy;
     while (row < rows) : (row += 1) {
         const backing_row = data.top + row;
-        if (backing_row >= backing.grid.sy) break;
+        if (backing_row >= total_backing_rows) break;
         copyLine(view.grid, row, backing.grid, backing_row, width);
     }
 
@@ -972,17 +973,17 @@ fn viewRows(wp: *const T.WindowPane) u32 {
 }
 
 fn rowCount(s: *const T.Screen) u32 {
-    return s.grid.sy;
+    return s.grid.hsize + s.grid.sy;
 }
 
 fn backingLineLength(wme: *T.WindowModeEntry, row: u32) u32 {
     const data = modeData(wme);
-    if (row >= data.backing.grid.sy) return 0;
+    if (row >= data.backing.grid.hsize + data.backing.grid.sy) return 0;
     return grid.line_length(data.backing.grid, row);
 }
 
 fn maxTop(backing: *const T.Screen, wp: *const T.WindowPane) u32 {
-    const rows = backing.grid.sy;
+    const rows = backing.grid.hsize + backing.grid.sy;
     const view = viewRows(wp);
     return if (rows > view) rows - view else 0;
 }
@@ -2196,12 +2197,22 @@ pub fn window_copy_view_init(wme: *T.WindowModeEntry, _fs: ?*anyopaque, args: *c
 /// onto a pane.  Enters alternate screen so the pane's own screen serves
 /// as the view, with data.backing holding the written text.
 fn window_copy_view_init_mode(wme: *T.WindowModeEntry) *T.Screen {
-    screen.screen_enter_alternate(wme.wp, true);
-    const data = window_copy_common_init(wme);
+    const wp = wme.wp;
+    const sx = wp.screen.grid.sx;
+    const sy = wp.screen.grid.sy;
+
+    screen.screen_enter_alternate(wp, true);
+
+    const data = xm.allocator.create(CopyModeData) catch unreachable;
+    data.* = .{
+        // Unlimited history so window_copy_add content is never lost
+        // and PgDn/PgUp scrolling works across all output.
+        .backing = screen.screen_init(sx, sy, std.math.maxInt(u32)),
+    };
     data.viewmode = true;
-    // Return the pane's own screen as the view — the backing holds
-    // the written text and redraw() copies lines from it.
-    return wme.wp.screen;
+    wme.data = @ptrCast(data);
+
+    return wp.screen;
 }
 
 pub fn window_copy_free(wme: *T.WindowModeEntry) void {

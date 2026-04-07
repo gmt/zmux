@@ -28,6 +28,7 @@ const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const image_mod = @import("image.zig");
 const sixel = @import("image-sixel.zig");
+const log = @import("log.zig");
 
 pub fn putc(ctx: *T.ScreenWriteCtx, ch: u8) void {
     const glyph = utf8.Glyph.fromAscii(ch);
@@ -685,11 +686,15 @@ pub fn reverseindex(ctx: *T.ScreenWriteCtx) void {
 /// Set mode bits on the screen (screen_write_mode_set).
 pub fn mode_set(ctx: *T.ScreenWriteCtx, mode: i32) void {
     ctx.s.mode |= mode;
+    if (log.log_get_level() != 0)
+        log.log_debug("screen_write_mode_set: {s}", .{screen_mod.screen_mode_to_string(mode)});
 }
 
 /// Clear mode bits on the screen (screen_write_mode_clear).
 pub fn mode_clear(ctx: *T.ScreenWriteCtx, mode: i32) void {
     ctx.s.mode &= ~mode;
+    if (log.log_get_level() != 0)
+        log.log_debug("screen_write_mode_clear: {s}", .{screen_mod.screen_mode_to_string(mode)});
 }
 
 /// VT100 alignment test: fill every cell with 'E' (screen_write_alignmenttest).

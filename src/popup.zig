@@ -939,6 +939,8 @@ fn rebuild_screen(pd: *PopupData) void {
     }
 
     const screen = screen_mod.screen_init(pd.sx, pd.sy, 0);
+    if (opts_mod.options_ready)
+        screen_mod.screen_set_default_cursor(screen, opts_mod.global_w_options);
     screen.cursor_visible = false;
     pd.screen = screen;
 

@@ -440,6 +440,19 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         return true;
     }
 
+    // If the active pane is in a mode that has a .key handler but no
+    // .key_table, dispatch unbound root-table keys to the mode instead
+    // of sending them to the pane PTY.  This covers modes like the
+    // server-print view mode which intercept all keys to exit.
+    if (pane_mode) |wme| {
+        if (wme.mode.key_table == null) {
+            if (wme.mode.key) |mode_key| {
+                mode_key(wme, cl, s, wl, normalize_key(event.key), null);
+                return true;
+            }
+        }
+    }
+
     if (T.keycIsMouse(event.key)) {
         if (target_wp.fd < 0 or target_wp.flags & T.PANE_INPUTOFF != 0) return true;
 
@@ -999,6 +1012,80 @@ test "server_client_handle_key forwards unbound keys to pane" {
     var buf: [8]u8 = undefined;
     const n = try std.posix.read(pipe_fds[0], &buf);
     try std.testing.expectEqualStrings("x", buf[0..n]);
+}
+
+test "server_client_handle_key dispatches to mode .key when mode has no key_table" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+    const server_print = @import("server-print.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+    key_bindings.key_bindings_init();
+
+    const s = sess.session_create(null, "key-viewmode", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("key-viewmode") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&sc, &cause).?;
+    const wp = wl.window.active.?;
+
+    // Wire a pipe so we can detect whether bytes leak to the PTY.
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    wp.fd = pipe_fds[1];
+    defer {
+        if (wp.fd >= 0) std.posix.close(wp.fd);
+        wp.fd = -1;
+    }
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    cl.tty.client = &cl;
+
+    // Enter server-print view mode (has .key but no .key_table).
+    server_print.server_client_print(&cl, true, "hello from view mode");
+    try std.testing.expect(win.window_pane_mode(wp) != null);
+
+    // Send a key that is NOT bound in the root table.
+    var event = T.key_event{ .key = 'j', .data = std.mem.zeroes([16]u8), .len = 1 };
+    event.data[0] = 'j';
+    _ = server_client_handle_key(&cl, &event);
+
+    // The mode's .key handler should have fired (exiting view mode),
+    // NOT sent 'j' to the pane PTY.
+    try std.testing.expect(win.window_pane_mode(wp) == null);
+
+    // Verify nothing was written to the PTY pipe.
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = pipe_fds[0],
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready = try std.posix.poll(&poll_fds, 0);
+    try std.testing.expectEqual(@as(usize, 0), ready);
 }
 
 test "server_client_handle_key records reported client theme before overlays" {

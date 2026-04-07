@@ -1487,6 +1487,7 @@ pub const Client = struct {
     control_all_blocks: std.ArrayListUnmanaged(*ControlBlock) = .{},
     control_pending_count: u32 = 0,
     control_ready_flag: bool = false,
+    control_input_buf: std.ArrayListUnmanaged(u8) = .{},
     pan_window: ?*Window = null,
     pan_ox: u32 = 0,
     pan_oy: u32 = 0,

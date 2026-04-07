@@ -669,7 +669,7 @@ pub fn control_read_callback(cl: *T.Client, line: []const u8) void {
                 err_ptr.* = err;
                 _ = cmdq.cmdq_append_item(
                     cl,
-                    cmdq.cmdq_get_callback2("control-error", control_error_cb, err_ptr, free_control_error_data),
+                    cmdq.cmdq_get_callback2("control-error", control_error_cb, @ptrCast(err_ptr), free_control_error_data),
                 );
             }
         },

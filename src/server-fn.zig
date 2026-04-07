@@ -392,6 +392,32 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
         return true;
     }
 
+    // Check prefix-timeout: if we're in the prefix table and the timeout has
+    // been exceeded, revert to root and fall through to default key handling.
+    // Mirrors tmux: server_client_key_callback prefix-timeout logic.
+    if (!using_mode_table and std.mem.eql(u8, current_table, "prefix")) {
+        const prefix_delay = opts.options_get_number(opts.global_options, "prefix-timeout");
+        if (prefix_delay > 0 and
+            server_client_mod.server_client_key_table_activity_diff(cl) > @as(u64, @intCast(prefix_delay)))
+        {
+            const bd = if (key_bindings.key_bindings_get_table(current_table, false)) |tbl|
+                lookup_binding(tbl, event.key)
+            else
+                null;
+            // If repeating is active and this is a repeating binding, ignore the timeout.
+            if (bd != null and (cl.flags & T.CLIENT_REPEAT != 0) and (bd.?.flags & T.KEY_BINDING_REPEAT != 0)) {
+                log.log_debug("prefix timeout ignored, repeat is active", .{});
+            } else {
+                log.log_debug("prefix timeout exceeded", .{});
+                server_client_mod.server_client_set_key_table(cl, null);
+                cl.flags &= ~@as(u64, T.CLIENT_REPEAT);
+                cl.flags |= T.CLIENT_REDRAWSTATUS;
+                // Fall through to handle the key in the root table.
+                return server_client_handle_key(cl, event);
+            }
+        }
+    }
+
     if (key_bindings.key_bindings_get_table(current_table, false)) |table| {
         if (lookup_binding(table, event.key)) |binding| {
             _ = key_bindings.key_bindings_dispatch(binding, null, cl, event, binding_find_state);

@@ -2145,7 +2145,7 @@ fn resolve_synchronized_output_flag(alloc: std.mem.Allocator, ctx: *const Format
 fn copyModeDataFromCtx(ctx: *const FormatContext) ?*window_copy.CopyModeData {
     const wp = ctx_pane(ctx) orelse return null;
     const wme = window_mod.window_pane_mode(wp) orelse return null;
-    if (wme.mode != &window_copy.window_copy_mode) return null;
+    if (wme.mode != &window_copy.window_copy_mode and wme.mode != &window_copy.window_view_mode) return null;
     return window_copy.modeData(wme);
 }
 

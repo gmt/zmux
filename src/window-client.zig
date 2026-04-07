@@ -73,6 +73,7 @@ const ClientModeData = struct {
 
 pub const window_client_mode = T.WindowMode{
     .name = "client-mode",
+    .resize = window_client_resize,
     .key = clientModeKey,
     .key_table = clientModeKeyTable,
     .command = clientModeCommand,

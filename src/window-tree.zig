@@ -118,6 +118,7 @@ const WindowTreeModeData = struct {
 
 pub const window_tree_mode = T.WindowMode{
     .name = "tree-mode",
+    .resize = window_tree_resize,
     .key = windowTreeKey,
     .key_table = windowTreeKeyTable,
     .command = windowTreeCommand,

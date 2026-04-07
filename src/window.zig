@@ -841,9 +841,8 @@ pub fn window_pane_resize(wp: *T.WindowPane, sx_in: u32, sy_in: u32) void {
     screen_mod.screen_resize(&wp.base, sx, sy, wp.base.saved_grid == null);
 
     if (window_pane_mode(wp)) |wme| {
-        const clock_mod = @import("window-clock.zig");
-        if (wme.mode == &clock_mod.window_clock_mode)
-            clock_mod.window_clock_resize(wme, wp.sx, wp.sy);
+        if (wme.mode.resize) |resize_fn|
+            resize_fn(wme, sx, sy);
     }
 }
 

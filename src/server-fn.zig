@@ -1018,7 +1018,6 @@ test "server_client_handle_key dispatches to mode .key when mode has no key_tabl
     const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");
     const spawn = @import("spawn.zig");
-    const server_print = @import("server-print.zig");
 
     sess.session_init_globals(xm.allocator);
     win.window_init_globals(xm.allocator);
@@ -1065,8 +1064,19 @@ test "server_client_handle_key dispatches to mode .key when mode has no key_tabl
     };
     cl.tty.client = &cl;
 
-    // Enter server-print view mode (has .key but no .key_table).
-    server_print.server_client_print(&cl, true, "hello from view mode");
+    // Push a custom test mode that has .key but no .key_table.
+    var mode_exited = false;
+    const test_mode = T.WindowMode{
+        .name = "test-keyonly-mode",
+        .key = struct {
+            fn key(wme: *T.WindowModeEntry, _: ?*T.Client, _: *T.Session, _: *T.Winlink, _: T.key_code, _: ?*const T.MouseEvent) void {
+                const flag: *bool = @ptrCast(@alignCast(wme.data));
+                flag.* = true;
+            }
+        }.key,
+    };
+    const window_mode_runtime = @import("window-mode-runtime.zig");
+    _ = window_mode_runtime.pushMode(wp, &test_mode, @ptrCast(&mode_exited), null);
     try std.testing.expect(win.window_pane_mode(wp) != null);
 
     // Send a key that is NOT bound in the root table.
@@ -1074,9 +1084,8 @@ test "server_client_handle_key dispatches to mode .key when mode has no key_tabl
     event.data[0] = 'j';
     _ = server_client_handle_key(&cl, &event);
 
-    // The mode's .key handler should have fired (exiting view mode),
-    // NOT sent 'j' to the pane PTY.
-    try std.testing.expect(win.window_pane_mode(wp) == null);
+    // The mode's .key handler should have fired, NOT sent 'j' to the PTY.
+    try std.testing.expect(mode_exited);
 
     // Verify nothing was written to the PTY pipe.
     var poll_fds = [_]std.posix.pollfd{.{
@@ -1086,6 +1095,8 @@ test "server_client_handle_key dispatches to mode .key when mode has no key_tabl
     }};
     const ready = try std.posix.poll(&poll_fds, 0);
     try std.testing.expectEqual(@as(usize, 0), ready);
+
+    _ = window_mode_runtime.popMode(wp, win.window_pane_mode(wp).?);
 }
 
 test "server_client_handle_key records reported client theme before overlays" {

@@ -25,6 +25,7 @@ const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 const build_options = @import("build_options");
+const file_mod = @import("file.zig");
 
 const max_imsg_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(protocol.MsgWriteData);
 
@@ -37,16 +38,12 @@ const PendingWrite = struct {
     flags: c_int,
 };
 
-const ClientWriteTarget = struct {
-    fd: i32,
-};
-
 var next_stream: i32 = 3;
 var pending_writes: std.AutoHashMap(i32, *PendingWrite) = undefined;
 var pending_writes_init = false;
 
-var client_write_targets: std.AutoHashMap(i32, ClientWriteTarget) = undefined;
-var client_write_targets_init = false;
+var client_write_files: T.ClientFiles = undefined;
+var client_write_files_init = false;
 
 fn ensure_pending_writes() void {
     if (pending_writes_init) return;
@@ -54,11 +51,13 @@ fn ensure_pending_writes() void {
     pending_writes_init = true;
 }
 
-fn ensure_client_write_targets() void {
-    if (client_write_targets_init) return;
-    client_write_targets = std.AutoHashMap(i32, ClientWriteTarget).init(xm.allocator);
-    client_write_targets_init = true;
+fn ensure_client_write_files() void {
+    if (client_write_files_init) return;
+    client_write_files = T.ClientFiles.init(xm.allocator);
+    client_write_files_init = true;
 }
+
+const set_nonblocking = file_mod.setNonblocking;
 
 fn write_errno_path(item: *cmdq.CmdqItem, errno_value: c_int, path: []const u8) void {
     const err = std.mem.span(c.posix_sys.strerror(errno_value));
@@ -110,10 +109,19 @@ fn send_pending_write_data(pending: *PendingWrite) void {
     finish_pending_write(pending, null);
 }
 
-fn client_close_write_target(stream: i32) void {
-    const target = client_write_targets.get(stream) orelse return;
-    _ = client_write_targets.remove(stream);
-    _ = c.posix_sys.close(target.fd);
+fn client_close_write_file(stream: i32) void {
+    if (!client_write_files_init) return;
+    const cf = client_write_files.get(stream) orelse return;
+    if (cf.event) |bev| {
+        c.libevent.bufferevent_free(bev);
+        cf.event = null;
+    }
+    if (cf.fd != -1) {
+        _ = c.posix_sys.close(cf.fd);
+        cf.fd = -1;
+    }
+    _ = client_write_files.remove(stream);
+    file_mod.fileFree(cf);
 }
 
 fn client_parse_write_path(data_len: usize, data_ptr: *const protocol.MsgWriteOpen) []const u8 {
@@ -204,7 +212,7 @@ pub fn fail_pending_writes_for_client(client: *T.Client) void {
 }
 
 pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow_streams: bool, close_received: bool) void {
-    ensure_client_write_targets();
+    ensure_client_write_files();
 
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len < @sizeOf(protocol.MsgWriteOpen) or imsg_msg.data == null) return;
@@ -216,7 +224,7 @@ pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow
         .@"error" = 0,
     };
 
-    if (client_write_targets.contains(msg.stream)) {
+    if (client_write_files.contains(msg.stream)) {
         reply.@"error" = @intFromEnum(std.posix.E.BADF);
         _ = proc_mod.proc_send(peer, .write_ready, -1, std.mem.asBytes(&reply).ptr, @sizeOf(protocol.MsgWriteReady));
         return;
@@ -240,44 +248,77 @@ pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow
         return;
     }
 
-    client_write_targets.put(msg.stream, .{ .fd = fd }) catch unreachable;
+    const cf = file_mod.createWithPeer(peer, &client_write_files, msg.stream, null, null);
+    cf.fd = fd;
+
+    if (proc_mod.libevent) |base| {
+        set_nonblocking(fd);
+        cf.event = c.libevent.bufferevent_socket_new(base, fd, 0);
+        if (cf.event) |bev| {
+            c.libevent.bufferevent_setcb(
+                bev,
+                null,
+                file_mod.fileWriteCallback,
+                file_mod.fileWriteErrorCallback,
+                cf,
+            );
+            _ = c.libevent.bufferevent_enable(bev, c.libevent.EV_WRITE);
+        }
+    }
+
     _ = proc_mod.proc_send(peer, .write_ready, -1, std.mem.asBytes(&reply).ptr, @sizeOf(protocol.MsgWriteReady));
 }
 
 pub fn client_handle_write_data(imsg_msg: *c.imsg.imsg) void {
-    if (!client_write_targets_init) return;
+    if (!client_write_files_init) return;
 
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len < @sizeOf(protocol.MsgWriteData) or imsg_msg.data == null) return;
 
     const msg: *const protocol.MsgWriteData = @ptrCast(@alignCast(imsg_msg.data.?));
-    const target = client_write_targets.get(msg.stream) orelse return;
+    const cf = client_write_files.get(msg.stream) orelse return;
     const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
-    var remaining = raw[@sizeOf(protocol.MsgWriteData)..data_len];
+    const payload = raw[@sizeOf(protocol.MsgWriteData)..data_len];
 
-    while (remaining.len != 0) {
-        const written = c.posix_sys.write(target.fd, @ptrCast(remaining.ptr), remaining.len);
-        if (written == -1) {
-            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
-            client_close_write_target(msg.stream);
-            return;
+    if (cf.event) |bev| {
+        _ = c.libevent.bufferevent_write(bev, @ptrCast(payload.ptr), payload.len);
+    } else {
+        var remaining = payload;
+        while (remaining.len != 0) {
+            const written = c.posix_sys.write(cf.fd, @ptrCast(remaining.ptr), remaining.len);
+            if (written == -1) {
+                if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+                client_close_write_file(msg.stream);
+                return;
+            }
+            if (written == 0) {
+                client_close_write_file(msg.stream);
+                return;
+            }
+            remaining = remaining[@as(usize, @intCast(written))..];
         }
-        if (written == 0) {
-            client_close_write_target(msg.stream);
-            return;
-        }
-        remaining = remaining[@as(usize, @intCast(written))..];
     }
 }
 
 pub fn client_handle_write_close(imsg_msg: *c.imsg.imsg) void {
-    if (!client_write_targets_init) return;
+    if (!client_write_files_init) return;
 
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len != @sizeOf(protocol.MsgWriteClose) or imsg_msg.data == null) return;
 
     const msg: *const protocol.MsgWriteClose = @ptrCast(@alignCast(imsg_msg.data.?));
-    client_close_write_target(msg.stream);
+    const cf = client_write_files.get(msg.stream) orelse return;
+
+    cf.closed = true;
+    if (cf.event) |bev| {
+        const output = c.libevent.bufferevent_get_output(bev);
+        const pending = if (output != null) c.libevent.evbuffer_get_length(output) else 0;
+        if (pending == 0) {
+            client_close_write_file(msg.stream);
+        }
+    } else {
+        client_close_write_file(msg.stream);
+    }
 }
 
 pub fn reset_for_tests() void {
@@ -288,23 +329,29 @@ pub fn reset_for_tests() void {
         pending_writes_init = false;
     }
 
-    if (client_write_targets_init) {
-        var it = client_write_targets.valueIterator();
-        while (it.next()) |target| _ = c.posix_sys.close(target.fd);
-        client_write_targets.deinit();
-        client_write_targets_init = false;
+    if (client_write_files_init) {
+        var streams_to_close = std.ArrayList(i32){};
+        defer streams_to_close.deinit(xm.allocator);
+        var it = client_write_files.keyIterator();
+        while (it.next()) |key| streams_to_close.append(xm.allocator, key.*) catch unreachable;
+        for (streams_to_close.items) |stream| client_close_write_file(stream);
+        client_write_files.deinit();
+        client_write_files_init = false;
     }
 
     next_stream = 3;
 }
 
 pub fn client_cleanup() void {
-    if (!client_write_targets_init) return;
+    if (!client_write_files_init) return;
 
-    var it = client_write_targets.valueIterator();
-    while (it.next()) |target| _ = c.posix_sys.close(target.fd);
-    client_write_targets.deinit();
-    client_write_targets_init = false;
+    var streams_to_close = std.ArrayList(i32){};
+    defer streams_to_close.deinit(xm.allocator);
+    var it = client_write_files.keyIterator();
+    while (it.next()) |key| streams_to_close.append(xm.allocator, key.*) catch unreachable;
+    for (streams_to_close.items) |stream| client_close_write_file(stream);
+    client_write_files.deinit();
+    client_write_files_init = false;
 }
 
 fn requireStressTests() !void {

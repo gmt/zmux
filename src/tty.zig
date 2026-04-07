@@ -3276,11 +3276,39 @@ fn tty_write_one(
 
 /// Iterate the sixel image list on screen `s` and redraw each one via
 /// tty_write_one → tty_cmd_sixelimage.  Called from screen_redraw_draw_pane
-/// after pane content is drawn.  Gated on ENABLE_SIXEL in tmux; zmux does
-/// not yet have an Image type, so this is a no-op placeholder that
-/// preserves the call interface.
-pub fn tty_draw_images(_: *T.Client, _: *T.WindowPane, _: *T.Screen) void {
-    // Sixel image support is not yet ported; nothing to iterate.
+/// after pane content is drawn.  Ported from tmux tty_draw_images().
+pub fn tty_draw_images(c: *T.Client, wp: *T.WindowPane, s: *T.Screen) void {
+    for (s.images.items) |im| {
+        var ttyctx: T.TtyCtx = .{};
+
+        // Image cell position.
+        ttyctx.ocx = im.px;
+        ttyctx.ocy = im.py;
+
+        // Screen scroll region.
+        ttyctx.orlower = s.rlower;
+        ttyctx.orupper = s.rupper;
+
+        // Pane offset and image dimensions (the Zig tty_cmd_sixelimage
+        // uses ctx.sx/sy as the area to clamp, so pass image cell size).
+        ttyctx.xoff = wp.xoff;
+        ttyctx.rxoff = wp.xoff;
+        ttyctx.sx = im.sx;
+        ttyctx.sy = im.sy;
+
+        // Sixel data for real rendering, fallback text for non-sixel terms.
+        ttyctx.si = im.data;
+        if (im.fallback) |fb| {
+            ttyctx.ptr = fb.ptr;
+            ttyctx.num = @intCast(fb.len);
+        }
+
+        ttyctx.arg = wp;
+        ttyctx.set_client_cb = tty_set_client_cb;
+        ttyctx.allow_invisible_panes = true;
+
+        tty_write_one(tty_cmd_sixelimage, c, &ttyctx);
+    }
 }
 
 pub fn tty_cmd_syncstart(tty: *T.Tty, ctx: *const T.TtyCtx) void {

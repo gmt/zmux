@@ -136,6 +136,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     cl.client_windows.deinit(xm.allocator);
     control.control_panes_deinit(cl);
     control_subscriptions.control_subscriptions_deinit(cl);
+    cl.control_input_buf.deinit(xm.allocator);
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
     server_client_close_terminal_fds(cl);
@@ -254,11 +255,44 @@ fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len == 0) return;
     const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
+
+    // Control clients receive line-based commands, not TTY key sequences.
+    if (cl.flags & T.CLIENT_CONTROL != 0) {
+        server_client_dispatch_control_stdin(cl, bytes[0..data_len]);
+        return;
+    }
+
     // Feed bytes into the tty input buffer and decode via tty_keys_next,
     // which routes through the full tty-keys.zig parser chain (DA responses,
     // colour queries, extended keys, mouse, etc).
     cl.tty.in_buf.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
     while (tty_mod.tty_keys_next(&cl.tty)) {}
+}
+
+/// Accumulate stdin bytes for a control client and dispatch each complete
+/// newline-terminated line via control_read_callback.  Partial lines are
+/// buffered in cl.control_input_buf until more data arrives.
+fn server_client_dispatch_control_stdin(cl: *T.Client, data: []const u8) void {
+    cl.control_input_buf.appendSlice(xm.allocator, data) catch unreachable;
+
+    // Process all complete lines.
+    while (true) {
+        const buf = cl.control_input_buf.items;
+        const nl = std.mem.indexOfScalar(u8, buf, '\n') orelse break;
+        // Extract the line without the newline.  Strip trailing \r if present.
+        var line_end = nl;
+        if (line_end > 0 and buf[line_end - 1] == '\r')
+            line_end -= 1;
+        const line = buf[0..line_end];
+
+        control.control_read_callback(cl, line);
+
+        // Remove the consumed line (including the newline) from the buffer.
+        const remaining = buf.len - nl - 1;
+        if (remaining > 0)
+            std.mem.copyForwards(u8, cl.control_input_buf.items[0..remaining], buf[nl + 1 ..]);
+        cl.control_input_buf.shrinkRetainingCapacity(remaining);
+    }
 }
 
 pub fn server_client_lock(cl: *T.Client, cmd: []const u8) void {
@@ -478,6 +512,7 @@ pub fn server_client_finalize_identify(cl: *T.Client) void {
     cl.name = server_client_build_name(cl);
 
     if ((cl.flags & T.CLIENT_CONTROL) != 0) {
+        control.control_start(cl);
         server_client_close_terminal_fds(cl);
         return;
     }
@@ -684,6 +719,10 @@ pub fn server_client_loop() void {
 
     for (client_registry.clients.items) |cl| {
         server_client_check_exit(cl);
+
+        // Flush pending control output blocks for control clients.
+        if (cl.flags & T.CLIENT_CONTROL != 0)
+            control.control_write_callback(cl);
 
         if (cl.session == null) continue;
         if (cl.flags & T.CLIENT_ATTACHED == 0) continue;

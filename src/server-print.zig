@@ -169,6 +169,7 @@ pub fn server_pane_view_data(wp: *T.WindowPane, data: []const u8, parse: bool) b
     }
     if (rest.len > 0)
         window_copy.window_copy_add(wp, true, rest);
+    window_copy.window_copy_reset_view(wp);
     return true;
 }
 

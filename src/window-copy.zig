@@ -2274,6 +2274,17 @@ pub fn window_copy_init_ctx_cb(_ctx: ?*anyopaque, _cell: ?*T.GridCell) void {
 
 // ── Text add (view-mode output) ────────────────────────────────────────────
 
+/// Reset the view-mode scroll position to the top of the content.
+pub fn window_copy_reset_view(wp: *T.WindowPane) void {
+    const wme = window.window_pane_mode(wp) orelse return;
+    if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
+    const data = modeData(wme);
+    data.top = 0;
+    data.cy = 0;
+    data.cx = 0;
+    redraw(wme);
+}
+
 pub fn window_copy_add(wp: *T.WindowPane, parse: bool, text: []const u8) void {
     window_copy_vadd(wp, parse, text);
 }

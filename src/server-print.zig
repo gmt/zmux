@@ -335,6 +335,151 @@ test "server_client_print appends parsed output in the shared view mode" {
     try std.testing.expectEqualStrings("beta", second_row);
 }
 
+test "view mode preserves screen dimensions and cursor after entering help" {
+    const client_registry = @import("client-registry.zig");
+    const opts = @import("options.zig");
+    const session_mod = @import("session.zig");
+
+    session_mod.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_ready = true;
+    defer {
+        opts.options_ready = false;
+    }
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_name = xm.xstrdup("view-dim");
+    defer xm.allocator.free(session_name);
+    const window_name = xm.xstrdup("pane");
+    defer xm.allocator.free(window_name);
+
+    // Use a realistic large terminal: 120 cols x 50 rows.
+    const cols: u32 = 120;
+    const rows: u32 = 50;
+
+    const base_grid = grid_mod.grid_create(cols, rows, 2000);
+    defer grid_mod.grid_free(base_grid);
+
+    var window = T.Window{
+        .id = 1,
+        .name = window_name,
+        .sx = cols,
+        .sy = rows,
+        .options = undefined,
+    };
+    defer window.panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 2,
+        .window = &window,
+        .options = undefined,
+        .sx = cols,
+        .sy = rows,
+        .screen = undefined,
+        .base = .{ .grid = base_grid, .rlower = rows - 1 },
+    };
+    // Mirror real runtime: pane.screen points to pane.base.
+    pane.screen = &pane.base;
+    defer if (window_mod.window_pane_mode(&pane)) |_| server_client_close_view_mode(&pane);
+
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    var session = T.Session{
+        .id = 0,
+        .name = session_name,
+        .cwd = "",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = undefined,
+        .environ = &env,
+    };
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var winlink = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    try session.windows.put(0, &winlink);
+    try window.winlinks.append(xm.allocator, &winlink);
+    session.curw = &winlink;
+
+    var client = T.Client{
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .session = &session,
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client_registry.add(&client);
+    defer {
+        client_registry.remove(&client);
+        clearClientRedrawFlags(&client);
+    }
+
+    // Populate the pane with filler text to simulate a scrolled-down shell.
+    for (0..rows) |i| {
+        var ctx = T.ScreenWriteCtx{ .s = pane.screen };
+        const line = xm.xasprintf("filler line {d:0>3}", .{i});
+        defer xm.allocator.free(line);
+        screen_write.putn(&ctx, line);
+        screen_write.newline(&ctx);
+    }
+
+    // Simulate Ctrl-B ? by printing help text via server_client_print.
+    // Generate enough lines to fill the screen (like list-keys output).
+    for (0..60) |i| {
+        const line = xm.xasprintf("C-b {c:<8}  Help binding {d}", .{@as(u8, @intCast('A' + i % 26)), i});
+        defer xm.allocator.free(line);
+        server_client_print(&client, true, line);
+    }
+
+    // (1) Mode must be active.
+    const wme = window_mod.window_pane_mode(&pane);
+    try std.testing.expect(wme != null);
+
+    // (2) Screen dimensions must match the original pane size.
+    //     This is the "window shrunk" symptom — grid.sy must be rows, not 24.
+    try std.testing.expectEqual(cols, pane.screen.grid.sx);
+    try std.testing.expectEqual(rows, pane.screen.grid.sy);
+
+    // (3) Cursor should be near the bottom of the screen (after 60 lines of
+    //     output with wrapping/scrolling), not stuck in the middle.
+    //     With 60 lines and 50 rows, the cursor should have scrolled and be
+    //     at the last row or very close to it.
+    const cursor_past_midpoint = pane.screen.cy >= rows / 2;
+    if (!cursor_past_midpoint) {
+        std.debug.print("\n  DIAGNOSTIC: cursor at row {d} of {d} (expected >= {d})\n", .{
+            pane.screen.cy, rows, rows / 2,
+        });
+    }
+    try std.testing.expect(cursor_past_midpoint);
+
+    // (4) The scroll region must span the full screen height.
+    try std.testing.expectEqual(@as(u32, 0), pane.screen.rupper);
+    try std.testing.expectEqual(rows - 1, pane.screen.rlower);
+
+    // (5) First line of help text should be intact (no gap in the middle).
+    const first_row = try grid_row_string(pane.screen.grid, 0);
+    defer xm.allocator.free(first_row);
+    try std.testing.expect(std.mem.startsWith(u8, first_row, "C-b"));
+}
+
 test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared runtime path" {
     const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);

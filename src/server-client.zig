@@ -2496,6 +2496,7 @@ export fn server_client_resize_timer(_fd: c_int, _events: c_short, arg: ?*anyopa
     log.log_debug("server_client_resize_timer: %%{d} timer expired", .{wp.id});
     if (wp.resize_timer) |ev|
         _ = c.libevent.event_del(ev);
+    server_client_check_pane_resize(wp);
 }
 
 export fn server_client_redraw_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
@@ -2511,6 +2512,12 @@ export fn server_client_click_timer(_fd: c_int, _events: c_short, arg: ?*anyopaq
     const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
     server_client_cancel_click_timer(cl);
     log.log_debug("server_client_click_timer fired", .{});
+
+    // If we were waiting for a third click that never came, emit KEYC_DOUBLECLICK.
+    if (mouse_runtime.click_timeout_event(cl)) |event| {
+        var translated = event;
+        _ = server_fn.server_client_handle_key(cl, &translated);
+    }
 }
 
 // ── Lifecycle functions ───────────────────────────────────────────────────

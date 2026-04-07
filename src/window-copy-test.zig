@@ -2081,15 +2081,15 @@ test "view mode: window_copy_add writes to backing screen" {
     const data = wc.modeData(wme);
     const backing = data.backing;
 
-    // window_copy_vadd does CR+LF before each line, so "hello" lands on row 1
-    // and "world" on row 2.
+    // The first line skips the leading CRLF (backing_written starts false),
+    // so "hello" lands on row 0 and "world" on row 1.
+    const row0 = grid.string_cells(backing.grid, 0, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(row0);
+    try std.testing.expectEqualStrings("hello", row0);
+
     const row1 = grid.string_cells(backing.grid, 1, 10, .{ .trim_trailing_spaces = true });
     defer xm.allocator.free(row1);
-    try std.testing.expectEqualStrings("hello", row1);
-
-    const row2 = grid.string_cells(backing.grid, 2, 10, .{ .trim_trailing_spaces = true });
-    defer xm.allocator.free(row2);
-    try std.testing.expectEqualStrings("world", row2);
+    try std.testing.expectEqualStrings("world", row1);
 
     // The base screen should be untouched.
     const base_row0 = grid.string_cells(target_grid, 0, 10, .{ .trim_trailing_spaces = true });
@@ -2149,13 +2149,13 @@ test "view mode: re-entry appends instead of creating new mode" {
     // Both lines should be on the same backing screen.
     const data = wc.modeData(wme1);
     const backing = data.backing;
+    const row0 = grid.string_cells(backing.grid, 0, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(row0);
+    try std.testing.expectEqualStrings("line1", row0);
+
     const row1 = grid.string_cells(backing.grid, 1, 10, .{ .trim_trailing_spaces = true });
     defer xm.allocator.free(row1);
-    try std.testing.expectEqualStrings("line1", row1);
-
-    const row2 = grid.string_cells(backing.grid, 2, 10, .{ .trim_trailing_spaces = true });
-    defer xm.allocator.free(row2);
-    try std.testing.expectEqualStrings("line2", row2);
+    try std.testing.expectEqualStrings("line2", row1);
 
     // Mode stack should have exactly one entry.
     try std.testing.expectEqual(@as(usize, 1), pane.modes.items.len);
@@ -2301,11 +2301,10 @@ test "view mode: format variables resolve for window_view_mode" {
     const view_ctx = format_mod.FormatContext{ .pane = &view_pane };
     const view_result = resolver.func(xm.allocator, &view_ctx);
 
-    // With the current bug, this returns null because copyModeDataFromCtx
-    // rejects window_view_mode.  The test expectation matches the current
-    // (buggy) behaviour so the suite stays green.  When the bug is fixed,
-    // change the expectation to: expectEqualStrings("3", view_result.?)
-    try std.testing.expectEqual(@as(?[]u8, null), view_result);
+    // copyModeDataFromCtx recognizes both window_copy_mode and
+    // window_view_mode, so the resolver returns data.cx as expected.
+    try std.testing.expectEqualStrings("3", view_result.?);
+    defer xm.allocator.free(view_result.?);
 }
 
 test "view mode: resize updates backing screen dimensions" {
@@ -2416,9 +2415,9 @@ test "view mode: refresh-from-pane wipes view content (unlike tmux)" {
     wc.window_copy_add(&pane, false, "viewtext");
 
     const data = wc.modeData(wme);
-    const row1 = grid.string_cells(data.backing.grid, 1, 10, .{ .trim_trailing_spaces = true });
-    defer xm.allocator.free(row1);
-    try std.testing.expectEqualStrings("viewtext", row1);
+    const row0 = grid.string_cells(data.backing.grid, 0, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(row0);
+    try std.testing.expectEqualStrings("viewtext", row0);
 
     // refresh-from-pane clones from the pane's base screen, wiping view content.
     try runCopyModeTestCommand(wme, "refresh-from-pane");

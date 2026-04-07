@@ -674,22 +674,31 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_type: OscEndType) void 
             apply_osc_52(wp, value, end_type);
         },
         104 => {
-            // OSC 104 ; index — reset palette colour (stub)
+            // OSC 104 ; index — reset palette colour
+            apply_osc_104(wp, value);
         },
         110 => {
             // OSC 110 — reset foreground colour
-            wp.palette.fg = 8;
+            if (value.len == 0) {
+                wp.palette.fg = 8;
+                wp.flags |= T.PANE_STYLECHANGED;
+            }
         },
         111 => {
             // OSC 111 — reset background colour
-            wp.palette.bg = 8;
+            if (value.len == 0) {
+                wp.palette.bg = 8;
+                wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
+            }
         },
         112 => {
             // OSC 112 — reset cursor colour
-            screen_mod.screen_set_cursor_colour(screen_mod.screen_current(wp), -1);
+            if (value.len == 0)
+                screen_mod.screen_set_cursor_colour(screen_mod.screen_current(wp), -1);
         },
         133 => {
-            // OSC 133 ; marker — semantic prompt markers A/B/C/D (stub)
+            // OSC 133 ; marker — semantic prompt markers A/B/C/D
+            apply_osc_133(value, current);
         },
         else => {
             // Unknown OSC sequence — ignore
@@ -742,11 +751,10 @@ fn apply_osc_8(s: *T.Screen, value: []const u8) void {
 }
 
 /// Handle OSC 4 — palette colour set/query.
-/// If the value is "idx;?" we reply with the palette colour.
-/// Otherwise consume silently (set is a stub for now).
+/// Parses "idx;?" (query) or "idx;colour" (set) pairs, semicolon-separated.
 fn apply_osc_4(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void {
-    // Parse "idx;?" or "idx;colour" pairs
     var rest: []const u8 = value;
+    var redraw = false;
     while (rest.len > 0) {
         const semi1 = std.mem.indexOfScalar(u8, rest, ';') orelse return;
         const idx_str = rest[0..semi1];
@@ -761,11 +769,18 @@ fn apply_osc_4(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void 
             if (c != -1) {
                 input_osc_colour_reply(wp, true, 4, idx, c, end_type);
             }
+        } else {
+            const c = colour_mod.colour_parseX11(colour_str);
+            if (c != -1) {
+                if (colour_mod.colour_palette_set(&wp.palette, idx, c))
+                    redraw = true;
+            }
         }
-        // Set is a stub — would need colour_parseX11 + colour_palette_set
         if (semi2 >= rest.len) break;
         rest = rest[semi2 + 1 ..];
     }
+    if (redraw)
+        wp.flags |= T.PANE_REDRAW;
 }
 
 /// Handle OSC 10 — foreground colour set/query.
@@ -776,7 +791,10 @@ fn apply_osc_10(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
         input_osc_colour_reply(wp, true, 10, 0, c, end_type);
         return;
     }
-    // Set foreground colour — stub (would need colour_parseX11)
+    const c = colour_mod.colour_parseX11(value);
+    if (c == -1) return;
+    wp.palette.fg = c;
+    wp.flags |= T.PANE_STYLECHANGED;
 }
 
 /// Handle OSC 11 — background colour set/query.
@@ -787,7 +805,10 @@ fn apply_osc_11(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
         input_osc_colour_reply(wp, true, 11, 0, c, end_type);
         return;
     }
-    // Set background colour — stub (would need colour_parseX11)
+    const c = colour_mod.colour_parseX11(value);
+    if (c == -1) return;
+    wp.palette.bg = c;
+    wp.flags |= T.PANE_STYLECHANGED | T.PANE_THEMECHANGED;
 }
 
 /// Handle OSC 12 — cursor colour set/query.
@@ -805,8 +826,47 @@ fn apply_osc_12(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
         log.log_debug("bad OSC 12: {s}", .{value});
         return;
     }
-    const current = screen_mod.screen_current(wp);
-    screen_mod.screen_set_cursor_colour(current, c);
+    screen_mod.screen_set_cursor_colour(screen_mod.screen_current(wp), c);
+}
+
+/// Handle OSC 104 — reset palette colour(s).
+/// Empty value resets the entire palette; otherwise semicolon-separated
+/// indices reset individual entries.
+fn apply_osc_104(wp: *T.WindowPane, value: []const u8) void {
+    if (value.len == 0) {
+        colour_mod.colour_palette_clear(&wp.palette);
+        wp.flags |= T.PANE_REDRAW;
+        return;
+    }
+    var rest: []const u8 = value;
+    var redraw = false;
+    while (rest.len > 0) {
+        const semi = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+        const idx_str = rest[0..semi];
+        const idx = std.fmt.parseInt(i32, idx_str, 10) catch return;
+        if (idx < 0 or idx >= 256) return;
+        if (colour_mod.colour_palette_set(&wp.palette, idx, -1))
+            redraw = true;
+        if (semi >= rest.len) break;
+        rest = rest[semi + 1 ..];
+    }
+    if (redraw)
+        wp.flags |= T.PANE_REDRAW;
+}
+
+/// Handle OSC 133 — semantic prompt markers.
+/// "A" marks the start of a prompt, "C" marks the start of command output.
+fn apply_osc_133(value: []const u8, current: *T.Screen) void {
+    if (value.len == 0) return;
+    const gd = current.grid;
+    const line = current.cy + gd.hsize;
+    if (line > gd.hsize + gd.sy -| 1) return;
+    const gl = grid_mod.grid_get_line(gd, line);
+    switch (value[0]) {
+        'A' => gl.flags |= T.GRID_LINE_START_PROMPT,
+        'C' => gl.flags |= T.GRID_LINE_START_OUTPUT,
+        else => {},
+    }
 }
 
 /// Handle OSC 52 — clipboard access.

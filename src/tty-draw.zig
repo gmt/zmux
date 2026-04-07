@@ -28,6 +28,7 @@ const style_mod = @import("style.zig");
 const tty_acs = @import("tty-acs.zig");
 const utf8 = @import("utf8.zig");
 const sixel = @import("image-sixel.zig");
+const hyperlinks_mod = @import("hyperlinks.zig");
 
 pub const WindowRenderResult = struct {
     payload: []u8 = &.{},
@@ -117,7 +118,7 @@ pub fn tty_draw_pane_offset(
     }
 
     for (0..row_count) |row_idx| {
-        const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), sx, scrollbar);
+        const rendered = try render_pane_row(wp, screen.grid, @intCast(row_idx), sx, scrollbar, screen.hyperlinks);
         defer xm.allocator.free(rendered);
 
         if (full_redraw or !std.mem.eql(u8, cache.rows.items[row_idx], rendered)) {
@@ -203,6 +204,7 @@ pub fn tty_draw_render_window_region(
                 region.start_x - bounds.xoff,
                 region.width,
                 scrollbar,
+                screen.hyperlinks,
             );
             defer xm.allocator.free(rendered);
 
@@ -282,6 +284,7 @@ pub fn tty_draw_render_dirty_panes_region(
                 region.start_x - bounds.xoff,
                 region.width,
                 scrollbar,
+                screen.hyperlinks,
             );
             defer xm.allocator.free(rendered);
 
@@ -425,7 +428,7 @@ pub fn tty_draw_render_screen_region(
     for (0..sy) |row_idx| {
         const row = view_y + @as(u32, @intCast(row_idx));
         if (row >= screen.grid.sy) break;
-        const rendered = try render_text_row_region(screen.grid, row, view_x, sx);
+        const rendered = try render_text_row_region(screen.grid, row, view_x, sx, screen.hyperlinks);
         defer xm.allocator.free(rendered);
         try append_move(&out, row_offset + @as(u32, @intCast(row_idx)) + 1, col_offset + 1);
         try out.appendSlice(xm.allocator, rendered);
@@ -482,12 +485,14 @@ const CellStyle = struct {
     attr: u16 = 0,
     fg: i32 = 0,
     bg: i32 = 0,
+    link: u32 = 0,
 };
 
 const RowRenderer = struct {
     out: std.ArrayList(u8) = .{},
     last_style: CellStyle = .{},
     have_style: bool = false,
+    hyperlinks: ?*hyperlinks_mod.Hyperlinks = null,
 
     fn deinit(self: *RowRenderer) void {
         self.out.deinit(xm.allocator);
@@ -499,6 +504,11 @@ const RowRenderer = struct {
             const sgr = try style_to_sgr(style);
             defer xm.allocator.free(sgr);
             try self.out.appendSlice(xm.allocator, sgr);
+
+            if (style.link != self.last_style.link) {
+                try self.emitHyperlink(style.link);
+            }
+
             self.last_style = style;
             self.have_style = true;
         }
@@ -507,7 +517,26 @@ const RowRenderer = struct {
         try self.out.appendSlice(xm.allocator, bytes);
     }
 
+    /// Emit an OSC 8 hyperlink escape for the given link id.
+    /// link == 0 closes the current hyperlink; link != 0 opens one.
+    fn emitHyperlink(self: *RowRenderer, link: u32) !void {
+        if (link == 0) {
+            try self.out.appendSlice(xm.allocator, "\x1b]8;;\x1b\\");
+            return;
+        }
+        const hl = self.hyperlinks orelse return;
+        var uri: []const u8 = "";
+        var id: []const u8 = "";
+        if (hyperlinks_mod.hyperlinks_get(hl, link, &uri, null, &id)) {
+            const seq = try std.fmt.allocPrint(xm.allocator, "\x1b]8;id={s};{s}\x1b\\", .{ id, uri });
+            defer xm.allocator.free(seq);
+            try self.out.appendSlice(xm.allocator, seq);
+        }
+    }
+
     fn finish(self: *RowRenderer) ![]u8 {
+        if (self.have_style and self.last_style.link != 0)
+            try self.emitHyperlink(0);
         if (self.have_style and !style_is_default(self.last_style))
             try self.out.appendSlice(xm.allocator, "\x1b[0m");
         return self.out.toOwnedSlice(xm.allocator);
@@ -579,8 +608,9 @@ fn render_pane_row(
     row: u32,
     sx: u32,
     scrollbar: ?window_mod.ScrollbarLayout,
+    hl: ?*hyperlinks_mod.Hyperlinks,
 ) ![]u8 {
-    return render_pane_row_region(wp, gd, row, 0, sx, scrollbar);
+    return render_pane_row_region(wp, gd, row, 0, sx, scrollbar, hl);
 }
 
 fn render_pane_row_region(
@@ -590,12 +620,13 @@ fn render_pane_row_region(
     start_col: u32,
     sx: u32,
     scrollbar: ?window_mod.ScrollbarLayout,
+    hl: ?*hyperlinks_mod.Hyperlinks,
 ) ![]u8 {
-    if (scrollbar == null) return render_text_row_region(gd, row, start_col, sx);
+    if (scrollbar == null) return render_text_row_region(gd, row, start_col, sx, hl);
 
     const layout = scrollbar.?;
     const extra = layout.width + layout.pad;
-    var renderer = RowRenderer{};
+    var renderer = RowRenderer{ .hyperlinks = hl };
     errdefer renderer.deinit();
 
     if (layout.left) {
@@ -621,12 +652,12 @@ fn render_pane_row_region(
     return renderer.finish();
 }
 
-fn render_text_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
-    return render_text_row_region(gd, row, 0, sx);
+fn render_text_row(gd: *T.Grid, row: u32, sx: u32, hl: ?*hyperlinks_mod.Hyperlinks) ![]u8 {
+    return render_text_row_region(gd, row, 0, sx, hl);
 }
 
-fn render_text_row_region(gd: *T.Grid, row: u32, start_col: u32, sx: u32) ![]u8 {
-    var renderer = RowRenderer{};
+fn render_text_row_region(gd: *T.Grid, row: u32, start_col: u32, sx: u32, hl: ?*hyperlinks_mod.Hyperlinks) ![]u8 {
+    var renderer = RowRenderer{ .hyperlinks = hl };
     errdefer renderer.deinit();
     try append_text_cells_range(&renderer, gd, row, start_col, sx);
     return renderer.finish();
@@ -726,7 +757,7 @@ fn append_scrollbar_segment_range(
 }
 
 fn render_row(gd: *T.Grid, row: u32, sx: u32) ![]u8 {
-    return render_text_row(gd, row, sx);
+    return render_text_row(gd, row, sx, null);
 }
 
 fn render_scrollbar_row(
@@ -794,6 +825,7 @@ fn style_of(cell: T.GridCell) CellStyle {
         .attr = cell.attr,
         .fg = cell.fg,
         .bg = cell.bg,
+        .link = cell.link,
     };
 }
 

@@ -1766,18 +1766,10 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
 // and cross-reference. `tty_ctx` is represented as opaque until a full port
 // wires screen-write → tty.
 
-/// Stub stand-in for tmux `visible_range` / `visible_ranges`.
-pub const VisibleRange = struct {
-    px: u32 = 0,
-    nx: u32 = 0,
-};
+pub const VisibleRange = server_client_mod.VisibleRange;
+pub const VisibleRanges = server_client_mod.VisibleRanges;
 
-pub const VisibleRanges = struct {
-    ranges: [1]VisibleRange = .{.{ .px = 0, .nx = 0 }},
-    used: u32 = 0,
-};
-
-threadlocal var tty_stub_overlay_storage: VisibleRanges = .{};
+threadlocal var tty_overlay_storage: VisibleRanges = .{};
 
 /// tmux `tty_draw_line` — implementation lives in tty-draw.zig (stub body there).
 pub const tty_draw_line = tty_draw_mod.tty_draw_line;
@@ -2642,7 +2634,7 @@ pub fn tty_draw_pane(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32) void {
         const r = tty_check_overlay_range(tty, ctx.xoff, ctx.yoff + py, nx);
         var j: u32 = 0;
         while (j < r.used) : (j += 1) {
-            const rr = &r.ranges[j];
+            const rr = &r.ranges.?[j];
             if (rr.nx != 0) {
                 tty_draw_line(tty, s, rr.px - ctx.xoff, py, rr.nx, rr.px, ctx.yoff + py, &ctx.defaults, ctx.palette orelse &default_palette);
             }
@@ -2658,7 +2650,7 @@ pub fn tty_draw_pane(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32) void {
         const r = tty_check_overlay_range(tty, x, ry, rx);
         var j: u32 = 0;
         while (j < r.used) : (j += 1) {
-            const rr = &r.ranges[j];
+            const rr = &r.ranges.?[j];
             if (rr.nx != 0) {
                 tty_draw_line(tty, s, i + (rr.px - x), py, rr.nx, rr.px, ry, &ctx.defaults, ctx.palette orelse &default_palette);
             }
@@ -2668,16 +2660,60 @@ pub fn tty_draw_pane(tty: *T.Tty, ctx: *const T.TtyCtx, py: u32) void {
 
 const default_palette = T.ColourPalette{};
 
-pub fn tty_check_overlay(_: *T.Tty, _: u32, _: u32) i32 {
-    return 1;
+pub fn tty_check_overlay(tty: *T.Tty, px: u32, py: u32) i32 {
+    const r = tty_check_overlay_range(tty, px, py, 1);
+    return @intFromBool(!server_client_mod.server_client_ranges_is_empty(r));
 }
 
+/// Return parts of the input range [px, px+nx) at row py which are visible
+/// (not occluded by the client's overlay). When no overlay is active the full
+/// range is returned as a single entry.
 pub fn tty_check_overlay_range(tty: *T.Tty, px: u32, py: u32, nx: u32) *VisibleRanges {
-    _ = tty;
-    _ = py;
-    tty_stub_overlay_storage.ranges[0] = .{ .px = px, .nx = nx };
-    tty_stub_overlay_storage.used = 1;
-    return &tty_stub_overlay_storage;
+    const c = tty.client;
+
+    if (c.overlay_check == null) {
+        server_client_mod.server_client_ensure_ranges(&tty_overlay_storage, 1);
+        tty_overlay_storage.ranges.?[0] = .{ .px = px, .nx = nx };
+        tty_overlay_storage.used = 1;
+        return &tty_overlay_storage;
+    }
+
+    const check = c.overlay_check.?;
+    const max_ranges = @max((nx + 1) / 2, 1);
+    server_client_mod.server_client_ensure_ranges(&tty_overlay_storage, max_ranges);
+
+    var used: u32 = 0;
+    var run_start: ?u32 = null;
+
+    var i: u32 = 0;
+    while (i < nx) : (i += 1) {
+        const cell_x = px + i;
+        if (check(c, c.overlay_data, cell_x, py)) {
+            if (run_start == null) {
+                run_start = cell_x;
+            }
+        } else {
+            if (run_start) |start| {
+                tty_overlay_storage.ranges.?[used] = .{
+                    .px = start,
+                    .nx = cell_x - start,
+                };
+                used += 1;
+                run_start = null;
+            }
+        }
+    }
+
+    if (run_start) |start| {
+        tty_overlay_storage.ranges.?[used] = .{
+            .px = start,
+            .nx = (px + nx) - start,
+        };
+        used += 1;
+    }
+
+    tty_overlay_storage.used = used;
+    return &tty_overlay_storage;
 }
 
 /// Update cursor visibility, style, and colour.
@@ -3195,7 +3231,7 @@ pub fn tty_cmd_cells(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     const r = tty_check_overlay_range(tty, px, ctx.yoff + ctx.ocy -| ctx.woy, ctx.num);
     var i: u32 = 0;
     while (i < r.used) : (i += 1) {
-        const rr = &r.ranges[i];
+        const rr = &r.ranges.?[i];
         if (rr.nx != 0) {
             const cx = rr.px -| ctx.xoff +| ctx.wox;
             tty_cursor_pane_unless_wrap_ctx(tty, ctx, cx, ctx.ocy);

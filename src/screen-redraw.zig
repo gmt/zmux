@@ -165,7 +165,7 @@ fn draw_pane(ctx: *const ScreenRedrawCtx, wp: *T.WindowPane) void {
         const r = tty_mod.tty_check_overlay_range(&cl.tty, x, y, width);
         var k: u32 = 0;
         while (k < r.used) : (k += 1) {
-            const rr = &r.ranges[k];
+            const rr = &r.ranges.?[k];
             if (rr.nx != 0) {
                 tty_mod.tty_draw_line(
                     &cl.tty,

@@ -819,6 +819,13 @@ pub fn server_client_check_redraw(cl: *T.Client) void {
 pub fn server_client_reset_state(cl: *T.Client) void {
     if (cl.flags & (T.CLIENT_CONTROL | T.CLIENT_SUSPENDED) != 0) return;
 
+    if (log.log_get_level() != 0) {
+        log.log_debug("server_client_reset_state: client {s} mode {s}", .{
+            cl.name orelse "(unknown)",
+            screen_mod.screen_mode_to_string(cl.tty.mode),
+        });
+    }
+
     // If an overlay or the prompt is active, ensure cursor is hidden.
     const overlay_active = cmd_display_panes.overlay_active(cl) or menu.overlay_active(cl) or popup.overlay_active(cl);
     const prompt_active = cl.message_string != null;

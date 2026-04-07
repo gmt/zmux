@@ -29,6 +29,7 @@ const xm = @import("xmalloc.zig");
 const tty_features = @import("tty-features.zig");
 const tty_term = @import("tty-term.zig");
 const tty_draw_mod = @import("tty-draw.zig");
+const screen_mod = @import("screen.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
 const input_keys = @import("input-keys.zig");
 const log = @import("log.zig");
@@ -1573,6 +1574,16 @@ pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !
         actual &= ~@as(i32, T.MODE_FOCUSON);
 
     const changed = actual ^ tty.mode;
+    if (log.log_get_level() != 0 and changed != 0) {
+        log.log_debug("{s}: current mode {s}", .{
+            tty.client.name orelse "(unknown)",
+            screen_mod.screen_mode_to_string(tty.mode),
+        });
+        log.log_debug("{s}: setting mode {s}", .{
+            tty.client.name orelse "(unknown)",
+            screen_mod.screen_mode_to_string(actual),
+        });
+    }
     if ((changed & T.ALL_MOUSE_MODES) != 0 and (supports_mouse or (tty.mode & T.ALL_MOUSE_MODES) != 0)) {
         try out.appendSlice(xm.allocator, "\x1b[?1006l\x1b[?1005l\x1b[?1000l\x1b[?1002l\x1b[?1003l");
         if (supports_mouse and (actual & T.ALL_MOUSE_MODES) != 0)
@@ -2768,8 +2779,18 @@ pub fn tty_update_mode(tty: *T.Tty, mode: i32, s: ?*T.Screen) void {
         actual &= ~@as(i32, T.MODE_CURSOR);
 
     const changed = actual ^ tty.mode;
-    _ = changed;
     _ = s;
+
+    if (log.log_get_level() != 0 and changed != 0) {
+        log.log_debug("{s}: current mode {s}", .{
+            tty.client.name orelse "(unknown)",
+            screen_mod.screen_mode_to_string(tty.mode),
+        });
+        log.log_debug("{s}: setting mode {s}", .{
+            tty.client.name orelse "(unknown)",
+            screen_mod.screen_mode_to_string(actual),
+        });
+    }
 
     tty.mode = actual;
 }

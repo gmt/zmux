@@ -1618,7 +1618,13 @@ test "window-copy start-of-line end-of-line and back-to-indentation" {
 }
 
 test "window-copy begin-selection updates end with cursor motion clear-selection ends drag" {
+    const opts_mod = @import("options.zig");
+
     initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
 
     const source_grid = grid.grid_create(8, 1, 0);
     defer grid.grid_free(source_grid);
@@ -1635,12 +1641,15 @@ test "window-copy begin-selection updates end with cursor motion clear-selection
         xm.allocator.destroy(target_screen);
     }
 
+    const window_options = opts_mod.options_create(opts_mod.global_w_options);
+    defer opts_mod.options_free(window_options);
+
     var window_ = T.Window{
         .id = 110,
         .name = xm.xstrdup("copy-sel"),
         .sx = 8,
         .sy = 1,
-        .options = undefined,
+        .options = window_options,
     };
     defer xm.allocator.free(window_.name);
     defer window_.panes.deinit(xm.allocator);

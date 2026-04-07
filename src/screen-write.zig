@@ -1699,7 +1699,18 @@ pub fn screen_write_cell(ctx: *T.ScreenWriteCtx, gc: *const T.GridCell) void {
         grid.set_padding(gd, s.cy, xx);
     }
 
-    grid.set_cell(gd, s.cy, s.cx, gc);
+    const selected = screen_mod.screen_check_selection(s, s.cx, s.cy);
+    if (selected and (gc.flags & T.GRID_FLAG_SELECTED == 0)) {
+        var tmp_gc = gc.*;
+        tmp_gc.flags |= T.GRID_FLAG_SELECTED;
+        grid.set_cell(gd, s.cy, s.cx, &tmp_gc);
+    } else if (!selected and (gc.flags & T.GRID_FLAG_SELECTED != 0)) {
+        var tmp_gc = gc.*;
+        tmp_gc.flags &= ~T.GRID_FLAG_SELECTED;
+        grid.set_cell(gd, s.cy, s.cx, &tmp_gc);
+    } else {
+        grid.set_cell(gd, s.cy, s.cx, gc);
+    }
 
     const not_wrap: u32 = if (s.mode & T.MODE_WRAP == 0) @as(u32, 1) else 0;
     if (s.cx <= sx - not_wrap - width)

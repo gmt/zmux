@@ -2290,11 +2290,9 @@ fn resolve_client_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8
 }
 
 fn resolve_client_written(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    // tmux tracks cumulative bytes written to the client tty in c->written.
-    // zmux does not yet have a Client.written counter; returns 0 until that
-    // accounting is wired up.
-    _ = ctx.client orelse return null;
-    return alloc.dupe(u8, "0") catch unreachable;
+    _ = alloc;
+    const cl = ctx.client orelse return null;
+    return xm.xasprintf("{d}", .{cl.written});
 }
 
 fn resolve_config_files(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
@@ -2377,9 +2375,8 @@ fn resolve_session_stack(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
 }
 
 fn resolve_sixel_support(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
-    // zmux does not implement sixel graphics; always report unsupported.
-    _ = ctx;
-    return alloc.dupe(u8, "0") catch unreachable;
+    const cl = ctx.client orelse return null;
+    return alloc.dupe(u8, if ((cl.term_features & tty_features.TERM_SIXEL) != 0) "1" else "0") catch unreachable;
 }
 
 fn resolve_start_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

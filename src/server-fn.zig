@@ -395,7 +395,7 @@ pub fn server_client_handle_key(cl: *T.Client, event: *T.key_event) bool {
     // Check prefix-timeout: if we're in the prefix table and the timeout has
     // been exceeded, revert to root and fall through to default key handling.
     // Mirrors tmux: server_client_key_callback prefix-timeout logic.
-    if (!using_mode_table and std.mem.eql(u8, current_table, "prefix")) {
+    if (!using_mode_table and opts.options_ready and std.mem.eql(u8, current_table, "prefix")) {
         const prefix_delay = opts.options_get_number(opts.global_options, "prefix-timeout");
         if (prefix_delay > 0 and
             server_client_mod.server_client_key_table_activity_diff(cl) > @as(u64, @intCast(prefix_delay)))

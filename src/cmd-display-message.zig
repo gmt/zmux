@@ -284,7 +284,7 @@ test "display-message -p reuses the shared print view-mode path" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(client.message_string == null);
     const wme = win_mod.window_pane_mode(pane) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("server-print-view", wme.mode.name);
+    try std.testing.expectEqualStrings("view-mode", wme.mode.name);
     server_print.server_client_close_view_mode(pane);
 }
 
@@ -512,7 +512,7 @@ test "display-message -p -F expands formats through the shared print path" {
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(client.message_string == null);
     const wme = win_mod.window_pane_mode(pane) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("server-print-view", wme.mode.name);
+    try std.testing.expectEqualStrings("view-mode", wme.mode.name);
 
     const row = try grid_row_string(pane.screen.grid, 0);
     defer xm.allocator.free(row);

@@ -931,30 +931,6 @@ pub fn server_client_write_fmt(cl: *T.Client, comptime fmt: []const u8, args: an
     server_client_write(cl, msg);
 }
 
-/// Print a message to a client. For attached clients, this opens copy-mode.
-/// For control clients, this writes to the control output. For detached
-/// clients, this is sent to the peer's output stream.
-pub fn server_client_print(cl: *T.Client, text: []const u8, parse: bool) void {
-    if (cl.session == null) {
-        server_client_write(cl, text);
-        server_client_write(cl, "\n");
-        return;
-    }
-    if (cl.flags & T.CLIENT_CONTROL != 0) {
-        server_client_write(cl, text);
-        return;
-    }
-
-    const window_copy = @import("window-copy.zig");
-    const wp = server_client_get_pane(cl) orelse return;
-
-    const wme = if (wp.modes.items.len > 0) wp.modes.items[0] else null;
-    if (wme == null or wme.?.mode != &window_copy.window_view_mode)
-        _ = win_mod.window_pane_set_mode(wp, null, &window_copy.window_view_mode, null);
-
-    window_copy.window_copy_add(wp, parse, text);
-}
-
 pub fn server_client_apply_session_size(cl: *T.Client, s: *T.Session) void {
     if (s.curw) |wl| wl.window.latest = @ptrCast(cl);
     resize_mod.recalculate_sizes_now(true);

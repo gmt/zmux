@@ -16,6 +16,14 @@ separate docs under `docs/`.
   program behaving like itself, not through cross-tool awareness.
 - User-visible names, messages, and environment variables use `zmux`.
 
+### Compatibility Mode
+
+When invoked as `tmux` (argv[0] detection), zmux switches all
+user-visible names, paths, and environment variables to their tmux
+equivalents. Internally it remains zmux — source files, function
+names, and types are unchanged. The compat mode affects only the
+surfaces a user or external tool would observe.
+
 ## Stack Shape
 
 ### Text and Cells

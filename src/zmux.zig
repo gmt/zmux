@@ -54,14 +54,44 @@ pub const fuzz = struct {
     pub const cmd = @import("cmd.zig");
 };
 
-// ── Usage ────────────────────────────────────────────────────────────────
+/// Program name for user-visible output. Set once at startup from argv[0].
+/// Defaults to "zmux"; becomes "tmux" when the binary is invoked as "tmux".
+pub var compat_name: []const u8 = "zmux";
+
+/// Returns "ZMUX" in zmux mode, "TMUX" in compat mode.
+pub fn compat_env() []const u8 {
+    return if (std.mem.eql(u8, compat_name, "tmux")) "TMUX" else "ZMUX";
+}
+
+/// Returns "ZMUX_PANE" in zmux mode, "TMUX_PANE" in compat mode.
+pub fn compat_env_pane() []const u8 {
+    return if (std.mem.eql(u8, compat_name, "tmux")) "TMUX_PANE" else "ZMUX_PANE";
+}
+
+/// Returns "ZMUX_TMPDIR" in zmux mode, "TMUX_TMPDIR" in compat mode.
+pub fn compat_env_tmpdir() []const u8 {
+    return if (std.mem.eql(u8, compat_name, "tmux")) "TMUX_TMPDIR" else "ZMUX_TMPDIR";
+}
+
+/// Returns the colon-separated default config search paths for the active mode.
+pub fn compat_conf_paths() []const u8 {
+    if (std.mem.eql(u8, compat_name, "tmux")) {
+        return "/etc/tmux.conf:~/.tmux.conf:$XDG_CONFIG_HOME/tmux/tmux.conf:~/.config/tmux/tmux.conf";
+    }
+    return T.ZMUX_CONF;
+}
 
 fn usage(to_stderr: bool) void {
     const stream = if (to_stderr) std.fs.File.stderr() else std.fs.File.stdout();
-    _ = stream.writeAll(
-        "usage: zmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n" ++
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "usage: {s} [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n" ++
             "            [-S socket-path] [-T features] [command [flags]]\n",
-    ) catch {};
+        .{compat_name},
+    ) catch "usage: zmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n" ++
+        "            [-S socket-path] [-T features] [command [flags]]\n";
+    _ = stream.writeAll(msg) catch {};
 }
 
 const ParsedMainArgs = struct {
@@ -180,8 +210,6 @@ fn parseMainArgs(raw_args: []const []const u8) error{Usage}!ParsedMainArgs {
     return parsed;
 }
 
-// ── main ─────────────────────────────────────────────────────────────────
-
 pub fn main() !void {
     const alloc = xm.allocator;
     _ = alloc;
@@ -226,6 +254,27 @@ pub fn main() !void {
     const raw_args = try std.process.argsAlloc(xm.allocator);
     defer std.process.argsFree(xm.allocator, raw_args);
 
+    // Detect compat mode from argv[0] basename (busybox-style).
+    // Set once here; everything downstream reads compat_name.
+    if (raw_args.len > 0) {
+        const argv0 = raw_args[0];
+        const basename = if (std.mem.lastIndexOfScalar(u8, argv0, '/')) |idx|
+            argv0[idx + 1 ..]
+        else
+            argv0;
+        if (std.mem.eql(u8, basename, "tmux")) {
+            compat_name = "tmux";
+            // Override the automatic-rename-format default so the status bar
+            // shows [tmux] instead of [zmux] when running in compat mode.
+            opts.options_set_string(
+                opts.global_w_options,
+                false,
+                "automatic-rename-format",
+                "#{?pane_in_mode,[tmux],#{pane_current_command}}#{?pane_dead,dead,}",
+            );
+        }
+    }
+
     const parsed = parseMainArgs(raw_args) catch {
         usage(true);
         std.process.exit(1);
@@ -247,7 +296,9 @@ pub fn main() !void {
             return;
         },
         .version => {
-            _ = std.fs.File.stdout().writeAll("zmux 3.6a-dev\n") catch {};
+            var buf: [64]u8 = undefined;
+            const ver = std.fmt.bufPrint(&buf, "{s} {s}\n", .{ compat_name, T.ZMUX_VERSION }) catch "zmux 3.6a-dev\n";
+            _ = std.fs.File.stdout().writeAll(ver) catch {};
             return;
         },
         .none => {},
@@ -262,7 +313,7 @@ pub fn main() !void {
 
     // Resolve socket path
     if (path == null) {
-        if (std.posix.getenv("ZMUX")) |zmux_env| {
+        if (std.posix.getenv(compat_env())) |zmux_env| {
             const comma = std.mem.indexOfScalar(u8, zmux_env, ',');
             const socket_str = if (comma) |ci| zmux_env[0..ci] else zmux_env;
             if (socket_str.len > 0) {
@@ -272,7 +323,7 @@ pub fn main() !void {
     }
     if (path == null) {
         path = make_label(label) orelse {
-            std.debug.print("zmux: couldn't create socket directory\n", .{});
+            std.debug.print("{s}: couldn't create socket directory\n", .{compat_name});
             std.process.exit(1);
         };
         flags |= T.CLIENT_DEFAULTSOCKET;
@@ -287,7 +338,7 @@ pub fn main() !void {
     }
 
     // UTF-8 detection
-    if (std.posix.getenv("ZMUX")) |_| {
+    if (std.posix.getenv(compat_env())) |_| {
         flags |= T.CLIENT_UTF8;
     } else {
         flags |= client_utf8_flags_from_locale(
@@ -306,8 +357,6 @@ pub fn main() !void {
     const rc = client_mod.client_main(base, shell_command, cmd_argc, if (cmd_argc > 0) cmd_argv else &empty_argv, flags, feat);
     std.process.exit(@intCast(@as(i32, @max(rc, 0))));
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────
 
 pub fn getshell() []const u8 {
     if (std.posix.getenv("SHELL")) |sh| {
@@ -329,9 +378,9 @@ pub fn client_utf8_flags_from_locale(
     return out;
 }
 
-/// Build `{tmpdir}/zmux-{uid}/{label_name}` after ensuring the base directory exists.
+/// Build `{tmpdir}/{compat_name}-{uid}/{label_name}` after ensuring the base directory exists.
 pub fn make_socket_label_path(tmpdir: []const u8, uid: u32, label_name: []const u8) ?[]u8 {
-    const base = xm.xasprintf("{s}/zmux-{d}", .{ tmpdir, uid });
+    const base = xm.xasprintf("{s}/{s}-{d}", .{ tmpdir, compat_name, uid });
     defer xm.allocator.free(base);
 
     std.fs.makeDirAbsolute(base) catch |err| {
@@ -344,11 +393,9 @@ pub fn make_socket_label_path(tmpdir: []const u8, uid: u32, label_name: []const 
 fn make_label(label: ?[]u8) ?[]u8 {
     const lname = if (label) |l| l else "default";
     const uid: u32 = @truncate(std.os.linux.getuid());
-    const tmpdir = std.posix.getenv("ZMUX_TMPDIR") orelse "/tmp";
+    const tmpdir = std.posix.getenv(compat_env_tmpdir()) orelse "/tmp";
     return make_socket_label_path(tmpdir, uid, lname);
 }
-
-// ── Module re-exports needed by other files ───────────────────────────────
 
 const proc_mod = @import("proc.zig");
 
@@ -488,6 +535,66 @@ test "make_socket_label_path reuses existing base and accepts long labels" {
     try std.testing.expect(std.mem.endsWith(u8, second, long_label));
     try std.testing.expect(std.mem.indexOf(u8, second, "/zmux-7/") != null);
     try std.testing.expect(std.mem.endsWith(u8, first, "/first"));
+}
+
+test "make_socket_label_path uses compat_name in directory" {
+    compat_name = "tmux";
+    defer {
+        compat_name = "zmux";
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir);
+
+    const sock = make_socket_label_path(dir, 99, "default").?;
+    defer xm.allocator.free(sock);
+
+    try std.testing.expect(std.mem.indexOf(u8, sock, "/tmux-99/") != null);
+    try std.testing.expect(std.mem.endsWith(u8, sock, "/tmux-99/default"));
+}
+
+test "compat_name defaults to zmux" {
+    try std.testing.expectEqualStrings("zmux", compat_name);
+}
+
+test "compat helpers return zmux values by default" {
+    try std.testing.expectEqualStrings("ZMUX", compat_env());
+    try std.testing.expectEqualStrings("ZMUX_PANE", compat_env_pane());
+    try std.testing.expectEqualStrings("ZMUX_TMPDIR", compat_env_tmpdir());
+    try std.testing.expect(std.mem.indexOf(u8, compat_conf_paths(), "zmux") != null);
+}
+
+test "compat helpers return tmux values in compat mode" {
+    compat_name = "tmux";
+    defer {
+        compat_name = "zmux";
+    }
+    try std.testing.expectEqualStrings("TMUX", compat_env());
+    try std.testing.expectEqualStrings("TMUX_PANE", compat_env_pane());
+    try std.testing.expectEqualStrings("TMUX_TMPDIR", compat_env_tmpdir());
+    try std.testing.expect(std.mem.indexOf(u8, compat_conf_paths(), "tmux.conf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compat_conf_paths(), "zmux") == null);
+}
+
+test "argv0 basename extraction: tmux paths trigger compat mode" {
+    const cases = [_]struct { argv0: []const u8, expect_tmux: bool }{
+        .{ .argv0 = "tmux", .expect_tmux = true },
+        .{ .argv0 = "/usr/bin/tmux", .expect_tmux = true },
+        .{ .argv0 = "./tmux", .expect_tmux = true },
+        .{ .argv0 = "/foo/bar/tmux", .expect_tmux = true },
+        .{ .argv0 = "zmux", .expect_tmux = false },
+        .{ .argv0 = "/usr/bin/zmux", .expect_tmux = false },
+        .{ .argv0 = "/foo/tmux-wrapper", .expect_tmux = false },
+    };
+    for (cases) |tc| {
+        const basename = if (std.mem.lastIndexOfScalar(u8, tc.argv0, '/')) |idx|
+            tc.argv0[idx + 1 ..]
+        else
+            tc.argv0;
+        const is_tmux = std.mem.eql(u8, basename, "tmux");
+        try std.testing.expectEqual(tc.expect_tmux, is_tmux);
+    }
 }
 
 test "getshell returns non-empty path" {

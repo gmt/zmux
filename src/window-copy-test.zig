@@ -1964,17 +1964,10 @@ test "window-copy search-forward jumps to matching line" {
 }
 
 /// Enter view mode on the given pane, creating the CopyModeData and pushing
-/// window_view_mode onto the mode stack.  Mirrors the pattern used by
-/// enterMode() for regular copy-mode, but uses the view-mode WindowMode.
+/// window_view_mode onto the mode stack using the production entry path.
 fn enterViewMode(wp: *T.WindowPane) *T.WindowModeEntry {
-    screen.screen_enter_alternate(wp, true);
-
-    const data = xm.allocator.create(wc.CopyModeData) catch unreachable;
-    data.* = .{
-        .backing = screen.screen_init(wp.base.grid.sx, wp.base.grid.sy, 0),
-    };
-
-    return window_mode_runtime.pushMode(wp, &wc.window_view_mode, @ptrCast(data), null);
+    _ = window.window_pane_set_mode(wp, null, &wc.window_view_mode, null);
+    return window.window_pane_mode(wp).?;
 }
 
 test "view mode init sets up backing screen and uses window_view_mode" {
@@ -2357,6 +2350,70 @@ test "view mode: resize updates backing screen dimensions" {
     // Backing screen should now have the new dimensions.
     try std.testing.expectEqual(@as(u32, 20), data.backing.grid.sx);
     try std.testing.expectEqual(@as(u32, 8), data.backing.grid.sy);
+}
+
+test "view mode uses the live resized pane height on the real entry path" {
+    initWindowCopyTestGlobals();
+
+    const target_grid = grid.grid_create(80, 24, 0);
+    defer grid.grid_free(target_grid);
+    const target_screen = screen.screen_init(80, 24, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 3042,
+        .name = xm.xstrdup("view-resized-pane-window"),
+        .sx = 80,
+        .sy = 24,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 3043,
+        .window = &window_,
+        .options = undefined,
+        .sx = 80,
+        .sy = 24,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 23 },
+    };
+    defer window_mode_runtime.resetModeAll(&pane);
+
+    try window_.panes.append(xm.allocator, &pane);
+    window_.active = &pane;
+
+    window.window_pane_resize(&pane, 120, 39);
+    try std.testing.expectEqual(@as(u32, 120), pane.base.grid.sx);
+    try std.testing.expectEqual(@as(u32, 39), pane.base.grid.sy);
+
+    const wme = enterViewMode(&pane);
+    const data = wc.modeData(wme);
+    try std.testing.expectEqual(@as(u32, 120), data.backing.grid.sx);
+    try std.testing.expectEqual(@as(u32, 39), data.backing.grid.sy);
+    try std.testing.expectEqual(@as(u32, 120), pane.screen.grid.sx);
+    try std.testing.expectEqual(@as(u32, 39), pane.screen.grid.sy);
+
+    var line_no: u32 = 0;
+    while (line_no < 39) : (line_no += 1) {
+        const text = try std.fmt.allocPrint(xm.allocator, "line-{d:0>2}", .{line_no});
+        defer xm.allocator.free(text);
+        wc.window_copy_add(&pane, false, text);
+    }
+
+    const lower = grid.string_cells(pane.screen.grid, 30, 120, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(lower);
+    try std.testing.expectEqualStrings("line-30", lower);
+
+    const bottom = grid.string_cells(pane.screen.grid, 38, 120, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(bottom);
+    try std.testing.expectEqualStrings("line-38", bottom);
 }
 
 test "view mode: refresh-from-pane wipes view content (unlike tmux)" {

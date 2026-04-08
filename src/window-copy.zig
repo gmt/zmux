@@ -667,14 +667,41 @@ fn cloneScreen(dst: *T.Screen, src: *const T.Screen) void {
     if (dst.grid.sy != 0) dst.cy = @min(src.cy, dst.grid.sy - 1) else dst.cy = 0;
 }
 
-fn copyLine(dst_grid: *T.Grid, dst_row: u32, src_grid: *const T.Grid, src_row: u32, width: u32) void {
-    if (src_row >= src_grid.linedata.len or dst_row >= dst_grid.linedata.len) return;
+fn absoluteStorageRow(gd: *const T.Grid, row: u32) ?u32 {
+    return grid.absolute_row_to_storage(gd, row);
+}
 
-    const src_line = &src_grid.linedata[src_row];
+fn storageRowToAbsolute(gd: *const T.Grid, row: u32) u32 {
+    return if (row < gd.sy) gd.hsize + row else row - gd.sy;
+}
+
+fn absoluteLine(gd: *const T.Grid, row: u32) ?*const T.GridLine {
+    const storage_row = absoluteStorageRow(gd, row) orelse return null;
+    return grid.grid_peek_line(gd, storage_row);
+}
+
+fn absoluteLineLength(gd: *const T.Grid, row: u32) u32 {
+    const storage_row = absoluteStorageRow(gd, row) orelse return 0;
+    return grid.line_length(@constCast(gd), storage_row);
+}
+
+fn absoluteGetCell(gd: *const T.Grid, row: u32, col: u32, gc: *T.GridCell) void {
+    const storage_row = absoluteStorageRow(gd, row) orelse {
+        gc.* = T.grid_default_cell;
+        return;
+    };
+    grid.get_cell(@constCast(gd), storage_row, col, gc);
+}
+
+fn copyLine(dst_grid: *T.Grid, dst_row: u32, src_grid: *const T.Grid, src_row: u32, width: u32) void {
+    const storage_row = absoluteStorageRow(src_grid, src_row) orelse return;
+    if (storage_row >= src_grid.linedata.len or dst_row >= dst_grid.linedata.len) return;
+
+    const src_line = &src_grid.linedata[storage_row];
     var cell: T.GridCell = undefined;
     var col: u32 = 0;
     while (col < width) : (col += 1) {
-        grid.get_cell(@constCast(src_grid), src_row, col, &cell);
+        grid.get_cell(@constCast(src_grid), storage_row, col, &cell);
         grid.set_cell(dst_grid, dst_row, col, &cell);
     }
 
@@ -818,7 +845,8 @@ fn repeatJump(wme: *T.WindowModeEntry, jump_type: JumpType) void {
 
 fn startMotionReader(wme: *T.WindowModeEntry, gr: *T.GridReader) bool {
     if (rowCount(modeData(wme).backing) == 0) return false;
-    grid.grid_reader_start(gr, modeData(wme).backing.grid, modeData(wme).cx, absoluteCursorRow(wme));
+    const row = absoluteStorageRow(modeData(wme).backing.grid, absoluteCursorRow(wme)) orelse return false;
+    grid.grid_reader_start(gr, modeData(wme).backing.grid, modeData(wme).cx, row);
     return true;
 }
 
@@ -826,7 +854,7 @@ fn applyMotionReader(wme: *T.WindowModeEntry, gr: *const T.GridReader) void {
     var cx: u32 = 0;
     var cy: u32 = 0;
     grid.grid_reader_get_cursor(gr, &cx, &cy);
-    setAbsoluteCursorRow(wme, cy);
+    setAbsoluteCursorRow(wme, storageRowToAbsolute(modeData(wme).backing.grid, cy));
     modeData(wme).cx = cx;
     clampCursorX(wme);
 }
@@ -979,7 +1007,7 @@ fn rowCount(s: *const T.Screen) u32 {
 fn backingLineLength(wme: *T.WindowModeEntry, row: u32) u32 {
     const data = modeData(wme);
     if (row >= data.backing.grid.hsize + data.backing.grid.sy) return 0;
-    return grid.line_length(data.backing.grid, row);
+    return absoluteLineLength(data.backing.grid, row);
 }
 
 fn maxTop(backing: *const T.Screen, wp: *const T.WindowPane) u32 {
@@ -1064,8 +1092,8 @@ fn clampCursorX(wme: *T.WindowModeEntry) void {
 }
 
 fn lineMaxX(backing: *const T.Screen, row: u32, view_width: u32) u32 {
-    if (view_width == 0 or row >= backing.grid.sy) return 0;
-    const length = grid.line_length(@constCast(backing.grid), row);
+    if (view_width == 0 or row >= rowCount(backing)) return 0;
+    const length = absoluteLineLength(backing.grid, row);
     if (length == 0) return 0;
     return @min(view_width - 1, length - 1);
 }
@@ -1268,7 +1296,7 @@ fn getSelectionText(wme: *T.WindowModeEntry) ?[]u8 {
     }
 
     // Trim ex to line length
-    const ey_last = grid.line_length(gd, ey);
+    const ey_last = absoluteLineLength(gd, ey);
     if (ex > ey_last) ex = ey_last;
 
     // Compute per-line start/end columns (handles both rect and normal).
@@ -1355,13 +1383,14 @@ fn copyLineToBuffer(
     if (line_start > line_end) return;
 
     // Determine effective line length
-    const wrapped = row < gd.linedata.len and
-        (gd.linedata[row].flags & T.GRID_LINE_WRAPPED) != 0 and
-        gd.linedata[row].cellused <= gd.sx;
+    const line = absoluteLine(gd, row);
+    const wrapped = line != null and
+        (line.?.flags & T.GRID_LINE_WRAPPED) != 0 and
+        line.?.cellused <= gd.sx;
     const effective_len: u32 = if (wrapped)
-        gd.linedata[row].cellused
+        line.?.cellused
     else
-        grid.line_length(gd, row);
+        absoluteLineLength(gd, row);
 
     var ex = line_end;
     var sx = line_start;
@@ -1372,7 +1401,7 @@ fn copyLineToBuffer(
     var col: u32 = sx;
     while (col < ex) : (col += 1) {
         var gc: T.GridCell = undefined;
-        grid.get_cell(gd, row, col, &gc);
+        absoluteGetCell(gd, row, col, &gc);
         if (gc.isPadding()) continue;
         if (gc.data.size >= 1) {
             buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
@@ -1421,7 +1450,7 @@ fn cmdRectangleSet(wme: *T.WindowModeEntry, on: bool) void {
 fn rectangleSetUpdateCursor(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
     const abs_row = absoluteCursorRow(wme);
-    const line_len = grid.line_length(data.backing.grid, abs_row);
+    const line_len = absoluteLineLength(data.backing.grid, abs_row);
     if (data.cx > line_len)
         data.cx = line_len;
     _ = updateSelection(wme);
@@ -1786,7 +1815,7 @@ fn isLowerCase(str: []const u8) bool {
 fn searchCompare(gd: *T.Grid, px: u32, py: u32, sgd: *T.Grid, spx: u32, cis: bool) bool {
     var gc: T.GridCell = undefined;
     var sgc: T.GridCell = undefined;
-    grid.get_cell(gd, py, px, &gc);
+    absoluteGetCell(gd, py, px, &gc);
     grid.get_cell(sgd, 0, spx, &sgc);
 
     if (gc.data.size != sgc.data.size) return false;
@@ -1901,7 +1930,7 @@ fn matchAtCursor(data: *CopyModeData) ?[]u8 {
         const py = data.top + (i / sx);
         const px = i % sx;
         var gc: T.GridCell = undefined;
-        grid.get_cell(gd, py, px, &gc);
+        absoluteGetCell(gd, py, px, &gc);
         if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
             buf.append('\t') catch unreachable;
         } else if ((gc.flags & T.GRID_FLAG_PADDING) != 0) {
@@ -2168,7 +2197,7 @@ pub const window_view_mode = T.WindowMode{
 pub fn window_copy_common_init(wme: *T.WindowModeEntry) *CopyModeData {
     const data = xm.allocator.create(CopyModeData) catch unreachable;
     data.* = .{
-        .backing = screen.screen_init(wme.wp.screen.grid.sx, wme.wp.screen.grid.sy, 0),
+        .backing = screen.screen_init(wme.wp.sx, wme.wp.sy, 0),
     };
     wme.data = @ptrCast(data);
     return data;
@@ -2198,8 +2227,8 @@ pub fn window_copy_view_init(wme: *T.WindowModeEntry, _fs: ?*anyopaque, args: *c
 /// as the view, with data.backing holding the written text.
 fn window_copy_view_init_mode(wme: *T.WindowModeEntry) *T.Screen {
     const wp = wme.wp;
-    const sx = wp.screen.grid.sx;
-    const sy = wp.screen.grid.sy;
+    const sx = wp.sx;
+    const sy = wp.sy;
 
     screen.screen_enter_alternate(wp, true);
 
@@ -2539,7 +2568,7 @@ pub fn window_copy_write_line(wme: *T.WindowModeEntry, raw_ctx: ?*anyopaque, py:
 
     // Write the backing row into the screen_write context
     const backing_row = data.top + py;
-    if (backing_row >= gd.sy) return;
+    if (backing_row >= gd.hsize + gd.sy) return;
 
     const sw = ctx orelse return;
     screen_write.cursor_to(sw, py, 0);
@@ -2548,7 +2577,7 @@ pub fn window_copy_write_line(wme: *T.WindowModeEntry, raw_ctx: ?*anyopaque, py:
     var col: u32 = 0;
     while (col < width) : (col += 1) {
         var gc: T.GridCell = undefined;
-        grid.get_cell(gd, backing_row, col, &gc);
+        absoluteGetCell(gd, backing_row, col, &gc);
         screen_write.putCell(sw, &gc);
     }
 
@@ -2837,7 +2866,7 @@ pub fn window_copy_copy_line(wme: *T.WindowModeEntry, buf: ?*?[]u8, off: ?*usize
         var i: u32 = start;
         while (i < ex) : (i += 1) {
             var gc: T.GridCell = undefined;
-            grid.get_cell(gd, py, i, &gc);
+            absoluteGetCell(gd, py, i, &gc);
             if (gc.isPadding()) continue;
 
             const cell_data = if ((gc.flags & T.GRID_FLAG_TAB) != 0)
@@ -3250,7 +3279,7 @@ pub fn window_copy_search_mark_match(data: *CopyModeData, px: u32, py: u32, widt
             const cell_py = data.top + (i / sx);
             const cell_px = i % sx;
             var gc: T.GridCell = undefined;
-            grid.get_cell(gd, cell_py, cell_px, &gc);
+            absoluteGetCell(gd, cell_py, cell_px, &gc);
             if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
                 w = w + gc.data.width - 1;
                 w = window_copy_clip_width(w, b, sx, sy);

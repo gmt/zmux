@@ -186,6 +186,10 @@ pub fn screen_enter_alternate(wp: *T.WindowPane, save_cursor: bool) void {
         wp.screen.saved_cy = 0;
     }
     wp.screen.saved_grid = wp.base.grid;
+    // Keep the alternate screen aligned with the live pane geometry before
+    // it becomes visible; otherwise alternate-only modes inherit stale 80x24
+    // grids from pane creation.
+    screen_resize(wp.screen, wp.sx, wp.sy, false);
     screen_reset_active(wp.screen);
 }
 

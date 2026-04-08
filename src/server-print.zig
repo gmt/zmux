@@ -64,7 +64,7 @@ fn suppressExpectedTestStderr(data: []const u8) bool {
         "pane input failed\n",
         "format expansion not supported yet\n",
         "pane is not empty\n",
-        "sessions should be nested with care, unset $TMUX to force\n",
+        "sessions should be nested with care, unset $ZMUX to force\n",
         "missing user argument\n",
         "-a and -d cannot be used together\n",
         "-r and -w cannot be used together\n",

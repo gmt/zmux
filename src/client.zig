@@ -36,8 +36,6 @@ const tty_term = @import("tty-term.zig");
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn system(command: [*:0]const u8) c_int;
 
-// ── Client globals ────────────────────────────────────────────────────────
-
 var client_proc: ?*T.ZmuxProc = null;
 var client_peer: ?*T.ZmuxPeer = null;
 var client_flags: u64 = 0;
@@ -58,8 +56,6 @@ var client_raw_tty = false;
 var client_saved_tio: c.posix_sys.termios = undefined;
 var client_have_saved_tio = false;
 var client_suspend_signal_hook: ?*const fn () void = null;
-
-// ── Socket connection ─────────────────────────────────────────────────────
 
 fn client_get_lock(lockfile: []const u8) i32 {
     const lockfile_z = xm.xm_dupeZ(lockfile);
@@ -128,16 +124,15 @@ pub fn client_connect(
                 continue :retry;
             }
             locked = true;
-            continue :retry; // retry once with lock held
+            continue :retry;
         }
 
-        // Start the server
         if (lockfd >= 0) {
             _ = std.posix.unlink(path) catch {};
         }
         const server_fd = server_mod.server_start(client_proc.?, flags, base, lockfd, lockfile);
         if (lockfd >= 0) {
-            lockfile = null; // ownership transferred to server_start
+            lockfile = null;
         }
         set_blocking(server_fd, false);
         return server_fd;
@@ -152,15 +147,11 @@ fn set_blocking(fd: i32, state: bool) void {
     _ = std.c.fcntl(fd, std.posix.F.SETFL, new_flags);
 }
 
-// ── Identify messages ─────────────────────────────────────────────────────
-
 fn client_send_identify(feat: i32) void {
     const peer = client_peer orelse return;
 
-    // Flags
     _ = proc_mod.proc_send(peer, .identify_longflags, -1, std.mem.asBytes(&client_flags).ptr, @sizeOf(u64));
 
-    // TERM
     const term = std.posix.getenv("TERM") orelse "screen";
     _ = proc_mod.proc_send(peer, .identify_term, -1, term.ptr, term.len + 1);
 
@@ -168,7 +159,6 @@ fn client_send_identify(feat: i32) void {
         _ = proc_mod.proc_send(peer, .identify_ttyname, -1, ttyname.ptr, ttyname.len + 1);
     }
 
-    // CWD
     var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
     if (std.posix.getcwd(&cwd_buf)) |cwd_slice| {
         _ = proc_mod.proc_send(peer, .identify_cwd, -1, cwd_slice.ptr, cwd_slice.len + 1);
@@ -183,18 +173,15 @@ fn client_send_identify(feat: i32) void {
         _ = proc_mod.proc_send(peer, .identify_stdout, stdout_fd, null, 0);
     }
 
-    // Env
     var env_ptr: [*c]const [*c]const u8 = std.c.environ;
     while (env_ptr.* != null) : (env_ptr += 1) {
         const var_str = std.mem.span(env_ptr.*);
         _ = proc_mod.proc_send(peer, .identify_environ, -1, var_str.ptr, var_str.len + 1);
     }
 
-    // Client PID
     const pid = std.os.linux.getpid();
     _ = proc_mod.proc_send(peer, .identify_clientpid, -1, std.mem.asBytes(&pid).ptr, @sizeOf(std.posix.pid_t));
 
-    // Features
     _ = proc_mod.proc_send(peer, .identify_features, -1, std.mem.asBytes(&feat).ptr, @sizeOf(i32));
 
     // Reduced terminfo capability truth for the tty/runtime layer.
@@ -204,16 +191,12 @@ fn client_send_identify(feat: i32) void {
         _ = proc_mod.proc_send(peer, .identify_terminfo, -1, cap.ptr, cap.len + 1);
     }
 
-    // Done
     _ = proc_mod.proc_send(peer, .identify_done, -1, null, 0);
 }
-
-// ── Dispatch (client side) ────────────────────────────────────────────────
 
 export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
     _ = _arg;
     if (imsg_ptr == null) {
-        // Server disconnected
         client_exitreason = .lost_server;
         proc_mod.proc_exit(client_proc.?);
         return;
@@ -223,7 +206,10 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
 
     switch (msg_type) {
         .version => {
-            _ = std.fs.File.stderr().writeAll("server protocol version mismatch; restart zmux server\n") catch {};
+            const zmux_mod = @import("zmux.zig");
+            var buf: [80]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "server protocol version mismatch; restart {s} server\n", .{zmux_mod.compat_name}) catch "server protocol version mismatch; restart zmux server\n";
+            _ = std.fs.File.stderr().writeAll(msg) catch {};
             log.log_warn("server version mismatch", .{});
             client_exitreason = .lost_server;
             proc_mod.proc_exit(client_proc.?);
@@ -588,8 +574,6 @@ export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     }
 }
 
-// ── Main client entry ─────────────────────────────────────────────────────
-
 /// Whether the client should set `CLIENT_STARTSERVER` before connecting (same
 /// rules as `client_main`, without libevent or proc setup).
 pub fn client_infer_start_server(shell_command: ?[]const u8, argc: i32, argv: [*]const [*:0]const u8) bool {
@@ -629,11 +613,9 @@ pub fn client_main(
     if (client_has_terminal()) client_mode_flags |= T.CLIENT_TERMINAL;
     client_flags = client_mode_flags | if (start_server) T.CLIENT_STARTSERVER else 0;
 
-    // Start client proc
     client_proc = proc_mod.proc_start("client");
     proc_mod.proc_set_signals(client_proc.?, client_signal);
 
-    // Connect
     const fd = client_connect(base, server_mod.socket_path, client_flags);
     if (fd < 0) {
         const errno_val: std.posix.E = @enumFromInt(std.c._errno().*);
@@ -647,10 +629,8 @@ pub fn client_main(
 
     client_peer = proc_mod.proc_add_peer(client_proc.?, fd, client_dispatch, null);
 
-    // Send identity
     client_send_identify(feat);
 
-    // Send the command
     if (client_shell_command != null) {
         client_send_shell_request();
     } else if (argc > 0) {
@@ -673,7 +653,6 @@ pub fn client_main(
         client_enable_attached_input();
     }
 
-    // Run the event loop until done
     proc_mod.proc_loop(client_proc.?, null);
     file_mod.clientCleanup();
     if (client_attached or client_raw_tty) {

@@ -40,8 +40,6 @@ const OscEndType = enum { st, bel };
 /// Global input buffer size limit, settable via input_set_buffer_size.
 var input_buffer_size: usize = 1048576;
 
-// ── Reply infrastructure ─────────────────────────────────────────────────
-
 /// Low-level reply writer: writes a raw string back to the pane's PTY fd.
 /// Mirrors tmux input_send_reply (writes to bufferevent; zmux writes to fd).
 pub fn input_send_reply(wp: *T.WindowPane, reply: []const u8) void {
@@ -155,9 +153,7 @@ pub fn input_report_current_theme(wp: *T.WindowPane) void {
 pub fn input_reply_clipboard(wp: *T.WindowPane, buf: ?[]const u8, end: []const u8, clip: u8) void {
     if (wp.fd < 0) return;
 
-    // Compute base64 payload size (if any).
     const encoded_len: usize = if (buf) |data| (if (data.len > 0) std.base64.standard.Encoder.calcSize(data.len) else 0) else 0;
-    // Header "\x1b]52;" (5) + optional clip (1) + ";" (1) + encoded + end
     const clip_len: usize = if (clip != 0) 1 else 0;
     const total = 5 + clip_len + 1 + encoded_len + end.len;
     const out = xm.allocator.alloc(u8, total) catch return;
@@ -209,8 +205,6 @@ export fn input_ground_timer_cb(_: c_int, _: c_short, arg: ?*anyopaque) void {
     log.log_debug("input_ground_timer_cb: %%{d} ground timer expired", .{wp.id});
     input_reset(wp, 0);
 }
-
-// ── Input request queue ──────────────────────────────────────────────────
 
 /// Start a 100ms timer that flushes stale requests.
 pub fn input_start_request_timer(wp: *T.WindowPane) void {
@@ -332,7 +326,6 @@ pub fn input_request_reply(cl: *T.Client, req_type_raw: u32, data: ?*anyopaque) 
     const rtype = std.meta.intToEnum(T.InputRequestType, req_type_raw) catch return;
     _ = data;
 
-    // Find first matching request on this client.
     var found: ?*T.InputRequest = null;
     for (cl.input_requests.items) |ir| {
         if (ir.type == rtype) {
@@ -343,7 +336,6 @@ pub fn input_request_reply(cl: *T.Client, req_type_raw: u32, data: ?*anyopaque) 
     const match = found orelse return;
     const wp = match.wp orelse return;
 
-    // Process all requests on the pane's queue up to and including the match.
     while (wp.input_request_list.items.len > 0) {
         const ir = wp.input_request_list.items[0];
         const is_match = (ir == match);
@@ -604,7 +596,7 @@ fn handle_plain_control(ctx: *T.ScreenWriteCtx, ch: u8) void {
 }
 
 fn parse_csi(ctx: *T.ScreenWriteCtx, bytes: []const u8) ?usize {
-    var idx: usize = 2; // ESC [
+    var idx: usize = 2;
     while (idx < bytes.len) : (idx += 1) {
         const ch = bytes[idx];
         if (ch >= '@' and ch <= '~') {
@@ -616,7 +608,7 @@ fn parse_csi(ctx: *T.ScreenWriteCtx, bytes: []const u8) ?usize {
 }
 
 fn parse_osc(wp: *T.WindowPane, bytes: []const u8) ?usize {
-    var idx: usize = 2; // ESC ]
+    var idx: usize = 2;
     while (idx < bytes.len) : (idx += 1) {
         if (bytes[idx] == 0x07) {
             apply_osc(wp, bytes[2..idx], .bel);
@@ -711,27 +703,22 @@ fn apply_osc(wp: *T.WindowPane, payload: []const u8, end_type: OscEndType) void 
 /// An empty URI closes the current hyperlink (sets link to 0).
 /// A non-empty URI stores the hyperlink via the screen's hyperlink table.
 fn apply_osc_8(s: *T.Screen, value: []const u8) void {
-    // Split into params and URI at the first ';'
     const semi_idx = std.mem.indexOfScalar(u8, value, ';') orelse {
-        // No URI separator — invalid, swallow
         return;
     };
     const params = value[0..semi_idx];
     const uri = value[semi_idx + 1 ..];
 
-    // Close hyperlink when URI is empty
     if (uri.len == 0) {
-        s.cell_attr &= ~T.GRID_ATTR_HIDDEN; // no special attr needed; link 0 = no link
+        s.cell_attr &= ~T.GRID_ATTR_HIDDEN;
         s.saved_cell.link = 0;
         return;
     }
 
-    // Parse "id=<value>" from params if present
     var id: ?[]const u8 = null;
     if (params.len > 0) {
         var pos: usize = 0;
         while (pos < params.len) {
-            // Find next ':' or end
             const next_colon = std.mem.indexOfScalarPos(u8, params, pos, ':') orelse params.len;
             const segment = params[pos..next_colon];
             if (segment.len > 3 and std.mem.startsWith(u8, segment, "id=")) {
@@ -741,13 +728,10 @@ fn apply_osc_8(s: *T.Screen, value: []const u8) void {
         }
     }
 
-    // Store the hyperlink if the screen has a hyperlink table
     if (s.hyperlinks) |hl| {
         const link_id = hyperlinks_mod.hyperlinks_put(hl, uri, id);
-        // Attach to the current cell state so future writes carry the link
         s.saved_cell.link = link_id;
     }
-    // If no hyperlink table exists, just swallow (reduced)
 }
 
 /// Handle OSC 4 — palette colour set/query.
@@ -876,7 +860,6 @@ fn apply_osc_52(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
     const clip_str = value[0..semi];
     const data_str = value[semi + 1 ..];
 
-    // Determine which clipboard target
     const clip: u8 = if (clip_str.len > 0) clip_str[0] else 0;
 
     if (std.mem.eql(u8, data_str, "?")) {
@@ -894,7 +877,6 @@ fn apply_osc_52(wp: *T.WindowPane, value: []const u8, end_type: OscEndType) void
         return;
     }
 
-    // Set clipboard — decode base64 and store
     const set_state = opts.options_get_number(opts.global_options, "set-clipboard");
     if (set_state != 2) return;
     if (data_str.len == 0) return;
@@ -927,7 +909,6 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
 
     var idx: usize = 2;
 
-    // Phase 1: Collect parameter bytes.
     const param_start = idx;
     var ignore = false;
     while (idx < bytes.len) {
@@ -944,14 +925,12 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
     }
     const params = if (!ignore) bytes[param_start..idx] else "";
 
-    // Phase 2: Collect intermediate bytes.
     const interm_start = idx;
     while (idx < bytes.len and bytes[idx] >= 0x20 and bytes[idx] <= 0x2F) {
         idx += 1;
     }
     const interm = if (!ignore) bytes[interm_start..idx] else "";
 
-    // Phase 3: Ignore mode — skip to ST.
     if (ignore) {
         while (idx < bytes.len) {
             if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return DcsParsed{ .consumed = idx + 2, .params = "", .interm = "", .data = "" };
@@ -961,7 +940,6 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
         return null;
     }
 
-    // Phase 4: Collect data payload.
     const data_start = idx;
     while (idx < bytes.len) {
         if (bytes[idx] == 0x1b) {
@@ -995,18 +973,14 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
 fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     const data = dcs.data;
 
-    // DECRQSS: DCS $ q <request> ST  (intermediate '$', data starts with 'q')
     if (dcs.interm.len == 1 and dcs.interm[0] == '$' and data.len >= 1 and data[0] == 'q') {
         apply_decrqss(wp, ctx, data);
         return;
     }
 
-    // Sixel: DCS Ps ; Ps q <data> ST  (no intermediate, data starts with 'q')
     if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
         const w = wp.window;
         const sixel_mod = @import("image-sixel.zig");
-        // Second DCS parameter (P2) controls transparent background.
-        // Parse from the raw param string "Ps;P2" — default to 0.
         const p2: u32 = blk: {
             const semi = std.mem.indexOfScalar(u8, dcs.params, ';') orelse break :blk 0;
             if (semi + 1 >= dcs.params.len) break :blk 0;
@@ -1018,8 +992,6 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
         return;
     }
 
-    // Passthrough: DCS tmux; <raw> ST
-    // Check allow-passthrough option, strip prefix, forward raw bytes.
     const oo = if (wp.options != opts.global_w_options) wp.options else opts.global_w_options;
     const allow_passthrough = opts.options_get_number(oo, "allow-passthrough");
     if (allow_passthrough != 0 and data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
@@ -1027,8 +999,6 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
         sw.rawstring(ctx, data[5..]);
         return;
     }
-
-    // All other DCS sequences: silently consumed.
 }
 
 /// Handle DECRQSS (DCS $ q <request> ST).
@@ -1064,8 +1034,7 @@ fn apply_decrqss(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, data: []const u8) vo
 }
 
 fn parse_string_to_st(bytes: []const u8) ?usize {
-    // Consume until ESC \ or BEL, starting after ESC <introducer>
-    var idx: usize = 2; // skip ESC and the introducer character
+    var idx: usize = 2;
     while (idx < bytes.len) {
         if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') return idx + 2;
         if (bytes[idx] == 0x07) return idx + 1;
@@ -1075,12 +1044,9 @@ fn parse_string_to_st(bytes: []const u8) ?usize {
 }
 
 fn parse_rename(_: *T.WindowPane, bytes: []const u8) ?usize {
-    // ESC k name ESC \\ – window rename
-    var idx: usize = 2; // skip ESC k
+    var idx: usize = 2;
     while (idx < bytes.len) {
         if (bytes[idx] == 0x1b and idx + 1 < bytes.len and bytes[idx + 1] == '\\') {
-            // const name = bytes[2..idx];
-            // reduced: would need allow-rename option check
             return idx + 2;
         }
         if (bytes[idx] == 0x07) {
@@ -1170,7 +1136,7 @@ fn apply_csi(ctx: *T.ScreenWriteCtx, raw_params: []const u8, final: u8) void {
             if (ctx.wp) |wp| {
                 const zmux_mod = @import("zmux.zig");
                 const ver = zmux_mod.getversion();
-                input_reply(wp, true, "\x1bP>|zmux {s}\x1b\\", .{ver});
+                input_reply(wp, true, "\x1bP>|{s} {s}\x1b\\", .{ zmux_mod.compat_name, ver });
             }
         }
         return;
@@ -1590,15 +1556,10 @@ fn apply_rm(ctx: *T.ScreenWriteCtx, params: []const u32, private: bool) void {
 }
 
 fn apply_decscusr(ctx: *T.ScreenWriteCtx, params: []const u32) void {
-    // CSI Ps SP q — DECSCUSR set cursor style.
-    // 0 or 1 = blinking block, 2 = steady block,
-    // 3 = blinking underline, 4 = steady underline,
-    // 5 = blinking bar, 6 = steady bar.
     const style = first_param(params, 0);
     const s = ctx.s;
     screen_mod.screen_set_cursor_style(style, &s.cstyle, &s.mode);
     if (style == 0) {
-        // Go back to default blinking state.
         screen_write.mode_clear(ctx, T.MODE_CURSOR_BLINKING_SET);
     }
 }
@@ -1610,7 +1571,6 @@ fn apply_sm_graphics(ctx: *T.ScreenWriteCtx, params: []const u32) void {
     if (params.len == 0) return;
     const n = params[0];
     const o: u32 = if (params.len >= 3) params[2] else 0;
-    // Reply: not supported (action 3 = not recognized)
     input_reply(wp, true, "\x1b[?{d};3;{d}S", .{ n, o });
 }
 

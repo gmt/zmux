@@ -33,6 +33,7 @@ const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
 const pane_io = @import("pane-io.zig");
 const resize_mod = @import("resize.zig");
+const zmux_mod = @import("zmux.zig");
 const server_mod = @import("server.zig");
 const server_client_mod = @import("server-client.zig");
 const c = @import("c.zig");
@@ -47,8 +48,6 @@ extern fn openpty(
 
 extern fn setsid() c_int;
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-
-// ── spawn_log ─────────────────────────────────────────────────────────────
 
 /// Debug logging for spawn operations (mirrors tmux spawn_log).
 pub fn spawn_log(from: []const u8, sc: *const T.SpawnContext) void {
@@ -76,8 +75,6 @@ pub fn spawn_log(from: []const u8, sc: *const T.SpawnContext) void {
 
     log.log_debug("{s}: name={s}", .{ from, sc.name orelse "none" });
 }
-
-// ── spawn_window ──────────────────────────────────────────────────────────
 
 /// Create a new window (and initial pane) in session sc.s.
 pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
@@ -172,8 +169,6 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
     return wl;
 }
 
-// ── spawn_pane ────────────────────────────────────────────────────────────
-
 /// Create a new pane in an existing window.
 pub fn spawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
     spawn_log("spawn_pane", sc);
@@ -237,8 +232,6 @@ pub fn respawn_pane(sc: *T.SpawnContext, cause: *?[]u8) ?*T.WindowPane {
     return wp;
 }
 
-// ── Internal: fork/exec for a pane ────────────────────────────────────────
-
 fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     const s = sc.s;
     const alloc = xm.allocator;
@@ -291,7 +284,6 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     const child_env = build_child_environment(sc, wp, cl, shell);
     defer env_mod.environ_free(child_env);
 
-    // Open PTY
     var master: i32 = -1;
     var slave: i32 = -1;
     open_pty(&master, &slave, &wp.tty_name, wp.sx, wp.sy, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL) catch {
@@ -300,13 +292,11 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     };
     wp.fd = master;
 
-    // Fork
     const pid = std.posix.fork() catch {
         log.log_warn("fork failed", .{});
         return error.ForkFailed;
     };
     if (pid == 0) {
-        // ── child ────────────────────────────────────────────────────────
         std.posix.close(master);
         _ = setsid();
         _ = std.c.ioctl(slave, 0x540e, @as(c_int, 0)); // TIOCSCTTY
@@ -315,7 +305,6 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         _ = std.c.dup2(slave, 2);
         if (slave > 2) std.posix.close(@intCast(slave));
 
-        // Change directory
         const cwd_z = alloc.dupeZ(u8, cwd) catch unreachable;
         if (std.c.chdir(cwd_z) == 0)
             env_mod.environ_set(child_env, "PWD", 0, cwd);
@@ -348,7 +337,6 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         std.c._exit(1);
     }
 
-    // ── parent ─────────────────────────────────────────────────────────
     std.posix.close(slave);
     wp.pid = pid;
     set_blocking(wp.fd, false);
@@ -386,12 +374,12 @@ fn build_child_environment(
         const session_id: i32 = if (sc.s) |session| @intCast(session.id) else -1;
         const zmux_value = xm.xasprintf("{s},{d},{d}", .{ server_mod.socket_path, std.c.getpid(), session_id });
         defer xm.allocator.free(zmux_value);
-        env_mod.environ_set(child, "ZMUX", 0, zmux_value);
+        env_mod.environ_set(child, zmux_mod.compat_env(), 0, zmux_value);
     }
 
     var pane_buf: [32]u8 = undefined;
     const pane_id = std.fmt.bufPrint(&pane_buf, "%{d}", .{wp.id}) catch unreachable;
-    env_mod.environ_set(child, "ZMUX_PANE", 0, pane_id);
+    env_mod.environ_set(child, zmux_mod.compat_env_pane(), 0, pane_id);
     env_mod.environ_set(child, "SHELL", 0, shell);
 
     // Set TERM to default-terminal (tmux-256color), overriding any

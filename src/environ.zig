@@ -30,6 +30,7 @@ const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const opts = @import("options.zig");
 const build_options = @import("build_options");
+const zmux_mod = @import("zmux.zig");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
@@ -99,7 +100,7 @@ pub fn environ_for_session(s: ?*T.Session, no_term: bool) *T.Environ {
     if (!no_term) {
         const term = opts.options_get_string(opts.global_options, "default-terminal");
         environ_set(env, "TERM", 0, term);
-        environ_set(env, "TERM_PROGRAM", 0, "zmux");
+        environ_set(env, "TERM_PROGRAM", 0, zmux_mod.compat_name);
         environ_set(env, "TERM_PROGRAM_VERSION", 0, T.ZMUX_VERSION);
         environ_set(env, "COLORTERM", 0, "truecolor");
     }
@@ -113,7 +114,7 @@ pub fn environ_for_session(s: ?*T.Session, no_term: bool) *T.Environ {
     const idx: i32 = if (s) |sess| @intCast(sess.id) else -1;
     const zmux_val = xm.xasprintf("{s},{d},{d}", .{ socket_path, std.c.getpid(), idx });
     defer xm.allocator.free(zmux_val);
-    environ_set(env, "ZMUX", 0, zmux_val);
+    environ_set(env, zmux_mod.compat_env(), 0, zmux_val);
 
     return env;
 }

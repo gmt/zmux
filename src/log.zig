@@ -45,7 +45,8 @@ pub fn log_open(name: []const u8) void {
 
     var buf: [256]u8 = undefined;
     const pid = std.os.linux.getpid();
-    const path = std.fmt.bufPrintZ(&buf, "/tmp/zmux-{s}-{d}.log", .{ name, pid }) catch return;
+    const zmux_mod = @import("zmux.zig");
+    const path = std.fmt.bufPrintZ(&buf, "/tmp/{s}-{s}-{d}.log", .{ zmux_mod.compat_name, name, pid }) catch return;
     log_file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch null;
 }
 
@@ -94,16 +95,28 @@ fn log_vwrite(comptime fmt: []const u8, args: anytype, prefix: []const u8) void 
 
 /// Write a fatal-with-errno message to the log, then abort.
 pub fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
+    const zmux_mod = @import("zmux.zig");
     const errno = std.c._errno().*;
     log_vwrite(fmt, args, "fatal: ");
-    std.debug.print("zmux fatal: " ++ fmt ++ " (errno={d})\n", args ++ .{errno});
+    var prefix_buf: [32]u8 = undefined;
+    var msg_buf: [4096]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{s} fatal: ", .{zmux_mod.compat_name}) catch "zmux fatal: ";
+    const msg = std.fmt.bufPrint(&msg_buf, fmt ++ " (errno={d})\n", args ++ .{errno}) catch "";
+    _ = std.fs.File.stderr().writeAll(prefix) catch {};
+    _ = std.fs.File.stderr().writeAll(msg) catch {};
     std.process.abort();
 }
 
 /// Write a fatal message to the log (no errno), then abort.
 pub fn fatalx(comptime fmt: []const u8, args: anytype) noreturn {
+    const zmux_mod = @import("zmux.zig");
     log_vwrite(fmt, args, "fatal: ");
-    std.debug.print("zmux fatal: " ++ fmt ++ "\n", args);
+    var prefix_buf: [32]u8 = undefined;
+    var msg_buf: [4096]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{s} fatal: ", .{zmux_mod.compat_name}) catch "zmux fatal: ";
+    const msg = std.fmt.bufPrint(&msg_buf, fmt ++ "\n", args) catch "";
+    _ = std.fs.File.stderr().writeAll(prefix) catch {};
+    _ = std.fs.File.stderr().writeAll(msg) catch {};
     std.process.abort();
 }
 

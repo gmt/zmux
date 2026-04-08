@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const xm = @import("xmalloc.zig");
 const log = @import("log.zig");
 const proc_mod = @import("proc.zig");
+const zmux_mod = @import("zmux.zig");
 const protocol = @import("zmux-protocol.zig");
 const file_mod = @import("file.zig");
 const opts = @import("options.zig");
@@ -256,15 +257,11 @@ fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (data_len == 0) return;
     const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
 
-    // Control clients receive line-based commands, not TTY key sequences.
     if (cl.flags & T.CLIENT_CONTROL != 0) {
         server_client_dispatch_control_stdin(cl, bytes[0..data_len]);
         return;
     }
 
-    // Feed bytes into the tty input buffer and decode via tty_keys_next,
-    // which routes through the full tty-keys.zig parser chain (DA responses,
-    // colour queries, extended keys, mouse, etc).
     cl.tty.in_buf.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
     while (tty_mod.tty_keys_next(&cl.tty)) {}
 }
@@ -275,11 +272,9 @@ fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 fn server_client_dispatch_control_stdin(cl: *T.Client, data: []const u8) void {
     cl.control_input_buf.appendSlice(xm.allocator, data) catch unreachable;
 
-    // Process all complete lines.
     while (true) {
         const buf = cl.control_input_buf.items;
         const nl = std.mem.indexOfScalar(u8, buf, '\n') orelse break;
-        // Extract the line without the newline.  Strip trailing \r if present.
         var line_end = nl;
         if (line_end > 0 and buf[line_end - 1] == '\r')
             line_end -= 1;
@@ -287,7 +282,6 @@ fn server_client_dispatch_control_stdin(cl: *T.Client, data: []const u8) void {
 
         control.control_read_callback(cl, line);
 
-        // Remove the consumed line (including the newline) from the buffer.
         const remaining = buf.len - nl - 1;
         if (remaining > 0)
             std.mem.copyForwards(u8, cl.control_input_buf.items[0..remaining], buf[nl + 1 ..]);
@@ -720,7 +714,6 @@ pub fn server_client_loop() void {
     for (client_registry.clients.items) |cl| {
         server_client_check_exit(cl);
 
-        // Flush pending control output blocks for control clients.
         if (cl.flags & T.CLIENT_CONTROL != 0)
             control.control_write_callback(cl);
 
@@ -1112,7 +1105,7 @@ pub fn server_client_get_cwd(cl: ?*T.Client, s: ?*T.Session) []const u8 {
 }
 
 fn client_has_nested_marker(cl: *T.Client) bool {
-    if (env_mod.environ_find(cl.environ, "ZMUX")) |entry| {
+    if (env_mod.environ_find(cl.environ, zmux_mod.compat_env())) |entry| {
         if (entry.value) |value| {
             if (value.len != 0) return true;
         }
@@ -1561,8 +1554,6 @@ fn server_client_uses_server_tty(cl: *const T.Client) bool {
     return false;
 }
 
-// ── Overlay functions ─────────────────────────────────────────────────────
-
 pub fn server_client_set_overlay(
     cl: *T.Client,
     delay: u32,
@@ -1718,8 +1709,6 @@ pub fn server_client_ensure_ranges(r: *VisibleRanges, n: u32) void {
     }
     r.size = n;
 }
-
-// ── Mouse functions ───────────────────────────────────────────────────────
 
 const MouseWhere = enum {
     nowhere,
@@ -2131,8 +2120,6 @@ pub fn server_client_check_mouse_in_pane(
     return .nowhere;
 }
 
-// ── Key handling functions ────────────────────────────────────────────────
-
 pub fn server_client_key_callback(item: *cmdq_mod.CmdqItem, data: ?*anyopaque) T.CmdRetval {
     const cl = cmdq_mod.cmdq_get_client(item) orelse return .normal;
     const s = cl.session orelse {
@@ -2379,8 +2366,6 @@ pub fn server_client_repeat_time(cl: *T.Client, bd: *T.KeyBinding) u32 {
     return @intCast(repeat);
 }
 
-// ── Resize / buffer functions ─────────────────────────────────────────────
-
 pub fn server_client_check_window_resize(w: *T.Window) void {
     if (w.flags & T.WINDOW_RESIZE == 0) return;
     log.log_debug("server_client_check_window_resize: @{d}", .{w.id});
@@ -2532,8 +2517,6 @@ pub fn server_client_check_pane_buffer(wp: *T.WindowPane) void {
     }
 }
 
-// ── Timer callbacks ───────────────────────────────────────────────────────
-
 export fn server_client_repeat_timer(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
@@ -2577,8 +2560,6 @@ export fn server_client_click_timer(_fd: c_int, _events: c_short, arg: ?*anyopaq
         _ = server_fn.server_client_handle_key(cl, &translated);
     }
 }
-
-// ── Lifecycle functions ───────────────────────────────────────────────────
 
 /// Decrement the client reference count and free when it reaches zero.
 /// The final free is synchronous (zmux has no event_once).
@@ -2635,8 +2616,6 @@ pub fn server_client_remove_pane(wp: *T.WindowPane) void {
         }
     }
 }
-
-// ── Misc functions ────────────────────────────────────────────────────────
 
 pub fn server_client_how_many() u32 {
     var n: u32 = 0;

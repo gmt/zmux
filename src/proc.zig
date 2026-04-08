@@ -36,8 +36,6 @@ const SOL_SOCKET: c_int = 1;
 const SO_PEERCRED: c_int = 17;
 const Ucred = extern struct { pid: c_int, uid: c_uint, gid: c_uint };
 
-extern fn daemon(nochdir: c_int, noclose: c_int) c_int;
-
 pub const DispatchCb = *const fn (?*c.imsg.imsg, ?*anyopaque) callconv(.c) void;
 
 // ── Event callback ────────────────────────────────────────────────────────
@@ -148,8 +146,9 @@ pub fn proc_start(name: []const u8) *T.ZmuxProc {
     log.log_open(name);
 
     const u = std.posix.uname();
+    const zmux_mod = @import("zmux.zig");
     log.log_debug("{s} started ({d}): version {s}, protocol {d}", .{
-        name, std.os.linux.getpid(), T.ZMUX_VERSION, protocol.PROTOCOL_VERSION,
+        name, std.os.linux.getpid(), zmux_mod.getversion(), protocol.PROTOCOL_VERSION,
     });
     log.log_debug("on {s}", .{std.mem.sliceTo(&u.sysname, 0)});
 
@@ -270,7 +269,6 @@ pub fn proc_add_peer(
 
 /// Mark a peer for deferred cleanup. Safe to call from inside event callbacks.
 pub fn proc_remove_peer(peer: *T.ZmuxPeer) void {
-    // Remove from parent's live list
     const peers = &peer.parent.peers;
     for (peers.items, 0..) |p, i| {
         if (p == peer) {
@@ -278,7 +276,6 @@ pub fn proc_remove_peer(peer: *T.ZmuxPeer) void {
             break;
         }
     }
-    // Mark dead -- actual cleanup happens in reap_dead_peers()
     peer.flags |= T.PEER_BAD;
     dead_peers.append(xm.allocator, peer) catch unreachable;
 }
@@ -320,7 +317,6 @@ pub fn proc_fork_and_daemon(fd_out: *i32) std.posix.pid_t {
 
     const pid = std.posix.fork() catch log.fatal("fork failed", .{});
     if (pid == 0) {
-        // Child: will become the server
         std.posix.close(pair[0]);
         fd_out.* = pair[1];
         // Manual daemonization instead of daemon(3):

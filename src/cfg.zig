@@ -52,7 +52,8 @@ pub fn cfg_add_file(path: []const u8) void {
 }
 
 pub fn cfg_add_defaults() void {
-    var it = std.mem.splitScalar(u8, T.ZMUX_CONF, ':');
+    const zmux_mod = @import("zmux.zig");
+    var it = std.mem.splitScalar(u8, zmux_mod.compat_conf_paths(), ':');
     while (it.next()) |raw| {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len == 0) continue;
@@ -114,10 +115,6 @@ pub fn cfg_note_path_error(path: []const u8, errno_value: c_int, quiet: bool) vo
 }
 
 fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags: CfgFlags) bool {
-    // Strip comment-only lines before feeding to the parser.
-    // We must pass the full buffer (not line-by-line) so that multi-line
-    // %if/%elif/%else/%endif blocks are handled correctly by the
-    // preprocessor inside cmd_parse_from_string.
     var stripped: std.ArrayList(u8) = .{};
     defer stripped.deinit(xm.allocator);
     {
@@ -126,14 +123,9 @@ fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags:
         while (lines.next()) |raw_line| {
             const line = std.mem.trimRight(u8, raw_line, "\r");
             const trimmed = std.mem.trimLeft(u8, line, " \t");
-            // Keep blank lines (they preserve line-count semantics) and
-            // directive lines (%if etc), but strip pure-comment lines.
             const is_comment = trimmed.len > 0 and trimmed[0] == '#';
-            // Always preserve lines that start with %, even if they
-            // look comment-like to a naive filter.
             const is_directive = trimmed.len > 0 and trimmed[0] == '%';
             if (is_comment and !is_directive) {
-                // Replace with blank to keep line numbers consistent.
                 if (!first) stripped.append(xm.allocator, '\n') catch unreachable;
                 first = false;
                 continue;
@@ -262,4 +254,36 @@ test "cfg source path missing file records cause when not quiet" {
     const missing = "/zmux-unit-test-nonexistent-config-path/.conf";
     try std.testing.expect(!cfg_source_path(null, missing, .{ .quiet = false }));
     try std.testing.expect(cfg_causes.items.len >= 1);
+}
+
+test "cfg_add_defaults loads zmux config paths in zmux mode" {
+    const zmux_mod = @import("zmux.zig");
+    zmux_mod.compat_name = "zmux";
+    defer {
+        zmux_mod.compat_name = "zmux";
+    }
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    for (cfg_file_paths.items) |path| {
+        try std.testing.expect(std.mem.indexOf(u8, path, "zmux") != null);
+        try std.testing.expect(std.mem.indexOf(u8, path, "tmux.conf") == null);
+    }
+    try std.testing.expect(cfg_file_paths.items.len > 0);
+}
+
+test "cfg_add_defaults loads tmux config paths in compat mode" {
+    const zmux_mod = @import("zmux.zig");
+    zmux_mod.compat_name = "tmux";
+    defer {
+        zmux_mod.compat_name = "zmux";
+    }
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    for (cfg_file_paths.items) |path| {
+        try std.testing.expect(std.mem.indexOf(u8, path, "tmux") != null);
+        try std.testing.expect(std.mem.indexOf(u8, path, "zmux.conf") == null);
+    }
+    try std.testing.expect(cfg_file_paths.items.len > 0);
 }

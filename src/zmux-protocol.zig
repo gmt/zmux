@@ -23,7 +23,7 @@
 //! must stay in sync with the C header; bump PROTOCOL_VERSION when any wire
 //! struct changes.
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 0xfe; // deliberately outside tmux's version space
 
 /// IPC message types exchanged between client and server.
 pub const MsgType = enum(c_int) {
@@ -32,7 +32,7 @@ pub const MsgType = enum(c_int) {
     identify_flags = 100,
     identify_term,
     identify_ttyname,
-    identify_oldcwd, // unused
+    identify_oldcwd,
     identify_stdin,
     identify_environ,
     identify_done,
@@ -54,9 +54,9 @@ pub const MsgType = enum(c_int) {
     resize,
     shell,
     shutdown,
-    oldstderr, // unused
-    oldstdin, // unused
-    oldstdout, // unused
+    oldstderr,
+    oldstdin,
+    oldstdout,
     @"suspend",
     unlock,
     wakeup,
@@ -74,8 +74,6 @@ pub const MsgType = enum(c_int) {
 
     stdin_data = 400,
 };
-
-// ── Wire payload structs (keep in sync with tmux-protocol.h) ──────────────
 
 /// Payload for MSG_COMMAND – followed by packed argv strings.
 pub const MsgCommand = extern struct {

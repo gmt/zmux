@@ -805,19 +805,19 @@ pub fn popup_editor_close_cb(exit_status: i32, arg: ?*anyopaque) void {
 
 /// External editor in a popup (tmux `popup_editor`).
 pub fn popup_editor(c: *T.Client, buf: []const u8, len: usize, cb: ?PopupFinishEditCb, arg: ?*anyopaque) i32 {
-    _ = len; // buf.len is authoritative
+    _ = len;
 
     const editor = opts_mod.options_get_string(opts_mod.global_options, "editor");
     if (editor.len == 0) return -1;
 
     var tmp_path_buf: [64]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/zmux.{d}", .{std.os.linux.getpid()}) catch return -1;
+    const zmux_mod = @import("zmux.zig");
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/{s}.{d}", .{ zmux_mod.compat_name, std.os.linux.getpid() }) catch return -1;
 
-    write_tmp: {
+    {
         const f = std.fs.createFileAbsolute(tmp_path, .{ .truncate = true }) catch return -1;
         defer f.close();
-        f.writeAll(buf) catch break :write_tmp;
-        break :write_tmp;
+        f.writeAll(buf) catch {};
     }
 
     const pe = xm.allocator.create(PopupEditor) catch {

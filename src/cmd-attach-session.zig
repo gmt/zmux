@@ -48,7 +48,8 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     const c = cl orelse return .normal;
     if (server_client_mod.server_client_check_nested(c)) {
-        cmdq.cmdq_error(item, "sessions should be nested with care, unset $ZMUX to force", .{});
+        const zmux_mod = @import("zmux.zig");
+        cmdq.cmdq_error(item, "sessions should be nested with care, unset ${s} to force", .{zmux_mod.compat_env()});
         return .@"error";
     }
 

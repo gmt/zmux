@@ -102,7 +102,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     var cause: ?[]u8 = null;
     const group_name = args.get('t');
 
-    // has-session: just validate the -t target (cmd_find_target already did it)
     if (cmd.entry == &entry_has) {
         return .normal;
     }
@@ -112,7 +111,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         return .@"error";
     }
 
-    // Determine session name
     var session_name: ?[]u8 = null;
     if (args.get('s')) |name_template| {
         const expanded = format_mod.format_single(@ptrCast(item), name_template, cl, null, null, null);
@@ -126,7 +124,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
     defer if (session_name) |n| xm.allocator.free(n);
 
-    // If name exists and -A flag set, attach instead
     if (args.has('A')) {
         if (find_existing_attach_session(item, session_name, args.get('t'))) |existing|
             return attach_existing_session(item, cl, existing, args.has('D'), args.has('X'), args.get('c'), args.get('f'));
@@ -139,7 +136,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    // Determine dimensions
     var sx: u32 = 80;
     var sy: u32 = 24;
     if (args.get('x')) |xs| {
@@ -174,7 +170,8 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         if (cl) |c| {
             if (c.session == null and c.fd != -1 and (c.flags & T.CLIENT_CONTROL) == 0) {
                 if (server_client_mod.server_client_check_nested(c)) {
-                    cmdq.cmdq_error(item, "sessions should be nested with care, unset $TMUX to force", .{});
+                    const zmux_mod = @import("zmux.zig");
+                    cmdq.cmdq_error(item, "sessions should be nested with care, unset ${s} to force", .{zmux_mod.compat_env()});
                     return .@"error";
                 }
             }
@@ -215,7 +212,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    // Create session
     const new_env = build_session_environment(args, cl);
 
     const sess_opts = opts.options_create(opts.global_s_options);
@@ -229,7 +225,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null,
     );
 
-    // Spawn the initial window.
     var spawn_cause: ?[]u8 = null;
     var sc = T.SpawnContext{
         .item = @ptrCast(item),
@@ -271,7 +266,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     notify.notify_session("session-created", s);
 
-    // Apply explicit -x/-y dimensions
     if (wl) |created_wl| {
         if (args.has('x') or args.has('y')) {
             const w = created_wl.window;
@@ -280,14 +274,12 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             for (w.panes.items) |wp| {
                 win_mod.window_pane_resize(wp, sx, sy);
             }
-            // Persist dimensions as the session default so new-window inherits them.
             const size_str = xm.xasprintf("{d}x{d}", .{ sx, sy });
             defer xm.allocator.free(size_str);
             opts.options_set_string(s.options, false, "default-size", size_str);
         }
     }
 
-    // Attach client if not detached
     if (!args.has('d') and !no_attach) {
         if (cl) |c| {
             if (args.has('x') or args.has('y')) {
@@ -300,7 +292,6 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
     }
 
-    // Print new session name if -P flag
     if (args.has('P')) {
         const fmt = args.get('F') orelse "#{session_name}:";
         const print_wp = if (wl) |created_wl| created_wl.window.active else null;
@@ -361,7 +352,6 @@ fn free_argv(argv: [][]u8) void {
 fn exec_has_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
     var target: T.CmdFindState = .{};
-    // Resolve the -t target (quietly; not-found → error exit code)
     if (cmd_find.cmd_find_target(&target, item, args.get('t'), .session, T.CMD_FIND_QUIET) != 0)
         return .@"error";
     if (target.s == null) return .@"error";
@@ -371,7 +361,6 @@ fn exec_has_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 fn exec_start_server(_cmd: *cmd_mod.Cmd, _item: *cmdq.CmdqItem) T.CmdRetval {
     _ = _cmd;
     _ = _item;
-    // Server is already running by the time we execute; just succeed.
     return .normal;
 }
 
@@ -839,7 +828,7 @@ test "new-session rejects nested unattached clients before opening a terminal" {
     try std.testing.expect(sess.session_find("new-session-nested-blocked") == null);
     try std.testing.expectEqual(@as(usize, 1), server_mod.message_log.items.len);
     try std.testing.expectEqualStrings(
-        "new-session-nested-client message: sessions should be nested with care, unset $TMUX to force",
+        "new-session-nested-client message: sessions should be nested with care, unset $ZMUX to force",
         server_mod.message_log.items[0].msg,
     );
 }

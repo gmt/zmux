@@ -24,6 +24,7 @@ const T = @import("types.zig");
 const c = @import("c.zig");
 const xm = @import("xmalloc.zig");
 const sess = @import("session.zig");
+const zmux_mod = @import("zmux.zig");
 const sort_mod = @import("sort.zig");
 const win_mod = @import("window.zig");
 const marked_pane_mod = @import("marked-pane.zig");
@@ -445,7 +446,7 @@ fn cmd_find_inside_pane(cl: *T.Client) ?*T.WindowPane {
         }
     }
 
-    const entry = env_mod.environ_find(cl.environ, "ZMUX_PANE") orelse return null;
+    const entry = env_mod.environ_find(cl.environ, zmux_mod.compat_env_pane()) orelse return null;
     const value = entry.value orelse return null;
     if (value.len <= 1 or value[0] != '%') return null;
     const id = std.fmt.parseUnsigned(u32, value[1..], 10) catch return null;
@@ -1184,5 +1185,3 @@ fn fnmatch_matches(pattern: []const u8, text: []const u8) bool {
     defer xm.allocator.free(text_z);
     return c.posix_sys.fnmatch(pattern_z.ptr, text_z.ptr, 0) == 0;
 }
-
-// Tests moved to cmd-find-test.zig

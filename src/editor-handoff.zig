@@ -12,8 +12,6 @@
 // IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 // OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
-// Reduced attached-client editor handoff for popup-editor consumers.
-
 const std = @import("std");
 const opts = @import("options.zig");
 const T = @import("types.zig");
@@ -108,7 +106,8 @@ fn finish(index: usize, status: i32) void {
 }
 
 fn createTempFile(client: *T.Client, initial: []const u8) ![]u8 {
-    const tmpdir = test_tmpdir_override orelse (std.posix.getenv("ZMUX_TMPDIR") orelse "/tmp");
+    const zmux_mod = @import("zmux.zig");
+    const tmpdir = test_tmpdir_override orelse (std.posix.getenv(zmux_mod.compat_env_tmpdir()) orelse "/tmp");
     var dir = try std.fs.openDirAbsolute(tmpdir, .{});
     defer dir.close();
 

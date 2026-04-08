@@ -435,6 +435,38 @@ test "window_pane_resize queues resize and updates screen" {
     try std.testing.expectEqual(@as(usize, 1), wp.resize_queue.items.len);
 }
 
+test "window_pane_resize keeps the active alternate screen in sync" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 80, 24);
+    screen_mod.screen_enter_alternate(wp, true);
+    try std.testing.expect(screen_mod.screen_alternate_active(wp));
+
+    win.window_pane_resize(wp, 60, 12);
+
+    try std.testing.expectEqual(@as(u32, 60), wp.base.grid.sx);
+    try std.testing.expectEqual(@as(u32, 12), wp.base.grid.sy);
+    try std.testing.expectEqual(@as(u32, 60), wp.screen.grid.sx);
+    try std.testing.expectEqual(@as(u32, 12), wp.screen.grid.sy);
+}
+
 test "window_rotate_panes rotates order and active pane" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);

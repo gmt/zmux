@@ -172,15 +172,23 @@ sleep 1
 ########################################################################
 # Test 1: Help text fills the entire vertical span.
 #         First visible line should start with "C-b" (the help content).
-#         No filler text should be visible.
+#         Lower rows should also contain help text, not the stale 24-row blank
+#         gap, and no filler text should be visible.
 ########################################################################
 
 SCREEN=$(inner_capture)
+PANE_SCREEN=$(printf '%s\n' "$SCREEN" | sed -n "1,${PRE_ROWS}p")
 
 FIRST_LINE=$(echo "$SCREEN" | head -1)
 case "$FIRST_LINE" in
     *C-b*) pass "first line contains help text" ;;
     *)     fail "first line is not help text: '$FIRST_LINE'" ;;
+esac
+
+BOTTOM_LINE=$(printf '%s\n' "$PANE_SCREEN" | sed -n "${PRE_ROWS}p")
+case "$BOTTOM_LINE" in
+    *[![:space:]]*) pass "bottom pane row contains help text" ;;
+    *)              fail "bottom pane row is blank in help view" ;;
 esac
 
 # No filler should be visible.

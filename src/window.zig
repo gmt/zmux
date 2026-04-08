@@ -839,6 +839,8 @@ pub fn window_pane_resize(wp: *T.WindowPane, sx_in: u32, sy_in: u32) void {
 
     log.log_debug("window_pane_resize: %%{d} resize {d}x{d}", .{ wp.id, sx, sy });
     screen_mod.screen_resize(&wp.base, sx, sy, wp.base.saved_grid == null);
+    if (screen_mod.screen_alternate_active(wp))
+        screen_mod.screen_resize(wp.screen, sx, sy, false);
 
     if (window_pane_mode(wp)) |wme| {
         if (wme.mode.resize) |resize_fn|

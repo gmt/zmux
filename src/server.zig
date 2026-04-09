@@ -37,6 +37,7 @@ const key_bindings = @import("key-bindings.zig");
 const cfg_mod = @import("cfg.zig");
 const build_options = @import("build_options");
 const client_registry = @import("client-registry.zig");
+const tty_mod = @import("tty.zig");
 const notify = @import("notify.zig");
 const server_acl = @import("server-acl.zig");
 const cmd_wait_for = @import("cmd-wait-for.zig");
@@ -413,6 +414,10 @@ fn server_send_exit() void {
 
     for (clients.items) |cl| {
         cl.session = null;
+        // Restore terminal settings for attached terminal clients before exit.
+        if (cl.flags & T.CLIENT_TERMINAL != 0) {
+            tty_mod.tty_stop_tty(&cl.tty);
+        }
         if (cl.flags & T.CLIENT_SUSPENDED != 0) {
             server_client_mod.server_client_lost(cl);
             continue;

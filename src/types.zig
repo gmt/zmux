@@ -26,6 +26,7 @@
 const std = @import("std");
 const c = @import("c.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
+const tty_keys_mod = @import("tty-keys.zig");
 pub const protocol = @import("zmux-protocol.zig");
 
 // ── Build constants ────────────────────────────────────────────────────────
@@ -845,14 +846,20 @@ pub const Tty = struct {
     mouse_scrolling_flag: bool = false,
     mouse_slider_mpos: i32 = -1,
     clipboard_timer: ?*c.libevent.event = null,
+    event_in: ?*c.libevent.event = null,
+    event_out: ?*c.libevent.event = null,
+    out_buf: std.ArrayListUnmanaged(u8) = .{},
+    saved_tio: ?c.posix_sys.termios = null,
     /// libevent timer that fires after TTY_QUERY_TIMEOUT to send DA/XDA requests.
     start_timer: ?*c.libevent.event = null,
     /// Timestamp (seconds since epoch) of the last tty_send_requests call.
     last_requests: i64 = 0,
     /// Input buffer for bytes read from the client fd (replaces tmux's evbuffer *in).
     in_buf: std.ArrayList(u8) = .{},
+    key_tree: ?*tty_keys_mod.TtyKey = null,
     /// Key escape-time timer (partial key timeout).
     key_timer: ?*c.libevent.event = null,
+    term: ?*anyopaque = null,
 };
 
 // ── Layout ────────────────────────────────────────────────────────────────

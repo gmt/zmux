@@ -48,6 +48,12 @@ const paste_mod = @import("paste.zig");
 
 pub fn tty_init(tty: *T.Tty, cl: *T.Client) void {
     tty.* = .{ .client = cl };
+    if (cl.fd != -1 and c_zig.posix_sys.isatty(cl.fd) != 0) {
+        var tio: c_zig.posix_sys.termios = undefined;
+        if (c_zig.posix_sys.tcgetattr(cl.fd, &tio) == 0) {
+            tty.saved_tio = tio;
+        }
+    }
 }
 
 pub fn tty_set_size(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void {
@@ -77,6 +83,18 @@ pub fn tty_resize(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void 
 }
 
 pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
+    const cl = tty.client;
+
+    // Build terminfo capability layer (must precede TTY_OPENED, matching tmux tty_open).
+    const term_name = cl.term_name orelse "unknown";
+    const caps: [][]u8 = cl.term_caps orelse &[_][]u8{};
+    const term = tty_term.tty_term_create(term_name, caps, &cl.term_features, cause);
+    if (term == null) {
+        tty_close(tty);
+        return -1;
+    }
+    tty.term = @ptrCast(term);
+
     cause.* = null;
     tty.flags |= @intCast(T.TTY_OPENED);
     tty.flags &= ~@as(i32, @intCast(T.TTY_NOCURSOR | T.TTY_FREEZE | T.TTY_BLOCK));
@@ -90,6 +108,11 @@ pub fn tty_close(tty: *T.Tty) void {
     freeClipboardTimer(tty);
     freeStartTimer(tty);
     if (tty.flags & @as(i32, @intCast(T.TTY_OPENED)) != 0) {
+        // Free terminfo capability layer.
+        if (tty.term) |t| {
+            tty_term.tty_term_free(@ptrCast(@alignCast(t)));
+            tty.term = null;
+        }
         tty_keys_free(tty);
     }
     tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
@@ -2186,14 +2209,22 @@ export fn tty_keys_timer_callback(_fd: c_int, _events: c_short, arg: ?*anyopaque
     }
 }
 
-/// Build the key lookup structures.  In zmux, input_key_get uses
-/// compile-time tables so this is a no-op placeholder that matches the
-/// tmux tty_keys_build call site.
-pub fn tty_keys_build(_: *T.Tty) void {}
+/// Build the key lookup tree from terminfo capabilities.
+/// Wires the real tty_keys_mod.tty_keys_build, passing the TtyTerm pointer
+/// (cast from the opaque tty.term field) so terminal-specific key sequences
+/// are included.  Matches tmux tty_keys_build call site in tty_open.
+pub fn tty_keys_build(tty: *T.Tty) void {
+    const term_ptr: ?*const tty_term.TtyTerm = if (tty.term) |t|
+        @ptrCast(@alignCast(t))
+    else
+        null;
+    tty_keys_mod.tty_keys_build(&tty.key_tree, term_ptr);
+}
 
-/// Free key lookup structures.  No-op in zmux (no runtime tree to free),
-/// but releases the input buffer memory.
+/// Free key lookup structures and release input buffer memory.
 pub fn tty_keys_free(tty: *T.Tty) void {
+    // Free the ternary search tree built by tty_keys_build.
+    tty_keys_mod.tty_keys_free(&tty.key_tree);
     tty_keys_cancel_timer(tty);
     if (tty.key_timer) |ev| {
         c_zig.libevent.event_free(ev);
@@ -3412,6 +3443,15 @@ fn tty_margin_pane_ctx(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 
 test "tty_open starts reduced tty lifecycle" {
     const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+
+    // tty_term_create reads global_options; initialize a minimal set.
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
 
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
@@ -3422,6 +3462,17 @@ test "tty_open starts reduced tty lifecycle" {
         .status = .{},
     };
     tty_init(&cl.tty, &cl);
+
+    // Provide minimal terminfo caps so tty_term_create passes CLEAR/CUP validation.
+    cl.term_name = xm.xstrdup("xterm");
+    defer xm.allocator.free(cl.term_name.?);
+    var test_caps = [_][]u8{
+        xm.xstrdup("clear=\x1b[H\x1b[2J"),
+        xm.xstrdup("cup=\x1b[%p1%d;%p2%dH"),
+    };
+    defer for (&test_caps) |cap| xm.allocator.free(cap);
+    cl.term_caps = &test_caps;
+    defer cl.term_caps = null;
 
     cl.tty.cx = 7;
     cl.tty.cy = 9;

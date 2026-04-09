@@ -513,6 +513,10 @@ pub fn server_client_finalize_identify(cl: *T.Client) void {
 
     if (cl.fd != -1 and c.posix_sys.isatty(cl.fd) != 0) {
         cl.flags |= T.CLIENT_TERMINAL;
+        var tio: c.posix_sys.termios = undefined;
+        if (c.posix_sys.tcgetattr(cl.fd, &tio) == 0) {
+            cl.tty.saved_tio = tio;
+        }
         if (cl.out_fd != -1) {
             _ = c.posix_sys.close(cl.out_fd);
             cl.out_fd = -1;

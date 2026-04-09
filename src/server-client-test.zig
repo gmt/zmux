@@ -167,6 +167,14 @@ test "server_client_finalize_identify treats tty stdin as terminal and drops cap
 }
 
 test "server_client_open rejects non-terminal clients but accepts reduced local-terminal path" {
+    // tty_term_create reads global_options; initialize a minimal set.
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
 
@@ -193,6 +201,16 @@ test "server_client_open rejects non-terminal clients but accepts reduced local-
     cause = null;
     xm.allocator.free(cl.ttyname.?);
     cl.ttyname = xm.xstrdup("/tmp/zmux-test-tty");
+    // Provide minimal terminfo caps so tty_term_create passes CLEAR/CUP validation.
+    cl.term_name = xm.xstrdup("xterm");
+    defer xm.allocator.free(cl.term_name.?);
+    var test_caps = [_][]u8{
+        xm.xstrdup("clear=\x1b[H\x1b[2J"),
+        xm.xstrdup("cup=\x1b[%p1%d;%p2%dH"),
+    };
+    defer for (&test_caps) |cap| xm.allocator.free(cap);
+    cl.term_caps = &test_caps;
+    defer cl.term_caps = null;
     try std.testing.expectEqual(@as(i32, 0), server_client_open(&cl, &cause));
     try std.testing.expect(cause == null);
     try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0);

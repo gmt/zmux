@@ -10,7 +10,6 @@ landed and been tested.
 
 | Gap | Location | Remediation | Prerequisites |
 |-----|----------|-------------|---------------|
-| ~~fd-passing / stdin_data ownership gap~~ (RESOLVED) | `client.zig`, `server.zig`, `tty.zig`, protocol | Server now owns the tty fd directly via libevent; `stdin_data` removed; control clients read from `cl.fd`; `PROTOCOL_VERSION=8`; `MSG_RESIZE` empty payload; client thinned to signal shell. | landed and tested |
 
 ## Documentation Debt
 

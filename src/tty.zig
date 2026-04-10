@@ -1777,11 +1777,21 @@ export fn tty_clipboard_query_timeout_cb(_fd: c_int, _events: c_short, arg: ?*an
 }
 
 fn tty_write(tty: *T.Tty, payload: []const u8) void {
-    const peer = tty.client.peer orelse return;
     if ((tty.client.flags & T.CLIENT_CONTROL) != 0) return;
+    if (payload.len == 0) return;
 
-    _ = file_mod.sendPeerStream(peer, 1, payload);
+    if ((tty.flags & @as(i32, @intCast(T.TTY_BLOCK))) != 0) {
+        tty.client.discarded += payload.len;
+        return;
+    }
+
+    tty.out_buf.appendSlice(xm.allocator, payload) catch return;
+    tty.pending_out = tty.out_buf.items.len;
     tty.client.written += payload.len;
+
+    if (tty.event_out != null and (tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) {
+        _ = c_zig.libevent.event_add(tty.event_out, null);
+    }
 }
 
 // ── C-name stubs: tmux screen-write / overlay API ─────────────────────────
@@ -2242,8 +2252,6 @@ export fn tty_timer_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
 
 /// Port of tmux tty_block_maybe().
 /// Throttles output when the output buffer exceeds TTY_BLOCK_START bytes.
-/// Zmux uses synchronous imsg delivery instead of evbuffers, so
-/// tty.pending_out is always 0; the block path is never taken in practice.
 pub fn tty_block_maybe(tty: *T.Tty) i32 {
     const c = tty.client;
     const size = tty.pending_out;
@@ -2278,7 +2286,40 @@ export fn tty_write_callback(_fd: c_int, _events: c_short, _arg: ?*anyopaque) vo
     _ = _fd;
     _ = _events;
     const tty: *T.Tty = @ptrCast(@alignCast(_arg orelse return));
+    const cl = tty.client;
+    const fd = cl.fd;
+
+    if (fd < 0) return;
+
+    while (tty.out_buf.items.len != 0) {
+        const written = std.posix.write(@intCast(fd), tty.out_buf.items) catch |err| {
+            if (err == error.WouldBlock) {
+                if (tty.event_out != null and (tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) {
+                    _ = c_zig.libevent.event_add(tty.event_out, null);
+                }
+                return;
+            }
+            log.log_debug("tty write error: {s}", .{@errorName(err)});
+            return;
+        };
+
+        if (written == 0) return;
+
+        if (written >= tty.out_buf.items.len) {
+            tty.out_buf.clearRetainingCapacity();
+        } else {
+            const remaining = tty.out_buf.items.len - written;
+            std.mem.copyForwards(u8, tty.out_buf.items[0..remaining], tty.out_buf.items[written..]);
+            tty.out_buf.shrinkRetainingCapacity(remaining);
+        }
+        tty.pending_out = tty.out_buf.items.len;
+    }
+
     _ = tty_block_maybe(tty);
+
+    if (tty.out_buf.items.len != 0 and tty.event_out != null and (tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) {
+        _ = c_zig.libevent.event_add(tty.event_out, null);
+    }
 }
 
 // tty_start_timer_callback — replaced by tty_start_timer_fire (above).

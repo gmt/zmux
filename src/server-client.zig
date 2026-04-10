@@ -917,6 +917,11 @@ pub fn server_client_set_path(cl: *T.Client) void {
 
 /// Write raw bytes to client's output peer stream.
 pub fn server_client_write(cl: *T.Client, data: []const u8) void {
+    if ((cl.flags & T.CLIENT_TERMINAL) != 0) {
+        tty_mod.tty_add(&cl.tty, data.ptr, data.len);
+        return;
+    }
+
     const peer = cl.peer orelse return;
     _ = file_mod.sendPeerStream(peer, 1, data);
 }
@@ -1535,11 +1540,7 @@ fn server_client_draw(cl: *T.Client, redraw_flags: u64) void {
     const payload = build_client_draw_payload(cl, redraw_flags);
     defer if (payload) |bytes| xm.allocator.free(bytes);
 
-    if (payload) |bytes| {
-        if (cl.peer) |peer| {
-            _ = file_mod.sendPeerStream(peer, 1, bytes);
-        }
-    }
+    if (payload) |bytes| server_client_write(cl, bytes);
 }
 
 fn wl_name(w: *T.Window) []const u8 {

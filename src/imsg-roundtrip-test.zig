@@ -78,14 +78,8 @@ test "imsg roundtrip empty version payload" {
     try imsgRoundtripPayload(.version, &.{});
 }
 
-test "imsg roundtrip resize struct" {
-    const m: protocol.MsgResize = .{
-        .sx = 132,
-        .sy = 43,
-        .xpixel = 1056,
-        .ypixel = 344,
-    };
-    try imsgRoundtripPayload(.resize, std.mem.asBytes(&m));
+test "imsg roundtrip empty resize payload" {
+    try imsgRoundtripPayload(.resize, &.{});
 }
 
 test "imsg roundtrip command argc and packed argv" {
@@ -155,6 +149,95 @@ test "imsg read rejects oversize declared length in header" {
     };
     _ = try std.posix.write(pair[0], std.mem.asBytes(&bad));
     try std.testing.expectEqual(@as(i32, -1), c.imsg.imsgbuf_read(&reader));
+}
+
+test "MSG_RESIZE compose produces zero-length payload" {
+    // MSG_RESIZE is empty on the wire — the server reads geometry via
+    // ioctl(TIOCGWINSZ) on the client fd, not from the message payload.
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var sender: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&sender, pair[0]));
+    defer {
+        c.imsg.imsgbuf_clear(&sender);
+        std.posix.close(pair[0]);
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    try std.testing.expectEqual(
+        @as(i32, 1),
+        c.imsg.imsg_compose(&sender, @intCast(@intFromEnum(protocol.MsgType.resize)), protocol.PROTOCOL_VERSION, -1, -1, null, 0),
+    );
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_flush(&sender));
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var got: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &got) > 0);
+    defer c.imsg.imsg_free(&got);
+
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.resize))), c.imsg.imsg_get_type(&got));
+    try std.testing.expectEqual(@as(usize, 0), c.imsg.imsg_get_len(&got));
+}
+
+test "identify handshake roundtrips all 11 required message types" {
+    // Every identify message type a client must send during the handshake,
+    // each with a representative payload.  These cover the full identify
+    // band excluding identify_oldcwd (103, unused/legacy).
+    const longflags = @as(u64, 0x42);
+    try imsgRoundtripPayload(.identify_longflags, std.mem.asBytes(&longflags));
+
+    try imsgRoundtripPayload(.identify_term, "xterm-256color\x00");
+    try imsgRoundtripPayload(.identify_ttyname, "/dev/pts/0\x00");
+    try imsgRoundtripPayload(.identify_cwd, "/home/test\x00");
+    try imsgRoundtripPayload(.identify_stdin, &.{});
+    try imsgRoundtripPayload(.identify_stdout, &.{});
+    try imsgRoundtripPayload(.identify_environ, "TERM=xterm\x00");
+
+    const pid = @as(std.posix.pid_t, 12345);
+    try imsgRoundtripPayload(.identify_clientpid, std.mem.asBytes(&pid));
+
+    const features = @as(i32, 0x55);
+    try imsgRoundtripPayload(.identify_features, std.mem.asBytes(&features));
+
+    try imsgRoundtripPayload(.identify_terminfo, "smcup=\\E[?1049h\x00");
+    try imsgRoundtripPayload(.identify_done, &.{});
+}
+
+test "identify handshake values cover correct numeric range" {
+    // All 11 required identify types (excluding identify_oldcwd which is
+    // unused/legacy) with their expected numeric values from tmux-protocol.h.
+    const required = [_]struct { ty: protocol.MsgType, val: i32 }{
+        .{ .ty = .identify_longflags, .val = 111 },
+        .{ .ty = .identify_term, .val = 101 },
+        .{ .ty = .identify_ttyname, .val = 102 },
+        .{ .ty = .identify_cwd, .val = 108 },
+        .{ .ty = .identify_stdin, .val = 104 },
+        .{ .ty = .identify_stdout, .val = 110 },
+        .{ .ty = .identify_environ, .val = 105 },
+        .{ .ty = .identify_clientpid, .val = 107 },
+        .{ .ty = .identify_features, .val = 109 },
+        .{ .ty = .identify_terminfo, .val = 112 },
+        .{ .ty = .identify_done, .val = 106 },
+    };
+    for (required) |r| {
+        try std.testing.expectEqual(r.val, @intFromEnum(r.ty));
+    }
+
+    // PROTOCOL_VERSION must be 8 and fit in the peerid low byte.
+    try std.testing.expectEqual(@as(u32, 8), protocol.PROTOCOL_VERSION);
+    try std.testing.expect(protocol.PROTOCOL_VERSION <= 0xff);
+
+    // stdin_data (400) must not be a valid MsgType.
+    inline for (@typeInfo(protocol.MsgType).@"enum".fields) |field| {
+        try std.testing.expect(field.value != 400);
+    }
 }
 
 test "imsg partial header yields no complete message yet" {

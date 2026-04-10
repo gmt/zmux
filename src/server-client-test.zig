@@ -1597,25 +1597,6 @@ test "server_client_dispatch_resize reads tty geometry from fd and sets CLIENT_S
     try std.testing.expect((cl.flags & T.CLIENT_SIZECHANGED) != 0);
 }
 
-test "server_client_dispatch_stdin ignores payload while client suspended" {
-    const env = env_mod.environ_create();
-    defer env_mod.environ_free(env);
-
-    var cl = T.Client{
-        .environ = env,
-        .tty = undefined,
-        .status = .{},
-        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_SUSPENDED,
-    };
-    cl.tty = .{ .client = &cl };
-    tty_mod.tty_init(&cl.tty, &cl);
-    const before = cl.tty.in_buf.items.len;
-
-    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.stdin_data), "zzz");
-    sc.server_client_dispatch_for_test(&imsg, &cl);
-    try std.testing.expectEqual(before, cl.tty.in_buf.items.len);
-}
-
 test "server_client_dispatch_shell with payload marks peer bad" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
@@ -2248,4 +2229,97 @@ test "server_client readonly enqueue rejects non-readonly command list" {
     try std.testing.expect(!cmdq_mod.cmdq_has_pending(&cl));
     const rv = try drainPeerUntilExit(&reader, pair[1]);
     try std.testing.expectEqual(@as(i32, 1), rv);
+}
+
+test "tty lifecycle: open sets term and saved_tio, smcup in out_buf, stop writes rmcup, restores termios" {
+    const input_keys = @import("input-keys.zig");
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, null, null));
+    defer _ = c.posix_sys.close(master);
+
+    // Capture original termios before tty_init/tty_open modify it.
+    var orig_tio: c.posix_sys.termios = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.posix_sys.tcgetattr(slave, &orig_tio));
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .fd = slave,
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+    tty_mod.tty_init(&cl.tty, &cl);
+    defer _ = c.posix_sys.close(slave);
+
+    // Provide terminfo caps including smcup so tty_putcode("smcup") writes
+    // the escape sequence to out_buf.
+    cl.term_name = xm.xstrdup("xterm");
+    defer xm.allocator.free(cl.term_name.?);
+    var test_caps = [_][]u8{
+        xm.xstrdup("clear=\x1b[H\x1b[2J"),
+        xm.xstrdup("cup=\x1b[%p1%d;%p2%dH"),
+        xm.xstrdup("smcup=\x1b[?1049h"),
+    };
+    defer for (&test_caps) |cap| xm.allocator.free(cap);
+    cl.term_caps = &test_caps;
+    defer cl.term_caps = null;
+
+    // ── tty_open ──
+    var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), tty_mod.tty_open(&cl.tty, &cause));
+    defer tty_mod.tty_close(&cl.tty);
+
+    // Verify tty.term created, saved_tio captured, flags set.
+    try std.testing.expect(cl.tty.term != null);
+    try std.testing.expect(cl.tty.saved_tio != null);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0);
+    try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
+
+    // ── SMCUP in out_buf ──
+    try std.testing.expect(std.mem.indexOf(u8, cl.tty.out_buf.items, "\x1b[?1049h") != null);
+
+    // ── Keystroke decoding: \x1b[A → KEYC_UP ──
+    // parse_csi in input-keys.zig decodes CSI A as UP|CURSOR|IMPLIED_META.
+    var event: T.key_event = .{};
+    const consumed = input_keys.input_key_get_client(&cl, "\x1b[A", &event);
+    try std.testing.expect(consumed != null);
+    try std.testing.expectEqual(@as(usize, 3), consumed.?);
+    try std.testing.expectEqual(T.KEYC_UP | T.KEYC_CURSOR | T.KEYC_IMPLIED_META, event.key);
+
+    // ── tty_stop_tty flushes out_buf then writes RMCUP via tty_raw ──
+    tty_mod.tty_stop_tty(&cl.tty);
+
+    // Set master to non-blocking so read doesn't hang.
+    const fl = std.c.fcntl(master, std.posix.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(master, std.posix.F.SETFL, fl | @as(c_int, 0x800));
+
+    // Read accumulated output from master (flushed out_buf + tty_raw RMCUP).
+    var read_buf: [16384]u8 = undefined;
+    var total_read: usize = 0;
+    while (total_read < read_buf.len) {
+        const n = std.posix.read(@intCast(master), read_buf[total_read..]) catch break;
+        if (n == 0) break;
+        total_read += n;
+    }
+    const output = read_buf[0..total_read];
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[?1049l") != null);
+
+    // ── Termios restored to pre-open state ──
+    var after_tio: c.posix_sys.termios = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.posix_sys.tcgetattr(slave, &after_tio));
+    try std.testing.expectEqual(orig_tio.c_iflag, after_tio.c_iflag);
+    try std.testing.expectEqual(orig_tio.c_oflag, after_tio.c_oflag);
+    try std.testing.expectEqual(orig_tio.c_lflag, after_tio.c_lflag);
 }

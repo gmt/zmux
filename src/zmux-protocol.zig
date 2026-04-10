@@ -71,8 +71,6 @@ pub const MsgType = enum(c_int) {
     write_ready,
     write_close,
     read_cancel,
-
-    stdin_data = 400,
 };
 
 /// Payload for MSG_COMMAND – followed by packed argv strings.
@@ -118,11 +116,4 @@ pub const MsgWriteReady = extern struct {
 
 pub const MsgWriteClose = extern struct {
     stream: c_int,
-};
-
-pub const MsgResize = extern struct {
-    sx: u32,
-    sy: u32,
-    xpixel: u32,
-    ypixel: u32,
 };

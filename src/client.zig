@@ -46,13 +46,11 @@ var client_exec_command: ?[]u8 = null;
 var client_exec_shell: ?[]u8 = null;
 var client_shell_command: ?[]u8 = null;
 var client_retval: i32 = 0;
-var client_stdin_event: ?*c.libevent.event = null;
 var client_control_input: std.ArrayList(u8) = .{};
 var client_control_stdin_closed = false;
 var client_attached = false;
 var client_suspended = false;
 var client_suspend_restore_attached = false;
-var client_raw_tty = false;
 var client_saved_tio: c.posix_sys.termios = undefined;
 var client_have_saved_tio = false;
 var client_suspend_signal_hook: ?*const fn () void = null;
@@ -359,46 +357,13 @@ fn client_exec(shell: []const u8, command: []const u8) noreturn {
 
 fn client_enter_attached_mode() void {
     client_attached = true;
-    client_enable_raw_tty();
-    client_enable_attached_input();
-    const stdout = std.fs.File.stdout();
-    _ = stdout.writeAll("\x1b[?1049h\x1b[H\x1b[2J") catch {};
 }
 
 fn client_leave_attached_mode() void {
-    client_disable_stdin_event();
-    if (client_raw_tty and client_have_saved_tio) {
+    if (client_have_saved_tio) {
         _ = c.posix_sys.tcsetattr(0, c.posix_sys.TCSANOW, &client_saved_tio);
     }
-    client_raw_tty = false;
     client_attached = false;
-    const stdout = std.fs.File.stdout();
-    _ = stdout.writeAll("\x1b[?25h\x1b[?1049l\x1b[0m") catch {};
-}
-
-fn client_enable_raw_tty() void {
-    if (client_raw_tty) return;
-    if (c.posix_sys.tcgetattr(0, &client_saved_tio) != 0) return;
-    client_have_saved_tio = true;
-    var raw = client_saved_tio;
-    c.posix_sys.cfmakeraw(&raw);
-    if (c.posix_sys.tcsetattr(0, c.posix_sys.TCSANOW, &raw) != 0) return;
-    client_raw_tty = true;
-}
-
-fn client_enable_attached_input() void {
-    if (client_stdin_event != null) return;
-    const base = proc_mod.libevent orelse return;
-    client_stdin_event = c.libevent.event_new(
-        base,
-        0,
-        @intCast(c.libevent.EV_READ | c.libevent.EV_PERSIST),
-        client_stdin_cb,
-        null,
-    );
-    if (client_stdin_event) |ev| {
-        _ = c.libevent.event_add(ev, null);
-    }
 }
 
 fn client_send_resize() void {
@@ -468,17 +433,9 @@ fn client_control_flush_lines(eof: bool) void {
     }
 }
 
-fn client_disable_stdin_event() void {
-    if (client_stdin_event) |ev| {
-        _ = c.libevent.event_del(ev);
-        c.libevent.event_free(ev);
-        client_stdin_event = null;
-    }
-}
-
 fn client_handle_lock_command(cmd: []const u8) void {
     const was_attached = client_attached;
-    if (client_attached or client_raw_tty) client_leave_attached_mode();
+    if (client_attached) client_leave_attached_mode();
 
     const cmd_z = xm.xm_dupeZ(cmd);
     defer xm.allocator.free(cmd_z);
@@ -510,7 +467,7 @@ fn client_deliver_suspend_signal() void {
 
 fn client_handle_suspend() void {
     client_suspend_restore_attached = client_attached;
-    if (client_attached or client_raw_tty) client_leave_attached_mode();
+    if (client_attached) client_leave_attached_mode();
     client_set_tstp_handler(std.posix.SIG.DFL);
     client_suspended = true;
     client_deliver_suspend_signal();
@@ -525,45 +482,6 @@ fn client_handle_continue() void {
     client_suspend_restore_attached = false;
     client_suspended = false;
     if (client_peer) |peer| _ = proc_mod.proc_send(peer, .wakeup, -1, null, 0);
-}
-
-export fn client_stdin_cb(fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
-    _ = _events;
-    _ = _arg;
-
-    var buf: [4096]u8 = undefined;
-    const n = std.posix.read(fd, buf[0..]) catch |err| switch (err) {
-        error.WouldBlock => return,
-        else => {
-            proc_mod.proc_exit(client_proc.?);
-            return;
-        },
-    };
-
-    if (client_flags & T.CLIENT_CONTROL != 0) {
-        if (n == 0) {
-            client_control_flush_lines(true);
-            client_disable_stdin_event();
-            if (!client_control_stdin_closed) {
-                client_control_stdin_closed = true;
-                client_send_command([_][]const u8{"detach-client"});
-            }
-            return;
-        }
-
-        client_control_input.appendSlice(xm.allocator, buf[0..n]) catch unreachable;
-        client_control_flush_lines(false);
-        return;
-    }
-
-    if (n == 0) {
-        client_disable_stdin_event();
-        return;
-    }
-
-    if (client_peer) |peer| {
-        _ = proc_mod.proc_send(peer, .stdin_data, -1, buf[0..n].ptr, n);
-    }
 }
 
 /// Whether the client should set `CLIENT_STARTSERVER` before connecting (same
@@ -621,6 +539,13 @@ pub fn client_main(
 
     client_peer = proc_mod.proc_add_peer(client_proc.?, fd, client_dispatch, null);
 
+    // Save terminal settings before sending identify — SIGKILL safety net.
+    if (!client_have_saved_tio) {
+        if (c.posix_sys.tcgetattr(std.posix.STDIN_FILENO, &client_saved_tio) == 0) {
+            client_have_saved_tio = true;
+        }
+    }
+
     client_send_identify(feat);
 
     if (client_shell_command != null) {
@@ -642,15 +567,13 @@ pub fn client_main(
     if (client_flags & T.CLIENT_CONTROL != 0) {
         client_control_input = .{};
         client_control_stdin_closed = false;
-        client_enable_attached_input();
     }
 
     proc_mod.proc_loop(client_proc.?, null);
     file_mod.clientCleanup();
-    if (client_attached or client_raw_tty) {
+    if (client_attached) {
         client_leave_attached_mode();
     }
-    client_disable_stdin_event();
     client_control_input.deinit(xm.allocator);
     client_control_input = .{};
     proc_mod.proc_clear_signals(client_proc.?, true);
@@ -916,7 +839,6 @@ test "client lock command runs shell command then sends unlock" {
     client_proc = &proc;
     client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
     client_attached = false;
-    client_raw_tty = false;
     client_have_saved_tio = false;
     defer {
         const peer = client_peer.?;
@@ -967,7 +889,6 @@ test "client suspend and continue round-trip wakeup state" {
     client_attached = true;
     client_suspended = false;
     client_suspend_restore_attached = false;
-    client_raw_tty = false;
     client_have_saved_tio = false;
     client_suspend_signal_hook = client_test_suspend_hook;
     defer {

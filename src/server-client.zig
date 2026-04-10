@@ -137,6 +137,11 @@ pub fn server_client_lost(cl: *T.Client) void {
     cl.client_windows.deinit(xm.allocator);
     control.control_panes_deinit(cl);
     control_subscriptions.control_subscriptions_deinit(cl);
+    if (cl.control_read_event) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        cl.control_read_event = null;
+    }
     cl.control_input_buf.deinit(xm.allocator);
     cl.stdin_pending.deinit(xm.allocator);
     tty_mod.tty_close(&cl.tty);
@@ -298,6 +303,42 @@ fn server_client_dispatch_control_stdin(cl: *T.Client, data: []const u8) void {
         const remaining = buf.len - nl - 1;
         if (remaining > 0)
             std.mem.copyForwards(u8, cl.control_input_buf.items[0..remaining], buf[nl + 1 ..]);
+        cl.control_input_buf.shrinkRetainingCapacity(remaining);
+    }
+}
+
+/// libevent callback for reading control client input directly from cl.fd.
+/// Buffers bytes in cl.control_input_buf and dispatches each complete
+/// newline-terminated line via control_read_callback.
+export fn control_stdin_read_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
+    _ = _events;
+    const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    const fd: std.posix.fd_t = if (_fd >= 0) _fd else cl.fd;
+    if (fd < 0) return;
+
+    var buf: [4096]u8 = undefined;
+    const n = std.posix.read(@intCast(fd), &buf) catch return;
+    if (n == 0) {
+        // EOF — flag client for exit.
+        cl.flags |= T.CLIENT_EXIT;
+        return;
+    }
+
+    cl.control_input_buf.appendSlice(xm.allocator, buf[0..n]) catch return;
+
+    while (true) {
+        const items = cl.control_input_buf.items;
+        const nl = std.mem.indexOfScalar(u8, items, '\n') orelse break;
+        var line_end = nl;
+        if (line_end > 0 and items[line_end - 1] == '\r')
+            line_end -= 1;
+        const line = items[0..line_end];
+
+        control.control_read_callback(cl, line);
+
+        const remaining = items.len - nl - 1;
+        if (remaining > 0)
+            std.mem.copyForwards(u8, cl.control_input_buf.items[0..remaining], items[nl + 1 ..]);
         cl.control_input_buf.shrinkRetainingCapacity(remaining);
     }
 }
@@ -520,7 +561,34 @@ pub fn server_client_finalize_identify(cl: *T.Client) void {
 
     if ((cl.flags & T.CLIENT_CONTROL) != 0) {
         control.control_start(cl);
-        server_client_close_terminal_fds(cl);
+
+        // Register a libevent read event on the client fd so the server
+        // reads control input directly, mirroring tmux's bufferevent on
+        // c->fd set up in control_start().
+        if (cl.fd >= 0) {
+            const base = proc_mod.libevent orelse {
+                server_client_close_terminal_fds(cl);
+                return;
+            };
+            const ev = c.libevent.event_new(
+                base,
+                cl.fd,
+                @intCast(c.libevent.EV_PERSIST | c.libevent.EV_READ),
+                control_stdin_read_cb,
+                cl,
+            );
+            if (ev) |e| {
+                _ = c.libevent.event_add(e, null);
+                cl.control_read_event = e;
+            }
+        }
+
+        // Close out_fd but keep cl.fd open — it is now monitored by the
+        // control read event (like tmux keeps c->fd for the bufferevent).
+        if (cl.out_fd != -1) {
+            _ = c.posix_sys.close(cl.out_fd);
+            cl.out_fd = -1;
+        }
         return;
     }
 

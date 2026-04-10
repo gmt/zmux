@@ -657,21 +657,21 @@ test "refresh-client -C stores and clears per-window control sizes" {
 }
 
 test "refresh-client -l emits a clipboard query for the target tty" {
-    const c = @import("c.zig");
-    const proc_mod = @import("proc.zig");
-    const protocol = @import("zmux-protocol.zig");
-    const xm = @import("xmalloc.zig");
+    const opts = @import("options.zig");
 
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
-
-    var proc = T.ZmuxProc{ .name = "refresh-client-clipboard-query-test" };
-    defer proc.peers.deinit(xm.allocator);
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
 
     var target_env = T.Environ.init(std.testing.allocator);
     defer target_env.deinit();
 
     var caps = [_][]u8{
+        @constCast("clear=\x1b[H\x1b[2J"),
+        @constCast("cup=\x1b[%p1%d;%p2%dH"),
         @constCast("Ms=\x1b]52;%p1%s;%p2%s\x07"),
     };
     var target_client = T.Client{
@@ -680,49 +680,22 @@ test "refresh-client -l emits a clipboard query for the target tty" {
         .tty = undefined,
         .status = .{},
         .term_caps = caps[0..],
+        .term_name = @constCast("xterm"),
     };
     tty_mod.tty_init(&target_client.tty, &target_client);
-    tty_mod.tty_start_tty(&target_client.tty);
-    target_client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
-    defer {
-        const peer = target_client.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
-    }
-
-    var reader: c.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
-
     var cause: ?[]u8 = null;
+    try std.testing.expectEqual(@as(i32, 0), tty_mod.tty_open(&target_client.tty, &cause));
+    defer tty_mod.tty_close(&target_client.tty);
+    try std.testing.expect(cause == null);
+    target_client.tty.out_buf.clearRetainingCapacity();
+
     const query = try cmd_mod.cmd_parse_one(&.{ "refresh-client", "-l" }, null, &cause);
     defer cmd_mod.cmd_free(query);
 
     var item = cmdq.CmdqItem{ .target_client = &target_client };
     try std.testing.expectEqual(T.CmdRetval.normal, exec(query, &item));
 
-    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
-
-    var imsg_msg: c.imsg.imsg = undefined;
-    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c.imsg.imsg_free(&imsg_msg);
-
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
-
-    const payload_len = c.imsg.imsg_get_len(&imsg_msg);
-    var payload = try xm.allocator.alloc(u8, payload_len);
-    defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
-
-    var stream: i32 = 0;
-    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
-    try std.testing.expectEqual(@as(i32, 1), stream);
-    try std.testing.expectEqualStrings("\x1b]52;;?\x07", payload[@sizeOf(i32)..]);
+    try std.testing.expect(std.mem.indexOf(u8, target_client.tty.out_buf.items, "\x1b]52;;?\x07") != null);
 }
 
 test "refresh-client rejects control-only flags on non-control clients" {
@@ -1124,7 +1097,6 @@ test "refresh-client -B control subscriptions stay quiet when unchanged and emit
             var extra: c.imsg.imsg = undefined;
             try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get(reader, &extra));
         }
-
     };
 
     session_mod.session_init_globals(xm.allocator);

@@ -185,7 +185,12 @@ pub fn build(b: *std.Build) void {
     unit_tests.linkSystemLibrary("event_core");
     unit_tests.linkSystemLibrary("ncursesw");
     const test_step = b.step("test", "Run Zig unit tests");
-    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    // Wrap the test binary in `timeout` so a hanging test does not block CI
+    // indefinitely.  120 seconds is generous for the full suite (~1265 tests).
+    const run_tests = b.addSystemCommand(&.{ "timeout", "--kill-after=5", "120" });
+    run_tests.addArtifactArg(unit_tests);
+    run_tests.addArgs(&.{ "--cache-dir=./.zig-cache", "--seed=0" });
+    test_step.dependOn(&run_tests.step);
 
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
     test_compile_step.dependOn(&unit_tests.step);

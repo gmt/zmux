@@ -14,31 +14,20 @@
 
 //! Custom test runner for zmux.
 //!
-//! Extends the default Zig test runner with:
+//! Thin wrapper around the default Zig test runner protocol that adds
+//! process-group isolation: the runner calls setpgid(0,0) at startup
+//! and installs a SIGINT handler that kills the whole group before
+//! exiting.  This ensures Ctrl-C during `zig build test` also
+//! terminates any child processes the tests may have spawned (pty
+//! helpers, sleep guards, etc.) rather than leaving them as orphans.
 //!
-//!   1. Per-test SIGALRM watchdog (PER_TEST_TIMEOUT_SECS).  A test that
-//!      blocks indefinitely — e.g. waiting on a socket that will never
-//!      receive data — is killed with a clear "test timed out" message
-//!      rather than hanging the entire suite forever.
-//!
-//!   2. Process-group management.  The runner puts itself in its own
-//!      process group at startup.  The SIGINT handler kills the whole
-//!      group before exiting, so Ctrl-C during a test run also terminates
-//!      any child processes the tests may have spawned (pty helpers,
-//!      sleep guards, etc.) rather than leaving them as orphans.
-//!
-//! The runner is a drop-in replacement for the default test_runner.zig:
-//! it speaks the same --listen=- server protocol so `zig build test`
-//! still reports individual test results correctly.
+//! Hang detection is handled externally by regress/test-watchdog.py
+//! which wraps the test run with adaptive timeouts, signal escalation,
+//! and diagnostic re-runs.
 
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
-const posix = std.posix;
-
-/// Seconds allowed per individual test before SIGALRM fires.
-/// Generous enough for slow CI machines; tight enough to catch hangs quickly.
-const PER_TEST_TIMEOUT_SECS: c_uint = 30;
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -50,47 +39,21 @@ var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
 var stdout_buffer: [4096]u8 = undefined;
 
-// Name of the currently-running test, set before each test_fn.func() call
-// so the SIGALRM handler can print it.
-var current_test_name: []const u8 = "<unknown>";
-
 // ── Signal handlers ────────────────────────────────────────────────────────
-
-/// SIGALRM: fired when a test exceeds PER_TEST_TIMEOUT_SECS.
-/// Panics so the test runner reports a failure and moves on (in server mode
-/// the panic is caught by the outer error handler).
-fn handleAlarm(sig: c_int) callconv(.c) void {
-    _ = sig;
-    // Write directly to stderr — allocator may be in an inconsistent state.
-    const msg = "FATAL: test timed out (SIGALRM)\n";
-    _ = std.c.write(2, msg.ptr, msg.len);
-    // Abort so the process exits with a non-zero status.  In server mode the
-    // build system will see the connection drop and report the test as failed.
-    std.process.abort();
-}
 
 /// SIGINT: Ctrl-C during the test run.  Kill the entire process group so
 /// child processes spawned by tests (pty helpers, sleep guards, etc.) are
 /// also terminated, then exit.
 fn handleSigint(sig: c_int) callconv(.c) void {
     _ = sig;
-    // Kill our entire process group (negative pid = process group).
     const pid = std.c.getpid();
     _ = std.c.kill(-pid, std.posix.SIG.TERM);
     std.process.exit(130); // 128 + SIGINT
 }
 
 fn installSignalHandlers() void {
-    // Put ourselves in our own process group so kill(-pid) in handleSigint
-    // reaches every child we spawn.
+    // Own process group so kill(-pid) in handleSigint reaches every child.
     _ = std.c.setpgid(0, 0);
-
-    var sa_alarm = std.posix.Sigaction{
-        .handler = .{ .handler = handleAlarm },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.ALRM, &sa_alarm, null);
 
     var sa_int = std.posix.Sigaction{
         .handler = .{ .handler = handleSigint },
@@ -98,18 +61,6 @@ fn installSignalHandlers() void {
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &sa_int, null);
-}
-
-// ── Watchdog helpers ───────────────────────────────────────────────────────
-
-fn armWatchdog(name: []const u8) void {
-    current_test_name = name;
-    _ = std.c.alarm(PER_TEST_TIMEOUT_SECS);
-}
-
-fn disarmWatchdog() void {
-    _ = std.c.alarm(0);
-    current_test_name = "<unknown>";
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -204,7 +155,6 @@ fn mainServer(opt_cache_dir: ?[]const u8) !void {
                 var fail = false;
                 var skip = false;
 
-                armWatchdog(test_fn.name);
                 test_fn.func() catch |err| switch (err) {
                     error.SkipZigTest => skip = true,
                     else => {
@@ -214,7 +164,6 @@ fn mainServer(opt_cache_dir: ?[]const u8) !void {
                         }
                     },
                 };
-                disarmWatchdog();
 
                 const leak = testing.allocator_instance.deinit() == .leak;
                 try server.serveTestResults(.{
@@ -254,9 +203,7 @@ fn mainTerminal() void {
         testing.allocator_instance = .{};
         log_err_count = 0;
 
-        armWatchdog(test_fn.name);
         const result = test_fn.func();
-        disarmWatchdog();
 
         if (testing.allocator_instance.deinit() == .leak) {
             std.debug.print("FAIL (memory leak)\n", .{});

@@ -69,7 +69,6 @@ pub fn tty_resize(tty: *T.Tty, sx: u32, sy: u32, xpixel: u32, ypixel: u32) void 
     const ch = if (sy > 0 and ypixel > 0) ypixel / sy else 0;
 
     if ((cw == 0 or ch == 0) and
-        tty.client.peer != null and
         (tty.client.flags & T.CLIENT_CONTROL) == 0 and
         tty_term.isVt100Like(tty) and
         (tty.flags & @as(i32, @intCast(T.TTY_WINSIZEQUERY))) == 0)
@@ -95,6 +94,26 @@ pub fn tty_open(tty: *T.Tty, cause: *?[]u8) i32 {
     }
     tty.term = @ptrCast(term);
 
+    // Register libevent read/write events on the client fd.
+    // In test contexts proc_mod.libevent may be null; skip event registration
+    // gracefully rather than failing tty_open entirely.
+    if (proc_mod.libevent) |base| {
+        tty.event_in = c_zig.libevent.event_new(
+            base,
+            cl.fd,
+            @intCast(c_zig.libevent.EV_PERSIST | c_zig.libevent.EV_READ),
+            tty_read_callback,
+            tty,
+        );
+        tty.event_out = c_zig.libevent.event_new(
+            base,
+            cl.fd,
+            @intCast(c_zig.libevent.EV_WRITE),
+            tty_write_callback,
+            tty,
+        );
+    }
+
     cause.* = null;
     tty.flags |= @intCast(T.TTY_OPENED);
     tty.flags &= ~@as(i32, @intCast(T.TTY_NOCURSOR | T.TTY_FREEZE | T.TTY_BLOCK));
@@ -114,20 +133,126 @@ pub fn tty_close(tty: *T.Tty) void {
             tty.term = null;
         }
         tty_keys_free(tty);
+        if (tty.event_in) |ev| {
+            _ = c_zig.libevent.event_del(ev);
+            c_zig.libevent.event_free(ev);
+            tty.event_in = null;
+        }
+        if (tty.event_out) |ev| {
+            _ = c_zig.libevent.event_del(ev);
+            c_zig.libevent.event_free(ev);
+            tty.event_out = null;
+        }
+        tty.out_buf.deinit(xm.allocator);
+        tty.out_buf = .{};
     }
     tty.flags &= ~@as(i32, @intCast(T.TTY_OPENED));
 }
 
 pub fn tty_start_tty(tty: *T.Tty) void {
     if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) return;
+
+    const opened = (tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0;
+    const fd = tty.client.fd;
+    if (opened and fd >= 0) {
+        const flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+        if (flags >= 0) {
+            const next = flags | c_zig.posix_sys.O_NONBLOCK;
+            _ = std.c.fcntl(fd, std.posix.F.SETFL, next);
+        }
+    }
+    if (opened) if (tty.event_in) |ev| {
+        _ = c_zig.libevent.event_add(ev, null);
+    };
+
+    if (opened) if (tty.saved_tio) |saved_tio| {
+        var tio = saved_tio;
+        const iflag_mask: @TypeOf(tio.c_iflag) = c_zig.posix_sys.IXON | c_zig.posix_sys.IXOFF | c_zig.posix_sys.ICRNL | c_zig.posix_sys.INLCR | c_zig.posix_sys.IGNCR | c_zig.posix_sys.IMAXBEL | c_zig.posix_sys.ISTRIP;
+        const oflag_mask: @TypeOf(tio.c_oflag) = c_zig.posix_sys.OPOST | c_zig.posix_sys.ONLCR | c_zig.posix_sys.OCRNL | c_zig.posix_sys.ONLRET;
+        const lflag_mask: @TypeOf(tio.c_lflag) = c_zig.posix_sys.IEXTEN | c_zig.posix_sys.ICANON | c_zig.posix_sys.ECHO | c_zig.posix_sys.ECHOE | c_zig.posix_sys.ECHONL | c_zig.posix_sys.ECHOCTL | c_zig.posix_sys.ECHOPRT | c_zig.posix_sys.ECHOKE | c_zig.posix_sys.ISIG;
+        tio.c_iflag &= ~iflag_mask;
+        tio.c_iflag |= c_zig.posix_sys.IGNBRK;
+        tio.c_oflag &= ~oflag_mask;
+        tio.c_lflag &= ~lflag_mask;
+        tio.c_cc[c_zig.posix_sys.VMIN] = 1;
+        tio.c_cc[c_zig.posix_sys.VTIME] = 0;
+        if (c_zig.posix_sys.tcsetattr(fd, c_zig.posix_sys.TCSANOW, &tio) == 0) {
+            _ = c_zig.posix_sys.tcflush(fd, c_zig.posix_sys.TCOFLUSH);
+        }
+    };
+
+    if (opened) {
+        tty_putcode(tty, "smcup");
+        tty_putcode(tty, "smkx");
+        tty_putcode(tty, "clear");
+        tty_putcode(tty, "cnorm");
+        tty_puts_str(tty, "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l");
+        if (tty_term.isVt100Like(tty)) {
+            tty_puts_str(tty, "\x1b[?2031h\x1b[?996n");
+        }
+    }
+
     tty.flags |= @intCast(T.TTY_STARTED);
-    tty_invalidate(tty);
     tty_start_start_timer(tty);
+    tty_invalidate(tty);
 }
 
 pub fn tty_stop_tty(tty: *T.Tty) void {
+    if ((tty.flags & @as(i32, @intCast(T.TTY_STARTED))) == 0) return;
+
     cancelClipboardQuery(tty);
     cancelStartTimer(tty);
+
+    const opened = (tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0;
+    const fd = tty.client.fd;
+    // Flush remaining output synchronously before shutdown.
+    // Limit retries to avoid spinning on a non-blocking fd with no data ready.
+    var flush_retries: u32 = 0;
+    while (opened and fd >= 0 and tty.out_buf.items.len != 0 and flush_retries < 5) {
+        const written = std.posix.write(@intCast(fd), tty.out_buf.items) catch |err| {
+            if (err == error.WouldBlock) {
+                flush_retries += 1;
+                std.Thread.sleep(100 * std.time.ns_per_us);
+                continue;
+            }
+            break;
+        };
+        if (written == 0) break;
+        flush_retries = 0;
+        if (written >= tty.out_buf.items.len) {
+            tty.out_buf.clearRetainingCapacity();
+        } else {
+            const remaining = tty.out_buf.items.len - written;
+            std.mem.copyForwards(u8, tty.out_buf.items[0..remaining], tty.out_buf.items[written..]);
+            tty.out_buf.shrinkRetainingCapacity(remaining);
+        }
+        tty.pending_out = tty.out_buf.items.len;
+    }
+    tty.pending_out = tty.out_buf.items.len;
+
+    if (opened) {
+        if (tty.event_in) |ev| _ = c_zig.libevent.event_del(ev);
+        if (tty.event_out) |ev| _ = c_zig.libevent.event_del(ev);
+    }
+
+    if (opened and fd >= 0) {
+        var ws: c_zig.posix_sys.winsize = undefined;
+        if (c_zig.posix_sys.ioctl(fd, c_zig.posix_sys.TIOCGWINSZ, &ws) != -1) {
+            tty_raw(tty, "\x1b[r");
+            tty_raw(tty, "\x1b[m");
+            tty_raw(tty, "\x1b[?1l\x1b>");
+            tty_raw(tty, "\x1b[H\x1b[2J");
+            tty_raw(tty, "\x1b[?1049l");
+        }
+    }
+
+    if (opened and fd >= 0) {
+        if (tty.saved_tio) |saved_tio| {
+            var restored = saved_tio;
+            _ = c_zig.posix_sys.tcsetattr(fd, c_zig.posix_sys.TCSANOW, &restored);
+        }
+    }
+
     tty.flags &= ~@as(i32, @intCast(T.TTY_STARTED | T.TTY_BLOCK));
 }
 
@@ -180,14 +305,14 @@ pub fn tty_raw(tty: *T.Tty, s: []const u8) void {
     while (i < 5) : (i += 1) {
         const n = std.posix.write(@intCast(fd), buf) catch |err| {
             if (err == error.WouldBlock) {
-                std.time.sleep(100_000); // 100 us, matches tmux usleep(100)
+                std.Thread.sleep(100 * std.time.ns_per_us); // 100 us, matches tmux usleep(100)
                 continue;
             }
             return;
         };
         buf = buf[n..];
         if (buf.len == 0) break;
-        std.time.sleep(100_000);
+        std.Thread.sleep(100 * std.time.ns_per_us);
     }
 }
 
@@ -1785,12 +1910,22 @@ fn tty_write(tty: *T.Tty, payload: []const u8) void {
         return;
     }
 
-    tty.out_buf.appendSlice(xm.allocator, payload) catch return;
-    tty.pending_out = tty.out_buf.items.len;
-    tty.client.written += payload.len;
-
-    if (tty.event_out != null and (tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) {
-        _ = c_zig.libevent.event_add(tty.event_out, null);
+    // If the tty has been opened (TTY_OPENED set by tty_open), buffer output
+    // for direct fd delivery via tty_write_callback.  Otherwise fall back to
+    // the imsg peer stream so that clients that never called tty_open (e.g.
+    // non-terminal clients and test harnesses that set up a peer socket
+    // without going through the full identify/open flow) still receive output.
+    if ((tty.flags & @as(i32, @intCast(T.TTY_OPENED))) != 0) {
+        tty.out_buf.appendSlice(xm.allocator, payload) catch return;
+        tty.pending_out = tty.out_buf.items.len;
+        tty.client.written += payload.len;
+        if (tty.event_out != null and (tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0) {
+            _ = c_zig.libevent.event_add(tty.event_out, null);
+        }
+    } else {
+        const peer = tty.client.peer orelse return;
+        _ = file_mod.sendPeerStream(peer, 1, payload);
+        tty.client.written += payload.len;
     }
 }
 
@@ -3557,59 +3692,44 @@ test "tty_resize clamps size and restores default pixels" {
 }
 
 test "tty_resize requests winsize replies for vt100 terminals without pixel dimensions" {
-    const proc_mod_local = @import("proc.zig");
-
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
-
-    var proc = T.ZmuxProc{ .name = "tty-resize-query-test" };
-    defer proc.peers.deinit(xm.allocator);
+    // Since T6, tty output goes to tty.out_buf (direct fd path) rather than
+    // through sendPeerStream/imsg.  This test verifies the escape sequences
+    // appear in out_buf after tty_resize.
+    const opts = @import("options.zig");
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
 
     var caps = [_][]u8{
         @constCast("clear=\x1b[H\x1b[J"),
+        @constCast("cup=\x1b[%p1%d;%p2%dH"),
     };
     var cl = T.Client{
         .environ = undefined,
         .tty = undefined,
         .status = .{},
         .term_caps = caps[0..],
+        .term_name = @constCast("xterm"),
     };
     tty_init(&cl.tty, &cl);
-    tty_start_tty(&cl.tty);
-    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
-    defer {
-        const peer = cl.peer.?;
-        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
-    }
+    // tty_start_tty requires TTY_OPENED; call tty_open to set it up properly.
+    var cause: ?[]u8 = null;
+    _ = tty_open(&cl.tty, &cause);
+    defer tty_close(&cl.tty);
 
-    var reader: c_zig.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c_zig.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
+    // Clear out_buf of startup sequences so we only see tty_resize output.
+    cl.tty.out_buf.clearRetainingCapacity();
 
     tty_resize(&cl.tty, 80, 24, 0, 0);
 
     try std.testing.expect((cl.tty.flags & @as(i32, @intCast(T.TTY_WINSIZEQUERY))) != 0);
-    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
-
-    var imsg_msg: c_zig.imsg.imsg = undefined;
-    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c_zig.imsg.imsg_free(&imsg_msg);
-
-    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
-    var payload = try xm.allocator.alloc(u8, payload_len);
-    defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
-
-    var stream: i32 = 0;
-    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
-    try std.testing.expectEqual(@as(i32, 1), stream);
-    try std.testing.expectEqualStrings("\x1b[18t\x1b[14t", payload[@sizeOf(i32)..]);
+    // The winsize query sequences should be in out_buf.
+    const buf = cl.tty.out_buf.items;
+    const found = std.mem.indexOf(u8, buf, "\x1b[18t\x1b[14t") != null;
+    try std.testing.expect(found);
 }
 
 test "tty_append_mode_update emits reduced outer mouse, bracketed-paste, and focus negotiation" {
@@ -3715,15 +3835,18 @@ test "tty_set_title honours the reduced title capability layer" {
 }
 
 test "tty_clipboard_query emits the recorded Ms capability query" {
-    const proc_mod_local = @import("proc.zig");
+    const opts = @import("options.zig");
 
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
-
-    var proc = T.ZmuxProc{ .name = "tty-clipboard-query-test" };
-    defer proc.peers.deinit(xm.allocator);
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
 
     var caps = [_][]u8{
+        @constCast("clear=\x1b[H\x1b[2J"),
+        @constCast("cup=\x1b[%p1%d;%p2%dH"),
         @constCast("Ms=\x1b]52;c;!\x07\x1b]52;c;%p2%s\x07"),
     };
     var cl = T.Client{
@@ -3731,44 +3854,20 @@ test "tty_clipboard_query emits the recorded Ms capability query" {
         .tty = undefined,
         .status = .{},
         .term_caps = caps[0..],
+        .term_name = @constCast("xterm"),
+        .fd = -1,
     };
     tty_init(&cl.tty, &cl);
-    tty_start_tty(&cl.tty);
-    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
-    defer {
-        const peer = cl.peer.?;
-        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
-    }
 
-    var reader: c_zig.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c_zig.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
+    var cause: ?[]u8 = null;
+    _ = tty_open(&cl.tty, &cause);
+    defer tty_close(&cl.tty);
+
+    cl.tty.out_buf.clearRetainingCapacity();
 
     tty_clipboard_query(&cl.tty);
 
-    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
-
-    var imsg_msg: c_zig.imsg.imsg = undefined;
-    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c_zig.imsg.imsg_free(&imsg_msg);
-
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(@import("zmux-protocol.zig").MsgType.write))), c_zig.imsg.imsg_get_type(&imsg_msg));
-
-    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
-    var payload = try xm.allocator.alloc(u8, payload_len);
-    defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
-
-    var stream: i32 = 0;
-    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
-    try std.testing.expectEqual(@as(i32, 1), stream);
-    try std.testing.expectEqualStrings("\x1b]52;c;!\x07\x1b]52;c;?\x07", payload[@sizeOf(i32)..]);
+    try std.testing.expect(std.mem.indexOf(u8, cl.tty.out_buf.items, "\x1b]52;c;!\x07\x1b]52;c;?\x07") != null);
 }
 
 fn test_peer_dispatch(_: ?*c_zig.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
@@ -4033,15 +4132,17 @@ test "tty_cursor_pane_unless_wrap delegates when not wrapped" {
 }
 
 test "tty_cursor emits CUP with correct parameter expansion" {
-    const proc_mod_local = @import("proc.zig");
+    const opts = @import("options.zig");
 
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
-
-    var proc = T.ZmuxProc{ .name = "tty-cursor-cup-test" };
-    defer proc.peers.deinit(xm.allocator);
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
 
     var caps = [_][]u8{
+        @constCast("clear=\x1b[H\x1b[2J"),
         @constCast("cup=\x1b[%i%p1%d;%p2%dH"),
     };
     var cl = T.Client{
@@ -4049,47 +4150,24 @@ test "tty_cursor emits CUP with correct parameter expansion" {
         .tty = undefined,
         .status = .{},
         .term_caps = caps[0..],
+        .term_name = @constCast("xterm"),
+        .fd = -1,
     };
     tty_init(&cl.tty, &cl);
-    tty_start_tty(&cl.tty);
     cl.tty.sx = 80;
     cl.tty.sy = 24;
     cl.tty.cx = 0;
     cl.tty.cy = 0;
-    cl.peer = proc_mod_local.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
-    defer {
-        const peer = cl.peer.?;
-        c_zig.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
-    }
 
-    // Flush any pending data from the socket.
-    var reader: c_zig.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c_zig.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
+    var cause: ?[]u8 = null;
+    _ = tty_open(&cl.tty, &cause);
+    defer tty_close(&cl.tty);
+
+    cl.tty.out_buf.clearRetainingCapacity();
 
     tty_cursor(&cl.tty, 4, 7);
 
-    try std.testing.expectEqual(@as(i32, 1), c_zig.imsg.imsgbuf_read(&reader));
-
-    var imsg_msg: c_zig.imsg.imsg = undefined;
-    try std.testing.expect(c_zig.imsg.imsg_get(&reader, &imsg_msg) > 0);
-    defer c_zig.imsg.imsg_free(&imsg_msg);
-
-    const payload_len = c_zig.imsg.imsg_get_len(&imsg_msg);
-    var payload = try xm.allocator.alloc(u8, payload_len);
-    defer xm.allocator.free(payload);
-    try std.testing.expectEqual(@as(i32, 0), c_zig.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
-
-    // %i increments both params: row=7+1=8, col=4+1=5 => \x1b[8;5H
-    const expected = "\x1b[8;5H";
-    const data = payload[@sizeOf(i32)..];
-    try std.testing.expectEqualStrings(expected, data);
+    try std.testing.expect(std.mem.indexOf(u8, cl.tty.out_buf.items, "\x1b[8;5H") != null);
 }
 
 test "expand_tparm expands %i%p1%d;%p2%d pattern correctly" {

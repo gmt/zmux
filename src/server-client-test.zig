@@ -1892,11 +1892,11 @@ test "server_client identify messages merge client identity and done sets flag" 
     sc.server_client_dispatch_for_test(&im, &cl);
     try std.testing.expectEqualStrings(real, cl.cwd.?);
 
-    const ev = "TRANCHE4=z\x00";
+    const ev = "TESTVAR4=z\x00";
     @memcpy(pay[0..ev.len], ev);
     im = testImsg(.identify_environ, pay[0..ev.len]);
     sc.server_client_dispatch_for_test(&im, &cl);
-    const ev_ent = env_mod.environ_find(cl.environ, "TRANCHE4").?;
+    const ev_ent = env_mod.environ_find(cl.environ, "TESTVAR4").?;
     try std.testing.expectEqualStrings("z", ev_ent.value.?);
 
     const pid = std.os.linux.getpid();

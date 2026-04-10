@@ -18,7 +18,7 @@ const std = @import("std");
 const p = @import("zmux-protocol.zig");
 
 test "zmux protocol version and extern payload sizes stay C-compatible" {
-    try std.testing.expectEqual(@as(u32, 0xfe), p.PROTOCOL_VERSION);
+    try std.testing.expectEqual(@as(u32, 8), p.PROTOCOL_VERSION);
 
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgCommand));
 

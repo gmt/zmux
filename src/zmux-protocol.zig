@@ -23,7 +23,7 @@
 //! must stay in sync with the C header; bump PROTOCOL_VERSION when any wire
 //! struct changes.
 
-pub const PROTOCOL_VERSION: u32 = 0xfe; // deliberately outside tmux's version space
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// IPC message types exchanged between client and server.
 pub const MsgType = enum(c_int) {

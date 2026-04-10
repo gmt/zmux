@@ -1559,9 +1559,20 @@ test "server_client_dispatch_for_test ignores unknown wire message type" {
     try std.testing.expect((client.flags & T.CLIENT_DEAD) == 0);
 }
 
-test "server_client_dispatch_resize updates tty geometry and sets CLIENT_SIZECHANGED" {
+test "server_client_dispatch_resize reads tty geometry from fd and sets CLIENT_SIZECHANGED" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    ws.ws_col = 72;
+    ws.ws_row = 24;
+    ws.ws_xpixel = 100;
+    ws.ws_ypixel = 200;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, null, &ws));
+    defer _ = c.posix_sys.close(master);
+    defer _ = c.posix_sys.close(slave);
 
     var cl = T.Client{
         .environ = env,
@@ -1569,18 +1580,13 @@ test "server_client_dispatch_resize updates tty geometry and sets CLIENT_SIZECHA
         .status = .{},
         .session = null,
         .flags = T.CLIENT_IDENTIFIED,
+        .fd = slave,
     };
     cl.tty = .{ .client = &cl };
     tty_mod.tty_init(&cl.tty, &cl);
     tty_mod.tty_set_size(&cl.tty, 10, 5, 0, 0);
 
-    var msg_st: protocol.MsgResize = .{
-        .sx = 72,
-        .sy = 24,
-        .xpixel = 100,
-        .ypixel = 200,
-    };
-    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.resize), std.mem.asBytes(&msg_st));
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.resize), &.{});
     sc.server_client_dispatch_for_test(&imsg, &cl);
 
     try std.testing.expectEqual(@as(u32, 72), cl.tty.sx);

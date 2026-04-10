@@ -236,12 +236,25 @@ pub fn server_client_dispatch_for_test(imsg_ptr: ?*c.imsg.imsg, cl: *T.Client) v
 }
 
 fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
-    if (imsg_msg.data == null) return;
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
-    if (data_len < @sizeOf(protocol.MsgResize)) return;
-    const msg: *const protocol.MsgResize = @ptrCast(@alignCast(imsg_msg.data.?));
+    if (data_len != 0) return;
 
-    tty_mod.tty_resize(&cl.tty, msg.sx, msg.sy, msg.xpixel, msg.ypixel);
+    var sx: u32 = 80;
+    var sy: u32 = 24;
+    var xpixel: u32 = 0;
+    var ypixel: u32 = 0;
+
+    if (cl.fd >= 0) {
+        var ws: c.posix_sys.winsize = undefined;
+        if (c.posix_sys.ioctl(cl.fd, c.posix_sys.TIOCGWINSZ, &ws) == 0) {
+            sx = @max(@as(u32, ws.ws_col), 1);
+            sy = @max(@as(u32, ws.ws_row), 1);
+            xpixel = ws.ws_xpixel;
+            ypixel = ws.ws_ypixel;
+        }
+    }
+
+    tty_mod.tty_resize(&cl.tty, sx, sy, xpixel, ypixel);
     tty_mod.tty_repeat_requests(&cl.tty, 0);
     cl.flags |= T.CLIENT_SIZECHANGED;
 

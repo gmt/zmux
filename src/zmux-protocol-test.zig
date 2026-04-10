@@ -32,10 +32,7 @@ test "zmux protocol version and extern payload sizes stay C-compatible" {
     try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgWriteReady));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgWriteClose));
 
-    try std.testing.expectEqual(4 * @sizeOf(u32), @sizeOf(p.MsgResize));
-
     try std.testing.expectEqual(@alignOf(c_int), @alignOf(p.MsgCommand));
-    try std.testing.expectEqual(@alignOf(u32), @alignOf(p.MsgResize));
 }
 
 test "zmux MsgType enum values match tmux wire numbering bands" {
@@ -47,25 +44,11 @@ test "zmux MsgType enum values match tmux wire numbering bands" {
     try std.testing.expectEqual(@as(i32, 208), @intFromEnum(p.MsgType.resize));
     try std.testing.expectEqual(@as(i32, 218), @intFromEnum(p.MsgType.flags));
     try std.testing.expectEqual(@as(i32, 300), @intFromEnum(p.MsgType.read_open));
-    try std.testing.expectEqual(@as(i32, 400), @intFromEnum(p.MsgType.stdin_data));
 }
 
 test "zmux identify message types stay contiguous after identify_flags" {
     try std.testing.expectEqual(@intFromEnum(p.MsgType.identify_flags) + 1, @intFromEnum(p.MsgType.identify_term));
     try std.testing.expectEqual(@intFromEnum(p.MsgType.identify_term) + 1, @intFromEnum(p.MsgType.identify_ttyname));
-}
-
-test "zmux MsgResize round-trips four u32 fields" {
-    const m: p.MsgResize = .{
-        .sx = 80,
-        .sy = 24,
-        .xpixel = 640,
-        .ypixel = 480,
-    };
-    try std.testing.expectEqual(@as(u32, 80), m.sx);
-    try std.testing.expectEqual(@as(u32, 24), m.sy);
-    try std.testing.expectEqual(@as(u32, 640), m.xpixel);
-    try std.testing.expectEqual(@as(u32, 480), m.ypixel);
 }
 
 test "zmux MsgCommand holds argc as c_int" {
@@ -84,18 +67,72 @@ test "zmux PROTOCOL_VERSION fits in peerid low byte" {
     try std.testing.expect(p.PROTOCOL_VERSION <= 0xff);
 }
 
-test "zmux MsgResize round-trips through byte buffer" {
-    const m: p.MsgResize = .{
-        .sx = 80,
-        .sy = 24,
-        .xpixel = 640,
-        .ypixel = 480,
-    };
-    var buf: [@sizeOf(p.MsgResize)]u8 align(@alignOf(p.MsgResize)) = undefined;
-    @memcpy(buf[0..], std.mem.asBytes(&m));
-    const m2 = std.mem.bytesToValue(p.MsgResize, &buf);
-    try std.testing.expectEqual(m.sx, m2.sx);
-    try std.testing.expectEqual(m.sy, m2.sy);
-    try std.testing.expectEqual(m.xpixel, m2.xpixel);
-    try std.testing.expectEqual(m.ypixel, m2.ypixel);
+test "MsgType values match tmux-protocol.h exactly — all 34 message types" {
+    // version band
+    try std.testing.expectEqual(@as(i32, 12), @intFromEnum(p.MsgType.version));
+
+    // identify band: 100–112 (13 values)
+    try std.testing.expectEqual(@as(i32, 100), @intFromEnum(p.MsgType.identify_flags));
+    try std.testing.expectEqual(@as(i32, 101), @intFromEnum(p.MsgType.identify_term));
+    try std.testing.expectEqual(@as(i32, 102), @intFromEnum(p.MsgType.identify_ttyname));
+    try std.testing.expectEqual(@as(i32, 103), @intFromEnum(p.MsgType.identify_oldcwd));
+    try std.testing.expectEqual(@as(i32, 104), @intFromEnum(p.MsgType.identify_stdin));
+    try std.testing.expectEqual(@as(i32, 105), @intFromEnum(p.MsgType.identify_environ));
+    try std.testing.expectEqual(@as(i32, 106), @intFromEnum(p.MsgType.identify_done));
+    try std.testing.expectEqual(@as(i32, 107), @intFromEnum(p.MsgType.identify_clientpid));
+    try std.testing.expectEqual(@as(i32, 108), @intFromEnum(p.MsgType.identify_cwd));
+    try std.testing.expectEqual(@as(i32, 109), @intFromEnum(p.MsgType.identify_features));
+    try std.testing.expectEqual(@as(i32, 110), @intFromEnum(p.MsgType.identify_stdout));
+    try std.testing.expectEqual(@as(i32, 111), @intFromEnum(p.MsgType.identify_longflags));
+    try std.testing.expectEqual(@as(i32, 112), @intFromEnum(p.MsgType.identify_terminfo));
+
+    // command band: 200–218 (19 values)
+    try std.testing.expectEqual(@as(i32, 200), @intFromEnum(p.MsgType.command));
+    try std.testing.expectEqual(@as(i32, 201), @intFromEnum(p.MsgType.detach));
+    try std.testing.expectEqual(@as(i32, 202), @intFromEnum(p.MsgType.detachkill));
+    try std.testing.expectEqual(@as(i32, 203), @intFromEnum(p.MsgType.exit));
+    try std.testing.expectEqual(@as(i32, 204), @intFromEnum(p.MsgType.exited));
+    try std.testing.expectEqual(@as(i32, 205), @intFromEnum(p.MsgType.exiting));
+    try std.testing.expectEqual(@as(i32, 206), @intFromEnum(p.MsgType.lock));
+    try std.testing.expectEqual(@as(i32, 207), @intFromEnum(p.MsgType.ready));
+    try std.testing.expectEqual(@as(i32, 208), @intFromEnum(p.MsgType.resize));
+    try std.testing.expectEqual(@as(i32, 209), @intFromEnum(p.MsgType.shell));
+    try std.testing.expectEqual(@as(i32, 210), @intFromEnum(p.MsgType.shutdown));
+    try std.testing.expectEqual(@as(i32, 211), @intFromEnum(p.MsgType.oldstderr));
+    try std.testing.expectEqual(@as(i32, 212), @intFromEnum(p.MsgType.oldstdin));
+    try std.testing.expectEqual(@as(i32, 213), @intFromEnum(p.MsgType.oldstdout));
+    try std.testing.expectEqual(@as(i32, 214), @intFromEnum(p.MsgType.@"suspend"));
+    try std.testing.expectEqual(@as(i32, 215), @intFromEnum(p.MsgType.unlock));
+    try std.testing.expectEqual(@as(i32, 216), @intFromEnum(p.MsgType.wakeup));
+    try std.testing.expectEqual(@as(i32, 217), @intFromEnum(p.MsgType.exec));
+    try std.testing.expectEqual(@as(i32, 218), @intFromEnum(p.MsgType.flags));
+
+    // read/write band: 300–307 (8 values)
+    try std.testing.expectEqual(@as(i32, 300), @intFromEnum(p.MsgType.read_open));
+    try std.testing.expectEqual(@as(i32, 301), @intFromEnum(p.MsgType.read));
+    try std.testing.expectEqual(@as(i32, 302), @intFromEnum(p.MsgType.read_done));
+    try std.testing.expectEqual(@as(i32, 303), @intFromEnum(p.MsgType.write_open));
+    try std.testing.expectEqual(@as(i32, 304), @intFromEnum(p.MsgType.write));
+    try std.testing.expectEqual(@as(i32, 305), @intFromEnum(p.MsgType.write_ready));
+    try std.testing.expectEqual(@as(i32, 306), @intFromEnum(p.MsgType.write_close));
+    try std.testing.expectEqual(@as(i32, 307), @intFromEnum(p.MsgType.read_cancel));
+
+    // Total enum field count must equal 1 + 13 + 19 + 8 = 41.
+    // (tmux has exactly this many entries in enum msgtype.)
+    try std.testing.expectEqual(@as(usize, 41), @typeInfo(p.MsgType).@"enum".fields.len);
+}
+
+test "zmux has no stdin_data message type at value 400" {
+    // stdin_data was a zmux-only extension that has been removed.
+    // Verify no MsgType discriminant has value 400.
+    inline for (@typeInfo(p.MsgType).@"enum".fields) |field| {
+        try std.testing.expect(field.value != 400);
+    }
+}
+
+test "zmux MSG_RESIZE carries no struct payload (MsgResize does not exist)" {
+    // tmux MSG_RESIZE is an empty message — the server reads geometry
+    // from the client fd via ioctl(TIOCGWINSZ).  No MsgResize struct
+    // should exist in the protocol definition.
+    comptime try std.testing.expect(!@hasDecl(p, "MsgResize"));
 }

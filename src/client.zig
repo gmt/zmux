@@ -28,8 +28,6 @@ const server_mod = @import("server.zig");
 const protocol = @import("zmux-protocol.zig");
 const file_mod = @import("file.zig");
 const c = @import("c.zig");
-const opts = @import("options.zig");
-const env_mod = @import("environ.zig");
 const cmd_mod = @import("cmd.zig");
 const tty_term = @import("tty-term.zig");
 
@@ -47,7 +45,6 @@ var client_exec_shell: ?[]u8 = null;
 var client_shell_command: ?[]u8 = null;
 var client_retval: i32 = 0;
 var client_control_input: std.ArrayList(u8) = .{};
-var client_control_stdin_closed = false;
 var client_attached = false;
 var client_suspended = false;
 var client_suspend_restore_attached = false;
@@ -566,7 +563,6 @@ pub fn client_main(
 
     if (client_flags & T.CLIENT_CONTROL != 0) {
         client_control_input = .{};
-        client_control_stdin_closed = false;
     }
 
     proc_mod.proc_loop(client_proc.?, null);

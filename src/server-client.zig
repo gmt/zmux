@@ -212,7 +212,6 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .command => server_client_dispatch_command(cl, imsg_msg),
         .shell => server_client_dispatch_shell(cl, imsg_msg),
         .resize => server_client_dispatch_resize(cl, imsg_msg),
-        .stdin_data => server_client_dispatch_stdin(cl, imsg_msg),
         .unlock => {
             var unlock_status: i32 = 0;
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
@@ -266,44 +265,6 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (cl.session) |s| {
         server_client_apply_session_size(cl, s);
         server_client_force_redraw(cl);
-    }
-}
-
-fn server_client_dispatch_stdin(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
-    if (cl.flags & T.CLIENT_SUSPENDED != 0) return;
-    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
-    if (data_len == 0) return;
-    const bytes: [*]const u8 = @ptrCast(imsg_msg.data.?);
-
-    if (cl.flags & T.CLIENT_CONTROL != 0) {
-        server_client_dispatch_control_stdin(cl, bytes[0..data_len]);
-        return;
-    }
-
-    cl.tty.in_buf.appendSlice(xm.allocator, bytes[0..data_len]) catch unreachable;
-    while (tty_mod.tty_keys_next(&cl.tty)) {}
-}
-
-/// Accumulate stdin bytes for a control client and dispatch each complete
-/// newline-terminated line via control_read_callback.  Partial lines are
-/// buffered in cl.control_input_buf until more data arrives.
-fn server_client_dispatch_control_stdin(cl: *T.Client, data: []const u8) void {
-    cl.control_input_buf.appendSlice(xm.allocator, data) catch unreachable;
-
-    while (true) {
-        const buf = cl.control_input_buf.items;
-        const nl = std.mem.indexOfScalar(u8, buf, '\n') orelse break;
-        var line_end = nl;
-        if (line_end > 0 and buf[line_end - 1] == '\r')
-            line_end -= 1;
-        const line = buf[0..line_end];
-
-        control.control_read_callback(cl, line);
-
-        const remaining = buf.len - nl - 1;
-        if (remaining > 0)
-            std.mem.copyForwards(u8, cl.control_input_buf.items[0..remaining], buf[nl + 1 ..]);
-        cl.control_input_buf.shrinkRetainingCapacity(remaining);
     }
 }
 

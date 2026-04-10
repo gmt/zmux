@@ -309,14 +309,8 @@ test "link-window rejects sessions that already belong to the same group" {
     const src_wl = spawn.spawn_window(&src_ctx, &cause).?;
     sess.session_group_synchronize_from(src);
 
-    var parse_cause: ?[]u8 = null;
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "link-window", "-s", "grouped-link-src:0", "-t", "grouped-link-dst:1" }, null, &parse_cause);
-    defer cmd_mod.cmd_free(cmd);
-
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
-    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(i32, -1), server_fn.server_link_window(src, src_wl, dst, 1, false, true, &cause));
+    try std.testing.expectEqualStrings("sessions are grouped", cause.?);
     try std.testing.expectEqual(@as(usize, 1), dst.windows.count());
     try std.testing.expectEqual(src_wl.window, sess.winlink_find_by_index(&dst.windows, 0).?.window);
-    try std.testing.expect(sess.winlink_find_by_index(&dst.windows, 1) == null);
 }

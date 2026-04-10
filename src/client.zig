@@ -403,15 +403,7 @@ fn client_enable_attached_input() void {
 
 fn client_send_resize() void {
     const peer = client_peer orelse return;
-    var ws: c.posix_sys.struct_winsize = std.mem.zeroes(c.posix_sys.struct_winsize);
-    if (c.posix_sys.ioctl(0, c.posix_sys.TIOCGWINSZ, &ws) != 0) return;
-    const msg = protocol.MsgResize{
-        .sx = @max(@as(u32, ws.ws_col), 1),
-        .sy = @max(@as(u32, ws.ws_row), 1),
-        .xpixel = ws.ws_xpixel,
-        .ypixel = ws.ws_ypixel,
-    };
-    _ = proc_mod.proc_send(peer, .resize, -1, std.mem.asBytes(&msg).ptr, @sizeOf(protocol.MsgResize));
+    _ = proc_mod.proc_send(peer, .resize, -1, null, 0);
 }
 
 fn client_has_terminal() bool {

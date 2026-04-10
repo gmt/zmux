@@ -10,12 +10,8 @@ landed and been tested.
 
 | Gap | Location | Remediation | Prerequisites |
 |-----|----------|-------------|---------------|
-
-(Resolved) fd-passing / stdin_data ownership gap | `client.zig`, `server.zig`, `tty.zig`, protocol | Server now owns the tty fd directly via libevent; `stdin_data` was removed; control clients read from `cl.fd`; `PROTOCOL_VERSION` is 8; `MSG_RESIZE` uses an empty payload; client tty handling is now signal-oriented only. | landed and tested |
-
-(Open) resize ioctl test coverage needs a real pty fd | tests around resize handling | Use a real pty fd so `ioctl(TIOCGWINSZ)` is exercised instead of falling back to default geometry. | test harness support |
-
-(No open items.)
+| ~~fd-passing / stdin_data ownership gap~~ (RESOLVED) | `client.zig`, `server.zig`, `tty.zig`, protocol | Server now owns the tty fd directly via libevent; `stdin_data` removed; control clients read from `cl.fd`; `PROTOCOL_VERSION=8`; `MSG_RESIZE` empty payload; client thinned to signal shell. | landed and tested |
+| resize ioctl test coverage needs a real pty fd | tests around resize handling | Use a real pty fd so `ioctl(TIOCGWINSZ)` is exercised instead of falling back to default geometry. | test harness support |
 
 ## Documentation Debt
 

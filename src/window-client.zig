@@ -45,7 +45,7 @@ const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
 const DEFAULT_COMMAND = "detach-client -t '%%'";
-const DEFAULT_FORMAT = "#{client_tty}: session #{client_session_name}";
+const DEFAULT_FORMAT = "#{t/p:client_activity}: session #{session_name}";
 const DEFAULT_KEY_FORMAT =
     "#{?#{e|<:#{line},10}," ++
     "#{line}" ++
@@ -1087,8 +1087,14 @@ test "window-client mode renders attached clients and preserves selection by cli
     }
 
     const data = modeData(wme);
+    const expected_first = format_mod.format_require_complete(
+        xm.allocator,
+        "#{t/p:client_activity}: session #{session_name}",
+        &clientFormatContext(&first),
+    ).?;
+    defer xm.allocator.free(expected_first);
     try std.testing.expectEqual(@as(usize, 2), data.items.items.len);
-    try std.testing.expectEqualStrings("/dev/pts/201: session window-client-render", data.items.items[0].text);
+    try std.testing.expectEqualStrings(expected_first, data.items.items[0].text);
     const first_line = renderLine(data.tree, 0);
     defer xm.allocator.free(first_line);
     try std.testing.expect(std.mem.indexOf(u8, first_line, "[0]") != null);

@@ -2321,7 +2321,7 @@ fn resolve_buffer_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContex
 
 fn resolve_client_mode_format(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     _ = ctx;
-    return alloc.dupe(u8, "#{client_tty}: session #{client_session_name}") catch unreachable;
+    return alloc.dupe(u8, "#{t/p:client_activity}: session #{session_name}") catch unreachable;
 }
 
 fn resolve_client_utf(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

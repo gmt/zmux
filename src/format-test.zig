@@ -1512,6 +1512,18 @@ test "format_expand resolves client_control_mode prefix readonly utf aliases ter
     try std.testing.expectEqualStrings("1:1:1:prefix:1:1:fmt-client-extra:ansi:0", expanded);
 }
 
+test "format_expand resolves client_mode_format to the tmux choose-client default" {
+    const ctx = FormatContext{};
+    const expanded = format_require_complete(
+        xm.allocator,
+        "#{client_mode_format}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(expanded);
+
+    try std.testing.expectEqualStrings("#{t/p:client_activity}: session #{session_name}", expanded);
+}
+
 test "format_expand multi-pair conditional #{?c1,v1,c2,v2,...}" {
     var s = T.Session{
         .id = 1,

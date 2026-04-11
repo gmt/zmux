@@ -30,18 +30,6 @@ Live tmux-parity gaps only.
   `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
   `docs/choose-tree-modes.md`
 
-## Popup PTY Runtime
-
-- `tmux:` `display-popup` can host a live PTY-backed job with popup-local
-  terminal behavior, resize, mouse, menu, and editor interactions.
-- `zmux:` `display-popup` now runs a live PTY-backed job with popup-local
-  parsing, resize, key/mouse forwarding, real `-E` close-on-exit behavior,
-  and popup-editor-backed buffer editing. The remaining popup gap is narrower:
-  format-aware coordinate behavior and the last bits of popup pane-promotion
-  and menu/internal interaction polish still trail tmux.
-- `likely files:` `src/popup.zig`, `src/cmd-display-menu.zig`,
-  `src/server-client.zig`, `docs/popup-runtime.md`
-
 ## Copy-Mode Runtime Parity
 
 - `tmux:` copy mode operates on real pane history with tmux's selection, copy,

@@ -29,6 +29,7 @@ const job_mod = @import("job.zig");
 const layout_mod = @import("layout.zig");
 const menu_mod = @import("menu.zig");
 const opts_mod = @import("options.zig");
+const paste_mod = @import("paste.zig");
 const screen_mod = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server_client = @import("server-client.zig");
@@ -588,7 +589,8 @@ pub fn popup_init_ctx_cb(ctx: *T.ScreenWriteCtx, ttyctx: *PopupTtyCtx) void {
     _ = ctx;
 }
 
-/// Mode cursor screen for the popup (tmux `popup_mode_cb`). Menu integration is not wired yet.
+/// Legacy overlay-callback cursor helper retained for tmux-shaped callback parity.
+/// The live popup runtime renders through `render_overlay_payload_region`.
 pub fn popup_mode_cb(_: *T.Client, data: ?*anyopaque, cx: *u32, cy: *u32) ?*T.Screen {
     const pd: *PopupData = @ptrCast(@alignCast(data orelse return null));
     const scr = pd.screen orelse return null;
@@ -597,7 +599,8 @@ pub fn popup_mode_cb(_: *T.Client, data: ?*anyopaque, cx: *u32, cy: *u32) ?*T.Sc
     return scr;
 }
 
-/// Menu-aware path is a stub; without overlay menu, ranges match tmux `popup_check_cb` non-menu branch.
+/// Legacy overlay-callback visibility helper retained for tmux-shaped callback parity.
+/// Live popup menus run as their own menu overlay instead of nesting inside popup ranges.
 pub fn popup_check_cb(
     _: *T.Client,
     data: ?*anyopaque,
@@ -760,10 +763,25 @@ pub fn popup_menu_done(_menu: *menu_mod.Menu, _choice: i32, key: T.key_code, dat
             pd.sy = c.tty.sy;
             pd.px = 0;
             pd.py = 0;
+            pd.psx = pd.sx;
+            pd.psy = pd.sy;
+            pd.ppx = pd.px;
+            pd.ppy = pd.py;
         },
         'C' => {
             pd.px = c.tty.sx / 2 - pd.sx / 2;
             pd.py = c.tty.sy / 2 - pd.sy / 2;
+            pd.ppx = pd.px;
+            pd.ppy = pd.py;
+        },
+        'p' => {
+            if (pd.job) |job| {
+                if (paste_mod.paste_get_top(null)) |pb| {
+                    const bev = job_mod.job_get_event(job) orelse return;
+                    const bytes = paste_mod.paste_buffer_data(pb, null);
+                    _ = c_mod.libevent.bufferevent_write(bev, @ptrCast(bytes.ptr), bytes.len);
+                }
+            }
         },
         'h' => popup_make_pane(pd, .leftright),
         'v' => popup_make_pane(pd, .topbottom),
@@ -950,6 +968,17 @@ fn popupDisplayMenu(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
     const menu = menu_mod.menu_create("");
     for (items) |template| {
         const name = template.name orelse break;
+        if (template.key == 'p') {
+            const pb = paste_mod.paste_get_top(null) orelse continue;
+            const display = xm.xasprintf("Paste #[underscore]{s}", .{paste_mod.paste_buffer_name(pb)});
+            defer xm.allocator.free(display);
+            menu_mod.menu_add_item(menu, .{
+                .name = display,
+                .key = template.key,
+                .command = template.command,
+            }, null, c, null);
+            continue;
+        }
         menu_mod.menu_add_item(menu, .{
             .name = name,
             .key = template.key,

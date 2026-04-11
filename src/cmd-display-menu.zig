@@ -27,6 +27,7 @@ const cmd_find = @import("cmd-find.zig");
 const cmd_mod = @import("cmd.zig");
 const cmd_render = @import("cmd-render.zig");
 const cmdq = @import("cmd-queue.zig");
+const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
 const key_string = @import("key-string.zig");
 const menu_mod = @import("menu.zig");
@@ -462,15 +463,140 @@ fn popup_dimension(
 }
 
 const PopupPositionContext = struct {
+    target: *const T.CmdFindState,
     tc: *T.Client,
     wp: ?*const T.WindowPane,
     event: *const T.key_event,
-    top: u32,
+    popup_w: u32,
+    popup_h: u32,
 };
+
+fn popup_position_context_deinit(ctx: *format_mod.FormatContext) void {
+    if (ctx.extras) |extras| {
+        extras.deinit();
+        xm.allocator.destroy(extras);
+        ctx.extras = null;
+    }
+}
+
+fn popup_format_add_int(ctx: *format_mod.FormatContext, key: []const u8, value: i64) void {
+    const rendered = xm.xasprintf("{d}", .{value});
+    defer xm.allocator.free(rendered);
+    format_mod.format_add(ctx, key, rendered);
+}
+
+fn popup_position_context(
+    target: *const T.CmdFindState,
+    tc: *T.Client,
+    event: *const T.key_event,
+    popup_w: u32,
+    popup_h: u32,
+) format_mod.FormatContext {
+    var ctx = cmd_display.target_context(target);
+    ctx.client = tc;
+    ctx.mouse_event = &event.m;
+
+    var ox: u32 = undefined;
+    var oy: u32 = undefined;
+    var sx: u32 = undefined;
+    var sy: u32 = undefined;
+    _ = tty_mod.tty_window_offset(&tc.tty, &ox, &oy, &sx, &sy);
+
+    const tty_sx: i64 = @intCast(tc.tty.sx);
+    const tty_sy: i64 = @intCast(tc.tty.sy);
+    const w: i64 = @intCast(popup_w);
+    const h: i64 = @intCast(popup_h);
+
+    popup_format_add_int(&ctx, "popup_width", w);
+    popup_format_add_int(&ctx, "popup_height", h);
+
+    var n = @divFloor(tty_sx - 1, 2) - @divFloor(w, 2);
+    if (n < 0) n = 0;
+    popup_format_add_int(&ctx, "popup_centre_x", n);
+
+    n = @divFloor(tty_sy - 1, 2) + @divFloor(h, 2);
+    if (n >= tty_sy) n = tty_sy - h;
+    popup_format_add_int(&ctx, "popup_centre_y", n);
+
+    if (event.m.valid) {
+        n = @as(i64, @intCast(event.m.x)) - @divFloor(w, 2);
+        if (n < 0) n = 0;
+        popup_format_add_int(&ctx, "popup_mouse_centre_x", n);
+
+        n = @as(i64, @intCast(event.m.y)) - @divFloor(h, 2);
+        if (n + h >= tty_sy) n = tty_sy - h;
+        popup_format_add_int(&ctx, "popup_mouse_centre_y", n);
+
+        n = @as(i64, @intCast(event.m.y)) + h;
+        if (n >= tty_sy) n = tty_sy - 1;
+        popup_format_add_int(&ctx, "popup_mouse_top", n);
+
+        n = @as(i64, @intCast(event.m.y)) - h;
+        if (n < 0) n = 0;
+        popup_format_add_int(&ctx, "popup_mouse_bottom", n);
+    }
+
+    var top = status.status_at_line(tc);
+    if (top != -1) {
+        const lines: i64 = @intCast(status.overlay_rows(tc));
+        const position = opts.options_get_number((tc.session orelse target.s orelse return ctx).options, "status-position");
+        const anchor = status_window_anchor(tc, target.wl.?.idx);
+
+        if (anchor.row >= 0) {
+            popup_format_add_int(&ctx, "popup_window_status_line_x", anchor.x);
+            if (position == 0)
+                popup_format_add_int(&ctx, "popup_window_status_line_y", anchor.row + 1 + h)
+            else
+                popup_format_add_int(&ctx, "popup_window_status_line_y", tty_sy - lines + anchor.row);
+        }
+
+        if (position == 0)
+            popup_format_add_int(&ctx, "popup_status_line_y", lines + h)
+        else
+            popup_format_add_int(&ctx, "popup_status_line_y", tty_sy - lines);
+
+        if (top == 0)
+            top = @intCast(lines)
+        else
+            top = 0;
+    } else {
+        top = 0;
+    }
+
+    if (target.wp) |wp| {
+        popup_format_add_int(&ctx, "popup_pane_left", @as(i64, @intCast(wp.xoff)) - @as(i64, @intCast(ox)));
+
+        n = @as(i64, @intCast(top)) + @as(i64, @intCast(wp.yoff)) - @as(i64, @intCast(oy)) + h;
+        if (n >= tty_sy) n = tty_sy - h;
+        popup_format_add_int(&ctx, "popup_pane_top", n);
+
+        popup_format_add_int(&ctx, "popup_pane_bottom", @as(i64, @intCast(top)) + @as(i64, @intCast(wp.yoff + wp.sy)) - @as(i64, @intCast(oy)));
+
+        n = @as(i64, @intCast(wp.xoff + wp.sx)) - @as(i64, @intCast(ox)) - w;
+        if (n < 0) n = 0;
+        popup_format_add_int(&ctx, "popup_pane_right", n);
+    }
+
+    return ctx;
+}
+
+fn popup_position_template(raw: ?[]const u8, vertical: bool) ?[]const u8 {
+    const value = raw orelse return if (vertical) "#{popup_centre_y}" else "#{popup_centre_x}";
+    if (std.mem.eql(u8, value, "C")) return if (vertical) "#{popup_centre_y}" else "#{popup_centre_x}";
+    if (value.len != 1 or !std.ascii.isAlphabetic(value[0])) return value;
+
+    return switch (value[0]) {
+        'P' => if (vertical) "#{popup_pane_bottom}" else "#{popup_pane_left}",
+        'R' => if (vertical) null else "#{popup_pane_right}",
+        'M' => if (vertical) "#{popup_mouse_top}" else "#{popup_mouse_centre_x}",
+        'S' => if (vertical) "#{popup_status_line_y}" else null,
+        'W' => if (vertical) "#{popup_window_status_line_y}" else "#{popup_window_status_line_x}",
+        else => null,
+    };
+}
 
 fn parse_popup_position(
     raw: ?[]const u8,
-    default_value: u32,
     size: u32,
     limit: u32,
     item: *cmdq.CmdqItem,
@@ -478,27 +604,25 @@ fn parse_popup_position(
     vertical: bool,
     pctx: PopupPositionContext,
 ) ?u32 {
-    const value = raw orelse return default_value;
-    if (std.mem.eql(u8, value, "C")) return default_value;
-
-    // Handle single-letter position codes matching tmux behaviour.
-    if (value.len == 1 and std.ascii.isAlphabetic(value[0])) {
-        const resolved = resolve_popup_letter(value[0], vertical, size, pctx) orelse {
-            cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, value });
-            return null;
-        };
-        return clamp_popup_position(resolved, size, limit, vertical);
-    }
-
-    const parsed = std.fmt.parseInt(i64, value, 10) catch {
-        cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, value });
+    const raw_value = raw orelse "C";
+    const template = popup_position_template(raw, vertical) orelse {
+        cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, raw_value });
         return null;
     };
-    if (parsed < 0) {
-        cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, value });
-        return null;
-    }
 
+    var ctx = popup_position_context(pctx.target, pctx.tc, pctx.event, pctx.popup_w, pctx.popup_h);
+    defer popup_position_context_deinit(&ctx);
+
+    const expanded = format_mod.format_require(xm.allocator, template, &ctx) catch {
+        cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, raw_value });
+        return null;
+    };
+    defer xm.allocator.free(expanded);
+
+    const parsed = std.fmt.parseInt(i64, expanded, 10) catch {
+        cmdq.cmdq_error(item, "unsupported popup {s} position: {s}", .{ label, raw_value });
+        return null;
+    };
     return clamp_popup_position(parsed, size, limit, vertical);
 }
 
@@ -516,62 +640,6 @@ fn clamp_popup_position(raw: i64, size: u32, limit: u32, vertical: bool) u32 {
     return @intCast(absolute);
 }
 
-/// Resolve a single-letter popup position code (P, R, M, S) to a
-/// coordinate, mirroring tmux's popup_pane_* / popup_mouse_* format
-/// variables.  `popup_size` is the popup dimension in the relevant axis
-/// (width for horizontal, height for vertical).
-fn resolve_popup_letter(ch: u8, vertical: bool, popup_size: u32, pctx: PopupPositionContext) ?i64 {
-    var ox: u32 = undefined;
-    var oy: u32 = undefined;
-    var sx: u32 = undefined;
-    var sy: u32 = undefined;
-    _ = tty_mod.tty_window_offset(&pctx.tc.tty, &ox, &oy, &sx, &sy);
-
-    if (!vertical) {
-        return switch (ch) {
-            'P' => blk: {
-                const wp = pctx.wp orelse break :blk null;
-                break :blk @as(i64, @intCast(wp.xoff)) - @as(i64, @intCast(ox));
-            },
-            'R' => blk: {
-                const wp = pctx.wp orelse break :blk null;
-                const n = @as(i64, @intCast(wp.xoff)) + @as(i64, @intCast(wp.sx)) - @as(i64, @intCast(ox)) - @as(i64, @intCast(popup_size));
-                break :blk if (n < 0) @as(i64, 0) else n;
-            },
-            'M' => blk: {
-                if (!pctx.event.m.valid) break :blk null;
-                const n = @as(i64, @intCast(pctx.event.m.x)) - @as(i64, @intCast(popup_size / 2));
-                break :blk if (n < 0) @as(i64, 0) else n;
-            },
-            else => null,
-        };
-    } else {
-        return switch (ch) {
-            'P' => blk: {
-                const wp = pctx.wp orelse break :blk null;
-                break :blk @as(i64, @intCast(pctx.top)) + @as(i64, @intCast(wp.yoff)) + @as(i64, @intCast(wp.sy)) - @as(i64, @intCast(oy));
-            },
-            'M' => blk: {
-                if (!pctx.event.m.valid) break :blk null;
-                const n = @as(i64, @intCast(pctx.event.m.y)) + @as(i64, @intCast(popup_size));
-                const tty_sy: i64 = @intCast(pctx.tc.tty.sy);
-                break :blk if (n >= tty_sy) tty_sy - 1 else n;
-            },
-            'S' => blk: {
-                const lines = status.overlay_rows(pctx.tc);
-                const position = opts.options_get_number(
-                    (pctx.tc.session orelse break :blk null).options,
-                    "status-position",
-                );
-                break :blk if (position == 0)
-                    @as(i64, @intCast(lines)) + @as(i64, @intCast(popup_size))
-                else
-                    @as(i64, @intCast(pctx.tc.tty.sy)) - @as(i64, @intCast(lines));
-            },
-            else => null,
-        };
-    }
-}
 
 fn popup_title(args: *const args_mod.Arguments, target: *const T.CmdFindState) []u8 {
     if (args.get('T')) |raw| return cmd_display.expand_format(xm.allocator, raw, target);
@@ -758,13 +826,15 @@ fn exec_display_popup(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const popup_w = popup_dimension(args, 'w', @max(@as(u32, 1), @divTrunc(tc.tty.sx, 2)), tc.tty.sx, item, "width") orelse return .@"error";
     const event = cmdq.cmdq_get_event(item);
     const pctx = PopupPositionContext{
+        .target = &target,
         .tc = tc,
         .wp = target.wp,
         .event = event,
-        .top = status.pane_row_offset(tc),
+        .popup_w = popup_w,
+        .popup_h = popup_h,
     };
-    const popup_y = parse_popup_position(args.get('y'), if (popup_limit_h > popup_h) (popup_limit_h - popup_h) / 2 else 0, popup_h, popup_limit_h, item, "y", true, pctx) orelse return .@"error";
-    const popup_x = parse_popup_position(args.get('x'), if (tc.tty.sx > popup_w) (tc.tty.sx - popup_w) / 2 else 0, popup_w, tc.tty.sx, item, "x", false, pctx) orelse return .@"error";
+    const popup_y = parse_popup_position(args.get('y'), popup_h, popup_limit_h, item, "y", true, pctx) orelse return .@"error";
+    const popup_x = parse_popup_position(args.get('x'), popup_w, tc.tty.sx, item, "x", false, pctx) orelse return .@"error";
 
     const cwd = popup_working_directory(args, &target, tc, session);
     defer xm.allocator.free(cwd);
@@ -924,6 +994,15 @@ fn waitForPopupClosed(client: *T.Client) !void {
         std.Thread.sleep(10 * std.time.ns_per_ms);
     }
     return error.TestExpectedEqual;
+}
+
+fn split_test_window_leftright(window: *T.Window, size: u32) !*T.WindowPane {
+    const win = @import("window.zig");
+    const first = window.active.?;
+    const second = win.window_add_pane(window, null, window.sx, window.sy);
+    const plan = try win.window_plan_split(first, .leftright, @intCast(size), 0);
+    win.window_apply_split_plan(first, second, plan);
+    return second;
 }
 
 fn install_test_event_base() ?*c.libevent.event_base {
@@ -1362,6 +1441,147 @@ test "display-popup modify updates title and popup flags" {
     key_event.data[0] = 'x';
     try std.testing.expect(server_fn.server_client_handle_key(&setup.client, &key_event));
     try waitForPopupClosed(&setup.client);
+}
+
+test "display-popup centres itself using tmux coordinate rules" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
+    var setup = test_setup("display-popup-centre");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-w", "20", "-h", "6", "printf centred" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+    const pd = popup.popup_data(&setup.client).?;
+    try std.testing.expectEqual(@as(u32, 29), pd.px);
+    try std.testing.expectEqual(@as(u32, 8), pd.py);
+}
+
+test "display-popup pane position shortcuts use tmux popup anchors" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
+    var setup = test_setup("display-popup-pane-shortcuts");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+
+    const second = try split_test_window_leftright(setup.window, 25);
+    const target = xm.xasprintf("%{d}", .{second.id});
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-t", target, "-w", "10", "-h", "6", "-x", "P", "-y", "P", "printf pane" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+    const pd = popup.popup_data(&setup.client).?;
+    try std.testing.expectEqual(second.xoff, pd.px);
+    try std.testing.expectEqual(@as(u32, @intCast(available_popup_height(&setup.client))) - 6, pd.py);
+}
+
+test "display-popup expands popup position format variables" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
+    var setup = test_setup("display-popup-position-format");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+
+    const second = try split_test_window_leftright(setup.window, 25);
+    const target = xm.xasprintf("%{d}", .{second.id});
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(
+        &.{ "display-popup", "-t", target, "-w", "10", "-h", "6", "-x", "#{popup_pane_right}", "-y", "#{popup_pane_bottom}", "printf fmt" },
+        null,
+        &parse_cause,
+    );
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+    const pd = popup.popup_data(&setup.client).?;
+    try std.testing.expectEqual(@as(u32, second.xoff + second.sx - 10), pd.px);
+    try std.testing.expectEqual(@as(u32, @intCast(available_popup_height(&setup.client))) - 6, pd.py);
+}
+
+test "popup menu paste writes the top paste buffer into a live popup job" {
+    const paste_mod = @import("paste.zig");
+
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
+    paste_mod.paste_reset_for_tests();
+    var setup = test_setup("display-popup-menu-paste");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "cat" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+    paste_mod.paste_add(null, xm.xstrdup("from-menu"));
+    const fake_menu = menu_mod.menu_create("");
+    defer fake_menu.deinit();
+    popup.popup_menu_done(fake_menu, 0, 'p', @ptrCast(setup.client.popup_data.?));
+    try waitForPopupText(&setup.client, "from-menu");
+}
+
+test "popup menu can promote a live popup job into a pane" {
+    const layout_mod = @import("layout.zig");
+
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
+    var setup = test_setup("display-popup-promote");
+    bind_test_client(&setup);
+    defer test_teardown(&setup);
+    layout_mod.layout_init(setup.window, setup.window.active.?);
+
+    var parse_cause: ?[]u8 = null;
+    defer if (parse_cause) |msg| xm.allocator.free(msg);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "cat" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+    const fake_menu = menu_mod.menu_create("");
+    defer fake_menu.deinit();
+    popup.popup_menu_done(fake_menu, 0, 'h', @ptrCast(setup.client.popup_data.?));
+
+    try std.testing.expect(!popup.overlay_active(&setup.client));
+    try std.testing.expectEqual(@as(usize, 2), setup.window.panes.items.len);
+    try std.testing.expect(setup.window.active != null);
+    try std.testing.expect(setup.window.active.? != setup.window.panes.items[0]);
+    try std.testing.expect(setup.window.active.?.fd >= 0);
 }
 
 test "display-popup is a no-op while another overlay owns the target client" {

@@ -4,6 +4,14 @@ Idiomatic-Zig cleanup for code that is functionally complete but
 C-shaped. Each item describes working code that could be more
 natural in Zig.
 
+## Rules
+
+- This file is for cleanup of code that already works.
+- Do not put tmux-parity bugs, missing commands, missing runtime behavior, or
+  reduced feature surfaces here. Those go in `docs/zig-porting-todo.md`.
+- If a debt item turns out to describe a real behavior mismatch, move it out of
+  this file instead of mixing the two kinds of work.
+
 ## Architecture
 
 - `types.zig` is a monolithic `tmux.h` replacement. Move
@@ -75,9 +83,6 @@ natural in Zig.
 
 - `control.zig` labels several sections as "stubs" but the
   functions are implemented via the peer-based IPC model.
-- `server-client.zig:815` says "window-copy mode is not yet
-  ported" but window-copy IS ported; the real issue is that
-  `server_client_output_mode` doesn't dispatch to it.
 
 ## Unused Imports
 

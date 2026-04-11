@@ -3464,16 +3464,16 @@ pub fn tty_cmd_rawstring(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 
 /// Port of tmux tty_cmd_sixelimage() (#ifdef ENABLE_SIXEL).
 /// Renders a sixel image stored in ctx.ptr at position (ctx.ocx, ctx.ocy).
-/// TODO: replace ctx.ptr/ctx.num fallback text with sixel_scale/sixel_print
-/// output once image-sixel.zig is ported.
+/// Uses `ctx.si` plus `sixel_scale`/`sixel_print` on sixel-capable terminals
+/// and falls back to the pre-rendered text in `ctx.ptr` elsewhere.
 pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     const has_sixel = (tty.client.term_features & tty_features.TERM_SIXEL) != 0 or
         tty_term.hasCapability(tty, "Sxl");
     const has_pixel = tty.xpixel != 0 and tty.ypixel != 0;
     const fallback = !has_sixel or !has_pixel;
 
-    // Use ctx.sx/sy as dimension bounds; exact cell size requires the sixel
-    // runtime which is not yet ported.
+    // Use ctx.sx/sy as the visible image bounds. Exact pixel-to-cell placement
+    // still depends on the tty geometry available on the client.
     var i: u32 = 0;
     var j: u32 = 0;
     var x: u32 = 0;

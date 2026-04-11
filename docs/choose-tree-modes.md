@@ -22,10 +22,10 @@
 - The current reduced `tree-mode` does not provide tmux's preview panes,
   prompt-driven command or kill flows, mouse preview selection, or custom `-K`
   key-format bindings.
-- Current `customize-mode` behavior enters the reduced read-only
+- Current `customize-mode` behavior enters the reduced
   `options-mode` pane consumer described in [`docs/modes/options-mode.md`](docs/modes/options-mode.md).
-- Current `choose-buffer` behavior still stops at the explicit reduced-mode
-  error because there is still no `window-buffer` consumer wired onto the
-  pane-mode runtime.
+- Current `choose-buffer` behavior enters the reduced `buffer-mode` consumer on
+  the shared pane-mode runtime, including custom `-K` key format and preview
+  flag plumbing.
 - Future intent is to move the rest of the chooser family onto the same shared
   pane-mode substrate instead of adding command-local shims.

@@ -142,6 +142,10 @@ pub fn resize_by_border_drag(w: *T.Window, x: u32, y: u32, last_x: u32, last_y: 
 }
 
 pub fn dump_window(w: *T.Window) ?[]u8 {
+    if (w.layout_root) |root| {
+        if (layout_count_cells(root) == w.panes.items.len)
+            return dump_root(root);
+    }
     if (w.panes.items.len == 0)
         return null;
 
@@ -2226,4 +2230,28 @@ test "zoom saves and restores layout" {
     try testing.expect(wp2.layout_cell != null);
     try testing.expectEqual(orig_sx1, wp1.layout_cell.?.sx);
     try testing.expectEqual(orig_sx2, wp2.layout_cell.?.sx);
+}
+
+test "dump_window prefers layout_root over pane rectangles" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const lc2 = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 40, 24);
+    layout_assign_pane(lc2, wp2, 0);
+
+    const root_dump = dump_root(w.layout_root.?).?;
+    defer xm.allocator.free(root_dump);
+
+    wp1.sx = 70;
+    wp2.xoff = 71;
+    wp2.sx = 9;
+
+    const window_dump = dump_window(w).?;
+    defer xm.allocator.free(window_dump);
+    try testing.expectEqualStrings(root_dump, window_dump);
 }

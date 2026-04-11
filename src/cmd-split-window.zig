@@ -308,6 +308,58 @@ test "split-window -b inserts before target and -d preserves active pane" {
     try std.testing.expectEqual(second, wl.window.active.?);
 }
 
+test "split-window -f wraps an existing split under a full-window layout root" {
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "split-fullsize", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("split-fullsize") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    const first = wl.window.active.?;
+
+    const lc2 = layout_mod.layout_split_pane(first, .topbottom, -1, 0).?;
+    var second_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = lc2, .flags = T.SPAWN_EMPTY };
+    _ = spawn.spawn_pane(&second_ctx, &cause).?;
+    s.curw = wl;
+
+    const target = xm.xasprintf("%{d}", .{first.id});
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    const split_cmd = try cmd_mod.cmd_parse_one(&.{ "split-window", "-f", "-h", "-t", target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(split_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(split_cmd, &item));
+
+    try std.testing.expectEqual(@as(usize, 3), wl.window.panes.items.len);
+    const root = wl.window.layout_root.?;
+    try std.testing.expectEqual(T.LayoutType.leftright, root.type);
+    try std.testing.expectEqual(@as(usize, 2), root.cells.items.len);
+    try std.testing.expect(root.cells.items[0].type == .windowpane or root.cells.items[1].type == .windowpane);
+    try std.testing.expect(root.cells.items[0].type == .topbottom or root.cells.items[1].type == .topbottom);
+}
+
 test "split-window location rendering uses pane ordinals" {
     const opts = @import("options.zig");
     const sess = @import("session.zig");

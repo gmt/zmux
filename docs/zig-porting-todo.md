@@ -28,15 +28,6 @@ Live tmux-parity gaps only.
   `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
   `docs/choose-tree-modes.md`
 
-## Customize-Mode Key Binding Editing
-
-- `tmux:` `customize-mode` can browse and edit both options and key bindings.
-- `zmux:` option browsing and option unset/reset flows exist, but the
-  key-binding tree plus its edit, unset, reset, and change callbacks are still
-  stubbed or no-ops.
-- `likely files:` `src/window-customize.zig`, `src/cmd-choose-tree.zig`,
-  `docs/modes/options-mode.md`
-
 ## Popup PTY Runtime
 
 - `tmux:` `display-popup` can host a live PTY-backed job with popup-local

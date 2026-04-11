@@ -19,13 +19,17 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
+const cmd_mod = @import("cmd.zig");
 const cmd_options = @import("cmd-options.zig");
 const format_mod = @import("format.zig");
+const key_bindings = @import("key-bindings.zig");
+const key_string = @import("key-string.zig");
 const mode_tree = @import("mode-tree.zig");
 const options_table = @import("options-table.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const sort_mod = @import("sort.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const T = @import("types.zig");
@@ -33,7 +37,7 @@ const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
-const DEFAULT_FORMAT = "#{option_name}: #{option_value}#{?option_unit, #{option_unit},}#{?option_inherited, [inherited],}";
+const DEFAULT_FORMAT = "#{?is_key,#{key_table}: #{key_string}#{?key_note, [#{key_note}],},#{option_name}: #{option_value}#{?option_unit, #{option_unit},}#{?option_inherited, [inherited],}}";
 const HELP_TEXT = "Arrows move  left/right fold  Enter edit  u unset  d reset  H hide inherited  q cancel";
 
 const ScopeKind = enum(u8) {
@@ -43,10 +47,18 @@ const ScopeKind = enum(u8) {
     pane = 3,
 };
 
+const ItemKind = enum(u8) {
+    option,
+    key,
+};
+
 const OptionItem = struct {
-    target: cmd_options.ResolvedTarget,
+    kind: ItemKind,
     name: []u8,
-    idx: ?u32,
+    idx: ?u32 = null,
+    target: ?cmd_options.ResolvedTarget = null,
+    table: ?[]u8 = null,
+    key: ?T.key_code = null,
 };
 
 const PromptAction = enum(u8) {
@@ -55,12 +67,17 @@ const PromptAction = enum(u8) {
     reset,
 };
 
-const OptionPromptState = struct {
+const KeyEditField = enum(u8) {
+    none,
+    command,
+    note,
+};
+
+const PromptState = struct {
     pane_id: u32,
-    target: cmd_options.ResolvedTarget,
-    name: []u8,
-    idx: ?u32,
+    item: *OptionItem,
     action: PromptAction,
+    key_field: KeyEditField = .none,
 };
 
 const CustomizeModeData = struct {
@@ -190,15 +207,15 @@ fn windowCustomizeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "unset-current")) {
-        const item = currentOptionItem(data) orelse return;
-        promptForCurrentItem(client orelse return, wme.wp, item, .unset);
-        return;
-    }
+    const item = currentOptionItem(data) orelse return;
+    promptForCurrentItem(client orelse return, wme.wp, item, .unset);
+    return;
+}
     if (std.mem.eql(u8, command, "reset-current")) {
-        const item = currentOptionItem(data) orelse return;
-        promptForCurrentItem(client orelse return, wme.wp, item, .reset);
-        return;
-    }
+    const item = currentOptionItem(data) orelse return;
+    promptForCurrentItem(client orelse return, wme.wp, item, .reset);
+    return;
+}
 
     unsupportedCommand(client, command);
     redraw(wme);
@@ -318,6 +335,7 @@ fn buildTree(tree: *mode_tree.Data) void {
     if (data.fs.s) |session_ptr| buildScope(data, tree, .session, "Session Options", session_ptr.options);
     if (data.fs.w) |window_ptr| buildScope(data, tree, .window, "Window Options", window_ptr.options);
     if (data.fs.wp) |pane_ptr| buildScope(data, tree, .pane, "Pane Options", pane_ptr.options);
+    window_customize_build_keys(data, tree);
 }
 
 fn buildScope(
@@ -410,9 +428,10 @@ fn appendRenderedOption(
 
     const item = xm.allocator.create(OptionItem) catch unreachable;
     item.* = .{
-        .target = target,
+        .kind = .option,
         .name = xm.xstrdup(optionBaseName(display_name, idx)),
         .idx = idx,
+        .target = target,
     };
     data.items.append(xm.allocator, item) catch unreachable;
 
@@ -540,7 +559,6 @@ fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
         "-"
     else
         "+";
-    const text = line.item.text orelse line.item.name;
 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -553,7 +571,15 @@ fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
     }
     out.appendSlice(xm.allocator, expanded) catch unreachable;
     out.appendSlice(xm.allocator, " ") catch unreachable;
-    out.appendSlice(xm.allocator, text) catch unreachable;
+    if (line.item.draw_as_parent) {
+        out.appendSlice(xm.allocator, line.item.name) catch unreachable;
+        if (line.item.text) |text| {
+            out.appendSlice(xm.allocator, ": ") catch unreachable;
+            out.appendSlice(xm.allocator, text) catch unreachable;
+        }
+    } else {
+        out.appendSlice(xm.allocator, line.item.text orelse line.item.name) catch unreachable;
+    }
 
     return out.toOwnedSlice(xm.allocator) catch unreachable;
 }
@@ -575,6 +601,14 @@ fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client) void {
     }
 
     const item = currentOptionItem(data) orelse return;
+    if (item.kind == .key and std.mem.eql(u8, current.name, item.name) and current.children.items.len != 0) {
+        if (current.expanded)
+            mode_tree.collapseCurrent(data.tree)
+        else
+            mode_tree.expandCurrent(data.tree);
+        redraw(wme);
+        return;
+    }
     editCurrentItem(wme, client, item);
 }
 
@@ -584,22 +618,28 @@ fn currentOptionItem(data: *CustomizeModeData) ?*OptionItem {
 }
 
 fn editCurrentItem(wme: *T.WindowModeEntry, client: ?*T.Client, item: *OptionItem) void {
+    if (item.kind == .key) {
+        window_customize_set_key(client, modeData(wme), item);
+        return;
+    }
+
     const cl = client orelse return;
+    const target = item.target.?;
     const oe = opts.options_table_entry(item.name);
 
     if (oe) |entry| {
         switch (entry.type) {
             .flag => {
-                const flag = opts.options_get_number(item.target.options, item.name);
-                opts.options_set_number(item.target.options, item.name, if (flag == 0) 1 else 0);
-                cmd_options.apply_target_side_effects(item.target, item.name);
+                const flag = opts.options_get_number(target.options, item.name);
+                opts.options_set_number(target.options, item.name, if (flag == 0) 1 else 0);
+                cmd_options.apply_target_side_effects(target, item.name);
                 rebuildAndDraw(wme);
                 return;
             },
             .choice => {
-                const next = nextChoiceValue(item.target.options, item.name, entry);
-                opts.options_set_number(item.target.options, item.name, next);
-                cmd_options.apply_target_side_effects(item.target, item.name);
+                const next = nextChoiceValue(target.options, item.name, entry);
+                opts.options_set_number(target.options, item.name, next);
+                cmd_options.apply_target_side_effects(target, item.name);
                 rebuildAndDraw(wme);
                 return;
             },
@@ -624,7 +664,7 @@ fn promptForCurrentItem(client: *T.Client, pane: *T.WindowPane, item: *const Opt
     };
     defer xm.allocator.free(input);
 
-    const state = createPromptState(pane, item, action);
+    const state = createPromptState(pane, item, action, .none);
     const flags: u32 = if (action == .edit)
         status_prompt.PROMPT_NOFORMAT
     else
@@ -644,7 +684,11 @@ fn promptForCurrentItem(client: *T.Client, pane: *T.WindowPane, item: *const Opt
 }
 
 fn buildEditPrompt(item: *const OptionItem) ?[]u8 {
-    const scope_text = scopeText(item.target);
+    if (item.kind == .key) {
+        return xm.xasprintf("({s}) ", .{item.name});
+    }
+
+    const scope_text = scopeText(item.target.?);
     defer xm.allocator.free(scope_text);
 
     const scope_sep = if (scope_text.len != 0) ", for " else "";
@@ -658,18 +702,22 @@ fn buildEditPrompt(item: *const OptionItem) ?[]u8 {
 }
 
 fn buildUnsetPrompt(item: *const OptionItem) ?[]u8 {
+    if (item.kind == .key)
+        return xm.xasprintf("Unset {s}? ", .{item.name});
     if (item.idx) |idx|
         return xm.xasprintf("Unset {s}[{d}]? ", .{ item.name, idx });
     return xm.xasprintf("Unset {s}? ", .{item.name});
 }
 
 fn buildResetPrompt(item: *const OptionItem) ?[]u8 {
+    if (item.kind == .key)
+        return xm.xasprintf("Reset {s} to default? ", .{item.name});
     if (item.idx != null) return null;
     return xm.xasprintf("Reset {s} to default? ", .{item.name});
 }
 
 fn currentEditValue(item: *const OptionItem) []u8 {
-    const value = opts.options_get(item.target.options, item.name) orelse return xm.xstrdup("");
+    const value = opts.options_get(item.target.?.options, item.name) orelse return xm.xstrdup("");
     if (item.idx) |idx| {
         const entry = opts.options_array_get_value(value, idx) orelse return xm.xstrdup("");
         return xm.xstrdup(entry);
@@ -677,26 +725,43 @@ fn currentEditValue(item: *const OptionItem) []u8 {
     return opts.options_value_to_string(item.name, value, opts.options_table_entry(item.name));
 }
 
-fn createPromptState(pane: *T.WindowPane, item: *const OptionItem, action: PromptAction) *OptionPromptState {
-    const state = xm.allocator.create(OptionPromptState) catch unreachable;
-    state.* = .{
-        .pane_id = pane.id,
-        .target = item.target,
+fn cloneItem(item: *const OptionItem) *OptionItem {
+    const copy = xm.allocator.create(OptionItem) catch unreachable;
+    copy.* = .{
+        .kind = item.kind,
         .name = xm.xstrdup(item.name),
         .idx = item.idx,
+        .target = item.target,
+        .table = if (item.table) |table| xm.xstrdup(table) else null,
+        .key = item.key,
+    };
+    return copy;
+}
+
+fn createPromptState(
+    pane: *T.WindowPane,
+    item: *const OptionItem,
+    action: PromptAction,
+    key_field: KeyEditField,
+) *PromptState {
+    const state = xm.allocator.create(PromptState) catch unreachable;
+    state.* = .{
+        .pane_id = pane.id,
+        .item = cloneItem(item),
         .action = action,
+        .key_field = key_field,
     };
     return state;
 }
 
 fn freePromptState(data: ?*anyopaque) void {
-    const state: *OptionPromptState = @ptrCast(@alignCast(data orelse return));
-    xm.allocator.free(state.name);
+    const state: *PromptState = @ptrCast(@alignCast(data orelse return));
+    window_customize_free_item(state.item);
     xm.allocator.destroy(state);
 }
 
 fn optionPromptCallback(client: *T.Client, data: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
-    const state: *OptionPromptState = @ptrCast(@alignCast(data orelse return 0));
+    const state: *PromptState = @ptrCast(@alignCast(data orelse return 0));
     const text = input orelse return 0;
 
     switch (state.action) {
@@ -720,17 +785,36 @@ fn confirmed(text: []const u8) bool {
     return text.len == 1 and std.ascii.toLower(text[0]) == 'y';
 }
 
-fn applyEdit(state: *OptionPromptState, client: *T.Client, text: []const u8) void {
-    const oe = opts.options_table_entry(state.name);
-    var idx = state.idx;
+fn applyEdit(state: *PromptState, client: *T.Client, text: []const u8) void {
+    switch (state.item.kind) {
+        .option => applyOptionEdit(state, client, text),
+        .key => switch (state.key_field) {
+            .command => {
+                if (window_customize_set_command_callback(client, @ptrCast(state.item), text))
+                    rebuildIfStillActive(state.pane_id);
+            },
+            .note => {
+                if (window_customize_set_note_callback(client, @ptrCast(state.item), text))
+                    rebuildIfStillActive(state.pane_id);
+            },
+            .none => {},
+        },
+    }
+}
+
+fn applyOptionEdit(state: *PromptState, client: *T.Client, text: []const u8) void {
+    const item = state.item;
+    const target = item.target.?;
+    const oe = opts.options_table_entry(item.name);
+    var idx = item.idx;
     if (oe) |entry| {
         if (entry.type == .array and idx == null)
-            idx = nextArrayIndex(state.target.options, state.name);
+            idx = nextArrayIndex(target.options, item.name);
     }
 
     var cause: ?[]u8 = null;
     defer if (cause) |msg| xm.allocator.free(msg);
-    if (!opts.options_set_from_string(state.target.options, oe, state.name, idx, text, false, &cause)) {
+    if (!opts.options_set_from_string(target.options, oe, item.name, idx, text, false, &cause)) {
         if (cause) |msg| {
             uppercaseFirst(msg);
             status_runtime.present_client_message(client, msg);
@@ -738,15 +822,24 @@ fn applyEdit(state: *OptionPromptState, client: *T.Client, text: []const u8) voi
         return;
     }
 
-    cmd_options.apply_target_side_effects(state.target, state.name);
+    cmd_options.apply_target_side_effects(target, item.name);
     rebuildIfStillActive(state.pane_id);
 }
 
-fn applyUnset(state: *OptionPromptState, client: *T.Client) void {
-    const oe = opts.options_table_entry(state.name);
+fn applyUnset(state: *PromptState, client: *T.Client) void {
+    switch (state.item.kind) {
+        .option => applyOptionUnset(state, client),
+        .key => window_customize_unset_key(modeDataForPaneId(state.pane_id) orelse return, @ptrCast(state.item)),
+    }
+}
+
+fn applyOptionUnset(state: *PromptState, client: *T.Client) void {
+    const item = state.item;
+    const target = item.target.?;
+    const oe = opts.options_table_entry(item.name);
     var cause: ?[]u8 = null;
     defer if (cause) |msg| xm.allocator.free(msg);
-    if (!opts.options_remove_or_default(state.target.options, oe, state.name, state.idx, state.target.global, &cause)) {
+    if (!opts.options_remove_or_default(target.options, oe, item.name, item.idx, target.global, &cause)) {
         if (cause) |msg| {
             uppercaseFirst(msg);
             status_runtime.present_client_message(client, msg);
@@ -754,22 +847,31 @@ fn applyUnset(state: *OptionPromptState, client: *T.Client) void {
         return;
     }
 
-    cmd_options.apply_target_side_effects(state.target, state.name);
+    cmd_options.apply_target_side_effects(target, item.name);
     rebuildIfStillActive(state.pane_id);
 }
 
-fn applyReset(state: *OptionPromptState, client: *T.Client) void {
-    if (state.idx != null) return;
+fn applyReset(state: *PromptState, client: *T.Client) void {
+    switch (state.item.kind) {
+        .option => applyOptionReset(state, client),
+        .key => window_customize_reset_key(modeDataForPaneId(state.pane_id) orelse return, @ptrCast(state.item)),
+    }
+}
 
-    const oe = opts.options_table_entry(state.name);
-    var current: ?*T.Options = state.target.options;
+fn applyOptionReset(state: *PromptState, client: *T.Client) void {
+    const item = state.item;
+    if (item.idx != null) return;
+
+    const target = item.target.?;
+    const oe = opts.options_table_entry(item.name);
+    var current: ?*T.Options = target.options;
     var cause: ?[]u8 = null;
     defer if (cause) |msg| xm.allocator.free(msg);
 
     while (current) |options_ptr| : (current = options_ptr.parent) {
-        if (opts.options_get_only(options_ptr, state.name) == null) continue;
+        if (opts.options_get_only(options_ptr, item.name) == null) continue;
         const global = isGlobalOptions(options_ptr);
-        if (!opts.options_remove_or_default(options_ptr, oe, state.name, null, global, &cause)) {
+        if (!opts.options_remove_or_default(options_ptr, oe, item.name, null, global, &cause)) {
             if (cause) |msg| {
                 uppercaseFirst(msg);
                 status_runtime.present_client_message(client, msg);
@@ -778,7 +880,7 @@ fn applyReset(state: *OptionPromptState, client: *T.Client) void {
         }
     }
 
-    cmd_options.apply_target_side_effects(state.target, state.name);
+    cmd_options.apply_target_side_effects(target, item.name);
     rebuildIfStillActive(state.pane_id);
 }
 
@@ -787,6 +889,13 @@ fn rebuildIfStillActive(pane_id: u32) void {
     const wme = window.window_pane_mode(pane) orelse return;
     if (wme.mode != &window_customize_mode) return;
     rebuildAndDraw(wme);
+}
+
+fn modeDataForPaneId(pane_id: u32) ?*CustomizeModeData {
+    const pane = window.window_pane_find_by_id(pane_id) orelse return null;
+    const wme = window.window_pane_mode(pane) orelse return null;
+    if (wme.mode != &window_customize_mode) return null;
+    return modeData(wme);
 }
 
 fn nextChoiceValue(oo: *T.Options, name: []const u8, oe: *const T.OptionsTableEntry) i64 {
@@ -937,8 +1046,7 @@ fn optionTag(scope_kind: ScopeKind, name: []const u8) u64 {
 
 fn freeItems(data: *CustomizeModeData) void {
     for (data.items.items) |item| {
-        xm.allocator.free(item.name);
-        xm.allocator.destroy(item);
+        window_customize_free_item(item);
     }
     data.items.clearRetainingCapacity();
 }
@@ -956,11 +1064,14 @@ pub fn window_customize_get_key(
     ktp: ?**T.KeyTable,
     bdp: ?**T.KeyBinding,
 ) bool {
-    _ = item;
-    _ = ktp;
-    _ = bdp;
-    // Options-only customize mode in zmux has no per-item key/table; key UI is unported.
-    return false;
+    if (item.kind != .key) return false;
+    const table_name = item.table orelse return false;
+    const key = item.key orelse return false;
+    const table = key_bindings.key_bindings_get_table(table_name, false) orelse return false;
+    const binding = key_bindings.key_bindings_get(table, key) orelse return false;
+    if (ktp) |out| out.* = table;
+    if (bdp) |out| out.* = binding;
+    return true;
 }
 
 /// tmux: window_customize_init – enter options/customize mode.
@@ -1061,7 +1172,7 @@ pub const window_customize_help_lines = [_][]const u8{
 };
 
 pub fn window_customize_help() struct { width: u32, item_noun: []const u8 } {
-    return .{ .width = 52, .item_noun = "option" };
+    return .{ .width = 52, .item_noun = "item" };
 }
 
 /// tmux: window_customize_get_tag – compute a unique tag for an option.
@@ -1085,8 +1196,14 @@ pub fn window_customize_check_item(
     data: *CustomizeModeData,
     item: *const OptionItem,
 ) bool {
-    const oo = window_customize_get_tree(item.target.kind, &data.fs);
-    return oo == item.target.options;
+    return switch (item.kind) {
+        .option => blk: {
+            const target = item.target orelse break :blk false;
+            const oo = window_customize_get_tree(target.kind, &data.fs);
+            break :blk oo == target.options;
+        },
+        .key => window_customize_get_key(@constCast(item), null, null),
+    };
 }
 
 /// tmux: window_customize_scope_text – human-readable scope label.
@@ -1101,9 +1218,10 @@ pub fn window_customize_add_item(
 ) *OptionItem {
     const item = xm.allocator.create(OptionItem) catch unreachable;
     item.* = .{
-        .target = target,
+        .kind = .option,
         .name = xm.xstrdup(name),
         .idx = idx,
+        .target = target,
     };
     data.items.append(xm.allocator, item) catch unreachable;
     return item;
@@ -1112,6 +1230,7 @@ pub fn window_customize_add_item(
 /// tmux: window_customize_free_item – free a single option item.
 pub fn window_customize_free_item(item: *OptionItem) void {
     xm.allocator.free(item.name);
+    if (item.table) |table| xm.allocator.free(table);
     xm.allocator.destroy(item);
 }
 
@@ -1131,14 +1250,15 @@ pub const window_customize_build_option = appendOption;
 pub const window_customize_build_array = appendOption;
 
 /// tmux: window_customize_build_keys – build key binding tree section.
-///
-/// Key binding editing is not yet ported; this is a no-op stub.
 pub fn window_customize_build_keys(
     data: *CustomizeModeData,
     tree: *mode_tree.Data,
 ) void {
-    _ = data;
-    _ = tree;
+    var table = key_bindings.key_bindings_first_table();
+    while (table) |current| : (table = key_bindings.key_bindings_next_table(current)) {
+        if (current.order.items.len == 0) continue;
+        buildKeyTable(data, tree, current);
+    }
 }
 
 /// tmux: window_customize_destroy – reference-counted destroy.
@@ -1173,7 +1293,7 @@ pub fn window_customize_set_option(
 
 /// tmux: window_customize_unset_option – remove/reset an option.
 pub fn window_customize_unset_option(
-    state: *OptionPromptState,
+    state: *PromptState,
     client: *T.Client,
 ) void {
     applyUnset(state, client);
@@ -1181,63 +1301,152 @@ pub fn window_customize_unset_option(
 
 /// tmux: window_customize_reset_option – reset option to default.
 pub fn window_customize_reset_option(
-    state: *OptionPromptState,
+    state: *PromptState,
     client: *T.Client,
 ) void {
     applyReset(state, client);
 }
 
-/// tmux: window_customize_set_command_callback – set key command (stub).
+/// tmux: window_customize_set_command_callback – set key command.
 pub fn window_customize_set_command_callback(
     client: ?*T.Client,
     item: ?*anyopaque,
     s: ?[]const u8,
 ) bool {
-    _ = client;
-    _ = item;
-    _ = s;
-    return false;
+    const binding_item: *OptionItem = @ptrCast(@alignCast(item orelse return false));
+    const text = s orelse return false;
+    if (text.len == 0) return false;
+
+    var binding: *T.KeyBinding = undefined;
+    if (!window_customize_get_key(binding_item, null, &binding)) return false;
+
+    var parse_input: T.CmdParseInput = .{};
+    const parsed = cmd_mod.cmd_parse_from_string(text, &parse_input);
+    switch (parsed.status) {
+        .@"error" => {
+            const cl = client orelse return false;
+            const msg = parsed.@"error" orelse return false;
+            defer xm.allocator.free(msg);
+            uppercaseFirst(msg);
+            status_runtime.present_client_message(cl, msg);
+            return false;
+        },
+        .success => {
+            const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(parsed.cmdlist.?));
+            if (binding.cmdlist) |old| cmd_mod.cmd_list_unref(old);
+            binding.cmdlist = @ptrCast(cmdlist);
+            return true;
+        },
+    }
 }
 
-/// tmux: window_customize_set_note_callback – set key note (stub).
+/// tmux: window_customize_set_note_callback – set key note.
 pub fn window_customize_set_note_callback(
     client: ?*T.Client,
     item: ?*anyopaque,
     s: ?[]const u8,
 ) bool {
     _ = client;
-    _ = item;
-    _ = s;
-    return false;
+    const binding_item: *OptionItem = @ptrCast(@alignCast(item orelse return false));
+    const text = s orelse return false;
+    if (text.len == 0) return false;
+
+    var binding: *T.KeyBinding = undefined;
+    if (!window_customize_get_key(binding_item, null, &binding)) return false;
+    if (binding.note) |note| xm.allocator.free(note);
+    binding.note = xm.xstrdup(text);
+    return true;
 }
 
-/// tmux: window_customize_set_key – begin editing a key binding (stub).
+/// tmux: window_customize_set_key – begin editing a key binding.
 pub fn window_customize_set_key(
     client: ?*T.Client,
     data: *CustomizeModeData,
     item: ?*anyopaque,
 ) void {
-    _ = client;
-    _ = data;
-    _ = item;
+    const cl = client orelse return;
+    const current_item: *OptionItem = @ptrCast(@alignCast(item orelse return));
+    var binding: *T.KeyBinding = undefined;
+    if (!window_customize_get_key(current_item, null, &binding)) return;
+
+    const current_name = mode_tree.getCurrentName(data.tree) orelse return;
+    if (std.mem.eql(u8, current_name, "Repeat")) {
+        binding.flags ^= T.KEY_BINDING_REPEAT;
+        rebuildDataIfStillActive(data);
+        return;
+    }
+
+    const pane = data.fs.wp orelse return;
+    const prompt = xm.xasprintf("({s}) ", .{current_item.name});
+    defer xm.allocator.free(prompt);
+
+    if (std.mem.eql(u8, current_name, "Command")) {
+        const value = cmdListPrint(binding.cmdlist);
+        defer xm.allocator.free(value);
+        const state = createPromptState(pane, current_item, .edit, .command);
+        status_prompt.status_prompt_set(
+            cl,
+            null,
+            prompt,
+            value,
+            optionPromptCallback,
+            null,
+            freePromptState,
+            state,
+            status_prompt.PROMPT_NOFORMAT,
+            .command,
+        );
+        return;
+    }
+
+    if (std.mem.eql(u8, current_name, "Note")) {
+        const state = createPromptState(pane, current_item, .edit, .note);
+        status_prompt.status_prompt_set(
+            cl,
+            null,
+            prompt,
+            binding.note orelse "",
+            optionPromptCallback,
+            null,
+            freePromptState,
+            state,
+            status_prompt.PROMPT_NOFORMAT,
+            .command,
+        );
+    }
 }
 
-/// tmux: window_customize_unset_key – remove a key binding (stub).
+/// tmux: window_customize_unset_key – remove a key binding.
 pub fn window_customize_unset_key(
     data: *CustomizeModeData,
     item: ?*anyopaque,
 ) void {
-    _ = data;
-    _ = item;
+    var table: *T.KeyTable = undefined;
+    var binding: *T.KeyBinding = undefined;
+    const current_item: *OptionItem = @ptrCast(@alignCast(item orelse return));
+    if (!window_customize_get_key(current_item, &table, &binding)) return;
+    key_bindings.key_bindings_remove(table.name, binding.key);
+    rebuildDataIfStillActive(data);
 }
 
-/// tmux: window_customize_reset_key – reset a key binding (stub).
+/// tmux: window_customize_reset_key – reset a key binding.
 pub fn window_customize_reset_key(
     data: *CustomizeModeData,
     item: ?*anyopaque,
 ) void {
-    _ = data;
-    _ = item;
+    var table: *T.KeyTable = undefined;
+    var binding: *T.KeyBinding = undefined;
+    const current_item: *OptionItem = @ptrCast(@alignCast(item orelse return));
+    if (!window_customize_get_key(current_item, &table, &binding)) return;
+
+    const default_binding = key_bindings.key_bindings_get_default(table, binding.key);
+    if (default_binding != null and binding.cmdlist == default_binding.?.cmdlist and
+        binding.flags == default_binding.?.flags and
+        std.meta.eql(binding.note, default_binding.?.note))
+        return;
+
+    key_bindings.key_bindings_reset(table.name, binding.key);
+    rebuildDataIfStillActive(data);
 }
 
 /// tmux: window_customize_change_each – apply change to each tagged item.
@@ -1251,7 +1460,7 @@ pub fn window_customize_change_each(
     _ = client;
 }
 
-/// tmux: window_customize_change_current_callback – prompt callback (stub).
+/// tmux: window_customize_change_current_callback – compatibility prompt wrapper.
 pub fn window_customize_change_current_callback(
     client: ?*T.Client,
     data: *CustomizeModeData,
@@ -1263,7 +1472,7 @@ pub fn window_customize_change_current_callback(
     return false;
 }
 
-/// tmux: window_customize_change_tagged_callback – prompt callback (stub).
+/// tmux: window_customize_change_tagged_callback – compatibility prompt wrapper.
 pub fn window_customize_change_tagged_callback(
     client: ?*T.Client,
     data: *CustomizeModeData,
@@ -1273,6 +1482,140 @@ pub fn window_customize_change_tagged_callback(
     _ = data;
     _ = s;
     return false;
+}
+
+fn keySectionTag(name: []const u8) u64 {
+    return 0x5300_0000_0000_0000 | (std.hash.Wyhash.hash(0x51c0_6b1d, name) & 0x00ff_ffff_ffff_ffff);
+}
+
+fn keyTag(table_name: []const u8, key: T.key_code) u64 {
+    return 0x5400_0000_0000_0000 |
+        (std.hash.Wyhash.hash(key, table_name) & 0x0000_ffff_ffff_ffff);
+}
+
+fn buildKeyTable(data: *CustomizeModeData, tree: *mode_tree.Data, table: *T.KeyTable) void {
+    const title = xm.xasprintf("Key Table - {s}", .{table.name});
+    defer xm.allocator.free(title);
+    const section = mode_tree.add(tree, null, null, keySectionTag(table.name), title, null, 1);
+    mode_tree.noTag(section);
+
+    const bindings = sort_mod.sorted_key_bindings_table(table, .{ .order = .order });
+    defer xm.allocator.free(bindings);
+
+    for (bindings) |binding| appendKeyBinding(data, tree, section, table, binding);
+
+    if (section.children.items.len == 0) mode_tree.remove(tree, section);
+}
+
+fn appendKeyBinding(
+    data: *CustomizeModeData,
+    tree: *mode_tree.Data,
+    parent: *mode_tree.Item,
+    table: *T.KeyTable,
+    binding: *T.KeyBinding,
+) void {
+    const key_name = key_string.key_string_lookup_key(binding.key, 0);
+    const command = cmdListPrint(binding.cmdlist);
+    defer xm.allocator.free(command);
+
+    const ctx = keyFormatContext(&data.fs, binding, command);
+    if (data.filter) |filter| {
+        const matches = format_mod.format_filter_match(xm.allocator, filter, &ctx) orelse false;
+        if (!matches) return;
+    }
+
+    const rendered = format_mod.format_require_complete(xm.allocator, data.format, &ctx) orelse
+        fallbackKeyText(binding);
+    defer xm.allocator.free(rendered);
+
+    const item = xm.allocator.create(OptionItem) catch unreachable;
+    item.* = .{
+        .kind = .key,
+        .name = xm.xstrdup(key_name),
+        .table = xm.xstrdup(table.name),
+        .key = binding.key,
+    };
+    data.items.append(xm.allocator, item) catch unreachable;
+
+    const child = mode_tree.add(tree, parent, @ptrCast(item), keyTag(table.name, binding.key), key_name, rendered, 0);
+    appendKeyBindingField(tree, child, item, "Command", command);
+    appendKeyBindingField(tree, child, item, "Note", binding.note orelse "");
+    appendKeyBindingField(tree, child, item, "Repeat", if (binding.flags & T.KEY_BINDING_REPEAT != 0) "on" else "off");
+}
+
+fn appendKeyBindingField(
+    tree: *mode_tree.Data,
+    parent: *mode_tree.Item,
+    item: *OptionItem,
+    name: []const u8,
+    text: []const u8,
+) void {
+    const child = mode_tree.add(tree, parent, @ptrCast(item), 0, name, text, 0);
+    mode_tree.drawAsParent(child);
+    mode_tree.noTag(child);
+}
+
+fn keyFormatContext(fs: *const T.CmdFindState, binding: *T.KeyBinding, command: []const u8) format_mod.FormatContext {
+    return .{
+        .session = fs.s,
+        .winlink = fs.wl,
+        .window = fs.w,
+        .pane = fs.wp,
+        .is_option = false,
+        .is_key = true,
+        .key_binding = binding,
+        .key_note = binding.note orelse "",
+        .key_command = command,
+        .key_has_repeat = (binding.flags & T.KEY_BINDING_REPEAT) != 0,
+        .key_string_width = @intCast(key_string.key_string_lookup_key(binding.key, 0).len),
+        .key_table_width = @intCast(binding.tablename.len),
+    };
+}
+
+fn fallbackKeyText(binding: *T.KeyBinding) []u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    out.appendSlice(xm.allocator, binding.tablename) catch unreachable;
+    out.appendSlice(xm.allocator, ": ") catch unreachable;
+    out.appendSlice(xm.allocator, key_string.key_string_lookup_key(binding.key, 0)) catch unreachable;
+    if (binding.note) |note| {
+        if (note.len != 0) {
+            out.appendSlice(xm.allocator, " [") catch unreachable;
+            out.appendSlice(xm.allocator, note) catch unreachable;
+            out.append(xm.allocator, ']') catch unreachable;
+        }
+    }
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn cmdListPrint(cmdlist_ptr: ?*T.CmdList) []u8 {
+    const raw = cmdlist_ptr orelse return xm.xstrdup("");
+    const list: *cmd_mod.CmdList = @ptrCast(@alignCast(raw));
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    var cmd_ptr = list.head;
+    while (cmd_ptr) |cmd_ptr_current| : (cmd_ptr = cmd_ptr_current.next) {
+        if (out.items.len != 0) out.appendSlice(xm.allocator, "; ") catch unreachable;
+        out.appendSlice(xm.allocator, cmd_ptr_current.entry.name) catch unreachable;
+        const printed_args = args_mod.args_print(&cmd_ptr_current.args);
+        defer xm.allocator.free(printed_args);
+        if (printed_args.len != 0) {
+            out.append(xm.allocator, ' ') catch unreachable;
+            out.appendSlice(xm.allocator, printed_args) catch unreachable;
+        }
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn rebuildDataIfStillActive(data: *CustomizeModeData) void {
+    const pane = data.fs.wp orelse return;
+    const wme = window.window_pane_mode(pane) orelse return;
+    if (wme.mode != &window_customize_mode) return;
+    rebuildAndDraw(wme);
 }
 
 fn initTestGlobals() void {
@@ -1349,6 +1692,42 @@ fn containsLineText(tree: *const mode_tree.Data, fragment: []const u8) bool {
         if (std.mem.indexOf(u8, text, fragment) != null) return true;
     }
     return false;
+}
+
+fn findKeyChildIndex(tree: *const mode_tree.Data, parent_index: usize, child_name: []const u8) ?usize {
+    const parent_depth = tree.line_list.items[parent_index].depth;
+    var idx = parent_index + 1;
+    while (idx < tree.line_list.items.len) : (idx += 1) {
+        const line = tree.line_list.items[idx];
+        if (line.depth <= parent_depth) break;
+        if (line.depth == parent_depth + 1 and std.mem.eql(u8, line.item.name, child_name))
+            return idx;
+    }
+    return null;
+}
+
+fn parseCmdListForTest(text: []const u8) *cmd_mod.CmdList {
+    var input: T.CmdParseInput = .{};
+    const parsed = cmd_mod.cmd_parse_from_string(text, &input);
+    switch (parsed.status) {
+        .success => return @ptrCast(@alignCast(parsed.cmdlist.?)),
+        .@"error" => {
+            const msg = parsed.@"error" orelse "parse error";
+            @panic(msg);
+        },
+    }
+}
+
+fn runCustomizeCommand(
+    wme: *T.WindowModeEntry,
+    client: *T.Client,
+    session_ptr: *T.Session,
+    command: []const u8,
+) !void {
+    var cause: ?[]u8 = null;
+    var command_args = try args_mod.args_parse(xm.allocator, &.{command}, "", 0, -1, &cause);
+    defer command_args.deinit();
+    windowCustomizeCommand(wme, client, session_ptr, session_ptr.curw.?, @ptrCast(&command_args), null);
 }
 
 fn makeClient(session_ptr: *T.Session, name: []const u8, ttyname: []const u8) T.Client {
@@ -1654,6 +2033,135 @@ test "window-customize reset-current clears local and inherited overrides back t
     try std.testing.expect(opts.options_get_only(setup.session.options, "status-left") == null);
     try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(opts.global_s_options, "status-left"));
     try std.testing.expectEqualStrings(default_status_left, opts.options_get_string(setup.session.options, "status-left"));
+}
+
+test "window-customize choose edits key command and note and toggles repeat" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const table_name = "customize-mode-test";
+    const key: T.key_code = 'x';
+    key_bindings.key_bindings_add(table_name, key, "old note", false, @ptrCast(parseCmdListForTest("display-message one")));
+    defer key_bindings.key_bindings_remove_table(table_name);
+
+    const setup = try testSetup("window-customize-key-edit");
+    defer if (sess.session_find("window-customize-key-edit") != null) sess.session_destroy(setup.session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:Nt:yZ", 0, 0, &cause);
+    defer args.deinit();
+
+    var target = targetState(setup);
+    const wme = enterMode(setup.pane, &target, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    var client = makeClient(setup.session, "options-key-client", "/dev/pts/541");
+    defer freeClient(&client);
+
+    const data = modeData(wme);
+    try std.testing.expect(mode_tree.setCurrent(data.tree, keyTag(table_name, key)));
+    mode_tree.expandCurrent(data.tree);
+
+    const table = key_bindings.key_bindings_get_table(table_name, false).?;
+    const binding = key_bindings.key_bindings_get(table, key).?;
+
+    const note_index = findKeyChildIndex(data.tree, data.tree.current, "Note").?;
+    data.tree.current = @intCast(note_index);
+    try runCustomizeCommand(wme, &client, setup.session, "choose");
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    var note_backspaces: usize = (binding.note orelse "").len;
+    while (note_backspaces > 0) : (note_backspaces -= 1)
+        try std.testing.expect(sendPromptKey(&client, T.KEYC_BSPACE, "\x7f"));
+    for ("fresh note") |ch| try std.testing.expect(sendPromptKey(&client, ch, &.{ch}));
+    try std.testing.expect(sendPromptKey(&client, T.C0_CR, "\r"));
+    try std.testing.expectEqualStrings("fresh note", binding.note.?);
+
+    try std.testing.expect(mode_tree.setCurrent(data.tree, keyTag(table_name, key)));
+    mode_tree.expandCurrent(data.tree);
+    const command_index = findKeyChildIndex(data.tree, data.tree.current, "Command").?;
+    data.tree.current = @intCast(command_index);
+    const old_command = cmdListPrint(binding.cmdlist);
+    defer xm.allocator.free(old_command);
+    try runCustomizeCommand(wme, &client, setup.session, "choose");
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    var command_backspaces: usize = old_command.len;
+    while (command_backspaces > 0) : (command_backspaces -= 1)
+        try std.testing.expect(sendPromptKey(&client, T.KEYC_BSPACE, "\x7f"));
+    for ("display-message two") |ch| try std.testing.expect(sendPromptKey(&client, ch, &.{ch}));
+    try std.testing.expect(sendPromptKey(&client, T.C0_CR, "\r"));
+    const new_command = cmdListPrint(binding.cmdlist);
+    defer xm.allocator.free(new_command);
+    try std.testing.expectEqualStrings("display-message two", new_command);
+
+    try std.testing.expect(mode_tree.setCurrent(data.tree, keyTag(table_name, key)));
+    mode_tree.expandCurrent(data.tree);
+    const repeat_index = findKeyChildIndex(data.tree, data.tree.current, "Repeat").?;
+    data.tree.current = @intCast(repeat_index);
+    try runCustomizeCommand(wme, &client, setup.session, "choose");
+    try std.testing.expect(binding.flags & T.KEY_BINDING_REPEAT != 0);
+}
+
+test "window-customize unset-current and reset-current work for key bindings" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const transient_table = "customize-mode-unset";
+    const transient_key: T.key_code = 'z';
+    key_bindings.key_bindings_add(transient_table, transient_key, "drop me", false, @ptrCast(parseCmdListForTest("display-message gone")));
+    defer key_bindings.key_bindings_remove_table(transient_table);
+
+    const prefix = key_bindings.key_bindings_get_table("prefix", false).?;
+    const default_question = key_bindings.key_bindings_get_default(prefix, '?').?;
+    const default_note = xm.xstrdup(default_question.note.?);
+    defer xm.allocator.free(default_note);
+    const default_command = cmdListPrint(default_question.cmdlist);
+    defer xm.allocator.free(default_command);
+    key_bindings.key_bindings_add("prefix", '?', "override note", false, @ptrCast(parseCmdListForTest("display-message override")));
+
+    const setup = try testSetup("window-customize-key-reset");
+    defer if (sess.session_find("window-customize-key-reset") != null) sess.session_destroy(setup.session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:Nt:yZ", 0, 0, &cause);
+    defer args.deinit();
+
+    var target = targetState(setup);
+    const wme = enterMode(setup.pane, &target, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane) != null)
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    var client = makeClient(setup.session, "options-key-reset-client", "/dev/pts/551");
+    defer freeClient(&client);
+
+    const data = modeData(wme);
+    try std.testing.expect(mode_tree.setCurrent(data.tree, keyTag(transient_table, transient_key)));
+    try runCustomizeCommand(wme, &client, setup.session, "unset-current");
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expect(sendPromptKey(&client, 'y', "y"));
+    if (key_bindings.key_bindings_get_table(transient_table, false)) |transient_binding_table| {
+        try std.testing.expect(key_bindings.key_bindings_get(transient_binding_table, transient_key) == null);
+    } else {
+        try std.testing.expect(true);
+    }
+
+    try std.testing.expect(mode_tree.setCurrent(data.tree, keyTag("prefix", '?')));
+    try runCustomizeCommand(wme, &client, setup.session, "reset-current");
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expect(sendPromptKey(&client, 'y', "y"));
+    const restored = key_bindings.key_bindings_get(prefix, '?').?;
+    try std.testing.expectEqualStrings(default_note, restored.note.?);
+    const restored_command = cmdListPrint(restored.cmdlist);
+    defer xm.allocator.free(restored_command);
+    try std.testing.expectEqualStrings(default_command, restored_command);
 }
 
 test "window-customize scope kinds follow server to pane ordering" {

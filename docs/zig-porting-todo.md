@@ -21,11 +21,11 @@ Live tmux-parity gaps only.
   panes, preview zoom, richer prompt-driven command and kill flows, mouse
   preview selection, and custom `-K` key-format bindings where tmux provides
   them.
-- `zmux:` the chooser family is still on reduced alternate-screen runtimes.
-  `choose-client` and `choose-tree` are usable, and both now have preview
-  surfaces plus `-K` plumbing. `tree-mode` now has prompt-driven command and
-  kill flows, but `choose-client` still lacks its richer prompt-driven detach
-  and kill paths, and the chooser preview interactions are still incomplete.
+- `zmux:` `choose-client` now rides the shared `mode-tree` substrate and
+  carries tmux-shaped status-aware previews, while `tree-mode` has prompt-driven
+  command and kill flows. The remaining chooser gap is mainly fuller preview
+  interaction parity, especially mouse-side preview selection behavior across
+  the chooser family.
 - `likely files:` `src/cmd-choose-tree.zig`, `src/window-client.zig`,
   `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
   `docs/choose-tree-modes.md`

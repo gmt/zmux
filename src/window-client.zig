@@ -27,12 +27,17 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_mod = @import("format.zig");
 const key_string = @import("key-string.zig");
+const menu_mod = @import("menu.zig");
+const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
+const resize_mod = @import("resize.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const server = @import("server.zig");
 const server_client = @import("server-client.zig");
 const sort_mod = @import("sort.zig");
+const status_mod = @import("status.zig");
+const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const protocol = @import("zmux-protocol.zig");
 const window = @import("window.zig");
@@ -49,28 +54,45 @@ const DEFAULT_KEY_FORMAT =
     "}";
 const HELP_TEXT = "Enter choose  d/x/z detach kill suspend  t/T/^T tags  q cancel";
 
+const window_client_menu_items = [_]menu_mod.MenuItemTemplate{
+    .{ .name = "Detach", .key = 'd' },
+    .{ .name = "Detach Tagged", .key = 'D' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Tag", .key = 't' },
+    .{ .name = "Tag All", .key = '\x14' },
+    .{ .name = "Tag None", .key = 'T' },
+    .{ .name = "", .key = T.KEYC_NONE },
+    .{ .name = "Cancel", .key = 'q' },
+    .{},
+};
+
 const ClientItem = struct {
     client: *T.Client,
     target_name: []u8,
     text: []u8,
-    key: T.key_code = T.KEYC_NONE,
-    keystr: ?[]u8 = null,
-    tagged: bool = false,
 };
 
 const ClientModeData = struct {
+    wp: *T.WindowPane,
+    tree: *mode_tree.Data,
     format: []u8,
     key_format: []u8,
-    filter: ?[]u8 = null,
     command: []u8,
-    sort_crit: T.SortCriteria = .{},
-    items: std.ArrayList(ClientItem) = .{},
-    current: usize = 0,
-    offset: usize = 0,
-    max_key_label_width: usize = 0,
-    preview: bool = false,
-    zoomed: i8 = -1,
+    items: std.ArrayList(*ClientItem) = .{},
 };
+
+const FilterPromptState = struct {
+    pane_id: u32,
+};
+
+fn previewModeFromArgs(args: *const args_mod.Arguments) mode_tree.Preview {
+    const count = if (args.entry('N')) |entry| entry.count else 0;
+    return switch (count) {
+        0 => if (args.has('y')) .normal else .off,
+        1 => .normal,
+        else => .big,
+    };
+}
 
 pub const window_client_mode = T.WindowMode{
     .name = "client-mode",
@@ -86,7 +108,6 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
     if (window.window_pane_mode(wp)) |wme| {
         if (wme.mode == &window_client_mode) {
             refreshFromArgs(wme, args);
-            maybeZoom(wme.wp, modeData(wme), args);
             rebuildAndDraw(wme);
             return wme;
         }
@@ -96,17 +117,27 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
 
     const data = xm.allocator.create(ClientModeData) catch unreachable;
     data.* = .{
+        .wp = wp,
+        .tree = undefined,
         .format = xm.xstrdup(args.get('F') orelse DEFAULT_FORMAT),
         .key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT),
-        .filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null,
         .command = xm.xstrdup(args.value_at(0) orelse DEFAULT_COMMAND),
-        .sort_crit = .{
-            .order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name,
-            .reversed = args.has('r'),
-        },
-        .preview = args.has('N') or args.has('y'),
     };
-    maybeZoom(wp, data, args);
+    data.tree = mode_tree.start(wp, .{
+        .modedata = @ptrCast(data),
+        .preview = previewModeFromArgs(args),
+        .zoom = args.has('Z'),
+        .menu = &window_client_menu_items,
+        .buildcb = buildTree,
+        .searchcb = searchItem,
+        .menucb = modeTreeMenuCallback,
+        .keycb = modeTreeKeyCallback,
+        .sortcb = modeTreeSortCallback,
+        .helpcb = modeTreeHelpCallback,
+    });
+    data.tree.sort_crit.order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name;
+    data.tree.sort_crit.reversed = args.has('r');
+    mode_tree.setFilter(data.tree, args.get('f'));
 
     const wme = window_mode_runtime.pushMode(wp, &window_client_mode, @ptrCast(data), null);
     rebuildAndDraw(wme);
@@ -121,16 +152,36 @@ fn clientModeKey(
     key: T.key_code,
     mouse: ?*const T.MouseEvent,
 ) void {
-    _ = mouse;
-
     const data = modeData(wme);
-    for (data.items.items, 0..) |item, idx| {
-        if (item.key == T.KEYC_NONE or item.key != key) continue;
-        data.current = idx;
-        runCommand(client, session, wl, data.command, item.target_name);
+    _ = session;
+    _ = wl;
+
+    var translated = key;
+    const finished = mode_tree.handleKey(data.tree, client, &translated, mouse, null, null);
+    switch (translated) {
+        'd', 'x', 'z' => {
+            if (currentItem(data)) |item|
+                window_client_do_detach(data, item, translated);
+            rebuildAfterAction(wme);
+            return;
+        },
+        'D', 'X', 'Z' => {
+            mode_tree.eachTagged(data.tree, detachTaggedCallback, client, translated, false);
+            rebuildAfterAction(wme);
+            return;
+        },
+        '\r' => {
+            chooseCurrent(wme, client);
+            return;
+        },
+        else => {},
+    }
+
+    if (finished or countSelectableClients() == 0) {
         _ = window_mode_runtime.resetMode(wme.wp);
         return;
     }
+    redraw(wme);
 }
 
 fn clientModeKeyTable(wme: *T.WindowModeEntry) []const u8 {
@@ -162,43 +213,50 @@ fn clientModeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "choose")) {
-        if (currentItem(data)) |item| runCommand(client, session, wl, data.command, item.target_name);
-        _ = window_mode_runtime.resetMode(wme.wp);
+        _ = session;
+        _ = wl;
+        chooseCurrent(wme, client);
         return;
     }
     if (std.mem.eql(u8, command, "cursor-up")) {
-        moveUp(data, repeat);
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) mode_tree.up(data.tree, false);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "cursor-down")) {
-        moveDown(data, repeat);
+        var remaining = repeat;
+        while (remaining > 0) : (remaining -= 1) _ = mode_tree.down(data.tree, false);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "page-up")) {
-        pageUp(data, listRows(data, wme.wp));
+        pageUp(data.tree, listRows(data.tree, wme.wp), repeat);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "page-down")) {
-        pageDown(data, listRows(data, wme.wp));
+        pageDown(data.tree, listRows(data.tree, wme.wp), repeat);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "tag")) {
-        toggleTag(data);
+        mode_tree.toggleCurrentTag(data.tree, false);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "tag-all")) {
-        for (data.items.items) |*item| item.tagged = true;
+        mode_tree.tagAll(data.tree);
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "tag-none")) {
-        for (data.items.items) |*item| item.tagged = false;
+        mode_tree.clearAllTagged(data.tree);
         redraw(wme);
+        return;
+    }
+    if (std.mem.eql(u8, command, "filter")) {
+        startFilterPrompt(wme, client);
         return;
     }
     if (std.mem.eql(u8, command, "detach")) {
@@ -207,7 +265,7 @@ fn clientModeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "detach-tagged")) {
-        actOnTagged(data, protocol.MsgType, detachClient, .detach, true);
+        actOnTagged(data, protocol.MsgType, detachClient, .detach, false);
         rebuildAfterAction(wme);
         return;
     }
@@ -217,7 +275,7 @@ fn clientModeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "kill-tagged")) {
-        actOnTagged(data, protocol.MsgType, detachClient, .detachkill, true);
+        actOnTagged(data, protocol.MsgType, detachClient, .detachkill, false);
         rebuildAfterAction(wme);
         return;
     }
@@ -227,7 +285,7 @@ fn clientModeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "suspend-tagged")) {
-        actOnTagged(data, void, suspendClient, {}, true);
+        actOnTagged(data, void, suspendClient, {}, false);
         rebuildAfterAction(wme);
         return;
     }
@@ -238,16 +296,12 @@ fn clientModeCommand(
 
 fn clientModeClose(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
+    mode_tree.free(data.tree);
     freeItems(data);
     data.items.deinit(xm.allocator);
     xm.allocator.free(data.format);
     xm.allocator.free(data.key_format);
-    if (data.filter) |filter| xm.allocator.free(filter);
     xm.allocator.free(data.command);
-
-    if (data.zoomed == 0 and window.window_unzoom(wme.wp.window))
-        server.server_redraw_window(wme.wp.window);
-
     xm.allocator.destroy(data);
 
     if (wme.wp.modes.items.len <= 1) {
@@ -256,7 +310,7 @@ fn clientModeClose(wme: *T.WindowModeEntry) void {
 }
 
 fn clientModeGetScreen(wme: *T.WindowModeEntry) *T.Screen {
-    return wme.wp.screen;
+    return modeData(wme).tree.getScreen();
 }
 
 fn modeData(wme: *T.WindowModeEntry) *ClientModeData {
@@ -271,32 +325,24 @@ fn refreshFromArgs(wme: *T.WindowModeEntry, args: *const args_mod.Arguments) voi
     xm.allocator.free(data.key_format);
     data.key_format = xm.xstrdup(args.get('K') orelse DEFAULT_KEY_FORMAT);
 
-    if (data.filter) |filter| xm.allocator.free(filter);
-    data.filter = if (args.get('f')) |filter| xm.xstrdup(filter) else null;
-
     xm.allocator.free(data.command);
     data.command = xm.xstrdup(args.value_at(0) orelse DEFAULT_COMMAND);
 
-    data.sort_crit.order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name;
-    data.sort_crit.reversed = args.has('r');
-    data.preview = args.has('N') or args.has('y');
-}
-
-fn maybeZoom(wp: *T.WindowPane, data: *ClientModeData, args: *const args_mod.Arguments) void {
-    if (!args.has('Z') or data.zoomed != -1) return;
-
-    data.zoomed = if (wp.window.flags & T.WINDOW_ZOOMED != 0) 1 else 0;
-    if (data.zoomed == 0 and window.window_zoom(wp))
-        server.server_redraw_window(wp.window);
+    data.tree.sort_crit.order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name;
+    data.tree.sort_crit.reversed = args.has('r');
+    data.tree.preview = previewModeFromArgs(args);
+    mode_tree.setFilter(data.tree, args.get('f'));
+    if (args.has('Z'))
+        mode_tree.zoom(data.tree, true);
 }
 
 fn rebuildAndDraw(wme: *T.WindowModeEntry) void {
-    rebuildData(modeData(wme));
+    mode_tree.build(modeData(wme).tree);
     redraw(wme);
 }
 
 fn rebuildAfterAction(wme: *T.WindowModeEntry) void {
-    rebuildData(modeData(wme));
+    mode_tree.build(modeData(wme).tree);
     if (countSelectableClients() == 0) {
         _ = window_mode_runtime.resetMode(wme.wp);
         return;
@@ -304,72 +350,10 @@ fn rebuildAfterAction(wme: *T.WindowModeEntry) void {
     redraw(wme);
 }
 
-fn rebuildData(data: *ClientModeData) void {
-    const previous_client = if (data.items.items.len != 0 and data.current < data.items.items.len)
-        data.items.items[data.current].client
-    else
-        null;
-
-    var tagged_clients: std.ArrayList(*T.Client) = .{};
-    defer tagged_clients.deinit(xm.allocator);
-    for (data.items.items) |item| {
-        if (item.tagged) tagged_clients.append(xm.allocator, item.client) catch unreachable;
-    }
-
-    freeItems(data);
-    data.items.clearRetainingCapacity();
-    data.max_key_label_width = 0;
-
-    const clients = sort_mod.sorted_clients(data.sort_crit);
-    defer xm.allocator.free(clients);
-
-    var restored_current = false;
-    for (clients) |cl| {
-        if (!isSelectable(cl)) continue;
-
-        const ctx = clientFormatContext(cl);
-        if (data.filter) |filter| {
-            const matches = format_mod.format_filter_match(xm.allocator, filter, &ctx) orelse false;
-            if (!matches) continue;
-        }
-
-        const text = format_mod.format_require_complete(xm.allocator, data.format, &ctx) orelse fallbackText(cl);
-        const target_name = clientTargetName(cl);
-        const line_number: u32 = @intCast(data.items.items.len);
-        const item_key = keyForLine(data, cl, line_number);
-        const item_keystr = if (item_key != T.KEYC_NONE)
-            xm.xstrdup(key_string.key_string_lookup_key(item_key, 0))
-        else
-            null;
-        data.items.append(xm.allocator, .{
-            .client = cl,
-            .target_name = target_name,
-            .text = text,
-            .key = item_key,
-            .keystr = item_keystr,
-            .tagged = isTagged(tagged_clients.items, cl),
-        }) catch unreachable;
-        if (item_keystr) |keystr|
-            data.max_key_label_width = @max(data.max_key_label_width, keystr.len);
-        if (!restored_current and previous_client == cl) {
-            data.current = data.items.items.len - 1;
-            restored_current = true;
-        }
-    }
-
-    if (data.items.items.len == 0) {
-        data.current = 0;
-        data.offset = 0;
-        return;
-    }
-    if (!restored_current or data.current >= data.items.items.len)
-        data.current = 0;
-    clampOffset(data, 1);
-}
-
 fn redraw(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
-    const view = wme.wp.screen;
+    const tree = data.tree;
+    const view = tree.getScreen();
 
     screen.screen_reset_active(view);
     view.mode &= ~@as(i32, T.MODE_CURSOR | T.MODE_WRAP);
@@ -378,19 +362,18 @@ fn redraw(wme: *T.WindowModeEntry) void {
     var ctx = T.ScreenWriteCtx{ .s = view };
     const width = view.grid.sx;
     const rows = view.grid.sy;
-    const preview_rows = previewRows(data, wme.wp);
-    const item_rows = listRows(data, wme.wp);
-    clampOffset(data, item_rows);
+    const item_rows = listRows(tree, wme.wp);
+    const preview_rows = previewRows(tree, wme.wp);
 
     var row: u32 = 0;
     while (row < item_rows) : (row += 1) {
         screen_write.cursor_to(&ctx, row, 0);
         screen_write.erase_line(&ctx);
 
-        const index = data.offset + row;
-        if (index >= data.items.items.len) continue;
+        const index = tree.offset + row;
+        if (index >= tree.line_list.items.len) continue;
 
-        const line = renderLine(data, index);
+        const line = renderLine(tree, index);
         defer xm.allocator.free(line);
         screen_write.putn(&ctx, line);
     }
@@ -403,19 +386,24 @@ fn redraw(wme: *T.WindowModeEntry) void {
         if (width != 0) screen_write.putn(&ctx, HELP_TEXT);
     }
 
-    if (data.items.items.len == 0 and item_rows != 0) {
+    if (tree.no_matches and item_rows != 0) {
         screen_write.cursor_to(&ctx, 0, 0);
         screen_write.erase_line(&ctx);
-        screen_write.putn(&ctx, if (data.filter != null) "No matching clients." else "No clients.");
+        screen_write.putn(&ctx, "No matching clients.");
+    } else if (tree.line_list.items.len == 0 and item_rows != 0) {
+        screen_write.cursor_to(&ctx, 0, 0);
+        screen_write.erase_line(&ctx);
+        screen_write.putn(&ctx, "No clients.");
     }
 
     window_mode_runtime.noteModeRedraw(wme.wp);
 }
 
-fn renderLine(data: *const ClientModeData, index: usize) []u8 {
-    const item = data.items.items[index];
-    const current = if (index == data.current) ">" else " ";
-    const tagged = if (item.tagged) "*" else " ";
+fn renderLine(tree: *const mode_tree.Data, index: usize) []u8 {
+    const line = tree.line_list.items[index];
+    const item: *ClientItem = @ptrCast(@alignCast(line.item.itemdata.?));
+    const current = if (index == tree.current) ">" else " ";
+    const tagged = if (line.item.tagged) "*" else " ";
 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -424,9 +412,10 @@ fn renderLine(data: *const ClientModeData, index: usize) []u8 {
     out.appendSlice(xm.allocator, tagged) catch unreachable;
     out.append(xm.allocator, ' ') catch unreachable;
 
-    if (data.max_key_label_width != 0) {
-        const key_width = data.max_key_label_width + 2;
-        if (item.keystr) |keystr| {
+    const max_key_width = maxKeyLabelWidth(tree);
+    if (max_key_width != 0) {
+        const key_width = max_key_width + 2;
+        if (line.item.keystr) |keystr| {
             out.append(xm.allocator, '[') catch unreachable;
             out.appendSlice(xm.allocator, keystr) catch unreachable;
             out.append(xm.allocator, ']') catch unreachable;
@@ -449,77 +438,157 @@ fn viewRows(wp: *const T.WindowPane) u32 {
     return if (wp.screen.grid.sy > 0) wp.screen.grid.sy - 1 else 0;
 }
 
-fn previewRows(data: *const ClientModeData, wp: *const T.WindowPane) u32 {
-    if (!data.preview) return 0;
+fn previewRows(tree: *const mode_tree.Data, wp: *const T.WindowPane) u32 {
     const rows = viewRows(wp);
     if (rows < 3) return 0;
-    return @max(@as(u32, 1), rows / 2);
+    return switch (tree.preview) {
+        .off => 0,
+        .normal => @max(@as(u32, 1), rows / 2),
+        .big => @max(@as(u32, 2), (rows * 3) / 4),
+    };
 }
 
-fn listRows(data: *const ClientModeData, wp: *const T.WindowPane) u32 {
+fn listRows(tree: *const mode_tree.Data, wp: *const T.WindowPane) u32 {
     const rows = viewRows(wp);
-    const preview = previewRows(data, wp);
+    const preview = previewRows(tree, wp);
     return rows -| preview;
 }
 
 fn drawPreview(data: *const ClientModeData, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
     if (height == 0) return;
-    const item = currentItem(@constCast(data)) orelse return;
-    const session = item.client.session orelse return;
+    const item = currentItem(data) orelse return;
+    const cl = item.client;
+    const session = cl.session orelse return;
     const wl = session.curw orelse return;
     const pane = wl.window.active orelse return;
 
-    screen_write.cursor_to(ctx, top, 0);
-    screen_write.preview(ctx, &pane.base, ctx.s.grid.sx, height);
-}
+    var lines = resize_mod.status_line_size(cl);
+    if (lines >= height) lines = 0;
+    const at: u32 = if (status_mod.status_at_line(cl) == 0) lines else 0;
 
-fn clampOffset(data: *ClientModeData, rows: u32) void {
-    if (data.items.items.len == 0 or rows == 0) {
-        data.offset = 0;
-        return;
+    const preview_height = height -| 2 -| lines;
+    if (preview_height != 0) {
+        screen_write.cursor_to(ctx, top + at, 0);
+        screen_write.preview(ctx, &pane.base, ctx.s.grid.sx, preview_height);
     }
-    if (data.current < data.offset) data.offset = data.current;
-    const row_count: usize = rows;
-    if (data.current >= data.offset + row_count) data.offset = data.current - row_count + 1;
+
+    const separator_row = if (at != 0) top + 2 else top + height -| 1 -| lines;
+    if (separator_row < ctx.s.grid.sy) {
+        screen_write.cursor_to(ctx, separator_row, 0);
+        screen_write.hline(ctx, ctx.s.grid.sx, false, false);
+    }
+
+    if (lines != 0) {
+        const status_screen = cl.status.screen orelse return;
+        const status_top = if (at != 0) top else top + height -| lines;
+        screen_write.cursor_to(ctx, status_top, 0);
+        screen_write.fast_copy(ctx, status_screen, 0, 0, ctx.s.grid.sx, lines);
+    }
 }
 
-fn moveUp(data: *ClientModeData, count: u32) void {
-    if (data.items.items.len == 0) return;
-    const step: usize = count;
-    data.current -|= step;
-    clampOffset(data, 1);
-}
-
-fn moveDown(data: *ClientModeData, count: u32) void {
-    if (data.items.items.len == 0) return;
-    const max_index = data.items.items.len - 1;
-    data.current = @min(data.current + @as(usize, count), max_index);
-    clampOffset(data, 1);
-}
-
-fn pageUp(data: *ClientModeData, rows: u32) void {
-    if (data.items.items.len == 0) return;
-    const step = if (rows > 1) rows - 1 else 1;
-    data.current -|= @as(usize, step);
-    clampOffset(data, rows);
-}
-
-fn pageDown(data: *ClientModeData, rows: u32) void {
-    if (data.items.items.len == 0) return;
-    const step = if (rows > 1) rows - 1 else 1;
-    const max_index = data.items.items.len - 1;
-    data.current = @min(data.current + @as(usize, step), max_index);
-    clampOffset(data, rows);
-}
-
-fn toggleTag(data: *ClientModeData) void {
+fn chooseCurrent(wme: *T.WindowModeEntry, client: ?*T.Client) void {
+    const data = modeData(wme);
     const item = currentItem(data) orelse return;
-    item.tagged = !item.tagged;
+    mode_tree.runCommand(client, null, data.command, item.target_name);
+    _ = window_mode_runtime.resetMode(wme.wp);
 }
 
-fn currentItem(data: *ClientModeData) ?*ClientItem {
-    if (data.items.items.len == 0 or data.current >= data.items.items.len) return null;
-    return &data.items.items[data.current];
+fn searchItem(_: *mode_tree.Data, itemdata: ?*anyopaque, search: []const u8, ignore_case: bool) bool {
+    const item: *ClientItem = @ptrCast(@alignCast(itemdata orelse return false));
+    if (contains(item.text, search, ignore_case)) return true;
+    if (item.client.name) |name|
+        if (contains(name, search, ignore_case)) return true;
+    if (item.client.ttyname) |ttyname|
+        if (contains(ttyname, search, ignore_case)) return true;
+    return false;
+}
+
+fn contains(haystack: []const u8, needle: []const u8, ignore_case: bool) bool {
+    if (!ignore_case) return std.mem.indexOf(u8, haystack, needle) != null;
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var pos: usize = 0;
+    while (pos + needle.len <= haystack.len) : (pos += 1) {
+        var matched = true;
+        for (needle, 0..) |needle_ch, idx| {
+            if (std.ascii.toLower(haystack[pos + idx]) != std.ascii.toLower(needle_ch)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
+fn pageUp(tree: *mode_tree.Data, rows: u32, repeat: u32) void {
+    const step = if (rows > 1) rows - 1 else 1;
+    var remaining = repeat;
+    while (remaining > 0) : (remaining -= 1) {
+        var moved: u32 = 0;
+        while (moved < step) : (moved += 1) mode_tree.up(tree, false);
+    }
+}
+
+fn pageDown(tree: *mode_tree.Data, rows: u32, repeat: u32) void {
+    const step = if (rows > 1) rows - 1 else 1;
+    var remaining = repeat;
+    while (remaining > 0) : (remaining -= 1) {
+        var moved: u32 = 0;
+        while (moved < step) : (moved += 1) _ = mode_tree.down(tree, false);
+    }
+}
+
+fn startFilterPrompt(wme: *T.WindowModeEntry, client: ?*T.Client) void {
+    const cl = client orelse return;
+    if ((cl.flags & T.CLIENT_ATTACHED) == 0) return;
+
+    const state = xm.allocator.create(FilterPromptState) catch unreachable;
+    state.* = .{ .pane_id = wme.wp.id };
+    const data = modeData(wme);
+    status_prompt.status_prompt_set(
+        cl,
+        null,
+        "(filter) ",
+        data.tree.filter,
+        filterPromptCallback,
+        null,
+        freeFilterPromptState,
+        state,
+        status_prompt.PROMPT_NOFORMAT,
+        .search,
+    );
+}
+
+fn freeFilterPromptState(raw: ?*anyopaque) void {
+    const state: *FilterPromptState = @ptrCast(@alignCast(raw orelse return));
+    xm.allocator.destroy(state);
+}
+
+fn filterPromptCallback(_: *T.Client, raw: ?*anyopaque, input: ?[]const u8, _: bool) i32 {
+    const state: *FilterPromptState = @ptrCast(@alignCast(raw orelse return 0));
+    const pane = window.window_pane_find_by_id(state.pane_id) orelse return 0;
+    const wme = window.window_pane_mode(pane) orelse return 0;
+    if (wme.mode != &window_client_mode) return 0;
+    const data = modeData(wme);
+    mode_tree.setFilter(data.tree, input);
+    mode_tree.build(data.tree);
+    redraw(wme);
+    return 0;
+}
+
+fn maxKeyLabelWidth(tree: *const mode_tree.Data) usize {
+    var width: usize = 0;
+    for (tree.line_list.items) |line| {
+        if (line.item.keystr) |keystr|
+            width = @max(width, keystr.len);
+    }
+    return width;
+}
+
+fn currentItem(data: *const ClientModeData) ?*ClientItem {
+    return @ptrCast(@alignCast(mode_tree.getCurrent(@constCast(data.tree)) orelse return null));
 }
 
 fn repeatCount(wme: *T.WindowModeEntry) u32 {
@@ -551,9 +620,10 @@ fn actOnTagged(
     current_fallback: bool,
 ) void {
     var fired = false;
-    for (data.items.items) |*item| {
-        if (!item.tagged) continue;
+    for (data.tree.line_list.items) |line| {
+        if (!line.item.tagged) continue;
         fired = true;
+        const item: *ClientItem = @ptrCast(@alignCast(line.item.itemdata.?));
         func(item, arg);
     }
     if (!fired and current_fallback) actOnCurrent(data, Arg, func, arg);
@@ -638,10 +708,10 @@ fn templateReplace(template: []const u8, replacement: []const u8, idx: usize) []
 
 fn freeItems(data: *ClientModeData) void {
     for (data.items.items) |item| {
-        xm.allocator.free(item.target_name);
-        xm.allocator.free(item.text);
-        if (item.keystr) |keystr| xm.allocator.free(keystr);
+        window_client_free_item(item);
+        xm.allocator.destroy(item);
     }
+    data.items.clearRetainingCapacity();
 }
 
 fn isSelectable(cl: *T.Client) bool {
@@ -703,13 +773,6 @@ fn keyForLine(data: *const ClientModeData, cl: *T.Client, line: u32) T.key_code 
     return key;
 }
 
-fn isTagged(tagged_clients: []*T.Client, client: *T.Client) bool {
-    for (tagged_clients) |tagged_client| {
-        if (tagged_client == client) return true;
-    }
-    return false;
-}
-
 fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
     const text = xm.xasprintf("Client-mode command not supported yet: {s}", .{command});
     const cl = client orelse {
@@ -746,8 +809,8 @@ pub fn window_client_free(wme: *T.WindowModeEntry) void {
     clientModeClose(wme);
 }
 
-pub fn window_client_resize(wme: *T.WindowModeEntry, _: u32, _: u32) void {
-    redraw(wme);
+pub fn window_client_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
+    mode_tree.resize(modeData(wme).tree, sx, sy);
 }
 
 pub fn window_client_update(wme: *T.WindowModeEntry) void {
@@ -766,37 +829,28 @@ pub fn window_client_key(
 }
 
 pub fn window_client_add_item(data: *ClientModeData, cl: *T.Client) void {
+    const item = xm.allocator.create(ClientItem) catch unreachable;
     const text = format_mod.format_require_complete(
         xm.allocator,
         data.format,
         &clientFormatContext(cl),
     ) orelse fallbackText(cl);
     const target_name = clientTargetName(cl);
-    const line_number: u32 = @intCast(data.items.items.len);
-    const item_key = keyForLine(data, cl, line_number);
-    const item_keystr = if (item_key != T.KEYC_NONE)
-        xm.xstrdup(key_string.key_string_lookup_key(item_key, 0))
-    else
-        null;
-    data.items.append(xm.allocator, .{
+    item.* = .{
         .client = cl,
         .target_name = target_name,
         .text = text,
-        .key = item_key,
-        .keystr = item_keystr,
-    }) catch unreachable;
-    if (item_keystr) |keystr|
-        data.max_key_label_width = @max(data.max_key_label_width, keystr.len);
+    };
+    data.items.append(xm.allocator, item) catch unreachable;
 }
 
 pub fn window_client_free_item(item: *ClientItem) void {
     xm.allocator.free(item.target_name);
     xm.allocator.free(item.text);
-    if (item.keystr) |keystr| xm.allocator.free(keystr);
 }
 
 pub fn window_client_build(wme: *T.WindowModeEntry) void {
-    rebuildData(modeData(wme));
+    buildTree(modeData(wme).tree);
 }
 
 pub fn window_client_draw(wme: *T.WindowModeEntry) void {
@@ -809,13 +863,19 @@ pub fn window_client_do_detach(
     key: T.key_code,
 ) void {
     if (item == currentItem(data))
-        moveDown(data, 1);
+        _ = mode_tree.down(data.tree, false);
     if (key == 'd' or key == 'D')
         server_client.server_client_detach(item.client, .detach)
     else if (key == 'x' or key == 'X')
         server_client.server_client_detach(item.client, .detachkill)
     else if (key == 'z' or key == 'Z')
         server_client.server_client_suspend(item.client);
+}
+
+fn detachTaggedCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, _: ?*T.Client, key: T.key_code) void {
+    const data: *ClientModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item: *ClientItem = @ptrCast(@alignCast(itemdata orelse return));
+    window_client_do_detach(data, item, key);
 }
 
 pub fn window_client_menu(
@@ -829,6 +889,16 @@ pub fn window_client_menu(
     clientModeKey(wme, client, session, wl, key, null);
 }
 
+fn modeTreeMenuCallback(tree: *mode_tree.Data, client: ?*T.Client, key: T.key_code) void {
+    const wme = window.window_pane_mode(tree.wp) orelse return;
+    if (wme.mode != &window_client_mode) return;
+    const data: *ClientModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item = currentItem(data) orelse return;
+    const session = item.client.session orelse return;
+    const wl = session.curw orelse return;
+    window_client_menu(wme, client, session, wl, key);
+}
+
 pub fn window_client_get_key(
     data: *const ClientModeData,
     cl: *T.Client,
@@ -838,15 +908,60 @@ pub fn window_client_get_key(
 }
 
 pub fn window_client_sort(sort_crit: *T.SortCriteria) void {
-    sort_crit.order_seq = &window_client_order_seq;
+    sort_crit.order_seq = sort_mod.window_client_sort_order_seq;
     if (sort_crit.order == .end)
-        sort_crit.order = window_client_order_seq[0];
+        sort_crit.order = sort_mod.window_client_sort_order_seq[0];
 }
 
 pub fn window_client_help(width: *u32, item_name: *[]const u8) []const []const u8 {
     width.* = 0;
     item_name.* = "client";
     return &window_client_help_lines;
+}
+
+fn modeTreeKeyCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, line: u32) T.key_code {
+    const data: *ClientModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const item: *ClientItem = @ptrCast(@alignCast(itemdata orelse return T.KEYC_NONE));
+    return window_client_get_key(data, item.client, line);
+}
+
+fn modeTreeSortCallback(sort_crit: *T.SortCriteria) void {
+    window_client_sort(sort_crit);
+}
+
+fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[*]const ?[*:0]const u8 {
+    const lines = window_client_help(width, item_name);
+    return @ptrCast(lines.ptr);
+}
+
+fn buildTree(tree: *mode_tree.Data) void {
+    const data: *ClientModeData = @ptrCast(@alignCast(tree.modedata.?));
+    freeItems(data);
+
+    const clients = sort_mod.sorted_clients(tree.sort_crit);
+    defer xm.allocator.free(clients);
+
+    for (clients) |cl| {
+        if (!isSelectable(cl)) continue;
+
+        const ctx = clientFormatContext(cl);
+        if (tree.filter) |filter| {
+            const matches = format_mod.format_filter_match(xm.allocator, filter, &ctx) orelse false;
+            if (!matches) continue;
+        }
+
+        window_client_add_item(data, cl);
+        const item = data.items.items[data.items.items.len - 1];
+        _ = mode_tree.add(
+            tree,
+            null,
+            @ptrCast(item),
+            @intFromPtr(cl),
+            cl.name orelse "client",
+            item.text,
+            0,
+        );
+    }
 }
 
 fn initTestGlobals() void {
@@ -931,6 +1046,10 @@ fn makeClient(session: *T.Session, name: []const u8, ttyname: []const u8) T.Clie
 fn freeClient(client: *T.Client) void {
     const env_mod = @import("environ.zig");
     env_mod.environ_free(client.environ);
+    if (client.status.screen) |screen_ptr| {
+        screen.screen_free(screen_ptr);
+        xm.allocator.destroy(screen_ptr);
+    }
     if (client.name) |name| xm.allocator.free(@constCast(name));
     if (client.ttyname) |ttyname| xm.allocator.free(ttyname);
     if (client.message_string) |message| xm.allocator.free(message);
@@ -965,13 +1084,13 @@ test "window-client mode renders attached clients and preserves selection by cli
     const data = modeData(wme);
     try std.testing.expectEqual(@as(usize, 2), data.items.items.len);
     try std.testing.expectEqualStrings("/dev/pts/201: session window-client-render", data.items.items[0].text);
-    const first_line = renderLine(data, 0);
+    const first_line = renderLine(data.tree, 0);
     defer xm.allocator.free(first_line);
     try std.testing.expect(std.mem.indexOf(u8, first_line, "[0]") != null);
 
-    data.current = 1;
-    rebuildData(data);
-    try std.testing.expectEqualStrings("/dev/pts/202", data.items.items[data.current].target_name);
+    data.tree.current = 1;
+    mode_tree.build(data.tree);
+    try std.testing.expectEqualStrings("/dev/pts/202", currentItem(data).?.target_name);
 }
 
 test "window-client choose runs the tmux template command for the selected client" {
@@ -1030,8 +1149,8 @@ test "window-client custom key format chooses the matching client" {
     defer args.deinit();
 
     const wme = enterMode(setup.pane, &args);
-    try std.testing.expectEqual(@as(T.key_code, '0'), modeData(wme).items.items[0].key);
-    try std.testing.expectEqual(@as(T.key_code, '1'), modeData(wme).items.items[1].key);
+    try std.testing.expectEqual(@as(T.key_code, '0'), modeData(wme).tree.line_list.items[0].item.key);
+    try std.testing.expectEqual(@as(T.key_code, '1'), modeData(wme).tree.line_list.items[1].item.key);
     const chosen = modeData(wme).items.items[1].client;
 
     clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, '1', null);
@@ -1082,6 +1201,14 @@ test "window-client preview draws the selected client's current pane when enable
 
     var target = makeClient(setup.session, "target", "/dev/pts/350");
     defer freeClient(&target);
+    target.tty.sx = 20;
+    target.tty.sy = 24;
+    setup.session.statusat = 23;
+    target.status.screen = screen.screen_init(20, 1, 0);
+    {
+        var status_ctx = T.ScreenWriteCtx{ .s = target.status.screen.? };
+        screen_write.putn(&status_ctx, "status");
+    }
     client_registry.add(&target);
 
     var cause: ?[]u8 = null;
@@ -1094,9 +1221,13 @@ test "window-client preview draws the selected client's current pane when enable
     }
 
     const data = modeData(wme);
-    try std.testing.expect(data.preview);
+    try std.testing.expect(data.tree.preview != .off);
 
-    const preview_line = grid.string_cells(setup.pane.screen.grid, 12, setup.pane.screen.grid.sx, .{ .trim_trailing_spaces = true });
+    const preview_line = grid.string_cells(clientModeGetScreen(wme).grid, 12, clientModeGetScreen(wme).grid.sx, .{ .trim_trailing_spaces = true });
     defer xm.allocator.free(preview_line);
     try std.testing.expect(std.mem.indexOf(u8, preview_line, "preview") != null);
+
+    const status_line = grid.string_cells(clientModeGetScreen(wme).grid, 22, clientModeGetScreen(wme).grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(status_line);
+    try std.testing.expect(std.mem.indexOf(u8, status_line, "status") != null);
 }

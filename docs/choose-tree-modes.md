@@ -4,15 +4,15 @@
   registered on the Zig command surface.
 - Current `choose-client` behavior resolves `-t target-pane`, validates
   `-O sort-order`, keeps tmux's empty-client no-op case, and otherwise enters a
-  reduced `client-mode` alternate-screen list over the shared
+  `mode-tree`-backed `client-mode` alternate-screen browser over the shared
   `window-mode-runtime.zig` interface.
-- The current reduced `client-mode` supports tmux's default choose action plus
+- The current `client-mode` supports tmux's default choose action plus
   detach, kill, suspend, tagging, custom `-F` format, `-f` filter, `-O`
   sorting, `-r` reverse sorting, template execution against the selected
-  client target, custom `-K` key labels, preview rendering, and `-Z` zoom
-  ownership for the mode lifetime.
-- The current reduced `client-mode` still lacks tmux's richer prompt-driven
-  detach or kill flows and the fuller client preview presentation.
+  client target, custom `-K` key labels, preview rendering with copied status
+  lines, and `-Z` zoom ownership for the mode lifetime.
+- The current `client-mode` still lacks tmux's fuller preview interaction
+  surface, especially mouse-side preview selection behavior.
 - Current `choose-tree` and `find-window` behavior enters a reduced `tree-mode`
   alternate-screen browser over the shared `window-mode-runtime.zig` interface.
 - The current reduced `tree-mode` supports session/window/pane tree browsing,

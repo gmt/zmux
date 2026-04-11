@@ -21,6 +21,7 @@ const std = @import("std");
 const args_mod = @import("arguments.zig");
 const format_mod = @import("format.zig");
 const key_string = @import("key-string.zig");
+const marked_pane = @import("marked-pane.zig");
 const menu_mod = @import("menu.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
@@ -319,65 +320,78 @@ fn windowTreeKey(
     mouse: ?*const T.MouseEvent,
 ) void {
     const data = modeData(wme);
+    var translated = key;
+    var finished = false;
+
     if (mouse) |event| {
-        if (windowTreeMouse(data, key, event)) |translated| {
-            switch (translated) {
-                '<' => {
-                    data.preview_offset -= 1;
-                    redraw(wme);
-                    return;
-                },
-                '>' => {
-                    data.preview_offset += 1;
-                    redraw(wme);
-                    return;
-                },
-                else => {},
+        if (currentItem(data)) |item| {
+            const previous_tag = currentTag(data.tree);
+            translated = windowTreeMouse(data, key, event.x, event.y, item);
+            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
+        }
+    }
+
+    if (translated == key) {
+        var mouse_x: u32 = 0;
+        var mouse_y: u32 = 0;
+        const previous_tag = currentTag(data.tree);
+        finished = mode_tree.handleKey(data.tree, client, &translated, mouse, &mouse_x, &mouse_y);
+        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
+
+        if (T.keycIsMouse(translated) and mouse != null) {
+            if (currentItem(data)) |item| {
+                const previous_mouse_tag = currentTag(data.tree);
+                translated = windowTreeMouse(data, translated, mouse_x, mouse_y, item);
+                resetPreviewOffsetIfSelectionChanged(data, previous_mouse_tag);
+            } else {
+                translated = T.KEYC_NONE;
             }
         }
     }
 
-    if (shortcutLineForKey(data.tree, key)) |line_index| {
-        const previous_tag = currentTag(data.tree);
-        data.tree.current = line_index;
-        adjustOffsetForCurrent(data.tree);
-        resetPreviewOffsetIfSelectionChanged(data, previous_tag);
-        chooseCurrent(wme, client, session, wl);
-        return;
-    }
-
-    switch (key) {
-        T.KEYC_WHEELUP => {
-            const previous_tag = currentTag(data.tree);
-            mode_tree.up(data.tree, false);
-            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
-            redraw(wme);
-        },
-        T.KEYC_WHEELDOWN => {
-            const previous_tag = currentTag(data.tree);
-            _ = mode_tree.down(data.tree, false);
-            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
-            redraw(wme);
-        },
+    switch (translated) {
         '<' => {
             data.preview_offset -= 1;
-            redraw(wme);
         },
         '>' => {
             data.preview_offset += 1;
-            redraw(wme);
+        },
+        'H' => {
+            const previous_tag = currentTag(data.tree);
+            focusTarget(data);
+            resetPreviewOffsetIfSelectionChanged(data, previous_tag);
+        },
+        'm' => {
+            setMarkedCurrent(data);
+        },
+        'M' => {
+            marked_pane.clear();
+            mode_tree.build(data.tree);
         },
         'x' => {
             promptTreeKill(client, wme, .kill_current);
+            return;
         },
         'X' => {
             promptTreeKill(client, wme, .kill_tagged);
+            return;
         },
         ':' => {
             promptTreeCommand(client, wme);
+            return;
+        },
+        '\r' => {
+            chooseCurrent(wme, client, session, wl);
+            return;
         },
         else => {},
     }
+
+    if (finished) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+        return;
+    }
+    redraw(wme);
 }
 
 fn windowTreeMenuCallback(tree: *mode_tree.Data, client: ?*T.Client, key: T.key_code) void {
@@ -709,6 +723,11 @@ fn currentTag(tree: *const mode_tree.Data) ?u64 {
     return tree.line_list.items[tree.current].item.tag;
 }
 
+fn currentItem(data: *const WindowTreeModeData) ?*TreeItem {
+    const item_ptr = mode_tree.getCurrent(data.tree) orelse return null;
+    return @ptrCast(@alignCast(item_ptr));
+}
+
 fn resetPreviewOffsetIfSelectionChanged(data: *WindowTreeModeData, previous_tag: ?u64) void {
     const previous = previous_tag orelse return;
     const current = currentTag(data.tree) orelse {
@@ -718,12 +737,74 @@ fn resetPreviewOffsetIfSelectionChanged(data: *WindowTreeModeData, previous_tag:
     if (current != previous) data.preview_offset = 0;
 }
 
-fn windowTreeMouse(data: *const WindowTreeModeData, key: T.key_code, mouse: *const T.MouseEvent) ?T.key_code {
-    if (!mouse.valid or key != T.keycMouse(T.KEYC_MOUSEDOWN1, .pane)) return null;
-    if (mouse.y < data.preview_top or mouse.y >= data.preview_bottom) return null;
-    if (data.preview_left != -1 and mouse.x <= @as(u32, @intCast(data.preview_left))) return '<';
-    if (data.preview_right != -1 and mouse.x >= @as(u32, @intCast(data.preview_right))) return '>';
-    return null;
+fn setMarkedCurrent(data: *WindowTreeModeData) void {
+    const item = currentItem(data) orelse return;
+    switch (item.item_type) {
+        .session => {
+            const wl = item.session.curw orelse return;
+            const pane = wl.window.active orelse return;
+            marked_pane.set(item.session, wl, pane);
+        },
+        .window => {
+            const wl = item.winlink orelse return;
+            const pane = wl.window.active orelse return;
+            marked_pane.set(item.session, wl, pane);
+        },
+        .pane => {
+            const wl = item.winlink orelse return;
+            const pane = item.pane orelse return;
+            marked_pane.set(item.session, wl, pane);
+        },
+    }
+    mode_tree.build(data.tree);
+}
+
+fn windowTreeMouse(
+    data: *const WindowTreeModeData,
+    key: T.key_code,
+    x: u32,
+    y: u32,
+    item: *const TreeItem,
+) T.key_code {
+    if (key != T.keycMouse(T.KEYC_MOUSEDOWN1, .pane)) return T.KEYC_NONE;
+    if (y < data.preview_top or y >= data.preview_bottom) return T.KEYC_NONE;
+    if (data.preview_left != -1 and x <= @as(u32, @intCast(data.preview_left))) return '<';
+    if (data.preview_right != -1 and x >= @as(u32, @intCast(data.preview_right))) return '>';
+    if (data.preview_end <= data.preview_start or data.preview_each == 0) return T.KEYC_NONE;
+
+    var preview_x = x;
+    if (data.preview_left != -1) {
+        preview_x -|= @as(u32, @intCast(data.preview_left));
+    } else if (preview_x != 0) {
+        preview_x -= 1;
+    }
+
+    var preview_index: u32 = 0;
+    if (preview_x != 0) {
+        preview_index = preview_x / data.preview_each;
+        const max_index = data.preview_end - data.preview_start - 1;
+        if (preview_index > max_index) preview_index = max_index;
+    }
+    const target_index = data.preview_start + preview_index;
+
+    switch (item.item_type) {
+        .session => {
+            const windows = sort_mod.sorted_winlinks_session(item.session, .{ .order = .index });
+            defer xm.allocator.free(windows);
+            if (target_index >= windows.len) return T.KEYC_NONE;
+            mode_tree.expandCurrent(data.tree);
+            _ = mode_tree.setCurrent(data.tree, tagForWinlink(windows[target_index]));
+            return '\r';
+        },
+        .window => {
+            const window_ptr = item.winlink.?.window;
+            if (target_index >= window_ptr.panes.items.len) return T.KEYC_NONE;
+            mode_tree.expandCurrent(data.tree);
+            _ = mode_tree.setCurrent(data.tree, tagForPane(window_ptr.panes.items[target_index]));
+            return '\r';
+        },
+        .pane => return T.KEYC_NONE,
+    }
 }
 
 fn buildTree(tree: *mode_tree.Data) void {
@@ -2139,6 +2220,153 @@ test "window-tree preview arrows translate pane clicks into scroll actions" {
     };
     windowTreeKey(wme, null, session_ptr, wl, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), &right_mouse);
     try std.testing.expectEqual(@as(u32, 2), data.preview_start);
+}
+
+test "window-tree H jumps back to the original target" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-home-target", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-home-target") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    session_ptr.curw = wl;
+    _ = window.window_add_pane(wl.window, null, 24, 12);
+    const target_pane = window.window_add_pane(wl.window, null, 24, 12);
+    wl.window.active = target_pane;
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = target_pane,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(target_pane, .{
+        .fs = &target,
+        .kind = .pane,
+    });
+    defer {
+        if (window.window_pane_mode(target_pane) != null)
+            _ = window_mode_runtime.resetMode(target_pane);
+    }
+
+    const data = modeData(wme);
+    data.tree.current = 0;
+    data.preview_offset = 3;
+    windowTreeKey(wme, null, session_ptr, wl, 'H', null);
+
+    const item = currentItem(data) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(item.item_type == .pane);
+    try std.testing.expect(item.pane == target_pane);
+    try std.testing.expectEqual(@as(i32, 0), data.preview_offset);
+}
+
+test "window-tree preview tile clicks select the clicked pane" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-preview-choose", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-preview-choose") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    const first = wl.window.active.?;
+    _ = window.window_add_pane(wl.window, null, 24, 12);
+    _ = window.window_add_pane(wl.window, null, 24, 12);
+    wl.window.active = first;
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = first,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(first, .{
+        .fs = &target,
+        .kind = .pane,
+    });
+    defer {
+        if (window.window_pane_mode(first) != null)
+            _ = window_mode_runtime.resetMode(first);
+    }
+
+    const data = modeData(wme);
+    const current_line = blk: {
+        for (data.tree.line_list.items, 0..) |line, line_index| {
+            const item: *TreeItem = @ptrCast(@alignCast(line.item.itemdata.?));
+            if (item.item_type == .window and item.winlink == wl)
+                break :blk @as(u32, @intCast(line_index));
+        }
+        return error.TestUnexpectedResult;
+    };
+    data.tree.current = current_line;
+    mode_tree.resize(data.tree, 120, 24);
+    redraw(wme);
+    try std.testing.expectEqual(@as(i32, -1), data.preview_right);
+
+    const click_layout = PreviewLayout{
+        .start = data.preview_start,
+        .end = data.preview_end,
+        .each = data.preview_each,
+        .remaining = 0,
+        .left = data.preview_left != -1,
+        .right = data.preview_right != -1,
+    };
+    const click_x = previewTileOffset(click_layout, 1) + 1;
+    const click = T.MouseEvent{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN1, .pane),
+        .x = click_x,
+        .y = data.preview_top,
+    };
+    const translated = windowTreeMouse(data, T.keycMouse(T.KEYC_MOUSEDOWN1, .pane), click.x, click.y, currentItem(data).?);
+    try std.testing.expectEqual(@as(T.key_code, '\r'), translated);
+    const selected = currentItem(data) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(selected.item_type == .pane);
+    try std.testing.expect(selected.pane != first);
 }
 
 test "window-tree default choose command targets switch-client" {

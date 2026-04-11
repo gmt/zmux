@@ -23,9 +23,9 @@ Live tmux-parity gaps only.
   them.
 - `zmux:` `choose-client` now rides the shared `mode-tree` substrate and
   carries tmux-shaped status-aware previews, while `tree-mode` has prompt-driven
-  command and kill flows. The remaining chooser gap is mainly fuller preview
-  interaction parity, especially mouse-side preview selection behavior across
-  the chooser family.
+  command and kill flows plus preview-tile mouse selection. The remaining
+  chooser gap is mainly fuller `choose-client` preview interaction parity and
+  the last bits of chooser-side polish around the shared `mode-tree` runtime.
 - `likely files:` `src/cmd-choose-tree.zig`, `src/window-client.zig`,
   `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
   `docs/choose-tree-modes.md`

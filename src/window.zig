@@ -39,6 +39,7 @@ const session_mod = @import("session.zig");
 const alerts = @import("alerts.zig");
 const layout_mod = @import("layout.zig");
 const input_mod = @import("input.zig");
+const input_keys = @import("input-keys.zig");
 const server_fn = @import("server-fn.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
@@ -1785,6 +1786,11 @@ pub fn window_pane_key(
     if (wp.fd < 0 or (wp.flags & T.PANE_INPUTOFF) != 0) return 0;
 
     if (T.keycIsMouse(key)) return 0;
+    var buf: [32]u8 = undefined;
+    const bytes = input_keys.input_key_encode_screen(screen_mod.screen_current(wp), key, &buf) catch return 0;
+    if (bytes.len == 0) return 0;
+    write_pane_bytes_best_effort(wp.fd, bytes);
+    window_pane_copy_key(wp, key);
     return 0;
 }
 
@@ -1813,19 +1819,11 @@ fn window_pane_copy_paste(wp: *T.WindowPane, buf: []const u8) void {
     }
 }
 
-/// Copy a key to all synchronised sibling panes (stub – actual input_key_pane
-/// dispatch is not yet ported).
-fn window_pane_copy_key(wp: *T.WindowPane, _key: T.key_code) void {
-    if (opts.options_get_number(wp.options, "synchronize-panes") == 0) return;
-
-    for (wp.window.panes.items) |loop| {
-        if (loop == wp) continue;
-        if (loop.modes.items.len > 0) continue;
-        if (loop.fd < 0 or (loop.flags & T.PANE_INPUTOFF) != 0) continue;
-        if (!window_pane_visible(loop)) continue;
-        if (opts.options_get_number(loop.options, "synchronize-panes") == 0) continue;
-        _ = _key;
-    }
+/// Copy a key to all synchronised sibling panes.
+fn window_pane_copy_key(wp: *T.WindowPane, key: T.key_code) void {
+    var buf: [32]u8 = undefined;
+    const bytes = input_keys.input_key_encode_screen(screen_mod.screen_current(wp), key, &buf) catch return;
+    window_pane_synchronize_key_bytes(wp, key, bytes);
 }
 
 // ── Ported window.c functions ─────────────────────────────────────────────

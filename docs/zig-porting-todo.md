@@ -73,14 +73,6 @@ Live tmux-parity gaps only.
   `src/cmd-split-window.zig`, `src/cmd-select-layout.zig`,
   `docs/layout-split-pane.md`, `docs/layout-select-layout.md`
 
-## Synchronize-Panes Keyboard Fanout
-
-- `tmux:` `synchronize-panes` forwards typed keys as well as pasted text to the
-  synchronized sibling panes.
-- `zmux:` paste fanout exists, but the keyboard path still drops the key at
-  `window_pane_copy_key`, so synchronized typing is not functionally complete.
-- `likely files:` `src/window.zig`, `src/input-keys.zig`, `src/server-client.zig`
-
 ## Display-Cell Runtime Adoption
 
 - `tmux:` prompt, status, message, redraw, and related text consumers share one

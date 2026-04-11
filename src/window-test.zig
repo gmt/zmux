@@ -214,6 +214,57 @@ test "window_pane_search matches visible base rows with tmux-style flags" {
     try std.testing.expectEqual(@as(u32, 0), win.window_pane_search(wp, "alternate", false, false));
 }
 
+test "window_pane_key mirrors encoded bytes to synchronized sibling panes" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(20, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const wp = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, wp);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const source = win.window_add_pane(w, null, 20, 4);
+    const sibling = win.window_add_pane(w, null, 20, 4);
+    w.active = source;
+
+    const source_pipe = try std.posix.pipe();
+    const sibling_pipe = try std.posix.pipe();
+    defer std.posix.close(source_pipe[0]);
+    defer std.posix.close(sibling_pipe[0]);
+    source.fd = source_pipe[1];
+    sibling.fd = sibling_pipe[1];
+    defer {
+        if (source.fd >= 0) std.posix.close(source.fd);
+        if (sibling.fd >= 0) std.posix.close(sibling.fd);
+        source.fd = -1;
+        sibling.fd = -1;
+    }
+
+    opts.options_set_number(source.options, "synchronize-panes", 1);
+    opts.options_set_number(sibling.options, "synchronize-panes", 1);
+
+    try std.testing.expectEqual(@as(i32, 0), win.window_pane_key(source, 'x', null));
+
+    var source_buf: [16]u8 = undefined;
+    const source_len = try std.posix.read(source_pipe[0], &source_buf);
+    try std.testing.expectEqualStrings("x", source_buf[0..source_len]);
+
+    var sibling_buf: [16]u8 = undefined;
+    const sibling_len = try std.posix.read(sibling_pipe[0], &sibling_buf);
+    try std.testing.expectEqualStrings("x", sibling_buf[0..sibling_len]);
+}
+
 test "window_detach_pane promotes the last active pane and marks it changed" {
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);

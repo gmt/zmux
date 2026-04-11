@@ -29,6 +29,7 @@ const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status_runtime = @import("status-runtime.zig");
+const style_mod = @import("style.zig");
 const T = @import("types.zig");
 const utf8 = @import("utf8.zig");
 const window = @import("window.zig");
@@ -244,6 +245,12 @@ pub fn startDrag(client: ?*T.Client, mouse: *const T.MouseEvent) void {
     syncBackingFromSource(wme);
 
     updateCursorFromMouse(wme, mouse, true);
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none) {
+        data.selflag = .char;
+        startSelection(wme);
+        _ = window_copy_update_selection(wme, false, false);
+    }
     cl.tty.mouse_drag_update = dragUpdate;
     redraw(wme);
 }
@@ -823,6 +830,7 @@ fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
     if (wme.mode != &window_copy_mode) return;
 
     updateCursorFromMouse(wme, mouse, false);
+    _ = window_copy_update_selection(wme, false, false);
     redraw(wme);
 }
 
@@ -1273,6 +1281,7 @@ fn clearSelection(wme: *T.WindowModeEntry) void {
     data.cursordrag = .none;
     data.lineflag = .none;
     data.selflag = .char;
+    screen.screen_clear_selection(wme.wp.screen);
 }
 
 fn updateSelection(wme: *T.WindowModeEntry) bool {
@@ -1405,6 +1414,13 @@ fn getSelectionText(wme: *T.WindowModeEntry) ?[]u8 {
     }
 
     return buf.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
+fn getSelectionOrMatchText(wme: *T.WindowModeEntry) ?[]u8 {
+    const data = modeData(wme);
+    if (data.cursordrag == .none and data.lineflag == .none)
+        return matchAtCursor(data);
+    return getSelectionText(wme);
 }
 
 /// Append cells from a single grid row [line_start..line_end) into buf,
@@ -1641,7 +1657,7 @@ fn cmdSwapSelectionEnd(wme: *T.WindowModeEntry) void {
 fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     _ = args;
     window_copy_synchronize_cursor(wme, false);
-    const buf = getSelectionText(wme) orelse return;
+    const buf = getSelectionOrMatchText(wme) orelse return;
     defer xm.allocator.free(buf);
     _ = session;
     const paste_mod = @import("paste.zig");
@@ -1655,7 +1671,7 @@ fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
 fn cmdCopySelectionNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
     _ = args;
     window_copy_synchronize_cursor(wme, false);
-    const buf = getSelectionText(wme) orelse return;
+    const buf = getSelectionOrMatchText(wme) orelse return;
     defer xm.allocator.free(buf);
     _ = session;
     const paste_mod = @import("paste.zig");
@@ -1672,7 +1688,7 @@ fn cmdCopyPipeNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const
 
 fn doCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, do_clear: bool, cancel: bool) void {
     window_copy_synchronize_cursor(wme, false);
-    const buf_text = getSelectionText(wme) orelse return;
+    const buf_text = getSelectionOrMatchText(wme) orelse return;
     defer xm.allocator.free(buf_text);
 
     const paste_mod = @import("paste.zig");
@@ -1815,12 +1831,19 @@ fn cmdCopyEndOfLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *con
 
 fn cmdAppendSelection(wme: *T.WindowModeEntry, session: *T.Session) void {
     _ = session;
-    const buf = getSelectionText(wme) orelse return;
+    const buf = getSelectionOrMatchText(wme) orelse return;
     defer xm.allocator.free(buf);
 
-    // Append to existing paste buffer
     const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf));
+    if (paste_mod.paste_get_top(null)) |top| {
+        const old = paste_mod.paste_buffer_data(top, null);
+        const merged = xm.allocator.alloc(u8, old.len + buf.len) catch unreachable;
+        @memcpy(merged[0..old.len], old);
+        @memcpy(merged[old.len..], buf);
+        paste_mod.paste_replace(top, merged);
+    } else {
+        paste_mod.paste_add(null, xm.xstrdup(buf));
+    }
     clearSelection(wme);
 }
 
@@ -2831,9 +2854,12 @@ pub fn window_copy_clear_selection(wme: *T.WindowModeEntry) void {
 pub fn window_copy_update_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
     _ = _may_redraw;
     const data = modeData(wme);
-    if (data.cursordrag == .none and data.lineflag == .none) return false;
-    window_copy_synchronize_cursor(wme, no_reset);
-    return true;
+    const s = wme.wp.screen;
+    if (data.cursordrag == .none and data.lineflag == .none) {
+        screen.screen_clear_selection(s);
+        return false;
+    }
+    return window_copy_set_selection(wme, false, no_reset);
 }
 
 pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *u32) i32 {
@@ -2848,8 +2874,30 @@ pub fn window_copy_adjust_selection(wme: *T.WindowModeEntry, selx: *u32, sely: *
 pub fn window_copy_set_selection(wme: *T.WindowModeEntry, _may_redraw: bool, no_reset: bool) bool {
     _ = _may_redraw;
     const data = modeData(wme);
-    if (data.cursordrag == .none and data.lineflag == .none) return false;
+    const s = wme.wp.screen;
+    if (data.cursordrag == .none and data.lineflag == .none) {
+        screen.screen_clear_selection(s);
+        return false;
+    }
     window_copy_synchronize_cursor(wme, no_reset);
+
+    var sx = data.selx;
+    var sy = data.sely;
+    const start_rel = adjustSelection(wme, &sx, &sy);
+
+    var ex = data.endselx;
+    var ey = data.endsely;
+    const end_rel = adjustSelection(wme, &ex, &ey);
+
+    if (start_rel == end_rel and start_rel != .on_screen) {
+        screen.screen_hide_selection(s);
+        return false;
+    }
+
+    var gc = T.grid_default_cell;
+    style_mod.style_apply(&gc, wme.wp.window.options, "copy-mode-selection-style", null);
+    gc.flags |= T.GRID_FLAG_NOPALETTE;
+    screen.screen_set_selection(s, sx, sy, ex, ey, data.rectflag, @intCast(opts.options_get_number(wme.wp.window.options, "mode-keys")), &gc);
     return true;
 }
 

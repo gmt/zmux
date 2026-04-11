@@ -1498,6 +1498,127 @@ test "window-copy startDrag keeps the cursor under reduced mouse drags" {
     try std.testing.expectEqual(@as(u32, 0), target.screen.sel.?.ey);
 }
 
+test "window-copy dragUpdate scrolls when dragging at the viewport edge" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window.window_init_globals(xm.allocator);
+
+    const source_grid = grid.grid_create(6, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 33,
+        .name = xm.xstrdup("copy-drag-edge"),
+        .sx = 6,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 34,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 35,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    try window.all_window_panes.put(target.id, &target);
+    defer _ = window.all_window_panes.remove(target.id);
+
+    setGridLineText(source.base.grid, 0, "row0");
+    setGridLineText(source.base.grid, 1, "row1");
+    setGridLineText(source.base.grid, 2, "row2");
+    setGridLineText(source.base.grid, 3, "row3");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = wc.enterMode(&target, &source, &args);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "copy-mode-edge-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty = .{ .client = &client };
+
+    var mouse = T.MouseEvent{
+        .valid = true,
+        .s = -1,
+        .w = -1,
+        .wp = @intCast(target.id),
+        .x = 0,
+        .y = 1,
+        .lx = 0,
+        .ly = 1,
+    };
+    wc.startDrag(&client, &mouse);
+
+    const wme = window.window_pane_mode(&target).?;
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 2), wc.absoluteCursorRow(wme));
+
+    wc.modeData(wme).top = 1;
+    wc.modeData(wme).cy = 0;
+    mouse.y = 0;
+    mouse.ly = 0;
+    client.tty.mouse_drag_update.?(&client, &mouse);
+
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).top);
+    try std.testing.expect(target.screen.sel != null);
+}
+
 test "window-copy scrollToMouse maps the reduced viewport onto scrollbar drags" {
     const opts_mod = @import("options.zig");
 

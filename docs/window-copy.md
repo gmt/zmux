@@ -22,6 +22,7 @@
   - regex search through `search-forward` and `search-backward`
   - keyboard selection growth through ordinary cursor movement
   - drag-started visual selection that stays synchronized on the active screen
+  - edge drag updates that scroll the viewport while extending a selection
   - mouse-positioned `select-word` and `select-line`
   - word selection growth that keeps using the session's
     `word-separators`
@@ -40,8 +41,7 @@
 ## Gaps (tracked in docs/zmux-porting-todo.md)
 
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
-- The broader drag auto-scroll and mouse-edge behavior are still short of full
-  tmux parity
+- Stationary edge-drag repeat scrolling is still short of full tmux parity
 - Mark, search, and clipboard-selection semantics still need more tmux-shaped
   coverage
 - Some mode-local redraw and update paths still need stronger parity coverage

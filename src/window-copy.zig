@@ -883,7 +883,19 @@ fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
 
+    const data = modeData(wme);
+    const point = mouseAt(wp, mouse, false) orelse return;
+    const old_cx = data.cx;
+    const old_cy = data.cy;
+
     updateCursorFromMouse(wme, mouse, false);
+    if (old_cy != data.cy or old_cx == data.cx) {
+        if (point.y == 0) {
+            scrollLines(wme, -1);
+        } else if (point.y + 1 == viewRows(wp)) {
+            cursorDownLines(wme, 1);
+        }
+    }
     _ = window_copy_update_selection(wme, false, false);
     redraw(wme);
 }

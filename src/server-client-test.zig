@@ -32,6 +32,7 @@ const client_registry = @import("client-registry.zig");
 const resize_mod = @import("resize.zig");
 const sc = @import("server-client.zig");
 const file_mod = @import("file.zig");
+const control = @import("control.zig");
 
 const server_client_resolve_cwd = sc.server_client_resolve_cwd;
 const server_client_finalize_identify = sc.server_client_finalize_identify;
@@ -355,7 +356,7 @@ test "server_client_lock sends lock message and unlock restores redraw state" {
     try std.testing.expect(client.flags & T.CLIENT_REDRAWWINDOW != 0);
 }
 
-test "server_client_detach sends detachkill payload and clears session state" {
+test "server_client_detach marks detachkill exit and check_exit sends payload" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
 
@@ -409,9 +410,13 @@ test "server_client_detach sends detachkill payload and clears session state" {
     server_client_detach(&client, .detachkill);
     try std.testing.expect(client.session == null);
     try std.testing.expect(client.flags & T.CLIENT_ATTACHED == 0);
+    try std.testing.expect(client.flags & T.CLIENT_EXIT != 0);
     try std.testing.expectEqual(T.ClientExitReason.detached_hup, client.exit_reason);
     try std.testing.expectEqualStrings("detach-test", client.exit_session.?);
     try std.testing.expectEqual(@as(u32, 0), session.attached);
+
+    sc.server_client_check_exit(&client);
+    try std.testing.expect(client.flags & T.CLIENT_EXIT == 0);
 
     try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
     var imsg_msg: c.imsg.imsg = undefined;
@@ -419,7 +424,7 @@ test "server_client_detach sends detachkill payload and clears session state" {
     defer c.imsg.imsg_free(&imsg_msg);
 
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.detachkill))), c.imsg.imsg_get_type(&imsg_msg));
-    const data_len = c.imsg.imsg_get_len(&imsg_msg);
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     var payload = try xm.allocator.alloc(u8, data_len);
     defer xm.allocator.free(payload);
     try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len));
@@ -1691,7 +1696,7 @@ test "server_client_dispatch_shell empty sends default shell path then marks pee
     try std.testing.expect((cl.peer.?.flags & T.PEER_BAD) != 0);
 }
 
-test "server_client_check_exit sends exit with retval and clears CLIENT_EXIT" {
+test "server_client_check_exit sends detach with session name and clears CLIENT_EXIT" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
 
@@ -1707,9 +1712,10 @@ test "server_client_check_exit sends exit with retval and clears CLIENT_EXIT" {
         .status = .{},
         .flags = T.CLIENT_EXIT,
         .exit_reason = .detached,
-        .retval = 9,
+        .exit_session = xm.xstrdup("detach-me"),
     };
     cl.tty = .{ .client = &cl };
+    defer if (cl.exit_session) |name| xm.allocator.free(name);
     cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
     defer {
         const peer = cl.peer.?;
@@ -1733,10 +1739,83 @@ test "server_client_check_exit sends exit with retval and clears CLIENT_EXIT" {
     var out: c.imsg.imsg = undefined;
     try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
     defer c.imsg.imsg_free(&out);
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exit))), c.imsg.imsg_get_type(&out));
-    var rv: i32 = -1;
-    _ = c.imsg.imsg_get_data(&out, std.mem.asBytes(&rv).ptr, @sizeOf(i32));
-    try std.testing.expectEqual(@as(i32, 9), rv);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.detach))), c.imsg.imsg_get_type(&out));
+    const data_len = out.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    const payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    _ = c.imsg.imsg_get_data(&out, payload.ptr, payload.len);
+    try std.testing.expectEqualStrings("detach-me", std.mem.sliceTo(@as([*:0]const u8, @ptrCast(payload.ptr)), 0));
+}
+
+test "server_client_check_exit waits for queued control output before detach" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "sc-check-exit-control" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL | T.CLIENT_EXIT,
+        .exit_reason = .detached,
+        .exit_session = xm.xstrdup("control-detach"),
+    };
+    cl.tty = .{ .client = &cl };
+    defer if (cl.exit_session) |name| xm.allocator.free(name);
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+    imsgReaderSetNonblock(pair[1]);
+
+    const cb = try xm.allocator.create(T.ControlBlock);
+    cb.* = .{ .line = xm.xstrdup("%queued"), .t = std.time.milliTimestamp() };
+    cl.control_all_blocks.append(xm.allocator, cb) catch unreachable;
+    defer {
+        while (cl.control_all_blocks.items.len > 0) {
+            const block = cl.control_all_blocks.orderedRemove(0);
+            if (block.line) |line| xm.allocator.free(line);
+            xm.allocator.destroy(block);
+        }
+        cl.control_all_blocks.deinit(xm.allocator);
+    }
+
+    sc.server_client_check_exit(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_EXIT) != 0);
+
+    control.control_flush_all_blocks(&cl);
+    sc.server_client_check_exit(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_EXIT) == 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var saw_write = false;
+    var saw_detach = false;
+    while (true) {
+        var msg: c.imsg.imsg = undefined;
+        if (c.imsg.imsg_get(&reader, &msg) <= 0) break;
+        defer c.imsg.imsg_free(&msg);
+        const ty = c.imsg.imsg_get_type(&msg);
+        if (ty == @intFromEnum(protocol.MsgType.write)) saw_write = true;
+        if (ty == @intFromEnum(protocol.MsgType.detach)) saw_detach = true;
+    }
+    try std.testing.expect(saw_write);
+    try std.testing.expect(saw_detach);
 }
 
 test "server_client_check_modes returns early without REDRAWSTATUS" {

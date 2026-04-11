@@ -346,7 +346,6 @@ pub fn server_client_unlock(cl: *T.Client) void {
 
 pub fn server_client_detach(cl: *T.Client, msg_type: protocol.MsgType) void {
     const s = cl.session orelse return;
-    const srv = @import("server.zig");
 
     if (s.attached > 0) s.attached -= 1;
     cl.last_session = s;
@@ -361,12 +360,9 @@ pub fn server_client_detach(cl: *T.Client, msg_type: protocol.MsgType) void {
     cl.exit_session = xm.xstrdup(s.name);
 
     notify.notify_client("client-detached", cl);
+    const srv = @import("server.zig");
     srv.server_update_socket();
-    if (cl.peer) |peer| {
-        _ = proc_mod.proc_send(peer, msg_type, -1, cl.exit_session.?.ptr, cl.exit_session.?.len + 1);
-    } else {
-        cl.flags |= T.CLIENT_EXIT;
-    }
+    cl.flags |= T.CLIENT_EXIT;
 }
 
 fn server_client_exec_shell(s: ?*T.Session) []const u8 {
@@ -789,10 +785,20 @@ pub fn server_client_loop() void {
 pub fn server_client_check_exit(cl: *T.Client) void {
     if (cl.flags & T.CLIENT_EXIT == 0) return;
 
+    if (cl.flags & T.CLIENT_CONTROL != 0) {
+        control.control_discard(cl);
+        if (!control.control_all_done(cl)) return;
+    }
+
     const peer = cl.peer orelse return;
 
     switch (cl.exit_reason) {
-        .none, .detached, .detached_hup, .lost_tty, .terminated, .lost_server => {
+        .detached, .detached_hup => {
+            const name = cl.exit_session orelse "";
+            const msg_type: protocol.MsgType = if (cl.exit_reason == .detached_hup) .detachkill else .detach;
+            _ = proc_mod.proc_send(peer, msg_type, -1, name.ptr, name.len + 1);
+        },
+        .none, .lost_tty, .terminated, .lost_server => {
             const retval: i32 = cl.retval;
             _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&retval)), @sizeOf(i32));
         },

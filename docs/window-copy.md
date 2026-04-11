@@ -19,6 +19,8 @@
   - top, middle, bottom viewport positioning
   - history-top and history-bottom
   - scrollbar drag via `copy-mode -S` and `scroll-to-mouse`
+  - the `copy-selection-no-clear`, `copy-pipe-line`,
+    `copy-pipe-line-and-cancel`, and `copy-pipe-end-of-line` command heads
   - cancel/exit
 - Default key tables include `copy-mode` and `copy-mode-vi`
   bindings for supported commands.
@@ -30,6 +32,8 @@
 ## Gaps (tracked in docs/zig-porting-todo.md)
 
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
+- Regex search, mouse-driven selection growth, and the broader line/word
+  selection semantics are still short of full tmux parity
 - A smaller tail of less-common copy-mode commands still falls through to the
   unsupported-command path
 - Resize and mode-local draw hooks

@@ -2822,3 +2822,194 @@ test "view mode: refresh-from-pane leaves view content intact" {
     defer xm.allocator.free(row0_after);
     try std.testing.expectEqualStrings("viewtext", row0_after);
 }
+
+test "copy-mode copy-selection-no-clear keeps the active selection" {
+    const env_mod = @import("environ.zig");
+    const paste_mod = @import("paste.zig");
+    const sess = @import("session.zig");
+
+    initWindowCopyTestGlobals();
+    paste_mod.paste_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const source_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    const session = sess.session_create(null, "copy-selection-no-clear", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("copy-selection-no-clear") != null) sess.session_destroy(session, false, "test");
+
+    var window_ = T.Window{
+        .id = 3100,
+        .name = xm.xstrdup("copy-selection-no-clear-window"),
+        .sx = 8,
+        .sy = 1,
+        .options = opts.options_create(opts.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 3101,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 3102,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    setGridLineText(source.base.grid, 0, "copyme");
+    source.base.grid.linedata[0].cellused = 6;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "select-line");
+    try runCopyModeTestCommandWithSession(wme, session, "copy-selection-no-clear");
+
+    const top = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("copyme", paste_mod.paste_buffer_data(top, null));
+    try std.testing.expect(wc.modeData(wme).lineflag != .none);
+}
+
+test "copy-mode recognizes copy-pipe line aliases" {
+    const env_mod = @import("environ.zig");
+    const paste_mod = @import("paste.zig");
+    const sess = @import("session.zig");
+
+    initWindowCopyTestGlobals();
+    paste_mod.paste_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "copy-pipe-line-alias", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("copy-pipe-line-alias") != null) sess.session_destroy(session, false, "test");
+
+    const source_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 3110,
+        .name = xm.xstrdup("copy-pipe-line-window"),
+        .sx = 8,
+        .sy = 1,
+        .options = opts.options_create(opts.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 3111,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 3112,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    setGridLineText(source.base.grid, 0, "linecopy");
+    source.base.grid.linedata[0].cellused = 8;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandWithSession(wme, session, "copy-pipe-line");
+    const line_top = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("linecop", paste_mod.paste_buffer_data(line_top, null));
+
+    paste_mod.paste_reset_for_tests();
+    wc.modeData(wme).cx = 4;
+    try runCopyModeTestCommandWithSession(wme, session, "copy-pipe-end-of-line");
+    const tail_top = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("cop", paste_mod.paste_buffer_data(tail_top, null));
+}

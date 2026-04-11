@@ -493,16 +493,24 @@ pub fn copyModeCommand(
         cmdCopySelection(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-selection-and-cancel")) {
         cmdCopySelection(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-selection-no-clear")) {
+        cmdCopySelectionNoClear(wme, session, args);
     } else if (std.mem.eql(u8, command, "copy-pipe")) {
         cmdCopyPipe(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-pipe-and-cancel")) {
         cmdCopyPipe(wme, session, args, true);
     } else if (std.mem.eql(u8, command, "copy-pipe-no-clear")) {
         cmdCopyPipeNoClear(wme, session, args);
+    } else if (std.mem.eql(u8, command, "copy-pipe-line")) {
+        cmdCopyLinePipe(wme, session, args, false);
+    } else if (std.mem.eql(u8, command, "copy-pipe-line-and-cancel")) {
+        cmdCopyLinePipe(wme, session, args, true);
     } else if (std.mem.eql(u8, command, "copy-line")) {
         cmdCopyLine(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-line-and-cancel")) {
         cmdCopyLine(wme, session, args, true);
+    } else if (std.mem.eql(u8, command, "copy-pipe-end-of-line")) {
+        cmdCopyEndOfLinePipe(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-end-of-line")) {
         cmdCopyEndOfLine(wme, session, args, false);
     } else if (std.mem.eql(u8, command, "copy-end-of-line-and-cancel")) {
@@ -1503,6 +1511,7 @@ fn cmdSelectLine(wme: *T.WindowModeEntry, session: *T.Session) void {
         cursorDownLines(wme, 1);
         cursorEndOfLine(wme);
     }
+    _ = updateSelection(wme);
 }
 
 fn cmdSelectWord(wme: *T.WindowModeEntry, session: *T.Session) void {
@@ -1536,6 +1545,7 @@ fn cmdSelectWord(wme: *T.WindowModeEntry, session: *T.Session) void {
     } else if (data.dx > data.endselrx) {
         data.dx = data.endselrx;
     }
+    _ = updateSelection(wme);
 }
 
 fn cmdSelectionMode(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
@@ -1623,6 +1633,7 @@ fn cmdSwapSelectionEnd(wme: *T.WindowModeEntry) void {
 
 fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     _ = args;
+    window_copy_synchronize_cursor(wme, false);
     const buf = getSelectionText(wme) orelse return;
     defer xm.allocator.free(buf);
     _ = session;
@@ -1634,6 +1645,16 @@ fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
     }
 }
 
+fn cmdCopySelectionNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
+    _ = args;
+    window_copy_synchronize_cursor(wme, false);
+    const buf = getSelectionText(wme) orelse return;
+    defer xm.allocator.free(buf);
+    _ = session;
+    const paste_mod = @import("paste.zig");
+    paste_mod.paste_add(null, xm.xstrdup(buf));
+}
+
 fn cmdCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     doCopyPipe(wme, session, args, true, cancel);
 }
@@ -1643,6 +1664,7 @@ fn cmdCopyPipeNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const
 }
 
 fn doCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, do_clear: bool, cancel: bool) void {
+    window_copy_synchronize_cursor(wme, false);
     const buf_text = getSelectionText(wme) orelse return;
     defer xm.allocator.free(buf_text);
 
@@ -1675,6 +1697,7 @@ fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_m
     while (remaining > 1) : (remaining -= 1)
         cursorDownLines(wme, 1);
     cursorEndOfLine(wme);
+    window_copy_synchronize_cursor(wme, false);
 
     const buf = getSelectionText(wme) orelse {
         data.cx = ocx;
@@ -1698,6 +1721,31 @@ fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_m
     }
 }
 
+fn cmdCopyLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+
+    const ocx = data.cx;
+    const ocy = data.cy;
+    const otop = data.top;
+
+    data.selflag = .char;
+    cursorStartOfLine(wme);
+    startSelection(wme);
+
+    var remaining = count;
+    while (remaining > 1) : (remaining -= 1)
+        cursorDownLines(wme, 1);
+    cursorEndOfLine(wme);
+    window_copy_synchronize_cursor(wme, false);
+
+    doCopyPipe(wme, session, args, true, cancel);
+
+    data.cx = ocx;
+    data.cy = ocy;
+    data.top = otop;
+}
+
 fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     _ = args;
     const data = modeData(wme);
@@ -1712,6 +1760,7 @@ fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
     while (remaining > 1) : (remaining -= 1)
         cursorDownLines(wme, 1);
     cursorEndOfLine(wme);
+    window_copy_synchronize_cursor(wme, false);
 
     const buf = getSelectionText(wme) orelse {
         data.cx = ocx;
@@ -1733,6 +1782,28 @@ fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
     }
+}
+
+fn cmdCopyEndOfLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
+    const data = modeData(wme);
+    const count = repeatCount(wme);
+
+    const ocx = data.cx;
+    const ocy = data.cy;
+    const otop = data.top;
+
+    startSelection(wme);
+    var remaining = count;
+    while (remaining > 1) : (remaining -= 1)
+        cursorDownLines(wme, 1);
+    cursorEndOfLine(wme);
+    window_copy_synchronize_cursor(wme, false);
+
+    doCopyPipe(wme, session, args, true, cancel);
+
+    data.cx = ocx;
+    data.cy = ocy;
+    data.top = otop;
 }
 
 fn cmdAppendSelection(wme: *T.WindowModeEntry, session: *T.Session) void {

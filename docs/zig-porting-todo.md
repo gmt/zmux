@@ -47,9 +47,9 @@ Live tmux-parity gaps only.
   behavior.
 - `zmux:` the current mode now carries live source history into its private
   backing surface, its public search-match helpers are now real, but the richer
-  copy/search/selection flows are still incomplete, and some less-common
-  commands still fall through to the
-  unsupported-command path.
+  copy/search/selection flows are still incomplete. tmux's broader selection,
+  mark, drag, and regex-search behavior still outstrips the current runtime
+  even though the missing line-copy and no-clear command heads are now wired.
 - `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
   `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
 

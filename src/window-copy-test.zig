@@ -15,6 +15,7 @@
 const std = @import("std");
 const args_mod = @import("arguments.zig");
 const grid = @import("grid.zig");
+const key_bindings_data = @import("key-bindings-data.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -42,12 +43,21 @@ fn runCopyModeTestCommandWithSession(wme: *T.WindowModeEntry, session: *T.Sessio
     return runCopyModeTestCommandArgs(wme, session, &.{command});
 }
 
-fn runCopyModeTestCommandArgs(wme: *T.WindowModeEntry, session: ?*T.Session, values: []const []const u8) !void {
+fn runCopyModeTestCommandArgsWithClient(
+    wme: *T.WindowModeEntry,
+    client: ?*T.Client,
+    session: ?*T.Session,
+    values: []const []const u8,
+) !void {
     var args = args_mod.Arguments.init(xm.allocator);
     defer args.deinit();
     for (values) |value|
         try args.values.append(xm.allocator, xm.xstrdup(value));
-    wc.copyModeCommand(wme, null, if (session) |s| s else undefined, undefined, @ptrCast(&args), null);
+    wc.copyModeCommand(wme, client, if (session) |s| s else undefined, undefined, @ptrCast(&args), null);
+}
+
+fn runCopyModeTestCommandArgs(wme: *T.WindowModeEntry, session: ?*T.Session, values: []const []const u8) !void {
+    return runCopyModeTestCommandArgsWithClient(wme, null, session, values);
 }
 
 fn runCopyModeMouseCommandArgs(
@@ -68,6 +78,28 @@ fn initWindowCopyTestGlobals() void {
 
     sess.session_init_globals(xm.allocator);
     window.window_init_globals(xm.allocator);
+}
+
+fn collectCopyModeBuiltinCommandHeads(list: *std.ArrayList([]const u8)) !void {
+    for (key_bindings_data.default_binding_specs) |spec| {
+        if (!std.mem.eql(u8, spec.table, "copy-mode") and !std.mem.eql(u8, spec.table, "copy-mode-vi"))
+            continue;
+        const command = spec.command orelse continue;
+        const send_at = std.mem.indexOf(u8, command, "send -X ") orelse continue;
+        const rest = command[send_at + "send -X ".len ..];
+        const end = std.mem.indexOfAny(u8, rest, " ;\"") orelse rest.len;
+        const head = rest[0..end];
+        if (head.len == 0) continue;
+
+        var seen = false;
+        for (list.items) |existing| {
+            if (std.mem.eql(u8, existing, head)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try list.append(xm.allocator, head);
+    }
 }
 
 test "window-copy tracks source pane updates without explicit refresh" {
@@ -724,6 +756,211 @@ test "window-copy select-word keeps separator-delimited selection bounds" {
     try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
 }
 
+test "window-copy startDrag keeps session word separators when extending a word selection" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    const session_options = opts_mod.options_create(opts_mod.global_s_options);
+    defer opts_mod.options_free(session_options);
+    opts_mod.options_set_string(session_options, false, "word-separators", ",");
+
+    var session = T.Session{
+        .id = 78,
+        .name = xm.xstrdup("copy-drag-word-session"),
+        .cwd = "/",
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+        .options = session_options,
+        .environ = &env,
+    };
+    defer xm.allocator.free(session.name);
+    defer session.lastw.deinit(xm.allocator);
+    defer session.windows.deinit();
+
+    var window_ = T.Window{
+        .id = 79,
+        .name = xm.xstrdup("copy-drag-word-window"),
+        .sx = 14,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+    opts_mod.options_set_number(window_.options, "mode-keys", T.MODEKEY_VI);
+
+    var source = T.WindowPane{
+        .id = 80,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 81,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    try window.all_window_panes.put(target.id, &target);
+    defer _ = window.all_window_panes.remove(target.id);
+
+    setGridLineText(source.base.grid, 0, "foo,  bar baz");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    wc.modeData(wme).cx = 7;
+    try runCopyModeTestCommandWithSession(wme, &session, "select-word");
+
+    var client = T.Client{
+        .name = "copy-drag-word-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = &session,
+    };
+    client.tty = .{ .client = &client };
+
+    var start_mouse = T.MouseEvent{
+        .valid = true,
+        .wp = @intCast(target.id),
+        .x = 7,
+        .y = 0,
+    };
+    wc.startDrag(&client, &start_mouse);
+
+    try std.testing.expect(target.screen.sel != null);
+    try std.testing.expect(client.tty.mouse_drag_release != null);
+}
+
+test "window-copy previous-word-pos respects custom separators" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(14, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(14, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 82,
+        .name = xm.xstrdup("copy-prev-word-pos-window"),
+        .sx = 14,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 83,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 84,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 14,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "foo,  bar baz");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    wc.modeData(wme).cx = 7;
+    var px: u32 = 0;
+    var py: u32 = 0;
+    wc.window_copy_cursor_previous_word_pos(wme, ",", &px, &py);
+
+    try std.testing.expectEqual(@as(u32, 6), px);
+    try std.testing.expectEqual(@as(u32, 0), py);
+}
+
 test "window-copy jump char motions remember direction and target character" {
     initWindowCopyTestGlobals();
 
@@ -1238,6 +1475,7 @@ test "window-copy startDrag keeps the cursor under reduced mouse drags" {
     };
     wc.startDrag(&client, &start_mouse);
     try std.testing.expect(client.tty.mouse_drag_update != null);
+    try std.testing.expect(client.tty.mouse_drag_release != null);
     try std.testing.expectEqual(@as(u32, 4), target.screen.cx);
     try std.testing.expectEqual(@as(u32, 1), target.screen.cy);
     try std.testing.expectEqual(wc.CursorDrag.endsel, wc.modeData(window.window_pane_mode(&target).?).cursordrag);
@@ -1344,7 +1582,7 @@ test "window-copy scrollToMouse maps the reduced viewport onto scrollbar drags" 
     try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).top);
 }
 
-test "unsupported window-copy commands surface a status message" {
+test "unknown window-copy commands surface a status message" {
     const opts_mod = @import("options.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
@@ -1441,10 +1679,126 @@ test "unsupported window-copy commands surface a status message" {
 
     var unsupported = args_mod.Arguments.init(xm.allocator);
     defer unsupported.deinit();
-    try unsupported.values.append(xm.allocator, xm.xstrdup("search-jump-to"));
+    try unsupported.values.append(xm.allocator, xm.xstrdup("definitely-not-a-tmux-command"));
     wc.copyModeCommand(wme, &client, undefined, undefined, @ptrCast(&unsupported), null);
 
-    try std.testing.expectEqualStrings("Copy-mode command not supported yet: search-jump-to", client.message_string.?);
+    try std.testing.expectEqualStrings("Copy-mode command not supported yet: definitely-not-a-tmux-command", client.message_string.?);
+}
+
+test "copy-mode default tables only use supported send -X command heads" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const sess = @import("session.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "copy-mode-builtins", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("copy-mode-builtins") != null) sess.session_destroy(session, false, "test");
+
+    const source_grid = grid.grid_create(16, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(16, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(16, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(16, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 24,
+        .name = xm.xstrdup("copy-mode-builtins-window"),
+        .sx = 16,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 25,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 16,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 26,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 16,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    setGridLineText(source.base.grid, 0, "alpha beta");
+    setGridLineText(source.base.grid, 1, "gamma delta");
+    setGridLineText(source.base.grid, 2, "epsilon zeta");
+    setGridLineText(source.base.grid, 3, "eta theta");
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "copy-mode-builtin-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    client.tty = .{ .client = &client };
+
+    var commands: std.ArrayList([]const u8) = .{};
+    defer commands.deinit(xm.allocator);
+    try collectCopyModeBuiltinCommandHeads(&commands);
+    try std.testing.expect(commands.items.len != 0);
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    var wme = wc.enterMode(&target, &source, &args);
+
+    for (commands.items) |command| {
+        wme = window.window_pane_mode(&target) orelse wc.enterMode(&target, &source, &args);
+        if (client.message_string) |msg| {
+            xm.allocator.free(msg);
+            client.message_string = null;
+        }
+        try runCopyModeTestCommandArgsWithClient(wme, &client, session, &.{command});
+        try std.testing.expect(client.message_string == null);
+    }
 }
 
 test "window-copy set-mark and jump-to-mark swap cursor with saved mark" {
@@ -2560,7 +2914,100 @@ test "window-copy mouse select-word uses the clicked position" {
 
     const selected = wc.window_copy_get_selection(wme, null) orelse return error.TestUnexpectedResult;
     defer xm.allocator.free(selected);
-    try std.testing.expectEqualStrings("bet", selected);
+    try std.testing.expectEqualStrings("beta", selected);
+}
+
+test "copy-mode resize rewraps the cursor and preserves an active selection" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(10, 2, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(10, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(10, 2, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(10, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 2300,
+        .name = xm.xstrdup("copy-resize-window"),
+        .sx = 10,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2301,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 10,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2302,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 10,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+
+    setGridLineText(source.base.grid, 0, "abcdefghij");
+    source.base.grid.linedata[0].cellused = 10;
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    wc.modeData(wme).cx = 2;
+    try runCopyModeTestCommand(wme, "begin-selection");
+    for (0..6) |_| try runCopyModeTestCommand(wme, "cursor-right");
+
+    const before = wc.window_copy_get_selection(wme, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(before);
+    try std.testing.expectEqualStrings("cdefgh", before);
+
+    window.window_pane_resize(&source, 5, 4);
+    window.window_pane_resize(&target, 5, 4);
+    wc.window_copy_size_changed(wme);
+
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 3), wc.modeData(wme).cx);
+    try std.testing.expect(target.screen.sel != null);
+
+    const after = wc.window_copy_get_selection(wme, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(after);
+    try std.testing.expectEqualStrings("cdefgh", after);
 }
 
 /// Enter view mode on the given pane, creating the CopyModeData and pushing
@@ -3405,7 +3852,7 @@ test "copy-mode copy-selection falls back to the current search match" {
     defer args.deinit();
     const wme = wc.enterMode(&target, &source, &args);
 
-    try runCopyModeTestCommandArgs(wme, session, &.{"search-forward", "bar"});
+    try runCopyModeTestCommandArgs(wme, session, &.{ "search-forward", "bar" });
     try runCopyModeTestCommandWithSession(wme, session, "copy-selection");
 
     const top = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;

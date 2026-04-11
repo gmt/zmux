@@ -23,12 +23,15 @@
   - keyboard selection growth through ordinary cursor movement
   - drag-started visual selection that stays synchronized on the active screen
   - mouse-positioned `select-word` and `select-line`
-  - the `copy-selection-no-clear`, `copy-pipe-line`,
-    `copy-pipe-line-and-cancel`, and `copy-pipe-end-of-line` command heads
+  - word selection growth that keeps using the session's
+    `word-separators`
+  - the shipped `copy-mode` and `copy-mode-vi` `send -X`
+    command heads without falling into the unsupported-command path
   - `copy-selection` and related copy helpers falling back to the current
     search match when no explicit selection is active
   - `append-selection` appending onto the current top paste buffer instead of
     always creating a fresh one
+  - cursor and active selection rewrapping across pane width changes
   - cancel/exit
 - Default key tables include `copy-mode` and `copy-mode-vi`
   bindings for supported commands.
@@ -37,8 +40,8 @@
 ## Gaps (tracked in docs/zmux-porting-todo.md)
 
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
-- The broader drag, regex-search, and line/word selection semantics are still
-  short of full tmux parity
-- A smaller tail of less-common copy-mode commands still falls through to the
-  unsupported-command path
-- Resize and mode-local draw hooks
+- The broader drag auto-scroll and mouse-edge behavior are still short of full
+  tmux parity
+- Mark, search, and clipboard-selection semantics still need more tmux-shaped
+  coverage
+- Some mode-local redraw and update paths still need stronger parity coverage

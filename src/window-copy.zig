@@ -71,6 +71,7 @@ const SearchDirection = enum {
 
 pub const CopyModeData = struct {
     backing: *T.Screen,
+    separators: []const u8 = word_whitespace,
     top: u32 = 0,
     cx: u32 = 0,
     cy: u32 = 0,
@@ -241,18 +242,39 @@ pub fn startDrag(client: ?*T.Client, mouse: *const T.MouseEvent) void {
     const cl = client orelse return;
     const wp = resolveMousePane(mouse) orelse return;
     const wme = window.window_pane_mode(wp) orelse return;
-    if (wme.mode != &window_copy_mode) return;
+    if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
     syncBackingFromSource(wme);
 
-    updateCursorFromMouse(wme, mouse, true);
     const data = modeData(wme);
-    if (data.cursordrag == .none and data.lineflag == .none) {
+    const point = mouseAt(wp, mouse, true) orelse return;
+    const absolute_row = data.top + point.y;
+
+    if (point.x < data.selrx or point.x > data.endselrx or absolute_row != data.selry) {
         data.selflag = .char;
-        startSelection(wme);
-        _ = window_copy_update_selection(wme, false, false);
     }
+
+    switch (data.selflag) {
+        .word => {
+            moveCursorToRow(wme, absolute_row, point.x);
+            var px = data.cx;
+            var py = absoluteCursorRow(wme);
+            window_copy_cursor_previous_word_pos(wme, data.separators, &px, &py);
+            moveCursorToRow(wme, py, px);
+        },
+        .line => moveCursorToRow(wme, absolute_row, 0),
+        .char => {
+            moveCursorToRow(wme, absolute_row, point.x);
+            startSelection(wme);
+            _ = window_copy_update_selection(wme, false, false);
+        },
+    }
+
     cl.tty.mouse_drag_update = dragUpdate;
+    cl.tty.mouse_drag_release = window_copy_drag_release;
     redraw(wme);
+
+    var drag_mouse = mouse.*;
+    dragUpdate(cl, &drag_mouse);
 }
 
 pub fn mouseFormatSource(wp: *T.WindowPane, y: u32) ?MouseFormatSource {
@@ -319,6 +341,7 @@ pub fn copyModeCommand(
     const count = repeatCount(wme);
     const command = args.value_at(0).?;
     const data = modeData(wme);
+    const wp = wme.wp;
     syncBackingFromSource(wme);
 
     if (std.mem.eql(u8, command, "cancel")) {
@@ -610,6 +633,7 @@ pub fn copyModeCommand(
     }
 
     wme.prefix = 1;
+    if (window.window_pane_mode(wp) != wme) return;
     _ = updateSelection(wme);
     redraw(wme);
 }
@@ -673,15 +697,20 @@ fn sourceScreen(wme: *T.WindowModeEntry) *T.Screen {
     return &(wme.swp orelse wme.wp).base;
 }
 
+fn cloneSourceScreen(wme: *T.WindowModeEntry) *T.Screen {
+    const src = sourceScreen(wme);
+    const backing = screen.screen_init(src.grid.sx, src.grid.sy, src.grid.hlimit);
+    cloneScreen(backing, src);
+    return backing;
+}
+
 fn syncBackingFromSource(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
     if (data.viewmode) return;
 
-    const src = sourceScreen(wme);
     screen.screen_free(data.backing);
     xm.allocator.destroy(data.backing);
-    data.backing = screen.screen_init(src.grid.sx, src.grid.sy, src.grid.hlimit);
-    cloneScreen(data.backing, src);
+    data.backing = cloneSourceScreen(wme);
 }
 
 fn cloneScreen(dst: *T.Screen, src: *const T.Screen) void {
@@ -749,6 +778,31 @@ fn copyLine(dst_grid: *T.Grid, dst_row: u32, src_grid: *const T.Grid, src_row: u
 
     dst_grid.linedata[dst_row].flags = src_line.flags;
     dst_grid.linedata[dst_row].time = src_line.time;
+}
+
+fn rewrapStoredPosition(old_backing: *const T.Screen, new_backing: *const T.Screen, px: *u32, py: *u32) void {
+    const old_rows = rowCount(old_backing);
+    const new_rows = rowCount(new_backing);
+    if (old_rows == 0 or new_rows == 0) {
+        px.* = 0;
+        py.* = 0;
+        return;
+    }
+
+    if (py.* >= old_rows) py.* = old_rows - 1;
+    const old_len = absoluteLineLength(old_backing.grid, py.*);
+    if (px.* > old_len) px.* = old_len;
+
+    if (old_backing.grid.sx != new_backing.grid.sx) {
+        var wx: u32 = 0;
+        var wy: u32 = 0;
+        grid.grid_wrap_position(old_backing.grid, px.*, py.*, &wx, &wy);
+        grid.grid_unwrap_position(new_backing.grid, px, py, wx, wy);
+    }
+
+    if (py.* >= new_rows) py.* = new_rows - 1;
+    const new_len = absoluteLineLength(new_backing.grid, py.*);
+    if (px.* > new_len) px.* = new_len;
 }
 
 fn redraw(wme: *T.WindowModeEntry) void {
@@ -827,7 +881,7 @@ fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
     _ = client;
     const wp = resolveMousePane(mouse) orelse return;
     const wme = window.window_pane_mode(wp) orelse return;
-    if (wme.mode != &window_copy_mode) return;
+    if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
 
     updateCursorFromMouse(wme, mouse, false);
     _ = window_copy_update_selection(wme, false, false);
@@ -1544,6 +1598,7 @@ fn cmdSelectWord(wme: *T.WindowModeEntry, session: *T.Session) void {
     data.lineflag = .left_right;
     data.rectflag = false;
     data.selflag = .word;
+    data.separators = separators;
     data.dx = data.cx;
     data.dy = absoluteCursorRow(wme);
 
@@ -1577,8 +1632,7 @@ fn cmdSelectionMode(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
 
     if (std.mem.eql(u8, mode, "word") or std.mem.eql(u8, mode, "w")) {
         data.selflag = .word;
-        // Store separators for word selection
-        _ = opts.options_get_string(session.options, "word-separators");
+        data.separators = opts.options_get_string(session.options, "word-separators");
     } else if (std.mem.eql(u8, mode, "line") or std.mem.eql(u8, mode, "l")) {
         data.selflag = .line;
     } else {
@@ -2382,21 +2436,43 @@ pub fn window_copy_free(wme: *T.WindowModeEntry) void {
 
 pub fn window_copy_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
     const data = modeData(wme);
-    if (data.viewmode)
-        screen.screen_resize(data.backing, sx, sy, false)
-    else
-        syncBackingFromSource(wme);
+    if (data.viewmode) {
+        screen.screen_resize(data.backing, sx, sy, false);
+        redraw(wme);
+        return;
+    }
+
+    const old_backing = data.backing;
+    const resized = sourceScreen(wme);
+
+    var cursor_x = data.cx;
+    var cursor_y = absoluteCursorRow(wme);
+    rewrapStoredPosition(old_backing, resized, &cursor_x, &cursor_y);
+
+    rewrapStoredPosition(old_backing, resized, &data.mark_x, &data.mark_y);
+    rewrapStoredPosition(old_backing, resized, &data.selx, &data.sely);
+    rewrapStoredPosition(old_backing, resized, &data.endselx, &data.endsely);
+    rewrapStoredPosition(old_backing, resized, &data.dx, &data.dy);
+    rewrapStoredPosition(old_backing, resized, &data.selrx, &data.selry);
+    rewrapStoredPosition(old_backing, resized, &data.endselrx, &data.endselry);
+
+    syncBackingFromSource(wme);
+    moveCursorToRow(wme, cursor_y, cursor_x);
+
+    if (data.selflag == .line) {
+        data.selrx = 0;
+        data.endselrx = backingLineLength(wme, data.endselry);
+        data.dx = @min(data.dx, backingLineLength(wme, data.dy));
+    }
+
+    if (data.searchmark != null and !data.timeout)
+        _ = window_copy_search_marks(wme, null, data.searchregex, false);
+    _ = window_copy_update_selection(wme, true, false);
     redraw(wme);
 }
 
 pub fn window_copy_size_changed(wme: *T.WindowModeEntry) void {
-    const data = modeData(wme);
-    const had_searchmark = data.searchmark != null;
     window_copy_resize(wme, wme.wp.sx, wme.wp.sy);
-    if (had_searchmark and !data.timeout) {
-        // Use false: after resize, marks need full recomputation, not just refresh.
-        _ = window_copy_search_marks(wme, null, data.searchregex, false);
-    }
 }
 
 pub fn window_copy_get_screen(wme: *T.WindowModeEntry) *T.Screen {
@@ -2925,14 +3001,14 @@ pub fn window_copy_synchronize_cursor_end(wme: *T.WindowModeEntry, begin: bool, 
         .word => {
             if (!no_reset) {
                 if (data.dy > yy or (data.dy == yy and data.dx > xx)) {
-                    window_copy_cursor_previous_word_pos(wme, word_whitespace, &xx, &yy);
+                    window_copy_cursor_previous_word_pos(wme, data.separators, &xx, &yy);
                     data.endselx = data.endselrx;
                     data.endsely = data.endselry;
                 } else {
                     if (xx >= backingLineLength(wme, yy) or
-                        grid.grid_in_set(data.backing.grid, yy, xx + 1, word_whitespace) == 0)
+                        grid.grid_in_set(data.backing.grid, yy, xx + 1, data.separators) == 0)
                     {
-                        window_copy_cursor_next_word_end_pos(wme, word_whitespace, &xx, &yy);
+                        window_copy_cursor_next_word_end_pos(wme, data.separators, &xx, &yy);
                     }
                     data.selx = data.selrx;
                     data.sely = data.selry;
@@ -3920,7 +3996,7 @@ pub fn window_copy_cursor_previous_word_pos(wme: *T.WindowModeEntry, separators:
         return;
     }
 
-    grid.grid_reader_cursor_previous_word(&gr, separators, true, !copyModeUsesViKeys(wme));
+    grid.grid_reader_cursor_previous_word(&gr, separators, false, !copyModeUsesViKeys(wme));
     grid.grid_reader_get_cursor(&gr, ppx, ppy);
 }
 
@@ -4719,11 +4795,13 @@ pub fn window_copy_cmd_search_reverse(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_select_line(cs: *const CmdState) CmdAction {
+    if (cs.mouse) |m| updateCursorFromMouse(cs.wme, m, false);
     if (cs.session) |s| cmdSelectLine(cs.wme, s);
     return .redraw;
 }
 
 pub fn window_copy_cmd_select_word(cs: *const CmdState) CmdAction {
+    if (cs.mouse) |m| updateCursorFromMouse(cs.wme, m, false);
     if (cs.session) |s| cmdSelectWord(cs.wme, s);
     return .redraw;
 }

@@ -1109,6 +1109,35 @@ test "send-keys -X drives copy-mode commands through the active runtime" {
     try std.testing.expectEqual(@as(u32, 1), wme.prefix);
 }
 
+test "send-keys -X applies copy-mode search clear policy" {
+    const setup = try test_session_with_empty_pane("send-copy-mode-clear");
+    defer test_teardown_session("send-copy-mode-clear", setup.s, -1, -1);
+
+    setPaneLineText(setup.wp, 0, "needle next");
+    setPaneLineText(setup.wp, 1, "needle more");
+
+    var cause: ?[]u8 = null;
+    const copy_mode_cmd = try cmd_mod.cmd_parse_one(&.{ "copy-mode", "-t", "send-copy-mode-clear:0.0" }, null, &cause);
+    defer cmd_mod.cmd_free(copy_mode_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(copy_mode_cmd, &item));
+
+    const wme = window_mod.window_pane_mode(setup.wp).?;
+    try std.testing.expectEqual(&window_copy.window_copy_mode, wme.mode);
+
+    const search_cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-X", "-t", "send-copy-mode-clear:0.0", "search-forward", "needle" }, null, &cause);
+    defer cmd_mod.cmd_free(search_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(search_cmd, &item));
+    try std.testing.expect(window_copy.modeData(wme).searchmark != null);
+
+    const clear_cmd = try cmd_mod.cmd_parse_one(&.{ "send-keys", "-X", "-t", "send-copy-mode-clear:0.0", "cursor-right" }, null, &cause);
+    defer cmd_mod.cmd_free(clear_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(clear_cmd, &item));
+    try std.testing.expect(window_copy.modeData(wme).searchmark == null);
+}
+
 test "send-keys pane_in_mode reflects the reduced active mode stack" {
     const setup = try test_session_with_empty_pane("send-pane-in-mode");
     defer test_teardown_session("send-pane-in-mode", setup.s, -1, -1);

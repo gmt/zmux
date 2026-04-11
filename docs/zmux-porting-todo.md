@@ -15,24 +15,6 @@ Live tmux-parity gaps only.
   - `zmux:` what is currently missing or approximate
   - `likely files:` where the repair probably lives
 
-## Copy-Mode Runtime Parity
-
-- `tmux:` copy mode operates on real pane history with tmux's selection, copy,
-  search, mark, drag, resize, mode-local redraw, and clipboard-selection
-  behavior.
-- `zmux:` the current mode now carries live source history into its private
-  backing surface, its public search-match helpers are now real, but the richer
-  copy/search/selection flows are still incomplete. tmux's broader selection,
-  mark, and drag behavior still outstrips the current runtime even though regex
-  search, mouse-positioned word/line selection, word-separator-aware selection
-  growth, drag-started visual selection, edge-drag viewport scrolling,
-  stationary edge-drag repeat scrolling, incremental-search origin restore,
-  current-match copy fallback, append-selection append semantics, built-in
-  `send -X` command coverage, clipboard export, and resize-time
-  cursor/selection rewrapping are now wired.
-- `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
-  `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
-
 ## Persistent Layout Ownership
 
 - `tmux:` split, destroy, resize, and `select-layout` all share one

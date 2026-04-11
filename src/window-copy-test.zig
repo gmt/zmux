@@ -2791,6 +2791,202 @@ test "window-copy regex search uses regex semantics and emacs cursor placement" 
     try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
 }
 
+test "window-copy emacs-only clear commands clear active search marks" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2059,
+        .name = xm.xstrdup("copy-clear-emacs-src"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 2060,
+        .name = xm.xstrdup("copy-clear-emacs-tgt"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2061,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2062,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "needle one");
+    setGridLineText(source.base.grid, 1, "needle two");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward", "needle" });
+    try std.testing.expect(wc.modeData(wme).searchmark != null);
+
+    try runCopyModeTestCommand(wme, "search-again");
+    try std.testing.expect(wc.modeData(wme).searchmark != null);
+
+    try runCopyModeTestCommand(wme, "cursor-right");
+    try std.testing.expect(wc.modeData(wme).searchmark == null);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searchx);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searchy);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searcho);
+}
+
+test "window-copy vi keeps emacs-only marks and clears always-clear marks" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2063,
+        .name = xm.xstrdup("copy-clear-vi-src"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+    opts_mod.options_set_number(source_window.options, "mode-keys", T.MODEKEY_VI);
+
+    var target_window = T.Window{
+        .id = 2064,
+        .name = xm.xstrdup("copy-clear-vi-tgt"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+    opts_mod.options_set_number(target_window.options, "mode-keys", T.MODEKEY_VI);
+
+    var source = T.WindowPane{
+        .id = 2065,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2066,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "needle one");
+    setGridLineText(source.base.grid, 1, "needle two");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward", "needle" });
+    try std.testing.expect(wc.modeData(wme).searchmark != null);
+
+    try runCopyModeTestCommand(wme, "cursor-right");
+    try std.testing.expect(wc.modeData(wme).searchmark != null);
+
+    try runCopyModeTestCommand(wme, "set-mark");
+    try std.testing.expect(wc.modeData(wme).searchmark == null);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searchx);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searchy);
+    try std.testing.expectEqual(std.math.maxInt(u32), wc.modeData(wme).searcho);
+}
+
 test "window-copy incremental search restores origin when the text changes" {
     const opts_mod = @import("options.zig");
 

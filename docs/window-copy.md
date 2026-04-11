@@ -42,7 +42,3 @@
   bindings for supported commands.
 - Client key routing prefers the active pane-mode key table when
   the client is on the default root table.
-## Gaps (tracked in docs/zmux-porting-todo.md)
-
-- Mark and search semantics still need more tmux-shaped coverage
-- Some mode-local redraw and update paths still need stronger parity coverage

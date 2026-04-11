@@ -340,308 +340,55 @@ pub fn copyModeCommand(
     mouse: ?*const T.MouseEvent,
 ) void {
     _ = _wl;
-
     const args: *const args_mod.Arguments = @ptrCast(@alignCast(raw_args));
     if (args.count() == 0) return;
 
-    const count = repeatCount(wme);
     const command = args.value_at(0).?;
-    const data = modeData(wme);
     const wp = wme.wp;
     syncBackingFromSource(wme);
 
-    if (std.mem.eql(u8, command, "cancel")) {
-        _ = window_mode_runtime.resetMode(wme.wp);
-        return;
-    }
-    if (std.mem.eql(u8, command, "refresh-from-pane")) {
-        refreshFromSource(wme, true);
-        wme.prefix = 1;
-        return;
-    }
-    if (std.mem.eql(u8, command, "scroll-to-mouse")) {
-        if (client) |cl| {
-            if (mouse) |event|
-                scrollToMouse(wme.wp, cl.tty.mouse_slider_mpos, event.y, args.has('e'));
+    if (mouse) |event| {
+        if (event.valid and !T.mouseWheel(event.b)) {
+            window_copy_move_mouse(@constCast(event));
         }
-        wme.prefix = 1;
-        return;
     }
 
-    if (std.mem.eql(u8, command, "cursor-left")) {
-        moveCursorX(wme, -@as(i32, @intCast(count)));
-    } else if (std.mem.eql(u8, command, "cursor-right")) {
-        moveCursorX(wme, @intCast(count));
-    } else if (std.mem.eql(u8, command, "jump-again")) {
-        repeatJump(wme, modeData(wme).jump_type);
-    } else if (std.mem.eql(u8, command, "jump-reverse")) {
-        repeatJump(wme, reverseJumpType(modeData(wme).jump_type));
-    } else if (std.mem.eql(u8, command, "jump-backward")) {
-        if (args.value_at(1)) |arg|
-            if (setJumpCharacter(modeData(wme), .backward, arg))
-                repeatJump(wme, .backward);
-    } else if (std.mem.eql(u8, command, "jump-forward")) {
-        if (args.value_at(1)) |arg|
-            if (setJumpCharacter(modeData(wme), .forward, arg))
-                repeatJump(wme, .forward);
-    } else if (std.mem.eql(u8, command, "jump-to-backward")) {
-        if (args.value_at(1)) |arg|
-            if (setJumpCharacter(modeData(wme), .to_backward, arg))
-                repeatJump(wme, .to_backward);
-    } else if (std.mem.eql(u8, command, "jump-to-forward")) {
-        if (args.value_at(1)) |arg|
-            if (setJumpCharacter(modeData(wme), .to_forward, arg))
-                repeatJump(wme, .to_forward);
-    } else if (std.mem.eql(u8, command, "next-paragraph")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) nextParagraph(wme);
-    } else if (std.mem.eql(u8, command, "next-space")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, "");
-    } else if (std.mem.eql(u8, command, "next-space-end")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(wme, "");
-    } else if (std.mem.eql(u8, command, "next-word")) {
-        const separators = opts.options_get_string(session.options, "word-separators");
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorNextWord(wme, separators);
-    } else if (std.mem.eql(u8, command, "next-word-end")) {
-        const separators = opts.options_get_string(session.options, "word-separators");
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(wme, separators);
-    } else if (std.mem.eql(u8, command, "previous-space")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorPreviousWord(wme, "", true);
-    } else if (std.mem.eql(u8, command, "previous-word")) {
-        const separators = opts.options_get_string(session.options, "word-separators");
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) cursorPreviousWord(wme, separators, true);
-    } else if (std.mem.eql(u8, command, "cursor-up")) {
-        scrollLines(wme, -@as(i32, @intCast(count)));
-    } else if (std.mem.eql(u8, command, "cursor-down")) {
-        cursorDownLines(wme, count);
-    } else if (std.mem.eql(u8, command, "cursor-down-and-cancel")) {
-        if (cursorDownAndCancel(wme, count)) {
-            _ = window_mode_runtime.resetMode(wme.wp);
-            return;
-        }
-    } else if (std.mem.eql(u8, command, "page-up")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) pageUpMode(wme, false);
-    } else if (std.mem.eql(u8, command, "previous-paragraph")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) previousParagraph(wme);
-    } else if (std.mem.eql(u8, command, "page-down")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) {
-            if (pageDownMode(wme, false, modeData(wme).scroll_exit)) {
-                _ = window_mode_runtime.resetMode(wme.wp);
-                return;
-            }
-        }
-    } else if (std.mem.eql(u8, command, "page-down-and-cancel")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) {
-            if (pageDownMode(wme, false, true)) {
-                _ = window_mode_runtime.resetMode(wme.wp);
-                return;
-            }
-        }
-    } else if (std.mem.eql(u8, command, "halfpage-up")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) pageUpMode(wme, true);
-    } else if (std.mem.eql(u8, command, "halfpage-down")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) {
-            if (pageDownMode(wme, true, modeData(wme).scroll_exit)) {
-                _ = window_mode_runtime.resetMode(wme.wp);
-                return;
-            }
-        }
-    } else if (std.mem.eql(u8, command, "halfpage-down-and-cancel")) {
-        var remaining = count;
-        while (remaining > 0) : (remaining -= 1) {
-            if (pageDownMode(wme, true, true)) {
-                _ = window_mode_runtime.resetMode(wme.wp);
-                return;
-            }
-        }
-    } else if (std.mem.eql(u8, command, "scroll-down")) {
-        if (scrollViewportDownLines(wme, count, modeData(wme).scroll_exit)) {
-            _ = window_mode_runtime.resetMode(wme.wp);
-            return;
-        }
-    } else if (std.mem.eql(u8, command, "scroll-down-and-cancel")) {
-        if (scrollViewportDownLines(wme, count, true)) {
-            _ = window_mode_runtime.resetMode(wme.wp);
-            return;
-        }
-    } else if (std.mem.eql(u8, command, "history-top")) {
-        setAbsoluteCursorRow(wme, 0);
-    } else if (std.mem.eql(u8, command, "history-bottom")) {
-        const backing_rows = rowCount(data.backing);
-        if (backing_rows != 0) setAbsoluteCursorRow(wme, backing_rows - 1);
-    } else if (std.mem.eql(u8, command, "goto-line")) {
-        if (args.value_at(1)) |arg| {
-            if (arg.len != 0) gotoLine(wme, arg);
-        }
-    } else if (std.mem.eql(u8, command, "top-line")) {
-        setCursorLine(wme, 0);
-    } else if (std.mem.eql(u8, command, "middle-line")) {
-        setCursorLine(wme, viewRows(wme.wp) / 2);
-    } else if (std.mem.eql(u8, command, "bottom-line")) {
-        const rows = viewRows(wme.wp);
-        if (rows != 0) setCursorLine(wme, rows - 1);
-    } else if (std.mem.eql(u8, command, "scroll-top")) {
-        alignCursor(wme, 0);
-    } else if (std.mem.eql(u8, command, "scroll-middle")) {
-        alignCursor(wme, viewRows(wme.wp) / 2);
-    } else if (std.mem.eql(u8, command, "scroll-bottom")) {
-        const rows = viewRows(wme.wp);
-        alignCursor(wme, if (rows == 0) 0 else rows - 1);
-    } else if (std.mem.eql(u8, command, "start-of-line")) {
-        cursorStartOfLine(wme);
-    } else if (std.mem.eql(u8, command, "back-to-indentation")) {
-        cursorBackToIndentation(wme);
-    } else if (std.mem.eql(u8, command, "end-of-line")) {
-        cursorEndOfLine(wme);
-    } else if (std.mem.eql(u8, command, "begin-selection")) {
-        if (mouse) |event|
-            startDrag(client, event)
-        else
-            cmdBeginSelection(wme);
-    } else if (std.mem.eql(u8, command, "stop-selection")) {
-        cmdStopSelection(wme);
-    } else if (std.mem.eql(u8, command, "clear-selection")) {
-        clearSelection(wme);
-    } else if (std.mem.eql(u8, command, "rectangle-toggle")) {
-        cmdRectangleToggle(wme);
-    } else if (std.mem.eql(u8, command, "rectangle-on")) {
-        cmdRectangleSet(wme, true);
-    } else if (std.mem.eql(u8, command, "rectangle-off")) {
-        cmdRectangleSet(wme, false);
-    } else if (std.mem.eql(u8, command, "select-line")) {
-        if (mouse) |event| updateCursorFromMouse(wme, event, false);
-        cmdSelectLine(wme, session);
-    } else if (std.mem.eql(u8, command, "select-word")) {
-        if (mouse) |event| updateCursorFromMouse(wme, event, false);
-        cmdSelectWord(wme, session);
-    } else if (std.mem.eql(u8, command, "selection-mode")) {
-        cmdSelectionMode(wme, session, args);
-    } else if (std.mem.eql(u8, command, "other-end")) {
-        cmdOtherEnd(wme);
-    } else if (std.mem.eql(u8, command, "copy-selection")) {
-        cmdCopySelection(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-selection-and-cancel")) {
-        cmdCopySelection(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "copy-selection-no-clear")) {
-        cmdCopySelectionNoClear(wme, session, args);
-    } else if (std.mem.eql(u8, command, "copy-pipe")) {
-        cmdCopyPipe(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-pipe-and-cancel")) {
-        cmdCopyPipe(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "copy-pipe-no-clear")) {
-        cmdCopyPipeNoClear(wme, session, args);
-    } else if (std.mem.eql(u8, command, "copy-pipe-line")) {
-        cmdCopyLinePipe(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-pipe-line-and-cancel")) {
-        cmdCopyLinePipe(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "copy-line")) {
-        cmdCopyLine(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-line-and-cancel")) {
-        cmdCopyLine(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "copy-pipe-end-of-line")) {
-        cmdCopyEndOfLinePipe(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-end-of-line")) {
-        cmdCopyEndOfLine(wme, session, args, false);
-    } else if (std.mem.eql(u8, command, "copy-end-of-line-and-cancel")) {
-        cmdCopyEndOfLine(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "append-selection")) {
-        cmdAppendSelection(wme, session);
-    } else if (std.mem.eql(u8, command, "append-selection-and-cancel")) {
-        cmdAppendSelection(wme, session);
-        _ = window_mode_runtime.resetMode(wme.wp);
-        return;
-    } else if (std.mem.eql(u8, command, "search-backward")) {
-        cmdSearchBackward(wme, args, true);
-    } else if (std.mem.eql(u8, command, "search-backward-text")) {
-        cmdSearchBackward(wme, args, false);
-    } else if (std.mem.eql(u8, command, "search-forward")) {
-        cmdSearchForward(wme, args, true);
-    } else if (std.mem.eql(u8, command, "search-forward-text")) {
-        cmdSearchForward(wme, args, false);
-    } else if (std.mem.eql(u8, command, "search-again")) {
-        cmdSearchAgain(wme);
-    } else if (std.mem.eql(u8, command, "search-reverse")) {
-        cmdSearchReverse(wme);
-    } else if (std.mem.eql(u8, command, "search-backward-incremental")) {
-        cmdSearchIncremental(wme, args, .up);
-    } else if (std.mem.eql(u8, command, "search-forward-incremental")) {
-        cmdSearchIncremental(wme, args, .down);
-    } else if (std.mem.eql(u8, command, "set-mark")) {
-        cmdSetMark(wme);
-    } else if (std.mem.eql(u8, command, "jump-to-mark")) {
-        cmdJumpToMark(wme);
-    } else if (std.mem.eql(u8, command, "toggle-position")) {
-        data.hide_position = !data.hide_position;
-    } else if (std.mem.eql(u8, command, "swap-selection-start")) {
-        cmdSwapSelectionStart(wme);
-    } else if (std.mem.eql(u8, command, "swap-selection-end")) {
-        cmdSwapSelectionEnd(wme);
-    } else if (std.mem.eql(u8, command, "scroll-exit-on")) {
-        data.scroll_exit = true;
-    } else if (std.mem.eql(u8, command, "scroll-exit-off")) {
-        data.scroll_exit = false;
-    } else if (std.mem.eql(u8, command, "scroll-exit-toggle")) {
-        data.scroll_exit = !data.scroll_exit;
-    } else if (std.mem.eql(u8, command, "centre-vertical") or std.mem.eql(u8, command, "cursor-centre-vertical")) {
-        alignCursor(wme, viewRows(wme.wp) / 2);
-    } else if (std.mem.eql(u8, command, "centre-horizontal") or std.mem.eql(u8, command, "cursor-centre-horizontal")) {
-        moveCursorX(wme, @intCast(lineMaxX(data.backing, absoluteCursorRow(wme), wme.wp.screen.grid.sx) / 2));
-    } else if (std.mem.eql(u8, command, "scroll-up")) {
-        scrollLines(wme, -@as(i32, @intCast(count)));
-    } else if (std.mem.eql(u8, command, "pipe") or std.mem.eql(u8, command, "pipe-and-cancel")) {
-        cmdPipe(wme, session, args, std.mem.eql(u8, command, "pipe-and-cancel"));
-    } else if (std.mem.eql(u8, command, "copy-pipe-end-of-line-and-cancel")) {
-        cmdCopyEndOfLine(wme, session, args, true);
-    } else if (std.mem.eql(u8, command, "pipe-no-clear")) {
-        cmdPipeNoClear(wme, session, args);
-    } else if (std.mem.eql(u8, command, "previous-matching-bracket")) {
-        const cs = CmdState{
-            .wme = wme,
-            .args = args,
-            .wargs = args,
-            .mouse = null,
-            .client = client,
-            .session = session,
-            .wl = null,
-        };
-        _ = window_copy_cmd_previous_matching_bracket(&cs);
-    } else if (std.mem.eql(u8, command, "next-matching-bracket")) {
-        const cs = CmdState{
-            .wme = wme,
-            .args = args,
-            .wargs = args,
-            .mouse = null,
-            .client = client,
-            .session = session,
-            .wl = null,
-        };
-        _ = window_copy_cmd_next_matching_bracket(&cs);
-    } else if (std.mem.eql(u8, command, "next-prompt")) {
-        window_copy_cursor_prompt(wme, 1, false);
-    } else if (std.mem.eql(u8, command, "previous-prompt")) {
-        window_copy_cursor_prompt(wme, -1, false);
-    } else {
+    const entry = findCopyCommandEntry(command) orelse {
         unsupportedCommand(client, command);
         wme.prefix = 1;
         return;
-    }
+    };
+
+    var cs = CmdState{
+        .wme = wme,
+        .args = args,
+        .wargs = args,
+        .mouse = mouse,
+        .client = client,
+        .session = if (entry.needs_session) session else null,
+        .wl = null,
+    };
+    var action = entry.handler(&cs);
+
+    if (window.window_pane_mode(wp) != wme) return;
+
+    applySearchClearPolicy(wme, command, entry.clear, &action);
 
     wme.prefix = 1;
-    if (window.window_pane_mode(wp) != wme) return;
-    _ = updateSelection(wme);
-    redraw(wme);
+
+    switch (action) {
+        .cancel => {
+            _ = window_mode_runtime.resetMode(wp);
+        },
+        .redraw => {
+            _ = updateSelection(wme);
+            window_copy_redraw_screen(wme);
+        },
+        .nothing => {
+            _ = updateSelection(wme);
+            window_copy_redraw_lines(wme, 0, 1);
+        },
+    }
 }
 
 fn copyModeClose(wme: *T.WindowModeEntry) void {
@@ -2474,6 +2221,15 @@ pub const CmdClear = enum {
     emacs_only,
 };
 
+const CopyCommandHandler = *const fn (*const CmdState) CmdAction;
+
+const CopyCommandEntry = struct {
+    command: []const u8,
+    handler: CopyCommandHandler,
+    clear: CmdClear,
+    needs_session: bool = false,
+};
+
 pub const CmdState = struct {
     wme: *T.WindowModeEntry,
     args: *const args_mod.Arguments,
@@ -2483,6 +2239,131 @@ pub const CmdState = struct {
     session: ?*T.Session,
     wl: ?*T.Winlink,
 };
+
+const copy_command_table = [_]CopyCommandEntry{
+    .{ .command = "append-selection", .handler = window_copy_cmd_append_selection, .clear = .always, .needs_session = true },
+    .{ .command = "append-selection-and-cancel", .handler = window_copy_cmd_append_selection_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "back-to-indentation", .handler = window_copy_cmd_back_to_indentation, .clear = .always },
+    .{ .command = "begin-selection", .handler = window_copy_cmd_begin_selection, .clear = .always },
+    .{ .command = "bottom-line", .handler = window_copy_cmd_bottom_line, .clear = .emacs_only },
+    .{ .command = "cancel", .handler = window_copy_cmd_cancel, .clear = .always },
+    .{ .command = "clear-selection", .handler = window_copy_cmd_clear_selection, .clear = .always },
+    .{ .command = "copy-end-of-line", .handler = window_copy_cmd_copy_end_of_line, .clear = .always, .needs_session = true },
+    .{ .command = "copy-end-of-line-and-cancel", .handler = window_copy_cmd_copy_end_of_line_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-end-of-line", .handler = window_copy_cmd_copy_pipe_end_of_line, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-end-of-line-and-cancel", .handler = window_copy_cmd_copy_pipe_end_of_line_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "copy-line", .handler = window_copy_cmd_copy_line, .clear = .always, .needs_session = true },
+    .{ .command = "copy-line-and-cancel", .handler = window_copy_cmd_copy_line_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-line", .handler = window_copy_cmd_copy_pipe_line, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-line-and-cancel", .handler = window_copy_cmd_copy_pipe_line_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-no-clear", .handler = window_copy_cmd_copy_pipe_no_clear, .clear = .never, .needs_session = true },
+    .{ .command = "copy-pipe", .handler = window_copy_cmd_copy_pipe, .clear = .always, .needs_session = true },
+    .{ .command = "copy-pipe-and-cancel", .handler = window_copy_cmd_copy_pipe_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "copy-selection-no-clear", .handler = window_copy_cmd_copy_selection_no_clear, .clear = .never, .needs_session = true },
+    .{ .command = "copy-selection", .handler = window_copy_cmd_copy_selection, .clear = .always, .needs_session = true },
+    .{ .command = "copy-selection-and-cancel", .handler = window_copy_cmd_copy_selection_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "cursor-down", .handler = window_copy_cmd_cursor_down, .clear = .emacs_only },
+    .{ .command = "cursor-down-and-cancel", .handler = window_copy_cmd_cursor_down_and_cancel, .clear = .always },
+    .{ .command = "cursor-left", .handler = window_copy_cmd_cursor_left, .clear = .emacs_only },
+    .{ .command = "cursor-right", .handler = window_copy_cmd_cursor_right, .clear = .emacs_only },
+    .{ .command = "cursor-up", .handler = window_copy_cmd_cursor_up, .clear = .emacs_only },
+    .{ .command = "cursor-centre-vertical", .handler = window_copy_cmd_centre_vertical, .clear = .emacs_only },
+    .{ .command = "cursor-centre-horizontal", .handler = window_copy_cmd_centre_horizontal, .clear = .emacs_only },
+    .{ .command = "centre-vertical", .handler = window_copy_cmd_centre_vertical, .clear = .emacs_only },
+    .{ .command = "centre-horizontal", .handler = window_copy_cmd_centre_horizontal, .clear = .emacs_only },
+    .{ .command = "end-of-line", .handler = window_copy_cmd_end_of_line, .clear = .emacs_only },
+    .{ .command = "goto-line", .handler = window_copy_cmd_goto_line, .clear = .emacs_only },
+    .{ .command = "halfpage-down", .handler = window_copy_cmd_halfpage_down, .clear = .emacs_only },
+    .{ .command = "halfpage-down-and-cancel", .handler = window_copy_cmd_halfpage_down_and_cancel, .clear = .always },
+    .{ .command = "halfpage-up", .handler = window_copy_cmd_halfpage_up, .clear = .emacs_only },
+    .{ .command = "history-bottom", .handler = window_copy_cmd_history_bottom, .clear = .emacs_only },
+    .{ .command = "history-top", .handler = window_copy_cmd_history_top, .clear = .emacs_only },
+    .{ .command = "jump-again", .handler = window_copy_cmd_jump_again, .clear = .emacs_only },
+    .{ .command = "jump-backward", .handler = window_copy_cmd_jump_backward, .clear = .emacs_only },
+    .{ .command = "jump-forward", .handler = window_copy_cmd_jump_forward, .clear = .emacs_only },
+    .{ .command = "jump-reverse", .handler = window_copy_cmd_jump_reverse, .clear = .emacs_only },
+    .{ .command = "jump-to-backward", .handler = window_copy_cmd_jump_to_backward, .clear = .emacs_only },
+    .{ .command = "jump-to-forward", .handler = window_copy_cmd_jump_to_forward, .clear = .emacs_only },
+    .{ .command = "jump-to-mark", .handler = window_copy_cmd_jump_to_mark, .clear = .always },
+    .{ .command = "middle-line", .handler = window_copy_cmd_middle_line, .clear = .emacs_only },
+    .{ .command = "next-matching-bracket", .handler = window_copy_cmd_next_matching_bracket, .clear = .always },
+    .{ .command = "next-paragraph", .handler = window_copy_cmd_next_paragraph, .clear = .emacs_only },
+    .{ .command = "next-space", .handler = window_copy_cmd_next_space, .clear = .emacs_only },
+    .{ .command = "next-space-end", .handler = window_copy_cmd_next_space_end, .clear = .emacs_only },
+    .{ .command = "next-word", .handler = window_copy_cmd_next_word, .clear = .emacs_only, .needs_session = true },
+    .{ .command = "next-word-end", .handler = window_copy_cmd_next_word_end, .clear = .emacs_only, .needs_session = true },
+    .{ .command = "next-prompt", .handler = window_copy_cmd_next_prompt, .clear = .always },
+    .{ .command = "other-end", .handler = window_copy_cmd_other_end, .clear = .emacs_only },
+    .{ .command = "page-down", .handler = window_copy_cmd_page_down, .clear = .emacs_only },
+    .{ .command = "page-down-and-cancel", .handler = window_copy_cmd_page_down_and_cancel, .clear = .always },
+    .{ .command = "page-up", .handler = window_copy_cmd_page_up, .clear = .emacs_only },
+    .{ .command = "pipe-no-clear", .handler = window_copy_cmd_pipe_no_clear, .clear = .never, .needs_session = true },
+    .{ .command = "pipe", .handler = window_copy_cmd_pipe, .clear = .always, .needs_session = true },
+    .{ .command = "pipe-and-cancel", .handler = window_copy_cmd_pipe_and_cancel, .clear = .always, .needs_session = true },
+    .{ .command = "previous-matching-bracket", .handler = window_copy_cmd_previous_matching_bracket, .clear = .always },
+    .{ .command = "previous-paragraph", .handler = window_copy_cmd_previous_paragraph, .clear = .emacs_only },
+    .{ .command = "previous-space", .handler = window_copy_cmd_previous_space, .clear = .emacs_only },
+    .{ .command = "previous-word", .handler = window_copy_cmd_previous_word, .clear = .emacs_only, .needs_session = true },
+    .{ .command = "previous-prompt", .handler = window_copy_cmd_previous_prompt, .clear = .always },
+    .{ .command = "rectangle-on", .handler = window_copy_cmd_rectangle_on, .clear = .always },
+    .{ .command = "rectangle-off", .handler = window_copy_cmd_rectangle_off, .clear = .always },
+    .{ .command = "rectangle-toggle", .handler = window_copy_cmd_rectangle_toggle, .clear = .always },
+    .{ .command = "refresh-from-pane", .handler = window_copy_cmd_refresh_from_pane, .clear = .always },
+    .{ .command = "scroll-bottom", .handler = window_copy_cmd_scroll_bottom, .clear = .always },
+    .{ .command = "scroll-down", .handler = window_copy_cmd_scroll_down, .clear = .emacs_only },
+    .{ .command = "scroll-down-and-cancel", .handler = window_copy_cmd_scroll_down_and_cancel, .clear = .always },
+    .{ .command = "scroll-exit-on", .handler = window_copy_cmd_scroll_exit_on, .clear = .always },
+    .{ .command = "scroll-exit-off", .handler = window_copy_cmd_scroll_exit_off, .clear = .always },
+    .{ .command = "scroll-exit-toggle", .handler = window_copy_cmd_scroll_exit_toggle, .clear = .always },
+    .{ .command = "scroll-middle", .handler = window_copy_cmd_scroll_middle, .clear = .always },
+    .{ .command = "scroll-to-mouse", .handler = window_copy_cmd_scroll_to_mouse, .clear = .emacs_only },
+    .{ .command = "scroll-top", .handler = window_copy_cmd_scroll_top, .clear = .always },
+    .{ .command = "scroll-up", .handler = window_copy_cmd_scroll_up, .clear = .emacs_only },
+    .{ .command = "search-again", .handler = window_copy_cmd_search_again, .clear = .always },
+    .{ .command = "search-backward", .handler = window_copy_cmd_search_backward, .clear = .always },
+    .{ .command = "search-backward-text", .handler = window_copy_cmd_search_backward_text, .clear = .always },
+    .{ .command = "search-backward-incremental", .handler = window_copy_cmd_search_backward_incremental, .clear = .always },
+    .{ .command = "search-forward", .handler = window_copy_cmd_search_forward, .clear = .always },
+    .{ .command = "search-forward-text", .handler = window_copy_cmd_search_forward_text, .clear = .always },
+    .{ .command = "search-forward-incremental", .handler = window_copy_cmd_search_forward_incremental, .clear = .always },
+    .{ .command = "search-reverse", .handler = window_copy_cmd_search_reverse, .clear = .always },
+    .{ .command = "select-line", .handler = window_copy_cmd_select_line, .clear = .always, .needs_session = true },
+    .{ .command = "select-word", .handler = window_copy_cmd_select_word, .clear = .always, .needs_session = true },
+    .{ .command = "selection-mode", .handler = window_copy_cmd_selection_mode, .clear = .always, .needs_session = true },
+    .{ .command = "set-mark", .handler = window_copy_cmd_set_mark, .clear = .always },
+    .{ .command = "start-of-line", .handler = window_copy_cmd_start_of_line, .clear = .emacs_only },
+    .{ .command = "stop-selection", .handler = window_copy_cmd_stop_selection, .clear = .always },
+    .{ .command = "swap-selection-start", .handler = window_copy_cmd_swap_selection_start, .clear = .always },
+    .{ .command = "swap-selection-end", .handler = window_copy_cmd_swap_selection_end, .clear = .always },
+    .{ .command = "toggle-position", .handler = window_copy_cmd_toggle_position, .clear = .never },
+    .{ .command = "top-line", .handler = window_copy_cmd_top_line, .clear = .emacs_only },
+};
+
+fn findCopyCommandEntry(command: []const u8) ?*const CopyCommandEntry {
+    for (&copy_command_table) |*entry| {
+        if (std.mem.eql(u8, entry.command, command)) return entry;
+    }
+    return null;
+}
+
+fn clearSearchState(wme: *T.WindowModeEntry) void {
+    window_copy_clear_marks(wme);
+    clearSearchOrigin(wme);
+}
+
+fn applySearchClearPolicy(wme: *T.WindowModeEntry, command: []const u8, clear: CmdClear, action: *CmdAction) void {
+    const data = modeData(wme);
+    if (std.mem.startsWith(u8, command, "search-")) return;
+    if (data.searchmark == null) return;
+
+    var effective_clear = clear;
+    if (effective_clear == .emacs_only and copyModeUsesViKeys(wme))
+        effective_clear = .never;
+    if (effective_clear == .never) return;
+
+    clearSearchState(wme);
+    if (action.* == .nothing) action.* = .redraw;
+}
 
 pub const window_view_mode = T.WindowMode{
     .name = "view-mode",
@@ -4301,16 +4182,12 @@ pub fn window_copy_command(wme: *T.WindowModeEntry, client: ?*T.Client, session:
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn window_copy_cmd_append_selection(cs: *const CmdState) CmdAction {
-    const wme = cs.wme;
-    if (cs.session) |_| window_copy_append_selection(wme);
-    window_copy_clear_selection(wme);
+    if (cs.session) |_| window_copy_append_selection(cs.wme);
     return .redraw;
 }
 
 pub fn window_copy_cmd_append_selection_and_cancel(cs: *const CmdState) CmdAction {
-    const wme = cs.wme;
-    if (cs.session) |_| window_copy_append_selection(wme);
-    window_copy_clear_selection(wme);
+    if (cs.session) |_| window_copy_append_selection(cs.wme);
     return .cancel;
 }
 
@@ -4353,9 +4230,11 @@ pub fn window_copy_cmd_clear_selection(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_do_copy_end_of_line(cs: *const CmdState, pipe: bool, do_cancel: bool) CmdAction {
-    _ = pipe;
     if (cs.session) |s| {
-        cmdCopyEndOfLine(cs.wme, s, cs.args, do_cancel);
+        if (pipe)
+            cmdCopyEndOfLinePipe(cs.wme, s, cs.args, false)
+        else
+            cmdCopyEndOfLine(cs.wme, s, cs.args, false);
     }
     return if (do_cancel) .cancel else .redraw;
 }
@@ -4377,9 +4256,11 @@ pub fn window_copy_cmd_copy_pipe_end_of_line_and_cancel(cs: *const CmdState) Cmd
 }
 
 pub fn window_copy_do_copy_line(cs: *const CmdState, pipe: bool, do_cancel: bool) CmdAction {
-    _ = pipe;
     if (cs.session) |s| {
-        cmdCopyLine(cs.wme, s, cs.args, do_cancel);
+        if (pipe)
+            cmdCopyLinePipe(cs.wme, s, cs.args, false)
+        else
+            cmdCopyLine(cs.wme, s, cs.args, false);
     }
     return if (do_cancel) .cancel else .redraw;
 }
@@ -4402,7 +4283,7 @@ pub fn window_copy_cmd_copy_pipe_line_and_cancel(cs: *const CmdState) CmdAction 
 
 pub fn window_copy_cmd_copy_selection_no_clear(cs: *const CmdState) CmdAction {
     if (cs.session) |s| {
-        cmdCopySelection(cs.wme, s, cs.args, false);
+        cmdCopySelectionNoClear(cs.wme, s, cs.args);
     }
     return .nothing;
 }
@@ -4411,13 +4292,12 @@ pub fn window_copy_cmd_copy_selection(cs: *const CmdState) CmdAction {
     if (cs.session) |s| {
         cmdCopySelection(cs.wme, s, cs.args, false);
     }
-    clearSelection(cs.wme);
     return .redraw;
 }
 
 pub fn window_copy_cmd_copy_selection_and_cancel(cs: *const CmdState) CmdAction {
     if (cs.session) |s| {
-        cmdCopySelection(cs.wme, s, cs.args, true);
+        cmdCopySelection(cs.wme, s, cs.args, false);
     }
     return .cancel;
 }
@@ -4435,17 +4315,17 @@ pub fn window_copy_cmd_cursor_down_and_cancel(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_cursor_left(cs: *const CmdState) CmdAction {
-    moveCursorX(cs.wme, -1);
+    moveCursorX(cs.wme, -@as(i32, @intCast(repeatCount(cs.wme))));
     return .redraw;
 }
 
 pub fn window_copy_cmd_cursor_right(cs: *const CmdState) CmdAction {
-    moveCursorX(cs.wme, 1);
+    moveCursorX(cs.wme, @intCast(repeatCount(cs.wme)));
     return .redraw;
 }
 
 pub fn window_copy_cmd_cursor_up(cs: *const CmdState) CmdAction {
-    scrollLines(cs.wme, -1);
+    scrollLines(cs.wme, -@as(i32, @intCast(repeatCount(cs.wme))));
     return .redraw;
 }
 
@@ -4774,17 +4654,20 @@ pub fn window_copy_cmd_next_matching_bracket(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_next_paragraph(cs: *const CmdState) CmdAction {
-    nextParagraph(cs.wme);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) nextParagraph(cs.wme);
     return .redraw;
 }
 
 pub fn window_copy_cmd_next_space(cs: *const CmdState) CmdAction {
-    cursorNextWord(cs.wme, "");
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorNextWord(cs.wme, "");
     return .redraw;
 }
 
 pub fn window_copy_cmd_next_space_end(cs: *const CmdState) CmdAction {
-    cursorNextWordEnd(cs.wme, "");
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(cs.wme, "");
     return .redraw;
 }
 
@@ -4793,7 +4676,8 @@ pub fn window_copy_cmd_next_word(cs: *const CmdState) CmdAction {
         opts.options_get_string(s.options, "word-separators")
     else
         "";
-    cursorNextWord(cs.wme, separators);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorNextWord(cs.wme, separators);
     return .redraw;
 }
 
@@ -4802,7 +4686,8 @@ pub fn window_copy_cmd_next_word_end(cs: *const CmdState) CmdAction {
         opts.options_get_string(s.options, "word-separators")
     else
         "";
-    cursorNextWordEnd(cs.wme, separators);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorNextWordEnd(cs.wme, separators);
     return .redraw;
 }
 
@@ -4846,12 +4731,14 @@ pub fn window_copy_cmd_page_up(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_previous_paragraph(cs: *const CmdState) CmdAction {
-    previousParagraph(cs.wme);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) previousParagraph(cs.wme);
     return .redraw;
 }
 
 pub fn window_copy_cmd_previous_space(cs: *const CmdState) CmdAction {
-    cursorPreviousWord(cs.wme, "", true);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorPreviousWord(cs.wme, "", true);
     return .redraw;
 }
 
@@ -4860,7 +4747,8 @@ pub fn window_copy_cmd_previous_word(cs: *const CmdState) CmdAction {
         opts.options_get_string(s.options, "word-separators")
     else
         "";
-    cursorPreviousWord(cs.wme, separators, true);
+    var remaining = repeatCount(cs.wme);
+    while (remaining > 0) : (remaining -= 1) cursorPreviousWord(cs.wme, separators, true);
     return .redraw;
 }
 
@@ -4963,7 +4851,7 @@ pub fn window_copy_cmd_copy_pipe(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_copy_pipe_and_cancel(cs: *const CmdState) CmdAction {
-    if (cs.session) |s| cmdCopyPipe(cs.wme, s, cs.args, true);
+    if (cs.session) |s| cmdCopyPipe(cs.wme, s, cs.args, false);
     return .cancel;
 }
 
@@ -4978,7 +4866,7 @@ pub fn window_copy_cmd_pipe(cs: *const CmdState) CmdAction {
 }
 
 pub fn window_copy_cmd_pipe_and_cancel(cs: *const CmdState) CmdAction {
-    if (cs.session) |s| cmdPipe(cs.wme, s, cs.args, true);
+    if (cs.session) |s| cmdPipe(cs.wme, s, cs.args, false);
     return .cancel;
 }
 
@@ -5063,8 +4951,7 @@ pub fn window_copy_cmd_search_forward_incremental(cs: *const CmdState) CmdAction
 
 pub fn window_copy_cmd_refresh_from_pane(cs: *const CmdState) CmdAction {
     refreshFromSource(cs.wme, true);
-    cs.wme.prefix = 1;
-    return .nothing;
+    return .redraw;
 }
 
 pub fn window_copy_cmd_swap_selection_start(cs: *const CmdState) CmdAction {

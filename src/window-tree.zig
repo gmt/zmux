@@ -26,9 +26,13 @@ const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
+const server = @import("server.zig");
 const sess = @import("session.zig");
+const server_fn = @import("server-fn.zig");
 const sort_mod = @import("sort.zig");
+const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
+const cmdq = @import("cmd-queue.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
@@ -103,6 +107,7 @@ const WindowTreeModeData = struct {
     key_format: []u8,
     filter: ?[]u8 = null,
     command: []u8,
+    entered: ?[]const u8 = null,
     sort_crit: T.SortCriteria = .{},
     kind: DisplayKind = .pane,
     squash_groups: bool = true,
@@ -114,6 +119,21 @@ const WindowTreeModeData = struct {
     preview_each: u32 = 0,
     preview_top: u32 = 0,
     preview_bottom: u32 = 0,
+};
+
+const TreePromptAction = enum(u8) {
+    command,
+    kill_current,
+    kill_tagged,
+};
+
+const TreePromptState = struct {
+    pane_id: u32,
+    action: TreePromptAction,
+};
+
+const TreeDoneState = struct {
+    pane_id: u32,
 };
 
 pub const window_tree_mode = T.WindowMode{
@@ -158,6 +178,7 @@ pub fn enterMode(wp: *T.WindowPane, config: EnterConfig) *T.WindowModeEntry {
         .menu = &window_tree_menu_items,
         .buildcb = buildTree,
         .searchcb = searchItem,
+        .menucb = windowTreeMenuCallback,
         .keycb = keyForLineCallback,
     });
 
@@ -346,8 +367,26 @@ fn windowTreeKey(
             data.preview_offset += 1;
             redraw(wme);
         },
+        'x' => {
+            promptTreeKill(client, wme, .kill_current);
+        },
+        'X' => {
+            promptTreeKill(client, wme, .kill_tagged);
+        },
+        ':' => {
+            promptTreeCommand(client, wme);
+        },
         else => {},
     }
+}
+
+fn windowTreeMenuCallback(tree: *mode_tree.Data, client: ?*T.Client, key: T.key_code) void {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(tree.modedata.?));
+    const pane = data.fs.wp orelse return;
+    const wme = window.window_pane_mode(pane) orelse return;
+    const session = data.fs.s orelse return;
+    const wl = data.fs.wl orelse return;
+    windowTreeKey(wme, client, session, wl, key, null);
 }
 
 fn windowTreeClose(wme: *T.WindowModeEntry) void {
@@ -1084,6 +1123,201 @@ fn unsupportedCommand(client: ?*T.Client, command: []const u8) void {
     status_runtime.present_client_message(cl, text);
 }
 
+fn promptTreeKill(client: ?*T.Client, wme: *T.WindowModeEntry, action: TreePromptAction) void {
+    const cl = client orelse return;
+    const data = modeData(wme);
+
+    const prompt = switch (action) {
+        .command => return,
+        .kill_current => killCurrentPrompt(data) orelse return,
+        .kill_tagged => blk: {
+            const tagged = mode_tree.countTagged(data.tree);
+            if (tagged == 0) return;
+            break :blk xm.xasprintf("Kill {d} tagged? ", .{tagged});
+        },
+    };
+    defer xm.allocator.free(prompt);
+
+    const state = xm.allocator.create(TreePromptState) catch unreachable;
+    state.* = .{
+        .pane_id = wme.wp.id,
+        .action = action,
+    };
+    status_prompt.status_prompt_set(
+        cl,
+        null,
+        prompt,
+        "",
+        treePromptCallback,
+        null,
+        treePromptFree,
+        state,
+        status_prompt.PROMPT_SINGLE | status_prompt.PROMPT_NOFORMAT,
+        .command,
+    );
+}
+
+fn promptTreeCommand(client: ?*T.Client, wme: *T.WindowModeEntry) void {
+    const cl = client orelse return;
+    const data = modeData(wme);
+    const tagged = mode_tree.countTagged(data.tree);
+    const prompt = if (tagged != 0)
+        xm.xasprintf("({d} tagged) ", .{tagged})
+    else
+        xm.xstrdup("(current) ");
+    defer xm.allocator.free(prompt);
+
+    const state = xm.allocator.create(TreePromptState) catch unreachable;
+    state.* = .{
+        .pane_id = wme.wp.id,
+        .action = .command,
+    };
+    status_prompt.status_prompt_set(
+        cl,
+        null,
+        prompt,
+        "",
+        treePromptCallback,
+        null,
+        treePromptFree,
+        state,
+        status_prompt.PROMPT_NOFORMAT,
+        .command,
+    );
+}
+
+fn treePromptFree(data: ?*anyopaque) void {
+    const state: *TreePromptState = @ptrCast(@alignCast(data orelse return));
+    xm.allocator.destroy(state);
+}
+
+fn treeDoneFree(data: ?*anyopaque) void {
+    const state: *TreeDoneState = @ptrCast(@alignCast(data orelse return));
+    xm.allocator.destroy(state);
+}
+
+fn treeDoneCallback(_: *cmdq.CmdqItem, data: ?*anyopaque) T.CmdRetval {
+    const state: *TreeDoneState = @ptrCast(@alignCast(data orelse return .normal));
+    rebuildAndDrawForPaneId(state.pane_id);
+    return .normal;
+}
+
+fn queueTreeDone(client: ?*T.Client, pane_id: u32) void {
+    const state = xm.allocator.create(TreeDoneState) catch unreachable;
+    state.* = .{ .pane_id = pane_id };
+    const item = cmdq.cmdq_get_callback2("window-tree-done", treeDoneCallback, state, treeDoneFree);
+    _ = cmdq.cmdq_append_item(client, item);
+}
+
+fn treePromptCallback(client: *T.Client, data: ?*anyopaque, s: ?[]const u8, _: bool) i32 {
+    const state: *TreePromptState = @ptrCast(@alignCast(data orelse return 0));
+    const tree_data = treeModeDataForPaneId(state.pane_id) orelse return 0;
+    switch (state.action) {
+        .command => {
+            const command = s orelse return 0;
+            if (command.len == 0) return 0;
+            runTreeCommand(tree_data, client, command);
+            queueTreeDone(client, state.pane_id);
+        },
+        .kill_current => {
+            if (!confirmedPrompt(s orelse return 0)) return 0;
+            killCurrentTreeItem(tree_data);
+            server_fn.server_renumber_all();
+            queueTreeDone(client, state.pane_id);
+        },
+        .kill_tagged => {
+            if (!confirmedPrompt(s orelse return 0)) return 0;
+            killTaggedTreeItems(tree_data);
+            server_fn.server_renumber_all();
+            queueTreeDone(client, state.pane_id);
+        },
+    }
+    return 0;
+}
+
+fn confirmedPrompt(text: []const u8) bool {
+    return text.len == 1 and std.ascii.toLower(text[0]) == 'y';
+}
+
+fn treeModeDataForPaneId(pane_id: u32) ?*WindowTreeModeData {
+    const pane = window.window_pane_find_by_id(pane_id) orelse return null;
+    const wme = window.window_pane_mode(pane) orelse return null;
+    if (wme.mode != &window_tree_mode) return null;
+    return modeData(wme);
+}
+
+fn rebuildAndDrawForPaneId(pane_id: u32) void {
+    const pane = window.window_pane_find_by_id(pane_id) orelse return;
+    const wme = window.window_pane_mode(pane) orelse return;
+    if (wme.mode != &window_tree_mode) return;
+    rebuildAndDraw(wme);
+}
+
+fn killCurrentTreeItem(data: *WindowTreeModeData) void {
+    const current_ptr = mode_tree.getCurrent(data.tree) orelse return;
+    const item: *TreeItem = @ptrCast(@alignCast(current_ptr));
+    killTreeItem(item);
+}
+
+fn killCurrentPrompt(data: *WindowTreeModeData) ?[]u8 {
+    const current_ptr = mode_tree.getCurrent(data.tree) orelse return null;
+    const item: *TreeItem = @ptrCast(@alignCast(current_ptr));
+    return switch (item.item_type) {
+        .session => xm.xasprintf("Kill session {s}? ", .{item.session.name}),
+        .window => xm.xasprintf("Kill window {d}? ", .{item.winlink.?.idx}),
+        .pane => xm.xasprintf("Kill pane {d}? ", .{paneIndex(item.winlink.?.window, item.pane.?)}),
+    };
+}
+
+fn killTaggedTreeItems(data: *WindowTreeModeData) void {
+    for (data.tree.line_list.items) |line| {
+        if (!line.item.tagged) continue;
+        const raw = line.item.itemdata orelse continue;
+        const item: *TreeItem = @ptrCast(@alignCast(raw));
+        killTreeItem(item);
+    }
+    mode_tree.clearAllTagged(data.tree);
+}
+
+fn killTreeItem(item: *const TreeItem) void {
+    switch (item.item_type) {
+        .session => {
+            server.server_destroy_session(item.session);
+            sess.session_destroy(item.session, true, "window_tree_kill_item");
+        },
+        .window => {
+            if (item.winlink) |wl| server_fn.server_kill_window(wl.window, false);
+        },
+        .pane => {
+            if (item.pane) |pane| server_fn.server_kill_pane(pane);
+        },
+    }
+}
+
+fn runTreeCommand(data: *WindowTreeModeData, client: ?*T.Client, command: []const u8) void {
+    data.entered = command;
+    defer data.entered = null;
+    mode_tree.eachTagged(data.tree, treeCommandEach, client, T.KEYC_NONE, true);
+}
+
+fn treeCommandEach(mtd: *mode_tree.Data, itemdata: ?*anyopaque, client: ?*T.Client, _: T.key_code) void {
+    const data: *WindowTreeModeData = @ptrCast(@alignCast(mtd.modedata.?));
+    const item: *const TreeItem = @ptrCast(@alignCast(itemdata orelse return));
+    const name = targetName(item) orelse return;
+    defer xm.allocator.free(name);
+
+    const wl = item.winlink;
+    var fs: T.CmdFindState = .{
+        .s = item.session,
+        .wl = wl,
+        .w = if (wl) |value| value.window else null,
+        .wp = if (item.pane) |pane| pane else if (wl) |value| value.window.active else null,
+        .idx = if (wl) |value| value.idx else 0,
+    };
+    const entered = data.entered orelse return;
+    mode_tree.runCommand(client, &fs, entered, name);
+}
+
 // ── Public API: wrappers matching tmux C function names ─────────────────
 //
 // Each wrapper below corresponds to a static function in tmux window-tree.c.
@@ -1290,7 +1524,7 @@ pub fn window_tree_command_each(
 
 /// tmux: window_tree_command_done – callback after tagged commands complete.
 pub fn window_tree_command_done(data: *WindowTreeModeData) void {
-    _ = data;
+    if (data.fs.wp) |pane| rebuildAndDrawForPaneId(pane.id);
 }
 
 /// tmux: window_tree_command_callback – prompt callback for running commands.
@@ -1299,10 +1533,12 @@ pub fn window_tree_command_callback(
     data: *WindowTreeModeData,
     s: ?[]const u8,
 ) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
+    const cl = client orelse return false;
+    const command = s orelse return false;
+    if (command.len == 0) return false;
+    runTreeCommand(data, cl, command);
+    if (data.fs.wp) |pane| queueTreeDone(cl, pane.id);
+    return true;
 }
 
 /// tmux: window_tree_command_free – release reference from command prompt.
@@ -1315,8 +1551,8 @@ pub fn window_tree_kill_each(
     item: *const TreeItem,
     client: ?*T.Client,
 ) void {
-    _ = item;
     _ = client;
+    killTreeItem(item);
 }
 
 /// tmux: window_tree_kill_current_callback – prompt callback to kill current.
@@ -1325,10 +1561,12 @@ pub fn window_tree_kill_current_callback(
     data: *WindowTreeModeData,
     s: ?[]const u8,
 ) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
+    const cl = client orelse return false;
+    if (!confirmedPrompt(s orelse return false)) return false;
+    killCurrentTreeItem(data);
+    server_fn.server_renumber_all();
+    if (data.fs.wp) |pane| queueTreeDone(cl, pane.id);
+    return true;
 }
 
 /// tmux: window_tree_kill_tagged_callback – prompt callback to kill tagged.
@@ -1337,10 +1575,12 @@ pub fn window_tree_kill_tagged_callback(
     data: *WindowTreeModeData,
     s: ?[]const u8,
 ) bool {
-    _ = client;
-    _ = data;
-    _ = s;
-    return false;
+    const cl = client orelse return false;
+    if (!confirmedPrompt(s orelse return false)) return false;
+    killTaggedTreeItems(data);
+    server_fn.server_renumber_all();
+    if (data.fs.wp) |pane| queueTreeDone(cl, pane.id);
+    return true;
 }
 
 test "window-tree enterMode builds reduced hierarchy and focuses the target pane" {
@@ -1476,6 +1716,87 @@ test "window-tree choose runs the command template for the selected target" {
 
     try std.testing.expect(wl.window.active == extra);
     try std.testing.expect(window.window_pane_mode(extra) == null);
+}
+
+test "window-tree command prompt runs the entered command for the current item" {
+    const cmdq_mod = @import("cmd-queue.zig");
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-prompt", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-prompt") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    const original = wl.window.active.?;
+    const extra = window.window_add_pane(wl.window, null, 80, 24);
+    wl.window.active = extra;
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "tree-prompt-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session_ptr,
+    };
+    client.tty = .{ .client = &client };
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = extra,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(extra, .{
+        .fs = &target,
+        .kind = .pane,
+    });
+    defer {
+        status_prompt.status_prompt_clear(&client);
+        if (window.window_pane_mode(extra) != null)
+            _ = window_mode_runtime.resetMode(extra);
+    }
+
+    wl.window.active = original;
+    windowTreeKey(wme, &client, session_ptr, wl, ':', null);
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expectEqualStrings("(current) ", status_prompt.status_prompt_message(&client).?);
+
+    try std.testing.expect(window_tree_command_callback(&client, modeData(wme), "select-pane -t '%%'"));
+    status_prompt.status_prompt_clear(&client);
+    while (cmdq_mod.cmdq_next(&client) != 0) {}
+
+    try std.testing.expect(wl.window.active == extra);
+    try std.testing.expect(window.window_pane_mode(extra) != null);
 }
 
 test "window-tree custom key format renders labels and chooses the matching line" {
@@ -1658,6 +1979,81 @@ test "window-tree preview scroll commands page current window previews" {
     windowTreeCommand(wme, null, session_ptr, wl, @ptrCast(&right_args), null);
     try std.testing.expectEqual(@as(u32, 2), data.preview_start);
     try std.testing.expectEqual(@as(u32, 3), data.preview_end);
+}
+
+test "window-tree kill prompts identify the selected pane and tagged count" {
+    const env_mod = @import("environ.zig");
+    const options_mod = @import("options.zig");
+    const spawn = @import("spawn.zig");
+
+    sess.session_init_globals(xm.allocator);
+    window.window_init_globals(xm.allocator);
+
+    options_mod.global_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_options);
+    options_mod.global_s_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_s_options);
+    options_mod.global_w_options = options_mod.options_create(null);
+    defer options_mod.options_free(options_mod.global_w_options);
+    options_mod.options_default_all(options_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    options_mod.options_default_all(options_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    options_mod.options_default_all(options_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session_ptr = sess.session_create(null, "tree-kill-prompt", "/", env_mod.environ_create(), options_mod.options_create(options_mod.global_s_options), null);
+    defer if (sess.session_find("tree-kill-prompt") != null) sess.session_destroy(session_ptr, false, "test");
+
+    var cause: ?[]u8 = null;
+    var spawn_ctx: T.SpawnContext = .{ .s = session_ptr, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&spawn_ctx, &cause).?;
+    session_ptr.curw = wl;
+
+    const extra = window.window_add_pane(wl.window, null, 80, 24);
+    wl.window.active = extra;
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "tree-kill-prompt-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session_ptr,
+    };
+    client.tty = .{ .client = &client };
+
+    var target = T.CmdFindState{
+        .s = session_ptr,
+        .wl = wl,
+        .w = wl.window,
+        .wp = extra,
+        .idx = wl.idx,
+    };
+
+    const wme = enterMode(extra, .{
+        .fs = &target,
+        .kind = .pane,
+    });
+    defer {
+        status_prompt.status_prompt_clear(&client);
+        if (window.window_pane_mode(extra) != null)
+            _ = window_mode_runtime.resetMode(extra);
+    }
+
+    windowTreeKey(wme, &client, session_ptr, wl, 'x', null);
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expectEqualStrings("Kill pane 1? ", status_prompt.status_prompt_message(&client).?);
+
+    status_prompt.status_prompt_clear(&client);
+    mode_tree.toggleCurrentTag(modeData(wme).tree, false);
+
+    windowTreeKey(wme, &client, session_ptr, wl, 'X', null);
+    try std.testing.expect(status_prompt.status_prompt_active(&client));
+    try std.testing.expectEqualStrings("Kill 1 tagged? ", status_prompt.status_prompt_message(&client).?);
 }
 
 test "window-tree preview arrows translate pane clicks into scroll actions" {

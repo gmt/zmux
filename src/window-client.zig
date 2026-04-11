@@ -68,6 +68,7 @@ const ClientModeData = struct {
     current: usize = 0,
     offset: usize = 0,
     max_key_label_width: usize = 0,
+    preview: bool = false,
     zoomed: i8 = -1,
 };
 
@@ -103,6 +104,7 @@ pub fn enterMode(wp: *T.WindowPane, args: *const args_mod.Arguments) *T.WindowMo
             .order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name,
             .reversed = args.has('r'),
         },
+        .preview = args.has('N') or args.has('y'),
     };
     maybeZoom(wp, data, args);
 
@@ -175,12 +177,12 @@ fn clientModeCommand(
         return;
     }
     if (std.mem.eql(u8, command, "page-up")) {
-        pageUp(data, viewRows(wme.wp));
+        pageUp(data, listRows(data, wme.wp));
         redraw(wme);
         return;
     }
     if (std.mem.eql(u8, command, "page-down")) {
-        pageDown(data, viewRows(wme.wp));
+        pageDown(data, listRows(data, wme.wp));
         redraw(wme);
         return;
     }
@@ -277,6 +279,7 @@ fn refreshFromArgs(wme: *T.WindowModeEntry, args: *const args_mod.Arguments) voi
 
     data.sort_crit.order = if (args.has('O')) sort_mod.sort_order_from_string(args.get('O')) else .name;
     data.sort_crit.reversed = args.has('r');
+    data.preview = args.has('N') or args.has('y');
 }
 
 fn maybeZoom(wp: *T.WindowPane, data: *ClientModeData, args: *const args_mod.Arguments) void {
@@ -375,7 +378,8 @@ fn redraw(wme: *T.WindowModeEntry) void {
     var ctx = T.ScreenWriteCtx{ .s = view };
     const width = view.grid.sx;
     const rows = view.grid.sy;
-    const item_rows = viewRows(wme.wp);
+    const preview_rows = previewRows(data, wme.wp);
+    const item_rows = listRows(data, wme.wp);
     clampOffset(data, item_rows);
 
     var row: u32 = 0;
@@ -390,6 +394,8 @@ fn redraw(wme: *T.WindowModeEntry) void {
         defer xm.allocator.free(line);
         screen_write.putn(&ctx, line);
     }
+
+    drawPreview(data, &ctx, item_rows, preview_rows);
 
     if (rows > 0) {
         screen_write.cursor_to(&ctx, rows - 1, 0);
@@ -441,6 +447,30 @@ fn renderLine(data: *const ClientModeData, index: usize) []u8 {
 
 fn viewRows(wp: *const T.WindowPane) u32 {
     return if (wp.screen.grid.sy > 0) wp.screen.grid.sy - 1 else 0;
+}
+
+fn previewRows(data: *const ClientModeData, wp: *const T.WindowPane) u32 {
+    if (!data.preview) return 0;
+    const rows = viewRows(wp);
+    if (rows < 3) return 0;
+    return @max(@as(u32, 1), rows / 2);
+}
+
+fn listRows(data: *const ClientModeData, wp: *const T.WindowPane) u32 {
+    const rows = viewRows(wp);
+    const preview = previewRows(data, wp);
+    return rows -| preview;
+}
+
+fn drawPreview(data: *const ClientModeData, ctx: *T.ScreenWriteCtx, top: u32, height: u32) void {
+    if (height == 0) return;
+    const item = currentItem(@constCast(data)) orelse return;
+    const session = item.client.session orelse return;
+    const wl = session.curw orelse return;
+    const pane = wl.window.active orelse return;
+
+    screen_write.cursor_to(ctx, top, 0);
+    screen_write.preview(ctx, &pane.base, ctx.s.grid.sx, height);
 }
 
 fn clampOffset(data: *ClientModeData, rows: u32) void {
@@ -857,6 +887,16 @@ const TestSetup = struct {
     pane: *T.WindowPane,
 };
 
+fn setGridLineText(gd: *T.Grid, row: u32, text: []const u8) void {
+    var col: u32 = 0;
+    while (col < text.len and col < gd.sx) : (col += 1) {
+        var cell = T.grid_default_cell;
+        cell.data = T.grid_default_cell.data;
+        cell.data.data[0] = text[col];
+        @import("grid.zig").set_cell(gd, row, col, &cell);
+    }
+}
+
 fn testSetup(session_name: []const u8) !TestSetup {
     const env_mod = @import("environ.zig");
     const opts_mod = @import("options.zig");
@@ -1026,4 +1066,37 @@ test "window-client -Z zooms for the mode lifetime" {
 
     try std.testing.expect(window_mode_runtime.resetMode(setup.pane));
     try std.testing.expectEqual(@as(u32, 0), setup.pane.window.flags & T.WINDOW_ZOOMED);
+}
+
+test "window-client preview draws the selected client's current pane when enabled" {
+    const grid = @import("grid.zig");
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-preview");
+    defer if (sess.session_find("window-client-preview") != null) sess.session_destroy(setup.session, false, "test");
+
+    setGridLineText(setup.pane.base.grid, 0, "preview");
+
+    var target = makeClient(setup.session, "target", "/dev/pts/350");
+    defer freeClient(&target);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{"-N"}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane)) |_| _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    const data = modeData(wme);
+    try std.testing.expect(data.preview);
+
+    const preview_line = grid.string_cells(setup.pane.screen.grid, 12, setup.pane.screen.grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(preview_line);
+    try std.testing.expect(std.mem.indexOf(u8, preview_line, "preview") != null);
 }

@@ -2416,6 +2416,60 @@ test "view mode uses the live resized pane height on the real entry path" {
     try std.testing.expectEqualStrings("line-38", bottom);
 }
 
+test "view mode follows the newest appended lines past the viewport" {
+    initWindowCopyTestGlobals();
+
+    const target_grid = grid.grid_create(10, 4, 0);
+    defer grid.grid_free(target_grid);
+    const target_screen = screen.screen_init(10, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 3044,
+        .name = xm.xstrdup("view-tail-window"),
+        .sx = 10,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer xm.allocator.free(window_.name);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 3045,
+        .window = &window_,
+        .options = undefined,
+        .sx = 10,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&pane);
+
+    try window_.panes.append(xm.allocator, &pane);
+    window_.active = &pane;
+
+    _ = enterViewMode(&pane);
+
+    for (0..6) |line_no| {
+        const text = try std.fmt.allocPrint(xm.allocator, "line-{d}", .{line_no});
+        defer xm.allocator.free(text);
+        wc.window_copy_add(&pane, false, text);
+    }
+
+    const first_visible = grid.string_cells(pane.screen.grid, 0, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(first_visible);
+    const last_visible = grid.string_cells(pane.screen.grid, 3, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(last_visible);
+
+    try std.testing.expectEqualStrings("line-2", first_visible);
+    try std.testing.expectEqualStrings("line-5", last_visible);
+}
+
 test "view mode: refresh-from-pane wipes view content (unlike tmux)" {
     // In tmux, refresh-from-pane is a no-op when data->viewmode is set.
     // In zmux, there is no viewmode field; refresh-from-pane clones from

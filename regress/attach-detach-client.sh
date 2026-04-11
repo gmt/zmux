@@ -14,6 +14,7 @@
 # OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 # attach-detach-client.sh – attach and detach a control client without hanging.
+# Characterizes tmux's explicit detach-client path, including %client-detached.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"
@@ -47,5 +48,11 @@ smoke_cmd list-clients 2>/dev/null | grep -q . || {
 }
 
 wait "$CLIENT_PID" || exit 1
+
+grep -Eq '^%client-detached ' "$OUT" || {
+    echo "missing client-detached"
+    cat "$OUT"
+    exit 1
+}
 
 exit 0

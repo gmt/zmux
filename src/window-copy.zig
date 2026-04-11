@@ -2353,6 +2353,14 @@ pub fn window_copy_vadd(wp: *T.WindowPane, parse: bool, text: []const u8) void {
         }
     }
 
+    if (data.viewmode) {
+        const rows = rowCount(backing);
+        const view = viewRows(wp);
+        data.top = if (rows > view) rows - view else 0;
+        const visible_rows = @min(rows, view);
+        data.cy = if (visible_rows == 0) 0 else visible_rows - 1;
+    }
+
     redraw(wme);
 }
 

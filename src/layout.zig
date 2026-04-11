@@ -50,6 +50,11 @@ const layout_set_names = [_][]const u8{
 };
 
 pub fn resize_pane(wp: *T.WindowPane, type_: T.LayoutType, change: i32, opposite: bool) bool {
+    if (trusted_layout_root(wp.window)) |root| {
+        const leaf = find_leaf(root, wp) orelse return false;
+        return resize_leaf(root, leaf, type_, change, opposite);
+    }
+
     var builder = Builder.init(wp.window.panes.items);
     defer builder.arena.deinit();
     const root = builder.build() catch return false;
@@ -58,37 +63,29 @@ pub fn resize_pane(wp: *T.WindowPane, type_: T.LayoutType, change: i32, opposite
 }
 
 pub fn resize_pane_to(wp: *T.WindowPane, type_: T.LayoutType, new_size: u32) bool {
+    if (trusted_layout_root(wp.window)) |root| {
+        const leaf = find_leaf(root, wp) orelse return false;
+        return resize_pane_to_leaf(root, leaf, type_, new_size);
+    }
+
     var builder = Builder.init(wp.window.panes.items);
     defer builder.arena.deinit();
     const root = builder.build() catch return false;
     const leaf = find_leaf(root, wp) orelse return false;
-
-    var lc = leaf;
-    var lcparent = lc.parent;
-    while (lcparent != null and lcparent.?.type != type_) {
-        lc = lcparent.?;
-        lcparent = lc.parent;
-    }
-    const parent = lcparent orelse return false;
-
-    const size: u32 = switch (type_) {
-        .leftright => lc.sx,
-        .topbottom => lc.sy,
-        .windowpane => return false,
-    };
-    const change64: i64 = if (is_last_child(parent, lc))
-        @as(i64, @intCast(size)) - @as(i64, @intCast(new_size))
-    else
-        @as(i64, @intCast(new_size)) - @as(i64, @intCast(size));
-    const change: i32 = std.math.cast(i32, change64) orelse return false;
-    return resize_leaf(root, leaf, type_, change, true);
+    return resize_pane_to_leaf(root, leaf, type_, new_size);
 }
 
 pub fn resize_by_border_drag(w: *T.Window, x: u32, y: u32, last_x: u32, last_y: u32) bool {
+    if (trusted_layout_root(w)) |root|
+        return resize_by_border_drag_root(root, x, y, last_x, last_y);
+
     var builder = Builder.init(w.panes.items);
     defer builder.arena.deinit();
     const root = builder.build() catch return false;
+    return resize_by_border_drag_root(root, x, y, last_x, last_y);
+}
 
+fn resize_by_border_drag_root(root: *Cell, x: u32, y: u32, last_x: u32, last_y: u32) bool {
     const dx64 = @as(i64, @intCast(x)) - @as(i64, @intCast(last_x));
     const dy64 = @as(i64, @intCast(y)) - @as(i64, @intCast(last_y));
     const dx: i32 = std.math.cast(i32, dx64) orelse return false;
@@ -141,11 +138,30 @@ pub fn resize_by_border_drag(w: *T.Window, x: u32, y: u32, last_x: u32, last_y: 
     return changed;
 }
 
-pub fn dump_window(w: *T.Window) ?[]u8 {
-    if (w.layout_root) |root| {
-        if (layout_count_cells(root) == w.panes.items.len)
-            return dump_root(root);
+fn resize_pane_to_leaf(root: *Cell, leaf: *Cell, type_: T.LayoutType, new_size: u32) bool {
+    var lc = leaf;
+    var lcparent = lc.parent;
+    while (lcparent != null and lcparent.?.type != type_) {
+        lc = lcparent.?;
+        lcparent = lc.parent;
     }
+    const parent = lcparent orelse return false;
+
+    const size: u32 = switch (type_) {
+        .leftright => lc.sx,
+        .topbottom => lc.sy,
+        .windowpane => return false,
+    };
+    const change64: i64 = if (is_last_child(parent, lc))
+        @as(i64, @intCast(size)) - @as(i64, @intCast(new_size))
+    else
+        @as(i64, @intCast(new_size)) - @as(i64, @intCast(size));
+    const change: i32 = std.math.cast(i32, change64) orelse return false;
+    return resize_leaf(root, leaf, type_, change, true);
+}
+
+pub fn dump_window(w: *T.Window) ?[]u8 {
+    if (trusted_layout_root(w)) |root| return dump_root(root);
     if (w.panes.items.len == 0)
         return null;
 
@@ -231,7 +247,15 @@ pub fn parse_window(w: *T.Window, layout: []const u8, cause: *?[]u8) bool {
 }
 
 pub fn spread_out(wp: *T.WindowPane) bool {
-    if (wp.layout_cell) |leaf| {
+    if (trusted_layout_root(wp.window)) |root| {
+        const leaf = if (wp.layout_cell) |candidate|
+            if (candidate.wp == wp and layout_cell_is_in_tree(root, candidate))
+                candidate
+            else
+                find_leaf(root, wp) orelse return false
+        else
+            find_leaf(root, wp) orelse return false;
+
         var parent = leaf.parent;
         while (parent) |candidate| : (parent = candidate.parent) {
             if (layout_spread_cell(wp.window, candidate) != 0) {
@@ -1194,6 +1218,49 @@ fn offsetCoord(value: u32, delta: i32) ?u32 {
     return std.math.cast(u32, shifted);
 }
 
+fn layout_root_matches_panes(root: *Cell, panes: []const *T.WindowPane) bool {
+    var next: usize = 0;
+    if (!layout_root_matches_panes_recursive(root, panes, &next))
+        return false;
+    return next == panes.len;
+}
+
+fn layout_root_matches_panes_recursive(lc: *Cell, panes: []const *T.WindowPane, next: *usize) bool {
+    if (lc.type == .windowpane) {
+        if (next.* >= panes.len)
+            return false;
+        if (lc.wp != panes[next.*])
+            return false;
+        next.* += 1;
+        return true;
+    }
+
+    for (lc.cells.items) |child| {
+        if (!layout_root_matches_panes_recursive(child, panes, next))
+            return false;
+    }
+    return true;
+}
+
+fn trusted_layout_root(w: *T.Window) ?*Cell {
+    const root = w.layout_root orelse return null;
+    if (!layout_root_matches_panes(root, w.panes.items))
+        return null;
+    return root;
+}
+
+fn layout_cell_is_in_tree(root: *Cell, target: *Cell) bool {
+    if (root == target)
+        return true;
+    if (root.type == .windowpane)
+        return false;
+    for (root.cells.items) |child| {
+        if (layout_cell_is_in_tree(child, target))
+            return true;
+    }
+    return false;
+}
+
 fn search_by_border(lc: *Cell, x: u32, y: u32) ?*Cell {
     var last: ?*Cell = null;
 
@@ -1559,7 +1626,21 @@ pub fn layout_fix_offsets(w: *T.Window) void {
 
 pub fn layout_fix_panes(w: *T.Window, skip: ?*T.WindowPane) void {
     const root = w.layout_root orelse return;
+    for (w.panes.items) |wp| {
+        wp.layout_cell = null;
+    }
+    layout_bind_panes(root);
     apply_panes_skip(root, skip);
+}
+
+fn layout_bind_panes(lc: *T.LayoutCell) void {
+    if (lc.type == .windowpane) {
+        if (lc.wp) |wp| wp.layout_cell = lc;
+        return;
+    }
+    for (lc.cells.items) |child| {
+        layout_bind_panes(child);
+    }
 }
 
 pub fn layout_resize(w: *T.Window, sx: u32, sy: u32) void {
@@ -2268,6 +2349,40 @@ test "dump_window prefers layout_root over pane rectangles" {
     try testing.expectEqualStrings(root_dump, window_dump);
 }
 
+test "dump_window falls back when layout_root leaf order no longer matches panes" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const lc2 = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 40, 24);
+    layout_assign_pane(lc2, wp2, 0);
+
+    const authoritative_dump = dump_window(w).?;
+    defer xm.allocator.free(authoritative_dump);
+
+    const root = w.layout_root.?;
+    const left = root.cells.items[0];
+    const right = root.cells.items[1];
+    const tmp_wp = left.wp;
+    left.wp = right.wp;
+    right.wp = tmp_wp;
+    left.sx = 10;
+    right.xoff = 11;
+    right.sx = 69;
+
+    const stale_root_dump = dump_root(root).?;
+    defer xm.allocator.free(stale_root_dump);
+
+    const window_dump = dump_window(w).?;
+    defer xm.allocator.free(window_dump);
+    try testing.expectEqualStrings(authoritative_dump, window_dump);
+    try testing.expect(!std.mem.eql(u8, stale_root_dump, window_dump));
+}
+
 test "spread_out prefers layout_cell parents over stale pane rectangles" {
     const w = test_setup_window(80, 24);
     defer test_teardown_window(w);
@@ -2284,6 +2399,8 @@ test "spread_out prefers layout_cell parents over stale pane rectangles" {
         return error.SplitFailed;
     const wp3 = win.window_add_pane(w, null, 40, 12);
     layout_assign_pane(right_cell, wp3, 0);
+    w.panes.items[1] = wp3;
+    w.panes.items[2] = wp2;
 
     layout_resize_adjust(w, wp1.layout_cell.?, .leftright, -10);
     layout_fix_offsets(w);
@@ -2304,4 +2421,73 @@ test "spread_out prefers layout_cell parents over stale pane rectangles" {
     const top_right = wp3.layout_cell.?.sx;
     try testing.expect(top_left == top_right or top_left == top_right + 1 or top_right == top_left + 1);
     try testing.expectEqual(@as(u32, 80), wp2.layout_cell.?.sx);
+}
+
+test "spread_out recovers through layout_root when a pane layout_cell is stale" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const bottom_cell = layout_split_pane(wp1, .topbottom, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 80, 12);
+    layout_assign_pane(bottom_cell, wp2, 0);
+
+    const right_cell = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp3 = win.window_add_pane(w, null, 40, 12);
+    layout_assign_pane(right_cell, wp3, 0);
+    w.panes.items[1] = wp3;
+    w.panes.items[2] = wp2;
+
+    layout_resize_adjust(w, wp1.layout_cell.?, .leftright, -10);
+    layout_fix_offsets(w);
+    layout_fix_panes(w, null);
+    try testing.expect(wp1.layout_cell.?.sx != wp3.layout_cell.?.sx);
+
+    wp1.layout_cell = null;
+    wp1.xoff = 0;
+    wp1.yoff = 0;
+    wp1.sx = 80;
+    wp1.sy = 11;
+    wp3.xoff = 0;
+    wp3.yoff = 0;
+    wp3.sx = 80;
+    wp3.sy = 11;
+
+    try testing.expect(spread_out(wp1));
+    try testing.expect(wp1.layout_cell != null);
+    const top_left = wp1.layout_cell.?.sx;
+    const top_right = wp3.layout_cell.?.sx;
+    try testing.expect(top_left == top_right or top_left == top_right + 1 or top_right == top_left + 1);
+    try testing.expectEqual(@as(u32, 80), wp2.layout_cell.?.sx);
+}
+
+test "resize_pane prefers trusted layout_root over stale pane rectangles" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const left = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, left);
+
+    const right_cell = layout_split_pane(left, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const right = win.window_add_pane(w, null, 40, 24);
+    layout_assign_pane(right_cell, right, 0);
+
+    left.xoff = 0;
+    left.yoff = 0;
+    left.sx = 10;
+    left.sy = 24;
+    right.xoff = 11;
+    right.yoff = 0;
+    right.sx = 69;
+    right.sy = 24;
+
+    try testing.expect(resize_pane(left, .leftright, 5, true));
+    try testing.expectEqual(@as(u32, 45), left.sx);
+    try testing.expectEqual(@as(u32, 46), right.xoff);
+    try testing.expectEqual(@as(u32, 34), right.sx);
 }

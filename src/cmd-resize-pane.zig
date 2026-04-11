@@ -374,6 +374,41 @@ test "resize-pane -R grows the whole left column when horizontal resize climbs p
     try std.testing.expectEqual(@as(u32, 37), right.sx);
 }
 
+test "resize-pane -R prefers layout_root over stale pane rectangles" {
+    const opts = @import("options.zig");
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "resize-pane-root", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("resize-pane-root") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&ctx, &cause).?;
+    const left = wl.window.active.?;
+    const lc2 = layout_mod.layout_split_pane(left, .leftright, -1, 0).?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = lc2, .flags = T.SPAWN_EMPTY };
+    const right = spawn.spawn_pane(&right_ctx, &cause).?;
+    s.curw = wl;
+
+    set_pane_geometry(left, 0, 0, 10, 24);
+    set_pane_geometry(right, 11, 0, 69, 24);
+
+    var parse_cause: ?[]u8 = null;
+    const resize_cmd = try cmd_mod.cmd_parse_one(&.{ "resize-pane", "-R", "-t", "resize-pane-root:0.0", "5" }, null, &parse_cause);
+    defer cmd_mod.cmd_free(resize_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(resize_cmd, &item));
+    try std.testing.expectEqual(@as(u32, 45), left.sx);
+    try std.testing.expectEqual(@as(u32, 46), right.xoff);
+    try std.testing.expectEqual(@as(u32, 34), right.sx);
+}
+
 test "resize-pane -x resizes the last pane by moving its left border" {
     const opts = @import("options.zig");
     const env_mod = @import("environ.zig");

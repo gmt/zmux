@@ -380,3 +380,53 @@ test "select-layout snapshots undo state from layout_root even with stale pane r
     try std.testing.expectEqual(original_second_xoff, second.xoff);
     try std.testing.expectEqual(original_second_sx, second.sx);
 }
+
+test "select-layout -E uses layout_root when the target pane layout_cell is stale" {
+    const env_mod = @import("environ.zig");
+    const opts = @import("options.zig");
+    const sess = @import("session.zig");
+    const spawn = @import("spawn.zig");
+
+    init_test_globals();
+    defer deinit_test_globals();
+
+    const s = sess.session_create(null, "select-layout-root-spread", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("select-layout-root-spread") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var first_ctx: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    const wl = spawn.spawn_window(&first_ctx, &cause).?;
+    const top_left = wl.window.active.?;
+    const bottom_cell = layout_mod.layout_split_pane(top_left, .topbottom, -1, 0).?;
+    var bottom_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = bottom_cell, .flags = T.SPAWN_EMPTY };
+    const bottom = spawn.spawn_pane(&bottom_ctx, &cause).?;
+    const right_cell = layout_mod.layout_split_pane(top_left, .leftright, -1, 0).?;
+    var right_ctx: T.SpawnContext = .{ .s = s, .wl = wl, .lc = right_cell, .flags = T.SPAWN_EMPTY };
+    const top_right = spawn.spawn_pane(&right_ctx, &cause).?;
+    s.curw = wl;
+
+    layout_mod.layout_resize_adjust(wl.window, top_left.layout_cell.?, .leftright, -10);
+    layout_mod.layout_fix_offsets(wl.window);
+    layout_mod.layout_fix_panes(wl.window, null);
+    try std.testing.expect(top_left.layout_cell.?.sx != top_right.layout_cell.?.sx);
+
+    top_left.layout_cell = null;
+    set_pane_geometry(top_left, 0, 0, 80, 11);
+    set_pane_geometry(top_right, 0, 0, 80, 11);
+
+    const target = xm.xasprintf("%{d}", .{top_left.id});
+    defer xm.allocator.free(target);
+
+    var parse_cause: ?[]u8 = null;
+    const spread_cmd = try cmd_mod.cmd_parse_one(&.{ "select-layout", "-E", "-t", target }, null, &parse_cause);
+    defer cmd_mod.cmd_free(spread_cmd);
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(spread_cmd, &item));
+
+    try std.testing.expect(top_left.layout_cell != null);
+    const left_sx = top_left.layout_cell.?.sx;
+    const right_sx = top_right.layout_cell.?.sx;
+    try std.testing.expect(left_sx == right_sx or left_sx == right_sx + 1 or right_sx == left_sx + 1);
+    try std.testing.expectEqual(@as(u32, 80), bottom.layout_cell.?.sx);
+}

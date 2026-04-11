@@ -707,7 +707,14 @@ fn popupDisplayMenu(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
         &popup_menu_items;
 
     const menu = menu_mod.menu_create("");
-    menu_mod.menu_add_items(menu, items);
+    for (items) |template| {
+        const name = template.name orelse break;
+        menu_mod.menu_add_item(menu, .{
+            .name = name,
+            .key = template.key,
+            .command = template.command,
+        }, null, c, null);
+    }
 
     var x: u32 = m.x;
     const half = (menu.width + 4) / 2;

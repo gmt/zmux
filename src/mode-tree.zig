@@ -1022,7 +1022,14 @@ pub fn displayMenu(mtd: *Data, client: ?*T.Client, x: u32, y: u32, outside: bool
     defer xm.allocator.free(title);
 
     const menu = menu_mod.menu_create(title);
-    menu_mod.menu_add_items(menu, items);
+    for (items) |template| {
+        const name = template.name orelse break;
+        menu_mod.menu_add_item(menu, .{
+            .name = name,
+            .key = template.key,
+            .command = template.command,
+        }, null, cl, null);
+    }
 
     const mtm = xm.allocator.create(MenuCtx) catch unreachable;
     mtm.* = .{ .data = mtd, .client = client, .line = line };

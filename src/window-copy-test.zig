@@ -50,6 +50,19 @@ fn runCopyModeTestCommandArgs(wme: *T.WindowModeEntry, session: ?*T.Session, val
     wc.copyModeCommand(wme, null, if (session) |s| s else undefined, undefined, @ptrCast(&args), null);
 }
 
+fn runCopyModeMouseCommandArgs(
+    wme: *T.WindowModeEntry,
+    session: ?*T.Session,
+    mouse: *const T.MouseEvent,
+    values: []const []const u8,
+) !void {
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    for (values) |value|
+        try args.values.append(xm.allocator, xm.xstrdup(value));
+    wc.copyModeCommand(wme, null, if (session) |s| s else undefined, undefined, @ptrCast(&args), mouse);
+}
+
 fn initWindowCopyTestGlobals() void {
     const sess = @import("session.zig");
 
@@ -2058,6 +2071,107 @@ test "window-copy search-forward jumps to matching line" {
     try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
 }
 
+test "window-copy regex search uses regex semantics and emacs cursor placement" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2051,
+        .name = xm.xstrdup("copy-regex-src"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 2052,
+        .name = xm.xstrdup("copy-regex-tgt"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2053,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2054,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "nope");
+    setGridLineText(source.base.grid, 1, "needle");
+    setGridLineText(source.base.grid, 2, "still");
+    setGridLineText(source.base.grid, 3, "done");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward-text", "n..d" });
+    try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward", "n..d" });
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 4), wc.modeData(wme).cx);
+
+    wc.window_copy_scroll_to(wme, 0, 3, true);
+    wc.modeData(wme).cx = 3;
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-backward", "n..d" });
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
+}
+
 test "window-copy public match helpers expose the current search hit" {
     const opts_mod = @import("options.zig");
 
@@ -2253,6 +2367,194 @@ test "window-copy built-in command aliases no longer fall into unsupported-comma
 
     // The built-in alias commands above should complete without surfacing the unsupported status message.
     try std.testing.expect(client.message_string == null);
+}
+
+test "window-copy cursor movement grows an active keyboard selection" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2111,
+        .name = xm.xstrdup("copy-selection-grow-src"),
+        .sx = 8,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 2112,
+        .name = xm.xstrdup("copy-selection-grow-tgt"),
+        .sx = 8,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2113,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2114,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "abcd");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "begin-selection");
+    try runCopyModeTestCommand(wme, "cursor-right");
+
+    const selected = wc.window_copy_get_selection(wme, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(selected);
+    try std.testing.expectEqualStrings("a", selected);
+}
+
+test "window-copy mouse select-word uses the clicked position" {
+    const env_mod = @import("environ.zig");
+    const opts_mod = @import("options.zig");
+    const sess = @import("session.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const session = sess.session_create(null, "copy-mouse-select-word", "/", env_mod.environ_create(), opts_mod.options_create(opts_mod.global_s_options), null);
+    defer if (sess.session_find("copy-mouse-select-word") != null) sess.session_destroy(session, false, "test");
+
+    const source_grid = grid.grid_create(12, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 2115,
+        .name = xm.xstrdup("copy-mouse-select-word-window"),
+        .sx = 12,
+        .sy = 1,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2116,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 12,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2117,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 12,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    setGridLineText(source.base.grid, 0, "alpha beta");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    const mouse = T.MouseEvent{
+        .valid = true,
+        .wp = @intCast(target.id),
+        .x = 7,
+        .y = 0,
+    };
+    try runCopyModeMouseCommandArgs(wme, session, &mouse, &.{"select-word"});
+
+    const selected = wc.window_copy_get_selection(wme, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(selected);
+    try std.testing.expectEqualStrings("bet", selected);
 }
 
 /// Enter view mode on the given pane, creating the CopyModeData and pushing

@@ -231,6 +231,17 @@ pub fn parse_window(w: *T.Window, layout: []const u8, cause: *?[]u8) bool {
 }
 
 pub fn spread_out(wp: *T.WindowPane) bool {
+    if (wp.layout_cell) |leaf| {
+        var parent = leaf.parent;
+        while (parent) |candidate| : (parent = candidate.parent) {
+            if (layout_spread_cell(wp.window, candidate) != 0) {
+                layout_fix_offsets(wp.window);
+                layout_fix_panes(wp.window, null);
+                return true;
+            }
+        }
+    }
+
     var builder = Builder.init(wp.window.panes.items);
     defer builder.arena.deinit();
     const root = builder.build() catch return false;
@@ -2254,4 +2265,42 @@ test "dump_window prefers layout_root over pane rectangles" {
     const window_dump = dump_window(w).?;
     defer xm.allocator.free(window_dump);
     try testing.expectEqualStrings(root_dump, window_dump);
+}
+
+test "spread_out prefers layout_cell parents over stale pane rectangles" {
+    const w = test_setup_window(80, 24);
+    defer test_teardown_window(w);
+
+    const wp1 = win.window_add_pane(w, null, 80, 24);
+    layout_init(w, wp1);
+
+    const bottom_cell = layout_split_pane(wp1, .topbottom, -1, 0) orelse
+        return error.SplitFailed;
+    const wp2 = win.window_add_pane(w, null, 80, 12);
+    layout_assign_pane(bottom_cell, wp2, 0);
+
+    const right_cell = layout_split_pane(wp1, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const wp3 = win.window_add_pane(w, null, 40, 12);
+    layout_assign_pane(right_cell, wp3, 0);
+
+    layout_resize_adjust(w, wp1.layout_cell.?, .leftright, -10);
+    layout_fix_offsets(w);
+    layout_fix_panes(w, null);
+    try testing.expect(wp1.layout_cell.?.sx != wp3.layout_cell.?.sx);
+
+    wp1.xoff = 0;
+    wp1.yoff = 0;
+    wp1.sx = 80;
+    wp1.sy = 11;
+    wp3.xoff = 0;
+    wp3.yoff = 0;
+    wp3.sx = 80;
+    wp3.sy = 11;
+
+    try testing.expect(spread_out(wp1));
+    const top_left = wp1.layout_cell.?.sx;
+    const top_right = wp3.layout_cell.?.sx;
+    try testing.expect(top_left == top_right or top_left == top_right + 1 or top_right == top_left + 1);
+    try testing.expectEqual(@as(u32, 80), wp2.layout_cell.?.sx);
 }

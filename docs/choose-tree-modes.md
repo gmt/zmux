@@ -10,9 +10,11 @@
   detach, kill, suspend, tagging, custom `-F` format, `-f` filter, `-O`
   sorting, `-r` reverse sorting, template execution against the selected
   client target, custom `-K` key labels, preview rendering with copied status
-  lines, and `-Z` zoom ownership for the mode lifetime.
+  lines, live preview refresh through the shared mode update path, and `-Z`
+  zoom ownership for the mode lifetime.
 - The current `client-mode` still lacks tmux's fuller preview interaction
-  surface, especially mouse-side preview selection behavior.
+  surface, so the remaining chooser gap is now mostly polish around the
+  `client-mode` preview/runtime path rather than missing tree-mode mechanics.
 - Current `choose-tree` and `find-window` behavior enters a reduced `tree-mode`
   alternate-screen browser over the shared `window-mode-runtime.zig` interface.
 - The current reduced `tree-mode` supports session/window/pane tree browsing,

@@ -96,6 +96,7 @@ fn previewModeFromArgs(args: *const args_mod.Arguments) mode_tree.Preview {
 
 pub const window_client_mode = T.WindowMode{
     .name = "client-mode",
+    .update = clientModeUpdate,
     .resize = window_client_resize,
     .key = clientModeKey,
     .key_table = clientModeKeyTable,
@@ -311,6 +312,10 @@ fn clientModeClose(wme: *T.WindowModeEntry) void {
 
 fn clientModeGetScreen(wme: *T.WindowModeEntry) *T.Screen {
     return modeData(wme).tree.getScreen();
+}
+
+fn clientModeUpdate(wme: *T.WindowModeEntry) void {
+    rebuildAndDraw(wme);
 }
 
 fn modeData(wme: *T.WindowModeEntry) *ClientModeData {
@@ -1230,4 +1235,40 @@ test "window-client preview draws the selected client's current pane when enable
     const status_line = grid.string_cells(clientModeGetScreen(wme).grid, 22, clientModeGetScreen(wme).grid.sx, .{ .trim_trailing_spaces = true });
     defer xm.allocator.free(status_line);
     try std.testing.expect(std.mem.indexOf(u8, status_line, "status") != null);
+}
+
+test "window-client mode update refreshes preview content" {
+    const grid = @import("grid.zig");
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-preview-update");
+    defer if (sess.session_find("window-client-preview-update") != null) sess.session_destroy(setup.session, false, "test");
+
+    setGridLineText(setup.pane.base.grid, 0, "before");
+
+    var target = makeClient(setup.session, "target-update", "/dev/pts/351");
+    defer freeClient(&target);
+    target.tty.sx = 20;
+    target.tty.sy = 24;
+    setup.session.statusat = 23;
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{"-N"}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane)) |_| _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    setGridLineText(setup.pane.base.grid, 0, "after");
+    window_client_mode.update.?(wme);
+
+    const preview_line = grid.string_cells(clientModeGetScreen(wme).grid, 12, clientModeGetScreen(wme).grid.sx, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(preview_line);
+    try std.testing.expect(std.mem.indexOf(u8, preview_line, "after") != null);
 }

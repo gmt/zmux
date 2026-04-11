@@ -24,8 +24,8 @@ Live tmux-parity gaps only.
 - `zmux:` `choose-client` now rides the shared `mode-tree` substrate and
   carries tmux-shaped status-aware previews, while `tree-mode` has prompt-driven
   command and kill flows plus preview-tile mouse selection. The remaining
-  chooser gap is mainly fuller `choose-client` preview interaction parity and
-  the last bits of chooser-side polish around the shared `mode-tree` runtime.
+  chooser gap is mainly the last bits of `choose-client` preview/runtime polish
+  around the shared `mode-tree` substrate.
 - `likely files:` `src/cmd-choose-tree.zig`, `src/window-client.zig`,
   `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
   `docs/choose-tree-modes.md`
@@ -48,8 +48,9 @@ Live tmux-parity gaps only.
 - `zmux:` the current mode now carries live source history into its private
   backing surface, its public search-match helpers are now real, but the richer
   copy/search/selection flows are still incomplete. tmux's broader selection,
-  mark, drag, and regex-search behavior still outstrips the current runtime
-  even though the missing line-copy and no-clear command heads are now wired.
+  mark, and drag behavior still outstrips the current runtime even though regex
+  search, mouse-positioned word/line selection, and the missing line-copy and
+  no-clear command heads are now wired.
 - `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
   `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
 
@@ -62,9 +63,10 @@ Live tmux-parity gaps only.
   runtime still reconstructs transient layout state from rectangles in generic
   dump callers and adjacent geometry helpers. `select-layout` now snapshots
   undo state from `window.layout_root`, and pane destroy plus respawn teardown
-  now repair the shared tree before removal. The broader stale-tree fallback
-  surface is still short of full tmux parity even though `split-window -f` now
-  rides the shared layout tree.
+  now repair the shared tree before removal. `select-layout -E` now also
+  prefers the shared tree, but the broader stale-tree fallback surface is still
+  short of full tmux parity even though `split-window -f` now rides the shared
+  layout tree.
 - `likely files:` `src/window.zig`, `src/layout.zig`,
   `src/cmd-split-window.zig`, `src/cmd-select-layout.zig`,
   `docs/layout-split-pane.md`, `docs/layout-select-layout.md`

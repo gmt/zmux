@@ -25,6 +25,7 @@ const c_import = @import("c.zig");
 const client_registry = @import("client-registry.zig");
 const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
+const grid = @import("grid.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const resize_mod = @import("resize.zig");
@@ -41,6 +42,7 @@ pub const RenderResult = struct {
     cursor_visible: bool = false,
     cursor_x: u32 = 0,
     cursor_y: u32 = 0,
+    cursor_screen: ?*const T.Screen = null,
 };
 
 const Area = struct {
@@ -60,6 +62,8 @@ pub fn status_init(c: *T.Client) void {
     } else {
         c.status.screen = screen_mod.screen_init(c.tty.sx, lines, 0);
     }
+    c.status.active = null;
+    c.status.references = 0;
     c.status.timer = null;
 }
 
@@ -91,7 +95,7 @@ pub fn status_redraw(c: *T.Client) bool {
     }
 
     const width = c.tty.sx;
-    const screen = c.status.screen orelse return false;
+    const screen = ensure_base_screen(c, width, lines);
     if (screen.grid.sx != width or screen.grid.sy != lines) {
         screen_mod.screen_resize(screen, width, lines, false);
         force = true;
@@ -143,6 +147,7 @@ pub fn status_redraw(c: *T.Client) bool {
         xm.allocator.free(expanded.text);
     }
     clear_status_entries_from(c, row);
+    set_screen_cursor_hidden(screen);
 
     return force or changed;
 }
@@ -206,14 +211,12 @@ pub fn status_message_redraw(c: *T.Client) bool {
     const rows = overlay_rows(c);
     if (rows == 0) return false;
 
-    const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
-    defer {
-        screen_mod.screen_free(screen);
-        xm.allocator.destroy(screen);
-    }
-    draw_base(screen, c, rows);
-    render_message(screen, c, rows, c.message_string.?);
-    return true;
+    const base = ensure_overlay_base_screen(c, rows);
+    const overlay = prepare_active_screen(c, rows);
+    copy_screen_metadata(overlay.screen, base);
+    fast_copy_screen(overlay.screen, base, rows);
+    render_message(overlay.screen, c, rows, c.message_string.?);
+    return finish_active_screen(overlay);
 }
 
 /// Push a new screen reference for overlay rendering (port of tmux status_push_screen).
@@ -234,15 +237,12 @@ pub fn status_prompt_redraw(c: *T.Client) bool {
     const rows = overlay_rows(c);
     if (rows == 0) return false;
 
-    const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
-    defer {
-        screen_mod.screen_free(screen);
-        xm.allocator.destroy(screen);
-    }
-    draw_base(screen, c, rows);
-    var result = RenderResult{};
-    render_prompt(screen, c, rows, &result);
-    return true;
+    const base = ensure_overlay_base_screen(c, rows);
+    const overlay = prepare_active_screen(c, rows);
+    copy_screen_metadata(overlay.screen, base);
+    fast_copy_screen(overlay.screen, base, rows);
+    render_prompt(overlay.screen, c, rows);
+    return finish_active_screen(overlay);
 }
 
 /// Area geometry for the prompt/message region (port of tmux status_prompt_area).
@@ -272,22 +272,13 @@ pub const PromptInputGeometry = struct {
 
 pub fn status_prompt_input_geometry(c: *T.Client) ?PromptInputGeometry {
     if (!status_prompt.status_prompt_active(c)) return null;
-    const s = c.session orelse return null;
-    const message = status_prompt.status_prompt_message(c) orelse return null;
     const rows = overlay_rows(c);
     const area = message_area(c, rows);
     if (area.width == 0) return null;
+    const expanded = expand_prompt_prefix(c) orelse return null;
+    defer expanded.deinit();
 
-    const command_prompt = status_prompt.status_prompt_command_mode(c);
-    var ctx = format_context(c);
-    ctx.message_text = message;
-    ctx.command_prompt = command_prompt;
-
-    const fmt = opts.options_get_string(s.options, "message-format");
-    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
-    defer xm.allocator.free(expanded);
-
-    const prefix_width = @min(format_draw.format_width(expanded), area.width);
+    const prefix_width = @min(format_draw.format_width(expanded.prefix), area.width);
     if (prefix_width >= area.width) return null;
 
     return .{
@@ -320,6 +311,12 @@ pub fn status_free(c: *T.Client) void {
         xm.allocator.destroy(screen);
         c.status.screen = null;
     }
+    if (c.status.active) |screen| {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+        c.status.active = null;
+    }
+    c.status.references = 0;
 }
 
 pub fn status_timer_start(c: *T.Client) void {
@@ -344,23 +341,32 @@ pub fn render(c: *T.Client) RenderResult {
     }
 
     const overlay_start = overlay_start_row(c, rows);
-    const screen = screen_mod.screen_init(c.tty.sx, rows, 0);
-    defer {
-        screen_mod.screen_free(screen);
-        xm.allocator.destroy(screen);
-    }
 
-    draw_base(screen, c, rows);
+    var screen: *T.Screen = undefined;
+    if (status_prompt.status_prompt_active(c)) {
+        _ = status_prompt_redraw(c);
+        screen = c.status.active orelse return .{};
+    } else if (c.message_string != null) {
+        _ = status_message_redraw(c);
+        screen = c.status.active orelse return .{};
+    } else {
+        if (resize_mod.status_line_size(c) != 0) {
+            _ = status_redraw(c);
+        } else {
+            screen = ensure_overlay_base_screen(c, rows);
+            set_screen_cursor_hidden(screen);
+        }
+        screen = c.status.screen orelse return .{};
+    }
 
     var result = RenderResult{};
-    if (status_prompt.status_prompt_active(c)) {
-        render_prompt(screen, c, rows, &result);
-    } else if (c.message_string) |message| {
-        render_message(screen, c, rows, message);
-    }
-
     result.payload = tty_draw.tty_draw_render_screen(screen, c.tty.sx, rows, overlay_start) catch unreachable;
-    if (result.cursor_visible) result.cursor_y += overlay_start;
+    if (screen.cursor_visible) {
+        result.cursor_visible = true;
+        result.cursor_x = screen.cx;
+        result.cursor_y = overlay_start + screen.cy;
+        result.cursor_screen = screen;
+    }
     return result;
 }
 
@@ -440,9 +446,136 @@ fn format_context(c: *T.Client) format_mod.FormatContext {
     };
 }
 
+const ActiveScreenPrep = struct {
+    screen: *T.Screen,
+    old: ?*T.Screen,
+};
+
+const ExpandedPromptPrefix = struct {
+    prompt_label: []u8,
+    prefix: []u8,
+    command_prompt: bool,
+
+    fn deinit(self: ExpandedPromptPrefix) void {
+        xm.allocator.free(self.prompt_label);
+        xm.allocator.free(self.prefix);
+    }
+};
+
+fn ensure_base_screen(c: *T.Client, width: u32, rows: u32) *T.Screen {
+    if (c.status.screen == null) {
+        c.status.screen = screen_mod.screen_init(width, rows, 0);
+        return c.status.screen.?;
+    }
+
+    const screen = c.status.screen.?;
+    if (screen.grid.sx != width or screen.grid.sy != rows)
+        screen_mod.screen_resize(screen, width, rows, false);
+    return screen;
+}
+
+fn ensure_overlay_base_screen(c: *T.Client, rows: u32) *T.Screen {
+    const width = if (c.tty.sx == 0) 1 else c.tty.sx;
+    if (resize_mod.status_line_size(c) != 0) {
+        _ = status_redraw(c);
+        return ensure_base_screen(c, width, rows);
+    }
+
+    const screen = ensure_base_screen(c, width, rows);
+    draw_base(screen, c, rows);
+    set_screen_cursor_hidden(screen);
+    return screen;
+}
+
+fn prepare_active_screen(c: *T.Client, rows: u32) ActiveScreenPrep {
+    const width = if (c.tty.sx == 0) 1 else c.tty.sx;
+    const old = c.status.active;
+    const screen = screen_mod.screen_init(width, rows, 0);
+    c.status.active = screen;
+    return .{ .screen = screen, .old = old };
+}
+
+fn finish_active_screen(prep: ActiveScreenPrep) bool {
+    defer if (prep.old) |old| {
+        screen_mod.screen_free(old);
+        xm.allocator.destroy(old);
+    };
+    return if (prep.old) |old|
+        !screen_states_equal(prep.screen, old)
+    else
+        true;
+}
+
+fn copy_screen_metadata(dst: *T.Screen, src: *const T.Screen) void {
+    dst.cursor_visible = src.cursor_visible;
+    dst.cx = src.cx;
+    dst.cy = src.cy;
+    dst.cstyle = src.cstyle;
+    dst.default_cstyle = src.default_cstyle;
+    dst.ccolour = src.ccolour;
+    dst.default_ccolour = src.default_ccolour;
+    dst.mode = src.mode;
+    dst.default_mode = src.default_mode;
+}
+
+fn fast_copy_screen(dst: *T.Screen, src: *const T.Screen, rows: u32) void {
+    var ctx = T.ScreenWriteCtx{ .s = dst };
+    screen_write.fast_copy(&ctx, src, 0, 0, @min(dst.grid.sx, src.grid.sx), @min(rows, src.grid.sy));
+}
+
+fn screen_states_equal(a: *const T.Screen, b: *const T.Screen) bool {
+    return grid.grid_compare(a.grid, b.grid) == 0 and
+        a.cursor_visible == b.cursor_visible and
+        a.cx == b.cx and
+        a.cy == b.cy and
+        a.cstyle == b.cstyle and
+        a.default_cstyle == b.default_cstyle and
+        a.ccolour == b.ccolour and
+        a.default_ccolour == b.default_ccolour and
+        a.mode == b.mode and
+        a.default_mode == b.default_mode;
+}
+
+fn set_screen_cursor_hidden(screen: *T.Screen) void {
+    screen.cursor_visible = false;
+    screen.cx = 0;
+    screen.cy = 0;
+    screen.cstyle = .default;
+    screen.default_cstyle = .default;
+    screen.ccolour = -1;
+    screen.default_ccolour = -1;
+    screen.mode = 0;
+    screen.default_mode = 0;
+}
+
+fn expand_prompt_prefix(c: *T.Client) ?ExpandedPromptPrefix {
+    const s = c.session orelse return null;
+    const prompt_string = status_prompt.status_prompt_message(c) orelse return null;
+    const prompt_input = status_prompt.status_prompt_input(c) orelse "";
+    const command_prompt = status_prompt.status_prompt_command_mode(c);
+
+    var ctx = format_context(c);
+    ctx.prompt_input = prompt_input;
+    ctx.command_prompt = command_prompt;
+
+    const prompt_label = format_mod.format_expand_time(xm.allocator, prompt_string, &ctx).text;
+    errdefer xm.allocator.free(prompt_label);
+
+    ctx.message_text = prompt_label;
+    const fmt = opts.options_get_string(s.options, "message-format");
+    const prefix = format_mod.format_expand_time(xm.allocator, fmt, &ctx).text;
+
+    return .{
+        .prompt_label = prompt_label,
+        .prefix = prefix,
+        .command_prompt = command_prompt,
+    };
+}
+
 fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
     const s = c.session orelse {
         clear_status_entries_from(c, 0);
+        set_screen_cursor_hidden(screen);
         return;
     };
 
@@ -483,37 +616,43 @@ fn draw_base(screen: *T.Screen, c: *T.Client, rows: u32) void {
         format_draw.format_draw_ranges(&swctx, &left_gc, screen.grid.sx, expanded.text, &entry.ranges);
     }
     clear_status_entries_from(c, row);
+    set_screen_cursor_hidden(screen);
 }
 
-fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResult) void {
+fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32) void {
     const s = c.session orelse return;
-    const message = status_prompt.status_prompt_message(c) orelse return;
+    const expanded = expand_prompt_prefix(c) orelse return;
+    defer expanded.deinit();
     const area = message_area(c, rows);
     if (area.width == 0) return;
-    const command_prompt = status_prompt.status_prompt_command_mode(c);
+    const command_prompt = expanded.command_prompt;
 
     var prompt_gc = T.grid_default_cell;
     const style_name = if (command_prompt) "message-command-style" else "message-style";
     style_mod.style_apply(&prompt_gc, s.options, style_name, null);
     fill_area(screen, area, &prompt_gc, message_fill_colour(s.options, style_name));
 
-    var ctx = format_context(c);
-    ctx.message_text = message;
-    ctx.command_prompt = command_prompt;
-
-    const fmt = opts.options_get_string(s.options, "message-format");
-    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(message);
-    defer xm.allocator.free(expanded);
+    screen.default_ccolour = @intCast(opts.options_get_number(s.options, "prompt-cursor-colour"));
+    screen.default_mode = 0;
+    const cursor_style_opt = if (command_prompt) "prompt-command-cursor-style" else "prompt-cursor-style";
+    screen_mod.screen_set_cursor_style(
+        @intCast(opts.options_get_number(s.options, cursor_style_opt)),
+        &screen.default_cstyle,
+        &screen.default_mode,
+    );
+    screen.ccolour = -1;
+    screen.cstyle = .default;
+    screen.mode = T.MODE_CURSOR | screen.default_mode;
 
     var swctx = T.ScreenWriteCtx{ .s = screen };
     screen_write.cursor_to(&swctx, area.line, area.x);
-    format_draw.format_draw(&swctx, &prompt_gc, area.width, expanded);
+    format_draw.format_draw(&swctx, &prompt_gc, area.width, expanded.prefix);
 
-    const prefix_width = @min(format_draw.format_width(expanded), area.width);
+    const prefix_width = @min(format_draw.format_width(expanded.prefix), area.width);
     if (prefix_width >= area.width) {
-        result.cursor_visible = true;
-        result.cursor_x = area.x + area.width - 1;
-        result.cursor_y = area.line;
+        screen.cursor_visible = true;
+        screen.cx = area.x + area.width - 1;
+        screen.cy = area.line;
         return;
     }
 
@@ -522,9 +661,9 @@ fn render_prompt(screen: *T.Screen, c: *T.Client, rows: u32, result: *RenderResu
     screen_write.cursor_to(&swctx, area.line, area.x + prefix_width);
     format_draw.format_draw(&swctx, &prompt_gc, area.width - prefix_width, render_state.input_visible);
 
-    result.cursor_visible = true;
-    result.cursor_x = area.x + @min(prefix_width + render_state.cursor_column, area.width - 1);
-    result.cursor_y = area.line;
+    screen.cursor_visible = true;
+    screen.cx = area.x + @min(prefix_width + render_state.cursor_column, area.width - 1);
+    screen.cy = area.line;
 }
 
 fn render_message(screen: *T.Screen, c: *T.Client, rows: u32, message: []const u8) void {
@@ -543,15 +682,17 @@ fn render_message(screen: *T.Screen, c: *T.Client, rows: u32, message: []const u
         xm.xstrdup(message);
     defer xm.allocator.free(display_message);
     ctx.message_text = display_message;
+    ctx.prompt_input = null;
     ctx.command_prompt = false;
 
     const fmt = opts.options_get_string(s.options, "message-format");
-    const expanded = format_mod.format_require_complete(xm.allocator, fmt, &ctx) orelse xm.xstrdup(display_message);
+    const expanded = format_mod.format_expand_time(xm.allocator, fmt, &ctx).text;
     defer xm.allocator.free(expanded);
 
     var swctx = T.ScreenWriteCtx{ .s = screen };
     screen_write.cursor_to(&swctx, area.line, area.x);
     format_draw.format_draw(&swctx, &message_gc, area.width, expanded);
+    set_screen_cursor_hidden(screen);
 }
 
 fn message_area(c: *T.Client, rows: u32) Area {
@@ -733,6 +874,7 @@ test "status render draws reduced status line and utf8 prompt overlay" {
     try std.testing.expect(std.mem.indexOf(u8, prompt.payload, "Name ") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt.payload, "🙂") != null);
     try std.testing.expect(prompt.cursor_visible);
+    try std.testing.expect(prompt.cursor_screen == client.status.active.?);
 }
 
 test "status persists translated ranges for hit-test consumers" {
@@ -847,6 +989,152 @@ test "status message overlay respects multiline status rows and message-line" {
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "overlay row") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "bottom row") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "middle row") == null);
+}
+
+test "status prompt geometry uses prompt_input-aware message format and preserves untouched rows" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_number(session_opts, "status", 3);
+    opts.options_set_number(session_opts, "message-line", 1);
+    opts.options_set_string(session_opts, false, "message-format", "#{message}#{prompt_input}:");
+    opts.options_set_array(session_opts, "status-format", &.{ "top row", "middle row", "bottom row" });
+
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "prompt-geometry", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+    resize_mod.status_update_cache(s);
+
+    const w = win_mod.window_create(24, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 24, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+    defer {
+        status_prompt.status_prompt_clear(&client);
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 24, .sy = 6 };
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+    status_prompt.status_prompt_set(
+        &client,
+        null,
+        "Name ",
+        "ab",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+
+    const geom = status_prompt_input_geometry(&client).?;
+    try std.testing.expectEqual(@as(u32, 8), geom.input_x);
+    try std.testing.expectEqual(@as(u32, 16), geom.input_width);
+    try std.testing.expectEqual(@as(u32, 1), geom.line);
+
+    const rendered = render(&client);
+    defer if (rendered.payload.len != 0) xm.allocator.free(rendered.payload);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "top row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "bottom row") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "Name ab:ab") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "middle row") == null);
+}
+
+test "status prompt redraw stores prompt cursor defaults on the active screen" {
+    const env_mod = @import("environ.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_number(session_opts, "prompt-cursor-colour", 160);
+    opts.options_set_number(session_opts, "prompt-cursor-style", 4);
+
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "prompt-cursor", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(18, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 18, 2);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+    defer {
+        status_prompt.status_prompt_clear(&client);
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 18, .sy = 3 };
+
+    const capture = xm.allocator.create(PromptCapture) catch unreachable;
+    capture.* = .{};
+    status_prompt.status_prompt_set(
+        &client,
+        null,
+        "Edit ",
+        "xy",
+        capture_prompt_input,
+        null,
+        free_prompt_capture,
+        capture,
+        0,
+        .command,
+    );
+
+    try std.testing.expect(status_prompt_redraw(&client));
+    const active = client.status.active.?;
+    try std.testing.expectEqual(@as(i32, 160), active.default_ccolour);
+    try std.testing.expectEqual(T.ScreenCursorStyle.underline, active.default_cstyle);
+    try std.testing.expect(active.default_mode & T.MODE_CURSOR_BLINKING == 0);
+    try std.testing.expect(active.cursor_visible);
 }
 
 test "status timer reuses the shared redraw path and suppresses overlay churn" {

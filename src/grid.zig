@@ -1607,8 +1607,8 @@ pub fn grid_compare(ga: *const T.Grid, gb: *const T.Grid) i32 {
         while (xx < w) : (xx += 1) {
             var gca: T.GridCell = undefined;
             var gcb: T.GridCell = undefined;
-            get_cell(ga, yy, xx, &gca);
-            get_cell(gb, yy, xx, &gcb);
+            get_cell(@constCast(ga), yy, xx, &gca);
+            get_cell(@constCast(gb), yy, xx, &gcb);
             if (!cells_equal(&gca, &gcb)) return 1;
         }
     }

@@ -69,6 +69,7 @@ const resolver_table_unsorted = [_]Resolver{
     .{ .name = "message_number", .func = resolve_message_number },
     .{ .name = "message_time", .func = resolve_message_time },
     .{ .name = "message_text", .func = resolve_message_text },
+    .{ .name = "prompt_input", .func = resolve_prompt_input },
     .{ .name = "command", .func = resolve_command },
     .{ .name = "command_prompt", .func = resolve_command_prompt },
     .{ .name = "hook", .func = resolve_hook },
@@ -770,6 +771,10 @@ fn resolve_message_text(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]
 
 fn resolve_message(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     return alloc.dupe(u8, ctx.message_text orelse "") catch unreachable;
+}
+
+fn resolve_prompt_input(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    return alloc.dupe(u8, ctx.prompt_input orelse "") catch unreachable;
 }
 
 fn resolve_message_number(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

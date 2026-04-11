@@ -24,18 +24,34 @@ const T = @import("types.zig");
 const c = @import("c.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
+const screen_mod = @import("screen.zig");
 const server = @import("server.zig");
 const server_print = @import("server-print.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 
 pub fn status_push_screen(client: *T.Client) void {
+    if (client.status.references == 0 and client.status.active == null) {
+        if (client.status.screen) |screen| {
+            client.status.active = screen_mod.screen_init(screen.grid.sx, screen.grid.sy, 0);
+        } else {
+            const sx = if (client.tty.sx == 0) 1 else client.tty.sx;
+            client.status.active = screen_mod.screen_init(sx, 1, 0);
+        }
+    }
     client.status.references += 1;
 }
 
 pub fn status_pop_screen(client: *T.Client) void {
     if (client.status.references == 0) return;
     client.status.references -= 1;
+    if (client.status.references == 0) {
+        if (client.status.active) |screen| {
+            screen_mod.screen_free(screen);
+            xm.allocator.destroy(screen);
+            client.status.active = null;
+        }
+    }
 }
 
 pub fn status_message_active(client: *const T.Client) bool {
@@ -196,6 +212,12 @@ pub fn status_cleanup(client: *T.Client) void {
         c.libevent.event_free(ev);
         client.message_timer = null;
     }
+    if (client.status.active) |screen| {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+        client.status.active = null;
+    }
+    client.status.references = 0;
 }
 
 fn arm_message_timer(client: *T.Client, delay_ms: i32) void {
@@ -287,6 +309,7 @@ test "status runtime arms and clears a timed message overlay" {
     try std.testing.expectEqualStrings("timed", client.message_string.?);
     try std.testing.expectEqual(@as(u32, 1), client.status.references);
     try std.testing.expect(client.message_timer != null);
+    try std.testing.expect(client.status.active != null);
     try std.testing.expectEqual(@as(usize, 1), server.message_log.items.len);
     try std.testing.expectEqualStrings("status-runtime-client message: timed", server.message_log.items[0].msg);
 
@@ -295,6 +318,7 @@ test "status runtime arms and clears a timed message overlay" {
 
     try std.testing.expect(client.message_string == null);
     try std.testing.expectEqual(@as(u32, 0), client.status.references);
+    try std.testing.expect(client.status.active == null);
     status_cleanup(&client);
 }
 

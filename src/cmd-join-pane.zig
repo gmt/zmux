@@ -72,8 +72,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     };
 
     const source_was_last = win.window_count_panes(src_w) == 1;
-    layout_mod.layout_close_pane(src_wp);
-    _ = win.window_detach_pane(src_w, src_wp);
+    if (layout_mod.layout_close_pane(src_wp))
+        _ = win.window_detach_pane_layout_managed(src_w, src_wp)
+    else
+        _ = win.window_detach_pane(src_w, src_wp);
     win.window_adopt_pane_before(dst_w, src_wp, insertion_anchor(dst_w, dst_wp, args.has('b')));
     layout_mod.layout_assign_pane(lcnew, src_wp, 0);
 

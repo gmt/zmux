@@ -254,8 +254,10 @@ pub fn server_destroy_pane(wp: *T.WindowPane, notify: bool) void {
     }
 
     _ = win.window_unzoom(w);
-    layout_mod.layout_close_pane(wp);
-    win.window_remove_pane(w, wp);
+    if (layout_mod.layout_close_pane(wp))
+        win.window_remove_pane_layout_managed(w, wp)
+    else
+        win.window_remove_pane(w, wp);
     srv.server_redraw_window(w);
     server_status_window(w);
 }
@@ -570,8 +572,10 @@ pub fn server_kill_pane(wp: *T.WindowPane) void {
         resize_mod.recalculate_sizes();
     } else {
         _ = win.window_unzoom(w);
-        layout_mod.layout_close_pane(wp);
-        win.window_remove_pane(w, wp);
+        if (layout_mod.layout_close_pane(wp))
+            win.window_remove_pane_layout_managed(w, wp)
+        else
+            win.window_remove_pane(w, wp);
         srv.server_redraw_window(w);
     }
 }

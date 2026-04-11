@@ -105,8 +105,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
                 cmdq.cmdq_error(item, "{s}", .{ic});
                 xm.allocator.free(ic);
             }
-            layout_mod.layout_close_pane(new_wp);
-            win.window_remove_pane(w, new_wp);
+            if (layout_mod.layout_close_pane(new_wp))
+                win.window_remove_pane_layout_managed(w, new_wp)
+            else
+                win.window_remove_pane(w, new_wp);
             return .@"error";
         }
         if (input_rc == 0) wait_for_input = true;

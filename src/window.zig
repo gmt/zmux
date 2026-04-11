@@ -208,12 +208,27 @@ fn window_pane_create(w: *T.Window, sx: u32, sy: u32) *T.WindowPane {
 
 pub fn window_remove_pane(w: *T.Window, wp: *T.WindowPane) void {
     marked_pane_mod.clear_if_pane(wp);
-    _ = window_detach_pane(w, wp);
+    _ = window_detach_pane_impl(w, wp, false);
+    _ = all_window_panes.remove(wp.id);
+    window_pane_destroy(wp);
+}
+
+pub fn window_remove_pane_layout_managed(w: *T.Window, wp: *T.WindowPane) void {
+    marked_pane_mod.clear_if_pane(wp);
+    _ = window_detach_pane_impl(w, wp, true);
     _ = all_window_panes.remove(wp.id);
     window_pane_destroy(wp);
 }
 
 pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
+    return window_detach_pane_impl(w, wp, false);
+}
+
+pub fn window_detach_pane_layout_managed(w: *T.Window, wp: *T.WindowPane) bool {
+    return window_detach_pane_impl(w, wp, true);
+}
+
+fn window_detach_pane_impl(w: *T.Window, wp: *T.WindowPane, layout_managed: bool) bool {
     remove_last_pane_reference(w, wp);
     window_clear_client_pane_reference(w, wp);
     const removed_geometry = pane_geometry(wp);
@@ -237,7 +252,11 @@ pub fn window_detach_pane(w: *T.Window, wp: *T.WindowPane) bool {
                     window_update_focus(w);
                 }
             }
-            collapse_detached_pane_gap(w, removed_geometry);
+            // Layout callers such as layout_close_pane already repaired pane
+            // ownership and geometry before removing the pane; only use the
+            // rectangle gap absorber for geometry-only windows.
+            if (!layout_managed)
+                collapse_detached_pane_gap(w, removed_geometry);
             return true;
         }
     }

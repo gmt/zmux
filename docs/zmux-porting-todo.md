@@ -66,7 +66,8 @@ Live tmux-parity gaps only.
   runtime still reconstructs transient layout state from rectangles in generic
   dump callers and adjacent geometry helpers. `select-layout` now snapshots
   undo state from `window.layout_root`, and pane destroy plus respawn teardown
-  now repair the shared tree before removal. `select-layout -E` now also
+  now repair the shared tree before removal. Layout-managed pane detaches now
+  also leave the repaired tree geometry alone, and `select-layout -E` now
   prefers the shared tree, but the broader stale-tree fallback surface is still
   short of full tmux parity even though `split-window -f` now rides the shared
   layout tree.

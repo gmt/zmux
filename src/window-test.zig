@@ -51,6 +51,28 @@ fn write_test_line(gd: *T.Grid, row: u32, text: []const u8) void {
     }
 }
 
+const TestPaneGeometry = struct {
+    xoff: u32,
+    yoff: u32,
+    sx: u32,
+    sy: u32,
+};
+
+fn pane_geometry_for_test(wp: *T.WindowPane) TestPaneGeometry {
+    return .{
+        .xoff = wp.xoff,
+        .yoff = wp.yoff,
+        .sx = wp.sx,
+        .sy = wp.sy,
+    };
+}
+
+fn set_pane_geometry_for_test(wp: *T.WindowPane, geometry: TestPaneGeometry) void {
+    wp.xoff = geometry.xoff;
+    wp.yoff = geometry.yoff;
+    win.window_pane_resize(wp, geometry.sx, geometry.sy);
+}
+
 fn init_session_window_test_globals() void {
     opts.global_options = opts.options_create(null);
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
@@ -690,6 +712,56 @@ test "window_detach_pane collapses the removed gap back into the remaining layou
     try std.testing.expectEqual(@as(u32, 0), first.yoff);
     try std.testing.expectEqual(@as(u32, 80), first.sx);
     try std.testing.expectEqual(@as(u32, 24), first.sy);
+}
+
+test "window_detach_pane leaves layout-managed windows on the repaired tree geometry" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const first = win.window_add_pane(w, null, 80, 24);
+    layout_mod.layout_init(w, first);
+
+    const second_cell = layout_mod.layout_split_pane(first, .leftright, 25, 0).?;
+    const second = win.window_add_pane(w, null, second_cell.sx, second_cell.sy);
+    layout_mod.layout_assign_pane(second_cell, second, 0);
+
+    const third_cell = layout_mod.layout_split_pane(second, .leftright, 12, 0).?;
+    const third = win.window_add_pane(w, null, third_cell.sx, third_cell.sy);
+    layout_mod.layout_assign_pane(third_cell, third, 0);
+
+    const first_before = pane_geometry_for_test(first);
+    const second_before = pane_geometry_for_test(second);
+    const third_before = pane_geometry_for_test(third);
+
+    try std.testing.expect(layout_mod.layout_close_pane(second));
+
+    const first_expected = pane_geometry_for_test(first);
+    const third_expected = pane_geometry_for_test(third);
+
+    try std.testing.expect(second.layout_cell == null);
+    try std.testing.expect(first_expected.sx != first_before.sx or third_expected.xoff != third_before.xoff);
+
+    set_pane_geometry_for_test(first, first_before);
+    set_pane_geometry_for_test(second, second_before);
+    set_pane_geometry_for_test(third, third_before);
+
+    try std.testing.expect(win.window_detach_pane(w, second));
+    try std.testing.expectEqual(@as(usize, 2), w.panes.items.len);
+
+    try std.testing.expectEqual(first_expected.xoff, first.xoff);
+    try std.testing.expectEqual(first_expected.yoff, first.yoff);
+    try std.testing.expectEqual(first_expected.sx, first.sx);
+    try std.testing.expectEqual(first_expected.sy, first.sy);
+
+    try std.testing.expectEqual(third_expected.xoff, third.xoff);
+    try std.testing.expectEqual(third_expected.yoff, third.yoff);
+    try std.testing.expectEqual(third_expected.sx, third.sx);
+    try std.testing.expectEqual(third_expected.sy, third.sy);
 }
 
 fn destroyTestWindow(w: *T.Window) void {

@@ -14,6 +14,8 @@ live pane-rectangle reconstruction when the stored tree is stale or missing.
   from `window.layout_root`
 - applying a dumped or explicit layout may resize the reduced window geometry
   to the layout bounds before the pane rectangles are written back
+- layout-managed pane detaches now leave the repaired tree geometry alone
+  instead of re-collapsing the gap from stale rectangles after `layout_close_pane`
 - future intent is to finish the remaining stale-tree producers in the broader
   runtime so generic dump and geometry helpers no longer need rectangle
   fallback

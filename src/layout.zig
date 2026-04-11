@@ -1649,14 +1649,15 @@ pub fn layout_destroy_cell(w: *T.Window, lc: *T.LayoutCell) void {
     layout_free_cell(parent);
 }
 
-pub fn layout_close_pane(wp: *T.WindowPane) void {
+pub fn layout_close_pane(wp: *T.WindowPane) bool {
     const w = wp.window;
-    const lc = wp.layout_cell orelse return;
+    const lc = wp.layout_cell orelse return false;
     layout_destroy_cell(w, lc);
     if (w.layout_root != null) {
         layout_fix_offsets(w);
         layout_fix_panes(w, null);
     }
+    return true;
 }
 
 pub fn layout_init(w: *T.Window, wp: *T.WindowPane) void {
@@ -2198,7 +2199,7 @@ test "layout_close_pane removes a cell and restores space" {
     const wp2 = win.window_add_pane(w, null, 40, 24);
     layout_assign_pane(lc2, wp2, 0);
 
-    layout_close_pane(wp2);
+    try testing.expect(layout_close_pane(wp2));
 
     const root = w.layout_root.?;
     try testing.expectEqual(T.LayoutType.windowpane, root.type);

@@ -90,8 +90,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         }
 
         const new_w = win.window_create(src_w.sx, src_w.sy, src_w.xpixel, src_w.ypixel);
-        layout_mod.layout_close_pane(src_wp);
-        _ = win.window_detach_pane(src_w, src_wp);
+        if (layout_mod.layout_close_pane(src_wp))
+            _ = win.window_detach_pane_layout_managed(src_w, src_wp)
+        else
+            _ = win.window_detach_pane(src_w, src_wp);
         win.window_adopt_pane(new_w, src_wp);
         layout_mod.layout_init(new_w, src_wp);
 

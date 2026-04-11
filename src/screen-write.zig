@@ -26,9 +26,12 @@ const opts = @import("options.zig");
 const screen_mod = @import("screen.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
+const c = @import("c.zig");
 const image_mod = @import("image.zig");
 const sixel = @import("image-sixel.zig");
 const log = @import("log.zig");
+const client_registry = @import("client-registry.zig");
+const tty_mod = @import("tty.zig");
 
 pub fn putc(ctx: *T.ScreenWriteCtx, ch: u8) void {
     const glyph = utf8.Glyph.fromAscii(ch);
@@ -900,11 +903,25 @@ pub fn rawstring(ctx: *T.ScreenWriteCtx, str: []const u8) void {
     wp.passthrough_pending.appendSlice(xm.allocator, str) catch return;
 }
 
-/// Set clipboard selection. No-op stub in zmux (screen_write_setselection).
+/// Set clipboard selection for attached terminal clients currently viewing the pane.
 pub fn setselection(ctx: *T.ScreenWriteCtx, clip: []const u8, str: []const u8) void {
-    _ = ctx;
-    _ = clip;
-    _ = str;
+    const wp = ctx.wp orelse return;
+    if (str.len == 0) return;
+
+    const clip_z = if (clip.len == 0)
+        null
+    else
+        xm.xm_dupeZ(clip);
+    defer if (clip_z) |owned| xm.allocator.free(owned);
+
+    for (client_registry.clients.items) |client| {
+        if ((client.flags & T.CLIENT_ATTACHED) == 0) continue;
+        if ((client.flags & T.CLIENT_CONTROL) != 0) continue;
+        const session = client.session orelse continue;
+        const wl = session.curw orelse continue;
+        if (wl.window != wp.window) continue;
+        tty_mod.tty_set_selection(&client.tty, if (clip_z) |owned| owned.ptr else null, str.ptr, str.len);
+    }
 }
 
 /// Origin-aware cursor positioning (screen_write_cursormove).
@@ -2248,6 +2265,153 @@ test "screen-write fullredraw is a no-op that doesn't corrupt content" {
     try std.testing.expectEqual(@as(u8, 'a'), grid.ascii_at(s.grid, 0, 0));
     try std.testing.expectEqual(@as(u8, 'b'), grid.ascii_at(s.grid, 0, 1));
     try std.testing.expectEqual(@as(u8, 'c'), grid.ascii_at(s.grid, 0, 2));
+}
+
+fn screenWriteTestPeerDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
+
+test "screen-write setselection forwards OSC 52 to attached pane viewers" {
+    const env_mod = @import("environ.zig");
+    const proc_mod = @import("proc.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const tty_features = @import("tty-features.zig");
+    const screen = @import("screen.zig");
+    const window_mod = @import("window.zig");
+    const session_mod = @import("session.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    window_mod.window_init_globals(xm.allocator);
+    session_mod.session_init_globals(xm.allocator);
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const base_grid = grid.grid_create(20, 4, 0);
+    defer grid.grid_free(base_grid);
+    const alt_screen = screen.screen_init(20, 4, 0);
+    defer {
+        screen.screen_free(alt_screen);
+        xm.allocator.destroy(alt_screen);
+    }
+
+    var window = T.Window{
+        .id = 91,
+        .name = xm.xstrdup("screen-write-selection"),
+        .sx = 20,
+        .sy = 4,
+        .options = opts.options_create(opts.global_w_options),
+    };
+    defer xm.allocator.free(window.name);
+    defer opts.options_free(window.options);
+    defer window.panes.deinit(xm.allocator);
+    defer window.last_panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 92,
+        .window = &window,
+        .options = opts.options_create(window.options),
+        .sx = 20,
+        .sy = 4,
+        .screen = alt_screen,
+        .base = .{ .grid = base_grid, .rlower = 3 },
+    };
+    defer opts.options_free(pane.options);
+    try window.panes.append(xm.allocator, &pane);
+    window.active = &pane;
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    const session_name = xm.xstrdup("screen-write-selection");
+    defer xm.allocator.free(session_name);
+    var session = T.Session{
+        .id = 7,
+        .name = session_name,
+        .cwd = "",
+        .options = opts.options_create(opts.global_s_options),
+        .environ = env,
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+    };
+    defer opts.options_free(session.options);
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var wl = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window,
+    };
+    try session.windows.put(0, &wl);
+    try window.winlinks.append(xm.allocator, &wl);
+    session.curw = &wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "screen-write-setselection" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const client_env = env_mod.environ_create();
+    defer env_mod.environ_free(client_env);
+    var client = T.Client{
+        .name = "clip-viewer",
+        .environ = client_env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = &session,
+        .term_features = tty_features.featureBit(.clipboard),
+    };
+    client.tty = .{ .client = &client };
+    client.tty.flags |= @intCast(T.TTY_STARTED);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], screenWriteTestPeerDispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+    client_registry.add(&client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var ctx = T.ScreenWriteCtx{ .wp = &pane, .s = pane.screen };
+    setselection(&ctx, "", "clipboard data");
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    const payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    _ = c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len);
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const data = "clipboard data";
+    const b64_len = std.base64.standard.Encoder.calcSize(data.len);
+    const b64 = try xm.allocator.alloc(u8, b64_len);
+    defer xm.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, data);
+    const expected = try std.fmt.allocPrint(xm.allocator, "\x1b]52;;{s}\x07", .{b64});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }
 
 test "screen-write cursormove respects origin mode" {

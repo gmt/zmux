@@ -54,9 +54,8 @@ Live tmux-parity gaps only.
   behavior.
 - `zmux:` the current mode runs on a snapshot-backed screen. Core navigation is
   there, but real history backing and the richer copy/search/selection flows
-  are still incomplete, some less-common commands still fall through to the
-  unsupported-command path, and clipboard selection export is still inert
-  because `screen_write.setselection` is a no-op.
+  are still incomplete, and some less-common commands still fall through to
+  the unsupported-command path.
 - `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
   `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
 

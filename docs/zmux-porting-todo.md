@@ -26,9 +26,9 @@ Live tmux-parity gaps only.
   mark, and drag behavior still outstrips the current runtime even though regex
   search, mouse-positioned word/line selection, word-separator-aware selection
   growth, drag-started visual selection, edge-drag viewport scrolling,
-  current-match copy fallback, append-selection append semantics, built-in
-  `send -X` command coverage, and resize-time cursor/selection rewrapping are
-  now wired.
+  stationary edge-drag repeat scrolling, current-match copy fallback,
+  append-selection append semantics, built-in `send -X` command coverage,
+  clipboard export, and resize-time cursor/selection rewrapping are now wired.
 - `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
   `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
 

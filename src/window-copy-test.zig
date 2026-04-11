@@ -14,9 +14,12 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
+const c = @import("c.zig");
 const grid = @import("grid.zig");
 const key_bindings_data = @import("key-bindings-data.zig");
+const os_mod = @import("os/linux.zig");
 const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const T = @import("types.zig");
@@ -80,6 +83,17 @@ fn initWindowCopyTestGlobals() void {
     window.window_init_globals(xm.allocator);
 }
 
+fn installTestEventBase() ?*c.libevent.event_base {
+    const old_base = proc_mod.libevent;
+    proc_mod.libevent = os_mod.osdep_event_init();
+    return old_base;
+}
+
+fn restoreTestEventBase(old_base: ?*c.libevent.event_base) void {
+    if (proc_mod.libevent) |base| c.libevent.event_base_free(base);
+    proc_mod.libevent = old_base;
+}
+
 fn collectCopyModeBuiltinCommandHeads(list: *std.ArrayList([]const u8)) !void {
     for (key_bindings_data.default_binding_specs) |spec| {
         if (!std.mem.eql(u8, spec.table, "copy-mode") and !std.mem.eql(u8, spec.table, "copy-mode-vi"))
@@ -101,6 +115,8 @@ fn collectCopyModeBuiltinCommandHeads(list: *std.ArrayList([]const u8)) !void {
         if (!seen) try list.append(xm.allocator, head);
     }
 }
+
+fn copyModeClipboardTestPeerDispatch(_: ?*c.imsg.imsg, _: ?*anyopaque) callconv(.c) void {}
 
 test "window-copy tracks source pane updates without explicit refresh" {
     const opts_mod = @import("options.zig");
@@ -1616,6 +1632,128 @@ test "window-copy dragUpdate scrolls when dragging at the viewport edge" {
     client.tty.mouse_drag_update.?(&client, &mouse);
 
     try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).top);
+    try std.testing.expect(target.screen.sel != null);
+}
+
+test "window-copy scroll timer repeats edge drag scrolling" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    const old_base = installTestEventBase();
+    defer restoreTestEventBase(old_base);
+
+    opts_mod.global_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_options);
+    opts_mod.global_s_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_s_options);
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
+    opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    window.window_init_globals(xm.allocator);
+
+    const source_grid = grid.grid_create(6, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(6, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(6, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(6, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var window_ = T.Window{
+        .id = 36,
+        .name = xm.xstrdup("copy-drag-repeat"),
+        .sx = 6,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts_mod.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 37,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer opts_mod.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 38,
+        .window = &window_,
+        .options = opts_mod.options_create(window_.options),
+        .sx = 6,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer opts_mod.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    try window.all_window_panes.put(target.id, &target);
+    defer _ = window.all_window_panes.remove(target.id);
+
+    setGridLineText(source.base.grid, 0, "row0");
+    setGridLineText(source.base.grid, 1, "row1");
+    setGridLineText(source.base.grid, 2, "row2");
+    setGridLineText(source.base.grid, 3, "row3");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    _ = wc.enterMode(&target, &source, &args);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .name = "copy-mode-repeat-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty = .{ .client = &client };
+
+    var mouse = T.MouseEvent{
+        .valid = true,
+        .s = -1,
+        .w = -1,
+        .wp = @intCast(target.id),
+        .x = 0,
+        .y = 1,
+        .lx = 0,
+        .ly = 1,
+    };
+    wc.startDrag(&client, &mouse);
+
+    const wme = window.window_pane_mode(&target).?;
+    try std.testing.expect(wc.modeData(wme).drag_timer != null);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 2), wc.absoluteCursorRow(wme));
+
+    wc.window_copy_scroll_timer(-1, 0, @ptrCast(wme));
+
+    try std.testing.expectEqual(@as(u32, 2), wc.modeData(wme).top);
+    try std.testing.expectEqual(@as(u32, 3), wc.absoluteCursorRow(wme));
     try std.testing.expect(target.screen.sel != null);
 }
 
@@ -3791,6 +3929,184 @@ test "copy-mode copy-selection-no-clear keeps the active selection" {
     const top = paste_mod.paste_get_top(null) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("copyme", paste_mod.paste_buffer_data(top, null));
     try std.testing.expect(wc.modeData(wme).lineflag != .none);
+}
+
+test "copy-mode copy-selection exports clipboard data to attached viewers" {
+    const client_registry = @import("client-registry.zig");
+    const env_mod = @import("environ.zig");
+    const paste_mod = @import("paste.zig");
+    const protocol = @import("zmux-protocol.zig");
+    const tty_features = @import("tty-features.zig");
+
+    initWindowCopyTestGlobals();
+    paste_mod.paste_reset_for_tests();
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const source_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 1, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 1, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+    const session_name = xm.xstrdup("copy-selection-clipboard");
+    defer xm.allocator.free(session_name);
+    var session = T.Session{
+        .id = 3103,
+        .name = session_name,
+        .cwd = "/",
+        .options = opts.options_create(opts.global_s_options),
+        .environ = env,
+        .lastw = .{},
+        .windows = std.AutoHashMap(i32, *T.Winlink).init(xm.allocator),
+    };
+    defer opts.options_free(session.options);
+    defer session.windows.deinit();
+    defer session.lastw.deinit(xm.allocator);
+
+    var window_ = T.Window{
+        .id = 3104,
+        .name = xm.xstrdup("copy-selection-clipboard-window"),
+        .sx = 8,
+        .sy = 1,
+        .options = opts.options_create(opts.global_w_options),
+    };
+    defer xm.allocator.free(window_.name);
+    defer opts.options_free(window_.options);
+    defer window_.panes.deinit(xm.allocator);
+    defer window_.last_panes.deinit(xm.allocator);
+    defer window_.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 3105,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 0 },
+    };
+    defer opts.options_free(source.options);
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 3106,
+        .window = &window_,
+        .options = opts.options_create(window_.options),
+        .sx = 8,
+        .sy = 1,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 0 },
+    };
+    defer opts.options_free(target.options);
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try window_.panes.append(xm.allocator, &source);
+    try window_.panes.append(xm.allocator, &target);
+    window_.active = &target;
+    setGridLineText(source.base.grid, 0, "copyme");
+    source.base.grid.linedata[0].cellused = 6;
+
+    var wl = T.Winlink{
+        .idx = 0,
+        .session = &session,
+        .window = &window_,
+    };
+    try session.windows.put(0, &wl);
+    try window_.winlinks.append(xm.allocator, &wl);
+    session.curw = &wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "copy-mode-clipboard" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const client_env = env_mod.environ_create();
+    defer env_mod.environ_free(client_env);
+    var client = T.Client{
+        .name = "copy-mode-clipboard-client",
+        .environ = client_env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = &session,
+        .term_features = tty_features.featureBit(.clipboard),
+    };
+    client.tty = .{ .client = &client };
+    client.tty.flags |= @intCast(T.TTY_STARTED);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], copyModeClipboardTestPeerDispatch, null);
+    defer {
+        const peer = client.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+    client_registry.add(&client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommand(wme, "select-line");
+    try runCopyModeTestCommandWithSession(wme, &session, "copy-selection");
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+
+    var imsg_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &imsg_msg) > 0);
+    defer c.imsg.imsg_free(&imsg_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&imsg_msg));
+
+    const payload_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    const payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    _ = c.imsg.imsg_get_data(&imsg_msg, payload.ptr, payload.len);
+
+    var stream: i32 = 0;
+    @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), stream);
+
+    const data = "copyme";
+    const b64_len = std.base64.standard.Encoder.calcSize(data.len);
+    const b64 = try xm.allocator.alloc(u8, b64_len);
+    defer xm.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, data);
+    const expected = try std.fmt.allocPrint(xm.allocator, "\x1b]52;;{s}\x07", .{b64});
+    defer xm.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, payload[@sizeOf(i32)..]);
 }
 
 test "copy-mode append-selection appends onto the current top paste buffer" {

@@ -19,13 +19,16 @@
 
 const std = @import("std");
 const args_mod = @import("arguments.zig");
+const c = @import("c.zig");
 const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
 const grid = @import("grid.zig");
 const hyperlinks = @import("hyperlinks.zig");
 const input_mod = @import("input.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
+const notify = @import("notify.zig");
 const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
 const status_runtime = @import("status-runtime.zig");
@@ -37,6 +40,7 @@ const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
 
 const word_whitespace = "\t ";
+const window_copy_drag_repeat_time_us = 50_000;
 
 pub const JumpType = enum {
     off,
@@ -71,6 +75,7 @@ const SearchDirection = enum {
 
 pub const CopyModeData = struct {
     backing: *T.Screen,
+    drag_timer: ?*c.libevent.event = null,
     separators: []const u8 = word_whitespace,
     top: u32 = 0,
     cx: u32 = 0,
@@ -640,6 +645,11 @@ pub fn copyModeCommand(
 
 fn copyModeClose(wme: *T.WindowModeEntry) void {
     const data = modeData(wme);
+    if (data.drag_timer) |ev| {
+        _ = c.libevent.event_del(ev);
+        c.libevent.event_free(ev);
+        data.drag_timer = null;
+    }
     if (data.searchmark) |sm| xm.allocator.free(sm);
     if (data.searchstr) |ss| xm.allocator.free(ss);
     screen.screen_free(data.backing);
@@ -695,6 +705,32 @@ fn sourceScreen(wme: *T.WindowModeEntry) *T.Screen {
     const data = modeData(wme);
     if (data.viewmode) return data.backing;
     return &(wme.swp orelse wme.wp).base;
+}
+
+fn cancelDragTimer(data: *CopyModeData) void {
+    if (data.drag_timer) |ev| _ = c.libevent.event_del(ev);
+}
+
+fn armDragTimer(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    if (data.drag_timer == null) {
+        const base = proc_mod.libevent orelse return;
+        data.drag_timer = c.libevent.event_new(
+            base,
+            -1,
+            @intCast(c.libevent.EV_TIMEOUT),
+            window_copy_scroll_timer,
+            wme,
+        );
+    }
+    if (data.drag_timer) |ev| {
+        var tv = std.posix.timeval{
+            .sec = 0,
+            .usec = window_copy_drag_repeat_time_us,
+        };
+        _ = c.libevent.event_del(ev);
+        _ = c.libevent.event_add(ev, @ptrCast(&tv));
+    }
 }
 
 fn cloneSourceScreen(wme: *T.WindowModeEntry) *T.Screen {
@@ -884,6 +920,7 @@ fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
 
     const data = modeData(wme);
+    cancelDragTimer(data);
     const point = mouseAt(wp, mouse, false) orelse return;
     const old_cx = data.cx;
     const old_cy = data.cy;
@@ -891,8 +928,10 @@ fn dragUpdate(client: *T.Client, mouse: *T.MouseEvent) void {
     updateCursorFromMouse(wme, mouse, false);
     if (old_cy != data.cy or old_cx == data.cx) {
         if (point.y == 0) {
+            armDragTimer(wme);
             scrollLines(wme, -1);
         } else if (point.y + 1 == viewRows(wp)) {
+            armDragTimer(wme);
             cursorDownLines(wme, 1);
         }
     }
@@ -1534,6 +1573,42 @@ fn copyLineToBuffer(
     }
 }
 
+const CopyCommandOptions = struct {
+    prefix: ?[]const u8 = null,
+    command: []const u8 = "",
+    set_paste: bool = true,
+    set_clip: bool = true,
+};
+
+fn selectionCopyOptions(args: *const args_mod.Arguments) CopyCommandOptions {
+    return .{
+        .prefix = args.value_at(1),
+        .set_paste = !args.has('P'),
+        .set_clip = !args.has('C'),
+    };
+}
+
+fn pipeCopyOptions(args: *const args_mod.Arguments) CopyCommandOptions {
+    return .{
+        .command = args.value_at(1) orelse "",
+        .prefix = args.value_at(2),
+        .set_paste = !args.has('P'),
+        .set_clip = !args.has('C'),
+    };
+}
+
+fn maybeSetClipboardSelection(wme: *T.WindowModeEntry, buf: []const u8) void {
+    if (buf.len == 0) return;
+    if (opts.options_get_number(opts.global_options, "set-clipboard") == 0) return;
+
+    var ctx = T.ScreenWriteCtx{
+        .wp = wme.wp,
+        .s = wme.wp.screen,
+    };
+    screen_write.setselection(&ctx, "", buf);
+    notify.notify_pane("pane-set-clipboard", wme.wp);
+}
+
 // ── Command implementations ────────────────────────────────────────────────
 
 fn cmdBeginSelection(wme: *T.WindowModeEntry) void {
@@ -1721,13 +1796,11 @@ fn cmdSwapSelectionEnd(wme: *T.WindowModeEntry) void {
 }
 
 fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
-    _ = args;
     window_copy_synchronize_cursor(wme, false);
-    const buf = getSelectionOrMatchText(wme) orelse return;
-    defer xm.allocator.free(buf);
+    const options = selectionCopyOptions(args);
     _ = session;
-    const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf));
+    const buf = getSelectionOrMatchText(wme) orelse return;
+    window_copy_copy_buffer(wme, options.prefix, buf, buf.len, options.set_paste, options.set_clip);
     clearSelection(wme);
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
@@ -1735,13 +1808,11 @@ fn cmdCopySelection(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
 }
 
 fn cmdCopySelectionNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments) void {
-    _ = args;
     window_copy_synchronize_cursor(wme, false);
-    const buf = getSelectionOrMatchText(wme) orelse return;
-    defer xm.allocator.free(buf);
+    const options = selectionCopyOptions(args);
     _ = session;
-    const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf));
+    const buf = getSelectionOrMatchText(wme) orelse return;
+    window_copy_copy_buffer(wme, options.prefix, buf, buf.len, options.set_paste, options.set_clip);
 }
 
 fn cmdCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
@@ -1754,14 +1825,10 @@ fn cmdCopyPipeNoClear(wme: *T.WindowModeEntry, session: *T.Session, args: *const
 
 fn doCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, do_clear: bool, cancel: bool) void {
     window_copy_synchronize_cursor(wme, false);
+    const options = pipeCopyOptions(args);
     const buf_text = getSelectionOrMatchText(wme) orelse return;
-    defer xm.allocator.free(buf_text);
-
-    const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf_text));
-
-    const command = if (args.value_at(1)) |a| a else "";
-    pipeRun(wme, session, command, buf_text);
+    pipeRun(wme, session, options.command, buf_text);
+    window_copy_copy_buffer(wme, options.prefix, buf_text, buf_text.len, options.set_paste, options.set_clip);
 
     if (do_clear) clearSelection(wme);
     if (cancel) {
@@ -1770,9 +1837,9 @@ fn doCopyPipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mo
 }
 
 fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
-    _ = args;
     const data = modeData(wme);
     const count = repeatCount(wme);
+    const options = selectionCopyOptions(args);
 
     const ocx = data.cx;
     const ocy = data.cy;
@@ -1788,23 +1855,14 @@ fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_m
     cursorEndOfLine(wme);
     window_copy_synchronize_cursor(wme, false);
 
-    const buf = getSelectionText(wme) orelse {
-        data.cx = ocx;
-        data.cy = ocy;
-        data.top = otop;
-        return;
-    };
-    defer xm.allocator.free(buf);
-
-    const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf));
+    _ = session;
+    window_copy_copy_selection(wme, options.prefix, options.set_paste, options.set_clip);
     clearSelection(wme);
 
     data.cx = ocx;
     data.cy = ocy;
     data.top = otop;
 
-    _ = session;
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
     }
@@ -1813,6 +1871,7 @@ fn cmdCopyLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_m
 fn cmdCopyLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     const data = modeData(wme);
     const count = repeatCount(wme);
+    const options = pipeCopyOptions(args);
 
     const ocx = data.cx;
     const ocy = data.cy;
@@ -1828,7 +1887,11 @@ fn cmdCopyLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const ar
     cursorEndOfLine(wme);
     window_copy_synchronize_cursor(wme, false);
 
-    doCopyPipe(wme, session, args, true, cancel);
+    window_copy_copy_pipe(wme, session, options.prefix, options.command, options.set_paste, options.set_clip);
+    clearSelection(wme);
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
 
     data.cx = ocx;
     data.cy = ocy;
@@ -1836,9 +1899,9 @@ fn cmdCopyLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const ar
 }
 
 fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
-    _ = args;
     const data = modeData(wme);
     const count = repeatCount(wme);
+    const options = selectionCopyOptions(args);
 
     const ocx = data.cx;
     const ocy = data.cy;
@@ -1851,23 +1914,14 @@ fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
     cursorEndOfLine(wme);
     window_copy_synchronize_cursor(wme, false);
 
-    const buf = getSelectionText(wme) orelse {
-        data.cx = ocx;
-        data.cy = ocy;
-        data.top = otop;
-        return;
-    };
-    defer xm.allocator.free(buf);
-
-    const paste_mod = @import("paste.zig");
-    paste_mod.paste_add(null, xm.xstrdup(buf));
+    _ = session;
+    window_copy_copy_selection(wme, options.prefix, options.set_paste, options.set_clip);
     clearSelection(wme);
 
     data.cx = ocx;
     data.cy = ocy;
     data.top = otop;
 
-    _ = session;
     if (cancel) {
         _ = window_mode_runtime.resetMode(wme.wp);
     }
@@ -1876,6 +1930,7 @@ fn cmdCopyEndOfLine(wme: *T.WindowModeEntry, session: *T.Session, args: *const a
 fn cmdCopyEndOfLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *const args_mod.Arguments, cancel: bool) void {
     const data = modeData(wme);
     const count = repeatCount(wme);
+    const options = pipeCopyOptions(args);
 
     const ocx = data.cx;
     const ocy = data.cy;
@@ -1888,7 +1943,11 @@ fn cmdCopyEndOfLinePipe(wme: *T.WindowModeEntry, session: *T.Session, args: *con
     cursorEndOfLine(wme);
     window_copy_synchronize_cursor(wme, false);
 
-    doCopyPipe(wme, session, args, true, cancel);
+    window_copy_copy_pipe(wme, session, options.prefix, options.command, options.set_paste, options.set_clip);
+    clearSelection(wme);
+    if (cancel) {
+        _ = window_mode_runtime.resetMode(wme.wp);
+    }
 
     data.cx = ocx;
     data.cy = ocy;
@@ -1900,6 +1959,7 @@ fn cmdAppendSelection(wme: *T.WindowModeEntry, session: *T.Session) void {
     const buf = getSelectionOrMatchText(wme) orelse return;
     defer xm.allocator.free(buf);
 
+    maybeSetClipboardSelection(wme, buf);
     const paste_mod = @import("paste.zig");
     if (paste_mod.paste_get_top(null)) |top| {
         const old = paste_mod.paste_buffer_data(top, null);
@@ -2516,13 +2576,28 @@ pub fn window_copy_clone_screen(src: *T.Screen, hint: ?*T.Screen, cx_out: ?*u32,
 
 // ── Timer / Callbacks ──────────────────────────────────────────────────────
 
-pub fn window_copy_scroll_timer(_fd: i32, _events: i16, _arg: ?*anyopaque) void {
-    // Timer callback for scroll speed management.
-    // In tmux, this fires periodically while the mouse is dragging
-    // near the edge to auto-scroll. Not yet needed in zmux.
+pub export fn window_copy_scroll_timer(_fd: c_int, _events: c_short, _arg: ?*anyopaque) void {
     _ = _fd;
     _ = _events;
-    _ = _arg;
+    const wme: *T.WindowModeEntry = @ptrCast(@alignCast(_arg orelse return));
+    const wp = wme.wp;
+    const current = window.window_pane_mode(wp) orelse return;
+    if (current != wme) return;
+    if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
+
+    const data = modeData(wme);
+    cancelDragTimer(data);
+
+    if (data.cy == 0) {
+        armDragTimer(wme);
+        scrollLines(wme, -1);
+    } else if (data.cy + 1 == viewRows(wp)) {
+        armDragTimer(wme);
+        cursorDownLines(wme, 1);
+    }
+
+    _ = window_copy_update_selection(wme, false, false);
+    redraw(wme);
 }
 
 pub fn window_copy_init_ctx_cb(_ctx: ?*anyopaque, _cell: ?*T.GridCell) void {
@@ -3058,10 +3133,7 @@ pub fn window_copy_synchronize_cursor_end(wme: *T.WindowModeEntry, begin: bool, 
 pub fn window_copy_copy_buffer(wme: *T.WindowModeEntry, prefix: ?[]const u8, buf: []u8, _len: usize, set_paste: bool, set_clip: bool) void {
     _ = _len;
 
-    if (set_clip) {
-        var ctx = T.ScreenWriteCtx{ .s = wme.wp.screen };
-        screen_write.setselection(&ctx, "", buf);
-    }
+    if (set_clip) maybeSetClipboardSelection(wme, buf);
 
     if (set_paste) {
         const paste_mod = @import("paste.zig");
@@ -4103,12 +4175,12 @@ pub fn window_copy_move_mouse(m: *T.MouseEvent) void {
     redraw(wme);
 }
 
-pub fn window_copy_start_drag(c: ?*T.Client, m: *const T.MouseEvent) void {
-    startDrag(c, m);
+pub fn window_copy_start_drag(client: ?*T.Client, m: *const T.MouseEvent) void {
+    startDrag(client, m);
 }
 
-pub fn window_copy_drag_update(c: *T.Client, m: *T.MouseEvent) void {
-    dragUpdate(c, m);
+pub fn window_copy_drag_update(client: *T.Client, m: *T.MouseEvent) void {
+    dragUpdate(client, m);
 }
 
 pub fn window_copy_drag_release(_c: *T.Client, m: *T.MouseEvent) void {
@@ -4116,6 +4188,7 @@ pub fn window_copy_drag_release(_c: *T.Client, m: *T.MouseEvent) void {
     const wp = resolveMousePane(m) orelse return;
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return;
+    cancelDragTimer(modeData(wme));
     redraw(wme);
 }
 

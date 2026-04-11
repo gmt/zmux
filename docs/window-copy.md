@@ -23,6 +23,7 @@
   - keyboard selection growth through ordinary cursor movement
   - drag-started visual selection that stays synchronized on the active screen
   - edge drag updates that scroll the viewport while extending a selection
+  - stationary edge-drag repeat scrolling through the copy-mode timer path
   - mouse-positioned `select-word` and `select-line`
   - word selection growth that keeps using the session's
     `word-separators`
@@ -32,6 +33,7 @@
     search match when no explicit selection is active
   - `append-selection` appending onto the current top paste buffer instead of
     always creating a fresh one
+  - clipboard export through the live copy-mode copy helpers
   - cursor and active selection rewrapping across pane width changes
   - cancel/exit
 - Default key tables include `copy-mode` and `copy-mode-vi`
@@ -40,8 +42,5 @@
   the client is on the default root table.
 ## Gaps (tracked in docs/zmux-porting-todo.md)
 
-- Selection, copy, search, marks, drag, and clipboard-selection semantics
-- Stationary edge-drag repeat scrolling is still short of full tmux parity
-- Mark, search, and clipboard-selection semantics still need more tmux-shaped
-  coverage
+- Mark and search semantics still need more tmux-shaped coverage
 - Some mode-local redraw and update paths still need stronger parity coverage

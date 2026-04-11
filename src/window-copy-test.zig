@@ -17,6 +17,7 @@ const args_mod = @import("arguments.zig");
 const grid = @import("grid.zig");
 const opts = @import("options.zig");
 const screen = @import("screen.zig");
+const screen_write = @import("screen-write.zig");
 const T = @import("types.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
@@ -56,7 +57,7 @@ fn initWindowCopyTestGlobals() void {
     window.window_init_globals(xm.allocator);
 }
 
-test "window-copy snapshots the source pane and refresh-from-pane updates it" {
+test "window-copy tracks source pane updates without explicit refresh" {
     const opts_mod = @import("options.zig");
 
     initWindowCopyTestGlobals();
@@ -153,10 +154,11 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
     }
 
     setGridLineText(source.base.grid, 0, "omega");
+    wc.window_copy_redraw_screen(wme);
     {
-        const snap = grid.string_cells(wc.modeData(wme).backing.grid, 0, 6, .{ .trim_trailing_spaces = true });
-        defer xm.allocator.free(snap);
-        try std.testing.expectEqualStrings("alpha", snap);
+        const synced = grid.string_cells(wc.modeData(wme).backing.grid, 0, 6, .{ .trim_trailing_spaces = true });
+        defer xm.allocator.free(synced);
+        try std.testing.expectEqualStrings("omega", synced);
     }
 
     var refresh_args = args_mod.Arguments.init(xm.allocator);
@@ -169,6 +171,99 @@ test "window-copy snapshots the source pane and refresh-from-pane updates it" {
         defer xm.allocator.free(refreshed);
         try std.testing.expectEqualStrings("omega", refreshed);
     }
+}
+
+test "window-copy backing carries source history rows" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(5, 2, 10);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(5, 2, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(5, 2, 10);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(5, 2, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 11,
+        .name = xm.xstrdup("copy-history-source"),
+        .sx = 5,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 12,
+        .name = xm.xstrdup("copy-history-target"),
+        .sx = 5,
+        .sy = 2,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 13,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 5,
+        .sy = 2,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 14,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 5,
+        .sy = 2,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 1 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    var ctx = T.ScreenWriteCtx{ .s = &source.base };
+    screen_write.putn(&ctx, "one\r\ntwo\r\nthree");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+
+    const wme = wc.enterMode(&target, &source, &args);
+    try std.testing.expectEqual(@as(u32, 1), wc.modeData(wme).backing.grid.hsize);
+
+    try runCopyModeTestCommand(wme, "history-top");
+
+    const top_line = grid.string_cells(target.screen.grid, 0, 5, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(top_line);
+    try std.testing.expectEqualStrings("one", top_line);
 }
 
 test "window-copy navigation commands move through a taller source snapshot" {
@@ -2470,13 +2565,7 @@ test "view mode follows the newest appended lines past the viewport" {
     try std.testing.expectEqualStrings("line-5", last_visible);
 }
 
-test "view mode: refresh-from-pane wipes view content (unlike tmux)" {
-    // In tmux, refresh-from-pane is a no-op when data->viewmode is set.
-    // In zmux, there is no viewmode field; refresh-from-pane clones from
-    // the pane's base screen (via wme.wp since swp is null), which wipes
-    // the view mode content.  This test documents the current behaviour.
-    // When a viewmode guard is added, this test should be updated to
-    // verify that refresh-from-pane is a no-op in view mode.
+test "view mode: refresh-from-pane leaves view content intact" {
     const opts_mod = @import("options.zig");
 
     initWindowCopyTestGlobals();
@@ -2530,11 +2619,9 @@ test "view mode: refresh-from-pane wipes view content (unlike tmux)" {
     defer xm.allocator.free(row0);
     try std.testing.expectEqualStrings("viewtext", row0);
 
-    // refresh-from-pane clones from the pane's base screen, wiping view content.
     try runCopyModeTestCommand(wme, "refresh-from-pane");
 
-    // Current behaviour: backing is now a clone of the (empty) base screen.
-    const row1_after = grid.string_cells(data.backing.grid, 1, 10, .{ .trim_trailing_spaces = true });
-    defer xm.allocator.free(row1_after);
-    try std.testing.expectEqualStrings("", row1_after);
+    const row0_after = grid.string_cells(data.backing.grid, 0, 10, .{ .trim_trailing_spaces = true });
+    defer xm.allocator.free(row0_after);
+    try std.testing.expectEqualStrings("viewtext", row0_after);
 }

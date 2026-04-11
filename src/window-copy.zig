@@ -167,6 +167,7 @@ pub fn enterMode(wp: *T.WindowPane, swp: *T.WindowPane, args: *const args_mod.Ar
 pub fn pageUp(wp: *T.WindowPane, half_page: bool) void {
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode) return;
+    syncBackingFromSource(wme);
     pageUpMode(wme, half_page);
     redraw(wme);
 }
@@ -174,6 +175,7 @@ pub fn pageUp(wp: *T.WindowPane, half_page: bool) void {
 pub fn pageDown(wp: *T.WindowPane, half_page: bool, scroll_exit: bool) void {
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode) return;
+    syncBackingFromSource(wme);
     if (pageDownMode(wme, half_page, scroll_exit)) {
         _ = window_mode_runtime.resetMode(wp);
         return;
@@ -184,6 +186,7 @@ pub fn pageDown(wp: *T.WindowPane, half_page: bool, scroll_exit: bool) void {
 pub fn scrollToMouse(wp: *T.WindowPane, slider_mouse_pos: i32, mouse_y: u32, scroll_exit: bool) void {
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode) return;
+    syncBackingFromSource(wme);
     if (slider_mouse_pos < 0) return;
 
     _ = window.window_set_active_pane(wp.window, wp, false);
@@ -238,6 +241,7 @@ pub fn startDrag(client: ?*T.Client, mouse: *const T.MouseEvent) void {
     const wp = resolveMousePane(mouse) orelse return;
     const wme = window.window_pane_mode(wp) orelse return;
     if (wme.mode != &window_copy_mode) return;
+    syncBackingFromSource(wme);
 
     updateCursorFromMouse(wme, mouse, true);
     cl.tty.mouse_drag_update = dragUpdate;
@@ -247,12 +251,11 @@ pub fn startDrag(client: ?*T.Client, mouse: *const T.MouseEvent) void {
 pub fn mouseFormatSource(wp: *T.WindowPane, y: u32) ?MouseFormatSource {
     const wme = window.window_pane_mode(wp) orelse return null;
     if (wme.mode != &window_copy_mode) return null;
-
     const data = modeData(wme);
-    const row = data.top + y;
-    if (row >= data.backing.grid.sy) return null;
+    const source = sourceScreen(wme);
+    const row = grid.absolute_row_to_storage(source.grid, data.top + y) orelse return null;
     return .{
-        .screen = data.backing,
+        .screen = source,
         .row = row,
     };
 }
@@ -309,6 +312,7 @@ pub fn copyModeCommand(
     const count = repeatCount(wme);
     const command = args.value_at(0).?;
     const data = modeData(wme);
+    syncBackingFromSource(wme);
 
     if (std.mem.eql(u8, command, "cancel")) {
         _ = window_mode_runtime.resetMode(wme.wp);
@@ -601,6 +605,7 @@ fn copyModeClose(wme: *T.WindowModeEntry) void {
 }
 
 fn copyModeGetScreen(wme: *T.WindowModeEntry) *T.Screen {
+    syncBackingFromSource(wme);
     return modeData(wme).backing;
 }
 
@@ -610,19 +615,14 @@ pub fn modeData(wme: *T.WindowModeEntry) *CopyModeData {
 
 fn refreshFromSource(wme: *T.WindowModeEntry, preserve_cursor: bool) void {
     const data = modeData(wme);
-    const source_wp = wme.swp orelse wme.wp;
-    const source_screen = &source_wp.base;
-    const old_absolute = if (preserve_cursor) absoluteCursorRow(wme) else 0;
-
-    if (data.backing.grid.sx != source_screen.grid.sx or data.backing.grid.sy != source_screen.grid.sy) {
-        screen.screen_free(data.backing);
-        xm.allocator.destroy(data.backing);
-        data.backing = screen.screen_init(source_screen.grid.sx, source_screen.grid.sy, 0);
-    } else {
-        screen.screen_reset(data.backing);
+    if (data.viewmode) {
+        redraw(wme);
+        return;
     }
 
-    cloneScreen(data.backing, source_screen);
+    const source_screen = sourceScreen(wme);
+    const old_absolute = if (preserve_cursor) absoluteCursorRow(wme) else 0;
+    syncBackingFromSource(wme);
 
     if (preserve_cursor) {
         setAbsoluteCursorRow(wme, old_absolute);
@@ -644,6 +644,23 @@ fn refreshFromSource(wme: *T.WindowModeEntry, preserve_cursor: bool) void {
     redraw(wme);
 }
 
+fn sourceScreen(wme: *T.WindowModeEntry) *T.Screen {
+    const data = modeData(wme);
+    if (data.viewmode) return data.backing;
+    return &(wme.swp orelse wme.wp).base;
+}
+
+fn syncBackingFromSource(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    if (data.viewmode) return;
+
+    const src = sourceScreen(wme);
+    screen.screen_free(data.backing);
+    xm.allocator.destroy(data.backing);
+    data.backing = screen.screen_init(src.grid.sx, src.grid.sy, src.grid.hlimit);
+    cloneScreen(data.backing, src);
+}
+
 fn cloneScreen(dst: *T.Screen, src: *const T.Screen) void {
     dst.mode = src.mode;
     dst.cursor_visible = src.cursor_visible;
@@ -658,10 +675,12 @@ fn cloneScreen(dst: *T.Screen, src: *const T.Screen) void {
     }
     dst.hyperlinks = if (src.hyperlinks) |hl| hyperlinks.hyperlinks_copy(hl) else hyperlinks.hyperlinks_init();
 
-    var row: u32 = 0;
-    while (row < @min(src.grid.sy, dst.grid.sy)) : (row += 1) {
-        copyLine(dst.grid, row, src.grid, row, @min(src.grid.sx, dst.grid.sx));
-    }
+    dst.grid.flags = src.grid.flags;
+    dst.grid.hlimit = src.grid.hlimit;
+    grid.resize_linedata_pub(dst.grid, src.grid.sy + src.grid.hsize);
+    grid.duplicate_lines(dst.grid, 0, src.grid, 0, src.grid.sy + src.grid.hsize);
+    dst.grid.hsize = src.grid.hsize;
+    dst.grid.hscrolled = src.grid.hscrolled;
 
     if (dst.grid.sx != 0) dst.cx = @min(src.cx, dst.grid.sx - 1) else dst.cx = 0;
     if (dst.grid.sy != 0) dst.cy = @min(src.cy, dst.grid.sy - 1) else dst.cy = 0;
@@ -710,6 +729,7 @@ fn copyLine(dst_grid: *T.Grid, dst_row: u32, src_grid: *const T.Grid, src_row: u
 }
 
 fn redraw(wme: *T.WindowModeEntry) void {
+    syncBackingFromSource(wme);
     const data = modeData(wme);
     const view = wme.wp.screen;
     const backing = data.backing;
@@ -2250,7 +2270,10 @@ pub fn window_copy_free(wme: *T.WindowModeEntry) void {
 
 pub fn window_copy_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
     const data = modeData(wme);
-    screen.screen_resize(data.backing, sx, sy, false);
+    if (data.viewmode)
+        screen.screen_resize(data.backing, sx, sy, false)
+    else
+        syncBackingFromSource(wme);
     redraw(wme);
 }
 
@@ -2452,14 +2475,17 @@ fn formatAddNum(ctx: *format_mod.FormatContext, key: []const u8, value: anytype)
 pub fn window_copy_formats(wme: *T.WindowModeEntry, raw_ft: ?*anyopaque) void {
     const ctx: *format_mod.FormatContext = @ptrCast(@alignCast(raw_ft orelse return));
     const data = modeData(wme);
-    const gd = data.backing.grid;
+    const source = sourceScreen(wme);
+    const gd = source.grid;
 
     // top_line_time: timestamp of the grid line at the top of the viewport.
     if (data.top < gd.hsize + gd.sy) {
-        const gl = grid.grid_get_line(@constCast(gd), data.top);
-        var buf: [24]u8 = undefined;
-        const time_str = std.fmt.bufPrint(&buf, "{d}", .{gl.time}) catch "0";
-        format_mod.format_add(ctx, "top_line_time", time_str);
+        if (grid.absolute_row_to_storage(gd, data.top)) |top_row| {
+            const gl = grid.grid_get_line(@constCast(gd), top_row);
+            var buf: [24]u8 = undefined;
+            const time_str = std.fmt.bufPrint(&buf, "{d}", .{gl.time}) catch "0";
+            format_mod.format_add(ctx, "top_line_time", time_str);
+        }
     }
 
     formatAddNum(ctx, "scroll_position", data.top);
@@ -2501,11 +2527,12 @@ pub fn window_copy_formats(wme: *T.WindowModeEntry, raw_ft: ?*anyopaque) void {
         const format_resolve = @import("format-resolve.zig");
         const s_opts2 = if (ctx.session) |s| s.options else opts.global_s_options;
         const separators = opts.options_get_string(s_opts2, "word-separators");
-        if (format_resolve.format_grid_word(xm.allocator, gd, data.cx, data.top + data.cy, separators)) |w| {
+        const cursor_row = grid.absolute_row_to_storage(gd, data.top + data.cy) orelse return;
+        if (format_resolve.format_grid_word(xm.allocator, gd, data.cx, cursor_row, separators)) |w| {
             defer xm.allocator.free(w);
             format_mod.format_add(ctx, "copy_cursor_word", w);
         }
-        if (format_resolve.format_grid_line(xm.allocator, gd, data.top + data.cy)) |l| {
+        if (format_resolve.format_grid_line(xm.allocator, gd, cursor_row)) |l| {
             defer xm.allocator.free(l);
             format_mod.format_add(ctx, "copy_cursor_line", l);
         }
@@ -2686,6 +2713,7 @@ pub fn window_copy_update_style(wme: *T.WindowModeEntry, fx: u32, fy: u32, gc: ?
 pub fn window_copy_get_current_offset(wp: *T.WindowPane, offset: ?*u32, size: ?*u32) bool {
     const wme = window.window_pane_mode(wp) orelse return false;
     if (wme.mode != &window_copy_mode and wme.mode != &window_view_mode) return false;
+    syncBackingFromSource(wme);
     const data = modeData(wme);
     if (offset) |o| o.* = data.top;
     if (size) |s| s.* = rowCount(data.backing);

@@ -43,10 +43,10 @@ Live tmux-parity gaps only.
 - `tmux:` copy mode operates on real pane history with tmux's selection, copy,
   search, mark, drag, resize, mode-local redraw, and clipboard-selection
   behavior.
-- `zmux:` the current mode runs on a snapshot-backed screen. Core navigation is
-  there, but real history backing and the richer copy/search/selection flows
-  are still incomplete, and some less-common commands still fall through to
-  the unsupported-command path.
+- `zmux:` the current mode now carries live source history into its private
+  backing surface, but the richer copy/search/selection flows are still
+  incomplete, and some less-common commands still fall through to the
+  unsupported-command path.
 - `likely files:` `src/window-copy.zig`, `src/cmd-copy-mode.zig`,
   `src/screen-write.zig`, `src/server-client.zig`, `docs/window-copy.md`
 

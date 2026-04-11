@@ -5,9 +5,9 @@
 ## Current State
 
 - `copy-mode` enters an alternate-screen pane mode.
-- The mode snapshots a source pane's base screen into a private
-  backing screen and renders a viewport into the target pane.
-- `capture-pane -M` sees the backing snapshot.
+- The mode keeps a private backing screen synchronized from the source
+  pane's live base history and renders a viewport into the target pane.
+- `capture-pane -M` sees that live-synchronized mode backing.
 - Supported features:
   - source-pane snapshots via `copy-mode -s`
   - refresh from the source pane
@@ -29,7 +29,6 @@
 
 ## Gaps (tracked in docs/zig-porting-todo.md)
 
-- Real pane history backing instead of snapshot-only screen
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
 - A few less-common copy-mode commands still fall through to the
   unsupported-command path

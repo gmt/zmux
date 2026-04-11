@@ -20,6 +20,8 @@
   - history-top and history-bottom
   - scrollbar drag via `copy-mode -S` and `scroll-to-mouse`
   - regex search through `search-forward` and `search-backward`
+  - incremental search restoring its saved origin as the search text changes
+    and clearing back to that origin when the incremental text is emptied
   - keyboard selection growth through ordinary cursor movement
   - drag-started visual selection that stays synchronized on the active screen
   - edge drag updates that scroll the viewport while extending a selection

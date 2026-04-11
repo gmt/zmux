@@ -2791,6 +2791,109 @@ test "window-copy regex search uses regex semantics and emacs cursor placement" 
     try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
 }
 
+test "window-copy incremental search restores origin when the text changes" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(12, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(12, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2055,
+        .name = xm.xstrdup("copy-incremental-src"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+    opts_mod.options_set_number(source_window.options, "wrap-search", 0);
+
+    var target_window = T.Window{
+        .id = 2056,
+        .name = xm.xstrdup("copy-incremental-tgt"),
+        .sx = 12,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+    opts_mod.options_set_number(target_window.options, "wrap-search", 0);
+
+    var source = T.WindowPane{
+        .id = 2057,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2058,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 12,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "alpha");
+    setGridLineText(source.base.grid, 1, "bravo");
+    setGridLineText(source.base.grid, 2, "beta");
+    setGridLineText(source.base.grid, 3, "omega");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward-incremental", "=be" });
+    try std.testing.expectEqual(@as(u32, 2), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 2), wc.modeData(wme).cx);
+    try std.testing.expect(wc.modeData(wme).searchmark != null);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward-incremental", "=br" });
+    try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 2), wc.modeData(wme).cx);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward-incremental", "=" });
+    try std.testing.expectEqual(@as(u32, 0), wc.absoluteCursorRow(wme));
+    try std.testing.expectEqual(@as(u32, 0), wc.modeData(wme).cx);
+    try std.testing.expect(wc.modeData(wme).searchmark == null);
+}
+
 test "window-copy public match helpers expose the current search hit" {
     const opts_mod = @import("options.zig");
 

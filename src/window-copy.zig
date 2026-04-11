@@ -41,6 +41,7 @@ const xm = @import("xmalloc.zig");
 
 const word_whitespace = "\t ";
 const window_copy_drag_repeat_time_us = 50_000;
+const invalid_search_origin = std.math.maxInt(u32);
 
 pub const JumpType = enum {
     off,
@@ -112,9 +113,9 @@ pub const CopyModeData = struct {
     searchcount: i32 = -1,
     searchmore: i32 = 0,
     searchall: bool = false,
-    searchx: u32 = 0,
-    searchy: u32 = 0,
-    searcho: u32 = 0,
+    searchx: u32 = invalid_search_origin,
+    searchy: u32 = invalid_search_origin,
+    searcho: u32 = invalid_search_origin,
     searchgen: u8 = 1,
     timeout: bool = false,
 
@@ -1151,6 +1152,36 @@ fn viewRows(wp: *const T.WindowPane) u32 {
 
 fn rowCount(s: *const T.Screen) u32 {
     return s.grid.hsize + s.grid.sy;
+}
+
+fn searchOriginValid(data: *const CopyModeData) bool {
+    return data.searchx != invalid_search_origin and
+        data.searchy != invalid_search_origin and
+        data.searcho != invalid_search_origin;
+}
+
+fn saveSearchOrigin(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.searchx = data.cx;
+    data.searchy = data.cy;
+    data.searcho = data.top;
+}
+
+fn restoreSearchOrigin(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    if (!searchOriginValid(data)) return;
+    data.top = @min(data.searcho, maxTop(data.backing, wme.wp));
+    const max_visible = backingBottomVisibleRow(wme);
+    data.cy = @min(data.searchy, max_visible);
+    data.cx = data.searchx;
+    clampCursorX(wme);
+}
+
+fn clearSearchOrigin(wme: *T.WindowModeEntry) void {
+    const data = modeData(wme);
+    data.searchx = invalid_search_origin;
+    data.searchy = invalid_search_origin;
+    data.searcho = invalid_search_origin;
 }
 
 fn backingLineLength(wme: *T.WindowModeEntry, row: u32) u32 {
@@ -2365,7 +2396,21 @@ fn cmdSearchIncremental(wme: *T.WindowModeEntry, args: *const args_mod.Arguments
     // The first character is a prefix indicating direction override
     const prefix = arg0[0];
     const search_text = arg0[1..];
-    if (search_text.len == 0) return;
+
+    if (!searchOriginValid(data)) {
+        saveSearchOrigin(wme);
+    } else if (data.searchstr) |old| {
+        if (!std.mem.eql(u8, search_text, old)) {
+            restoreSearchOrigin(wme);
+        }
+    }
+
+    if (search_text.len == 0) {
+        window_copy_clear_marks(wme);
+        clearSearchOrigin(wme);
+        redraw(wme);
+        return;
+    }
 
     if (data.searchstr) |old| xm.allocator.free(old);
     data.searchstr = xm.xstrdup(search_text);
@@ -2545,6 +2590,7 @@ pub fn window_copy_resize(wme: *T.WindowModeEntry, sx: u32, sy: u32) void {
 
 pub fn window_copy_size_changed(wme: *T.WindowModeEntry) void {
     window_copy_resize(wme, wme.wp.sx, wme.wp.sy);
+    saveSearchOrigin(wme);
 }
 
 pub fn window_copy_get_screen(wme: *T.WindowModeEntry) *T.Screen {

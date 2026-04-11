@@ -40,6 +40,7 @@ const status_mod = @import("status.zig");
 const status_prompt = @import("status-prompt.zig");
 const status_runtime = @import("status-runtime.zig");
 const protocol = @import("zmux-protocol.zig");
+const popup = @import("popup.zig");
 const window = @import("window.zig");
 const window_mode_runtime = @import("window-mode-runtime.zig");
 const xm = @import("xmalloc.zig");
@@ -934,9 +935,8 @@ fn modeTreeSortCallback(sort_crit: *T.SortCriteria) void {
     window_client_sort(sort_crit);
 }
 
-fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[*]const ?[*:0]const u8 {
-    const lines = window_client_help(width, item_name);
-    return @ptrCast(lines.ptr);
+fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[]const []const u8 {
+    return window_client_help(width, item_name);
 }
 
 fn buildTree(tree: *mode_tree.Data) void {
@@ -1277,4 +1277,139 @@ test "window-client mode update refreshes preview content" {
     const preview_line = grid.string_cells(clientModeGetScreen(wme).grid, 12, clientModeGetScreen(wme).grid.sx, .{ .trim_trailing_spaces = true });
     defer xm.allocator.free(preview_line);
     try std.testing.expect(std.mem.indexOf(u8, preview_line, "after") != null);
+}
+
+test "window-client raw key opens the filter prompt" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-filter");
+    defer if (sess.session_find("window-client-filter") != null) sess.session_destroy(setup.session, false, "test");
+
+    var chooser = makeClient(setup.session, "chooser", "/dev/pts/360");
+    defer {
+        status_prompt.status_prompt_clear(&chooser);
+        freeClient(&chooser);
+    }
+    var target = makeClient(setup.session, "target", "/dev/pts/361");
+    defer freeClient(&target);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane)) |_|
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, 'f', null);
+    try std.testing.expect(status_prompt.status_prompt_active(&chooser));
+    try std.testing.expectEqualStrings("(filter) ", status_prompt.status_prompt_message(&chooser).?);
+}
+
+test "window-client raw keys drive help sort reverse and preview toggle" {
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-raw-keys");
+    defer if (sess.session_find("window-client-raw-keys") != null) sess.session_destroy(setup.session, false, "test");
+
+    var chooser = makeClient(setup.session, "chooser", "/dev/pts/362");
+    defer {
+        popup.clear_overlay(&chooser);
+        freeClient(&chooser);
+    }
+    chooser.tty.sx = 120;
+    chooser.tty.sy = 60;
+    var target = makeClient(setup.session, "target", "/dev/pts/363");
+    defer freeClient(&target);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane)) |_|
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    const data = modeData(wme);
+    try std.testing.expectEqual(T.SortOrder.name, data.tree.sort_crit.order);
+    try std.testing.expect(!data.tree.sort_crit.reversed);
+    try std.testing.expectEqual(mode_tree.Preview.off, data.tree.preview);
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, 'O', null);
+    try std.testing.expectEqual(T.SortOrder.size, data.tree.sort_crit.order);
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, 'r', null);
+    try std.testing.expect(data.tree.sort_crit.reversed);
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, 'v', null);
+    try std.testing.expectEqual(mode_tree.Preview.big, data.tree.preview);
+
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, T.KEYC_F1, null);
+    try std.testing.expect(popup.overlay_active(&chooser));
+}
+
+test "window-client right click opens a menu and double click chooses the client" {
+    const cmdq_mod = @import("cmd-queue.zig");
+    const sess = @import("session.zig");
+
+    initTestGlobals();
+    defer deinitTestGlobals();
+
+    const setup = try testSetup("window-client-mouse");
+    defer if (sess.session_find("window-client-mouse") != null) sess.session_destroy(setup.session, false, "test");
+
+    var chooser = makeClient(setup.session, "chooser", "/dev/pts/364");
+    defer {
+        menu_mod.clear_overlay(&chooser);
+        freeClient(&chooser);
+    }
+    chooser.tty.sx = 120;
+    chooser.tty.sy = 60;
+    var target = makeClient(setup.session, "target", "/dev/pts/365");
+    defer freeClient(&target);
+    client_registry.add(&target);
+
+    var cause: ?[]u8 = null;
+    var args = try args_mod.args_parse(xm.allocator, &.{}, "F:f:K:NO:rt:yZ", 0, 1, &cause);
+    defer args.deinit();
+
+    const wme = enterMode(setup.pane, &args);
+    defer {
+        if (window.window_pane_mode(setup.pane)) |_|
+            _ = window_mode_runtime.resetMode(setup.pane);
+    }
+
+    const right_click = T.MouseEvent{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_MOUSEDOWN3, .pane),
+        .x = 1,
+        .y = 0,
+    };
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, T.keycMouse(T.KEYC_MOUSEDOWN3, .pane), &right_click);
+    try std.testing.expect(menu_mod.overlay_active(&chooser));
+    menu_mod.clear_overlay(&chooser);
+
+    const double_click = T.MouseEvent{
+        .valid = true,
+        .key = T.keycMouse(T.KEYC_DOUBLECLICK1, .pane),
+        .x = 1,
+        .y = 0,
+    };
+    clientModeKey(wme, &chooser, setup.session, setup.session.curw.?, T.keycMouse(T.KEYC_DOUBLECLICK1, .pane), &double_click);
+    while (cmdq_mod.cmdq_next(&chooser) != 0) {}
+
+    try std.testing.expect(target.session == null);
+    try std.testing.expect(window.window_pane_mode(setup.pane) == null);
 }

@@ -15,21 +15,6 @@ Live tmux-parity gaps only.
   - `zmux:` what is currently missing or approximate
   - `likely files:` where the repair probably lives
 
-## Chooser Preview And Prompt Flows
-
-- `tmux:` `choose-client`, `choose-tree`, and `find-window` support preview
-  panes, preview zoom, richer prompt-driven command and kill flows, mouse
-  preview selection, and custom `-K` key-format bindings where tmux provides
-  them.
-- `zmux:` `choose-client` now rides the shared `mode-tree` substrate and
-  carries tmux-shaped status-aware previews, while `tree-mode` has prompt-driven
-  command and kill flows plus preview-tile mouse selection. The remaining
-  chooser gap is mainly the last bits of `choose-client` preview/runtime polish
-  around the shared `mode-tree` substrate.
-- `likely files:` `src/cmd-choose-tree.zig`, `src/window-client.zig`,
-  `src/window-tree.zig`, `src/mode-tree.zig`, `src/window-mode-runtime.zig`,
-  `docs/choose-tree-modes.md`
-
 ## Copy-Mode Runtime Parity
 
 - `tmux:` copy mode operates on real pane history with tmux's selection, copy,

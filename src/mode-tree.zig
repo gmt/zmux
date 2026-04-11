@@ -95,7 +95,7 @@ pub const HeightCallback = *const fn (*Data, u32) u32;
 pub const KeyCallback = *const fn (*Data, ?*anyopaque, u32) T.key_code;
 pub const SwapCallback = *const fn (?*anyopaque, ?*anyopaque, *T.SortCriteria) bool;
 pub const SortCallback = *const fn (*T.SortCriteria) void;
-pub const HelpCallback = *const fn (*u32, *[]const u8) ?[*]const ?[*:0]const u8;
+pub const HelpCallback = *const fn (*u32, *[]const u8) ?[]const []const u8;
 pub const EachCallback = *const fn (*Data, ?*anyopaque, ?*T.Client, T.key_code) void;
 
 /// Context passed through `menu_display` as opaque data so the
@@ -1072,21 +1072,15 @@ pub fn displayHelp(mtd: *Data, client: ?*T.Client) void {
     // collect any extra help lines it provides.
     var w: u32 = HELP_DEFAULT_WIDTH;
     var item_name: []const u8 = "item";
-    var extra_lines: ?[*]const ?[*:0]const u8 = null;
+    var extra_lines: ?[]const []const u8 = null;
     if (mtd.helpcb) |helpcb| {
-        extra_lines = helpcb(&w, @ptrCast(&item_name));
+        extra_lines = helpcb(&w, &item_name);
         if (w < HELP_DEFAULT_WIDTH) w = HELP_DEFAULT_WIDTH;
     }
 
     // Count total height.
     var h: u32 = help_start.len + help_end.len;
-    if (extra_lines) |elines| {
-        var ptr = elines;
-        while (ptr[0]) |_| {
-            h += 1;
-            ptr += 1;
-        }
-    }
+    if (extra_lines) |elines| h += @intCast(elines.len);
 
     if (cl.tty.sx < w or cl.tty.sy < h) return;
     const px = (cl.tty.sx - w) / 2;
@@ -1106,13 +1100,10 @@ pub fn displayHelp(mtd: *Data, client: ?*T.Client) void {
         buf.appendSlice(xm.allocator, replaced) catch unreachable;
     }
     if (extra_lines) |elines| {
-        var ptr = elines;
-        while (ptr[0]) |raw| {
-            const zig_line = std.mem.span(raw);
+        for (elines) |zig_line| {
             const replaced = templateReplace(zig_line, item_name, 1);
             defer xm.allocator.free(replaced);
             buf.appendSlice(xm.allocator, replaced) catch unreachable;
-            ptr += 1;
         }
     }
     for (help_end) |line| {

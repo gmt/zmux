@@ -10,11 +10,12 @@
   detach, kill, suspend, tagging, custom `-F` format, `-f` filter, `-O`
   sorting, `-r` reverse sorting, template execution against the selected
   client target, custom `-K` key labels, preview rendering with copied status
-  lines, live preview refresh through the shared mode update path, and `-Z`
-  zoom ownership for the mode lifetime.
-- The current `client-mode` still lacks tmux's fuller preview interaction
-  surface, so the remaining chooser gap is now mostly polish around the
-  `client-mode` preview/runtime path rather than missing tree-mode mechanics.
+  lines, live preview refresh through the shared mode update path, inherited
+  `mode-tree` help/search/filter/menu behavior, mouse double-click choose, and
+  `-Z` zoom ownership for the mode lifetime.
+- No concrete `choose-client`-specific tmux gap is currently tracked; any
+  remaining chooser parity work is more likely to surface on the broader
+  `tree-mode` side when a specific mismatch turns up.
 - Current `choose-tree` and `find-window` behavior enters a reduced `tree-mode`
   alternate-screen browser over the shared `window-mode-runtime.zig` interface.
 - The current reduced `tree-mode` supports session/window/pane tree browsing,
@@ -26,8 +27,8 @@
   ownership for the mode lifetime
   with prior zoom state restored on exit.
 - The current reduced `tree-mode` still does not provide all of tmux's chooser
-  interaction polish, but the biggest remaining chooser gap is now on the
-  `client-mode` side rather than preview-tile selection in `tree-mode`.
+  interaction polish, but no specific live `choose-client` gap is currently
+  known.
 - Current `customize-mode` behavior enters the reduced
   `options-mode` pane consumer described in [`docs/modes/options-mode.md`](docs/modes/options-mode.md).
 - Current `choose-buffer` behavior enters the reduced `buffer-mode` consumer on

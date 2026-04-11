@@ -323,9 +323,8 @@ fn modeTreeKeyCallback(tree: *mode_tree.Data, itemdata: ?*anyopaque, line: u32) 
     return window_buffer_get_key(wme, item, line);
 }
 
-fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[*]const ?[*:0]const u8 {
-    const lines = window_buffer_help(width, item_name);
-    return @ptrCast(lines.ptr);
+fn modeTreeHelpCallback(width: *u32, item_name: *[]const u8) ?[]const []const u8 {
+    return window_buffer_help(width, item_name);
 }
 
 fn redraw(wme: *T.WindowModeEntry) void {

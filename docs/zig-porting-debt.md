@@ -8,7 +8,7 @@ natural in Zig.
 
 - This file is for cleanup of code that already works.
 - Do not put tmux-parity bugs, missing commands, missing runtime behavior, or
-  reduced feature surfaces here. Those go in `docs/zig-porting-todo.md`.
+  reduced feature surfaces here. Those go in `docs/zmux-porting-todo.md`.
 - If a debt item turns out to describe a real behavior mismatch, move it out of
   this file instead of mixing the two kinds of work.
 

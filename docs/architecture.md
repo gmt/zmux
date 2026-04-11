@@ -71,6 +71,6 @@ surfaces a user or external tool would observe.
   local workarounds.
 - UTF-8, display-width, combine, and rendering code stays within
   the declared stack.
-- Functional tmux-parity gaps go in `docs/zig-porting-todo.md`.
+- Functional tmux-parity gaps go in `docs/zmux-porting-todo.md`.
 - Delete fixed todo entries instead of marking them resolved in place.
 - Zig-idiom cleanup and refactor debt go in `docs/zig-porting-debt.md`.

@@ -229,6 +229,11 @@ pub fn input_key_mouse_pane(wp: *T.WindowPane, m: *const T.MouseEvent, buf: *[40
     return input_key_get_mouse(screen_mod.screen_current(wp), m, point.x, point.y, buf);
 }
 
+pub fn input_key_mouse_screen(screen: *const T.Screen, m: *const T.MouseEvent, x: u32, y: u32, buf: *[40]u8) []const u8 {
+    if (!m.valid or m.ignore) return buf[0..0];
+    return input_key_get_mouse(screen, m, x, y, buf);
+}
+
 fn parse_escape(client: ?*T.Client, bytes: []const u8, event: *T.key_event) ?usize {
     if (bytes.len == 1) return null;
     if (bytes[1] == ']') {

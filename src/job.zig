@@ -169,6 +169,7 @@ extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_
 pub fn job_run(
     cmd: []const u8,
     cwd: ?[]const u8,
+    env_map: ?*const std.process.EnvMap,
     updatecb: ?JobUpdateCb,
     completecb: ?JobCompleteCb,
     freecb: ?JobFreeCb,
@@ -204,7 +205,7 @@ pub fn job_run(
             _ = std.c.dup2(slave, 1);
             _ = std.c.dup2(slave, 2);
             if (slave > 2) std.posix.close(@intCast(slave));
-            job_run_child(cmd, cwd, flags);
+            job_run_child(cmd, cwd, env_map, flags);
         }
         std.posix.close(@intCast(slave));
         parent_fd = master;
@@ -231,7 +232,7 @@ pub fn job_run(
                 }
             }
             if (out[1] > 2) std.posix.close(@intCast(out[1]));
-            job_run_child(cmd, cwd, flags);
+            job_run_child(cmd, cwd, env_map, flags);
         }
         std.posix.close(@intCast(out[1]));
         parent_fd = out[0];
@@ -250,7 +251,7 @@ pub fn job_run(
 }
 
 /// Child-side exec (called after fork, never returns).
-fn job_run_child(cmd: []const u8, cwd: ?[]const u8, flags: u32) noreturn {
+fn job_run_child(cmd: []const u8, cwd: ?[]const u8, env_map: ?*const std.process.EnvMap, flags: u32) noreturn {
     // Reset signals to defaults
     const sa_dfl = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.DFL },
@@ -290,6 +291,15 @@ fn job_run_child(cmd: []const u8, cwd: ?[]const u8, flags: u32) noreturn {
 
     if (flags & JOB_DEFAULTSHELL != 0)
         _ = setenv("SHELL", shell, 1);
+
+    if (env_map) |map| {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            const name = xm.allocator.dupeZ(u8, entry.key_ptr.*) catch continue;
+            const value = xm.allocator.dupeZ(u8, entry.value_ptr.*) catch continue;
+            _ = setenv(name, value, 1);
+        }
+    }
 
     const cmd_z = xm.allocator.dupeZ(u8, cmd) catch {
         std.c._exit(1);
@@ -1181,6 +1191,7 @@ test "job_run streams output via bufferevent" {
     const job = job_run(
         "printf 'hello world'",
         "/",
+        null,
         update_cb,
         complete_cb,
         null,

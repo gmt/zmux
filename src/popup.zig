@@ -18,9 +18,13 @@
 //   ISC licence – same terms as above.
 
 const std = @import("std");
+const c_mod = @import("c.zig");
 const T = @import("types.zig");
 const cmdq = @import("cmd-queue.zig");
+const editor_handoff = @import("editor-handoff.zig");
 const grid = @import("grid.zig");
+const input_keys = @import("input-keys.zig");
+const input_mod = @import("input.zig");
 const job_mod = @import("job.zig");
 const layout_mod = @import("layout.zig");
 const menu_mod = @import("menu.zig");
@@ -109,7 +113,7 @@ pub const PopupLayoutType = enum {
 pub const PopupFinishEditCb = *const fn (?[]u8, usize, ?*anyopaque) void;
 
 pub const PopupEditor = struct {
-    path: ?[]u8 = null,
+    client: *T.Client,
     cb: ?PopupFinishEditCb = null,
     arg: ?*anyopaque = null,
 };
@@ -129,6 +133,8 @@ pub const PopupData = struct {
     /// Colour palette (tmux `pd->palette`).
     palette: T.ColourPalette = .{},
     screen: ?*T.Screen = null,
+    runtime_window: ?*T.Window = null,
+    runtime_pane: ?*T.WindowPane = null,
     content: std.ArrayList(u8) = .{},
     /// Exit status of the popup job (tmux `pd->status`).
     command_status: i32 = 0,
@@ -167,7 +173,20 @@ pub const PopupData = struct {
             screen_mod.screen_free(screen);
             xm.allocator.destroy(screen);
         }
-        if (self.job) |j| job_mod.job_free(j);
+        if (self.runtime_pane) |pane| {
+            pane.fd = -1;
+            pane.pid = -1;
+        }
+        if (self.job) |j| {
+            job_mod.job_free(j);
+            self.job = null;
+        }
+        if (self.runtime_window) |w| {
+            if (w.references == 0) w.references = 1;
+            window_mod.window_remove_ref(w, "popup runtime");
+            self.runtime_window = null;
+            self.runtime_pane = null;
+        }
         if (self.title) |title| xm.allocator.free(title);
         if (self.style) |style| xm.allocator.free(style);
         if (self.border_style) |border_style| xm.allocator.free(border_style);
@@ -208,9 +227,64 @@ pub fn clear_overlay(client: *T.Client) void {
     client.tty.flags &= ~@as(i32, @intCast(T.TTY_NOCURSOR | T.TTY_FREEZE));
     client.flags |= T.CLIENT_REDRAWOVERLAY;
 
-    if (pd.item) |item| cmdq.cmdq_continue(item);
+    if (pd.close_cb) |cb| cb(pd.command_status, pd.close_cb_arg);
+    if (pd.item) |item| {
+        if (cmdq.cmdq_get_client(item)) |item_client| {
+            if (item_client.session == null)
+                item_client.retval = pd.command_status;
+        }
+        cmdq.cmdq_continue(item);
+    }
+    server_client.server_client_unref(client);
     pd.deinit();
     xm.allocator.destroy(pd);
+}
+
+fn popup_inner_size(pd: *const PopupData) struct { sx: u32, sy: u32 } {
+    if (pd.border_lines == POPUP_BORDER_NONE)
+        return .{ .sx = pd.sx, .sy = pd.sy };
+    return .{
+        .sx = pd.sx -| 2,
+        .sy = pd.sy -| 2,
+    };
+}
+
+fn ensure_runtime_body(pd: *PopupData) *T.WindowPane {
+    if (pd.runtime_pane) |pane| return pane;
+
+    const inner = popup_inner_size(pd);
+    const body_window = window_mod.window_create(@max(inner.sx, 1), @max(inner.sy, 1), T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    errdefer {
+        if (body_window.references == 0) body_window.references = 1;
+        window_mod.window_remove_ref(body_window, "popup runtime");
+    }
+    if (pd.client.session) |session| {
+        if (session.curw) |wl| {
+            opts_mod.options_free(body_window.options);
+            body_window.options = opts_mod.options_create(wl.window.options);
+        }
+    }
+    const pane = window_mod.window_add_pane(body_window, null, @max(inner.sx, 1), @max(inner.sy, 1));
+    input_mod.input_init(pane, null);
+    pd.runtime_window = body_window;
+    pd.runtime_pane = pane;
+    return pane;
+}
+
+fn resize_runtime_body(pd: *PopupData) void {
+    const pane = pd.runtime_pane orelse return;
+    const inner = popup_inner_size(pd);
+    const sx = @max(inner.sx, 1);
+    const sy = @max(inner.sy, 1);
+    pane.window.sx = sx;
+    pane.window.sy = sy;
+    window_mod.window_pane_resize(pane, sx, sy);
+}
+
+fn popup_body_screen(pd: *PopupData) ?*T.Screen {
+    if (pd.runtime_pane) |pane|
+        return screen_mod.screen_current(pane);
+    return null;
 }
 
 pub fn popup_modify(
@@ -222,6 +296,7 @@ pub fn popup_modify(
     flags: ?i32,
 ) void {
     const pd = state(client) orelse return;
+    const old_inner = popup_inner_size(pd);
 
     replace_optional_string(&pd.title, title);
     replace_optional_string(&pd.style, style);
@@ -229,6 +304,12 @@ pub fn popup_modify(
     if (lines) |value| pd.border_lines = value;
     if (flags) |value| pd.flags = value;
 
+    const new_inner = popup_inner_size(pd);
+    if ((old_inner.sx != new_inner.sx or old_inner.sy != new_inner.sy) and pd.runtime_pane != null) {
+        resize_runtime_body(pd);
+        if (pd.job) |job|
+            job_mod.job_resize(job, @max(new_inner.sx, 1), @max(new_inner.sy, 1));
+    }
     apply_styles(pd);
     rebuild_screen(pd);
     client.flags |= T.CLIENT_REDRAWOVERLAY;
@@ -236,6 +317,12 @@ pub fn popup_modify(
 
 pub fn popup_write(client: *T.Client, data: []const u8) void {
     const pd = state(client) orelse return;
+    if (pd.runtime_pane) |pane| {
+        input_mod.input_parse_buffer(pane, data);
+        rebuild_screen(pd);
+        client.flags |= T.CLIENT_REDRAWOVERLAY;
+        return;
+    }
     pd.content.appendSlice(xm.allocator, data) catch unreachable;
     rebuild_screen(pd);
     client.flags |= T.CLIENT_REDRAWOVERLAY;
@@ -268,6 +355,7 @@ pub fn popup_display(
         .item = item,
         .flags = flags,
         .border_lines = lines,
+        .command_status = 128 + std.posix.SIG.HUP,
         .px = px,
         .py = py,
         .sx = sx,
@@ -300,20 +388,104 @@ pub fn popup_display(
     return 0;
 }
 
+pub fn popup_display_job(
+    flags: i32,
+    lines: u32,
+    item: ?*cmdq.CmdqItem,
+    px: u32,
+    py: u32,
+    sx: u32,
+    sy: u32,
+    title: []const u8,
+    client: *T.Client,
+    style: ?[]const u8,
+    border_style: ?[]const u8,
+    command: []const u8,
+    cwd: []const u8,
+    env_map: ?*const std.process.EnvMap,
+    close_cb: ?PopupCloseCb,
+    close_cb_arg: ?*anyopaque,
+) i32 {
+    const popup_height = available_height(client);
+    if (sx == 0 or sy == 0 or client.tty.sx < sx or popup_height < sy)
+        return -1;
+
+    clear_overlay(client);
+
+    const pd = xm.allocator.create(PopupData) catch unreachable;
+    pd.* = .{
+        .client = client,
+        .item = item,
+        .flags = flags,
+        .border_lines = lines,
+        .command_status = 128 + std.posix.SIG.HUP,
+        .close_cb = close_cb,
+        .close_cb_arg = close_cb_arg,
+        .px = px,
+        .py = py,
+        .sx = sx,
+        .sy = sy,
+        .ppx = px,
+        .ppy = py,
+        .psx = sx,
+        .psy = sy,
+        .content = .{},
+    };
+    errdefer {
+        pd.deinit();
+        xm.allocator.destroy(pd);
+    }
+
+    pd.title = xm.xstrdup(title);
+    if (style) |value| pd.style = xm.xstrdup(value);
+    if (border_style) |value| pd.border_style = xm.xstrdup(value);
+
+    _ = ensure_runtime_body(pd);
+    resize_runtime_body(pd);
+
+    if (client.session != null) {
+        apply_styles(pd);
+    }
+    rebuild_screen(pd);
+
+    const inner = popup_inner_size(pd);
+    pd.job = job_mod.job_run(
+        command,
+        cwd,
+        env_map,
+        popup_job_update_cb,
+        popup_job_complete_cb,
+        null,
+        pd,
+        job_mod.JOB_NOWAIT | job_mod.JOB_PTY | job_mod.JOB_KEEPWRITE | job_mod.JOB_DEFAULTSHELL,
+        @max(inner.sx, 1),
+        @max(inner.sy, 1),
+    ) orelse return -1;
+    if (pd.runtime_pane) |pane| {
+        pane.fd = pd.job.?.fd;
+        pane.pid = pd.job.?.pid;
+    }
+
+    client.popup_data = pd;
+    client.references += 1;
+    client.tty.flags |= @intCast(T.TTY_FREEZE | T.TTY_NOCURSOR);
+    client.flags |= T.CLIENT_REDRAWOVERLAY;
+    return 0;
+}
+
 pub fn handle_key(client: *T.Client, event: *const T.key_event) bool {
     const pd = state(client) orelse return false;
-
-    if ((pd.flags & POPUP_CLOSEANYKEY) != 0 and !T.keycIsMouse(event.key) and !T.keycIsPaste(event.key)) {
+    if (menu_mod.overlay_active(client))
+        return false;
+    if (popup_key_cb(client, pd, event) == 1) {
         clear_overlay(client);
         return true;
     }
-
-    if (event.key == T.C0_ESC or event.key == ('c' | T.KEYC_CTRL)) {
+    if (pd.close_pending) {
         clear_overlay(client);
         return true;
     }
-
-    return true;
+    return overlay_active(client);
 }
 
 fn ensure_popup_visible_ranges(r: *PopupVisibleRanges, n: u32) void {
@@ -420,13 +592,8 @@ pub fn popup_init_ctx_cb(ctx: *T.ScreenWriteCtx, ttyctx: *PopupTtyCtx) void {
 pub fn popup_mode_cb(_: *T.Client, data: ?*anyopaque, cx: *u32, cy: *u32) ?*T.Screen {
     const pd: *PopupData = @ptrCast(@alignCast(data orelse return null));
     const scr = pd.screen orelse return null;
-    if (pd.border_lines == POPUP_BORDER_NONE) {
-        cx.* = pd.px + scr.cx;
-        cy.* = pd.py + scr.cy;
-    } else {
-        cx.* = pd.px + 1 + scr.cx;
-        cy.* = pd.py + 1 + scr.cy;
-    }
+    cx.* = pd.px + scr.cx;
+    cy.* = pd.py + scr.cy;
     return scr;
 }
 
@@ -447,26 +614,9 @@ pub fn popup_check_cb(
 pub fn popup_draw_cb(c: *T.Client, data: ?*anyopaque, _: *PopupScreenRedrawCtx) void {
     const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
     const tty = &c.tty;
+    const s = pd.screen orelse return;
 
     popup_reapply_styles(pd);
-
-    const s = screen_mod.screen_init(pd.sx, pd.sy, 0);
-    defer {
-        screen_mod.screen_free(s);
-        xm.allocator.destroy(s);
-    }
-    s.cursor_visible = false;
-
-    fill_rect(s.grid, 0, 0, pd.sx, pd.sy, &pd.defaults);
-    if (pd.border_lines == POPUP_BORDER_NONE) {
-        if (pd.screen) |inner| blit_screen(s.grid, 0, 0, inner);
-    } else if (pd.sx > 2 and pd.sy > 2) {
-        fill_rect(s.grid, 0, 0, pd.sx, pd.sy, &pd.border_cell);
-        fill_rect(s.grid, 1, 1, pd.sx - 2, pd.sy - 2, &pd.defaults);
-        draw_border(pd, s);
-        draw_title(pd, s);
-        if (pd.screen) |inner| blit_screen(s.grid, 1, 1, inner);
-    }
 
     var defaults = pd.defaults;
     if (defaults.fg == 8) defaults.fg = pd.palette.fg;
@@ -519,6 +669,11 @@ pub fn popup_resize_cb(_: *T.Client, data: ?*anyopaque) void {
     else
         pd.px = pd.ppx;
 
+    resize_runtime_body(pd);
+    if (pd.job) |job| {
+        const inner = popup_inner_size(pd);
+        job_mod.job_resize(job, @max(inner.sx, 1), @max(inner.sy, 1));
+    }
     rebuild_screen(pd);
     pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
 }
@@ -540,14 +695,39 @@ pub fn popup_make_pane(pd: *PopupData, layout_type: PopupLayoutType) void {
 
     const lc = layout_mod.layout_split_pane(wp, zig_type, -1, 0) orelse return;
 
+    if (pd.runtime_window) |body_window| {
+        const body_wp = pd.runtime_pane orelse return;
+        if (pd.job) |job| {
+            var pid: i32 = body_wp.pid;
+            body_wp.fd = job_mod.job_transfer(job, &pid, null);
+            body_wp.pid = pid;
+            pd.job = null;
+        }
+        _ = window_mod.window_detach_pane(body_window, body_wp);
+        window_mod.window_adopt_pane(w, body_wp);
+        layout_mod.layout_assign_pane(lc, body_wp, 0);
+        window_mod.window_pane_resize(body_wp, lc.sx, lc.sy);
+        window_mod.window_pane_set_event(body_wp);
+        _ = window_mod.window_set_active_pane(w, body_wp, true);
+        body_wp.flags |= T.PANE_CHANGED;
+        pd.runtime_pane = null;
+        pd.runtime_window = null;
+        if (body_window.references == 0) body_window.references = 1;
+        window_mod.window_remove_ref(body_window, "popup runtime");
+        pd.close_pending = true;
+        return;
+    }
+
     const new_wp = window_mod.window_add_pane(w, null, lc.sx, lc.sy);
     layout_mod.layout_assign_pane(lc, new_wp, 0);
 
     if (pd.job) |j| {
-        new_wp.fd = j.fd;
-        new_wp.pid = j.pid;
-        j.fd = -1;
+        new_wp.fd = job_mod.job_transfer(j, &new_wp.pid, null);
         pd.job = null;
+        if (pd.runtime_pane) |pane| {
+            pane.fd = -1;
+            pane.pid = -1;
+        }
     }
 
     if (pd.screen) |ps| {
@@ -566,7 +746,7 @@ pub fn popup_make_pane(pd: *PopupData, layout_type: PopupLayoutType) void {
 }
 
 /// Context menu selection (tmux `popup_menu_done`).
-pub fn popup_menu_done(_menu: ?*anyopaque, _choice: u32, key: T.key_code, data: ?*anyopaque) void {
+pub fn popup_menu_done(_menu: *menu_mod.Menu, _choice: i32, key: T.key_code, data: ?*anyopaque) void {
     _ = _menu;
     _ = _choice;
     const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
@@ -587,9 +767,22 @@ pub fn popup_menu_done(_menu: ?*anyopaque, _choice: u32, key: T.key_code, data: 
         },
         'h' => popup_make_pane(pd, .leftright),
         'v' => popup_make_pane(pd, .topbottom),
-        'q' => pd.close_pending = true,
+        'q' => {},
         else => {},
     }
+    if (pd.close_pending or key == 'q') {
+        clear_overlay(c);
+        return;
+    }
+    if (pd.runtime_pane != null) {
+        resize_runtime_body(pd);
+        if (pd.job) |job| {
+            const inner = popup_inner_size(pd);
+            job_mod.job_resize(job, @max(inner.sx, 1), @max(inner.sy, 1));
+        }
+    }
+    rebuild_screen(pd);
+    c.flags |= T.CLIENT_REDRAWOVERLAY;
 }
 
 /// Mouse move/resize drag (tmux `popup_handle_drag`).
@@ -630,6 +823,11 @@ pub fn popup_handle_drag(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) v
         pd.psx = pd.sx;
         pd.psy = pd.sy;
 
+        resize_runtime_body(pd);
+        if (pd.job) |job| {
+            const inner = popup_inner_size(pd);
+            job_mod.job_resize(job, @max(inner.sx, 1), @max(inner.sy, 1));
+        }
         rebuild_screen(pd);
         c.flags |= T.CLIENT_REDRAWOVERLAY;
     }
@@ -637,6 +835,23 @@ pub fn popup_handle_drag(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) v
     pd.lx = m.x;
     pd.ly = m.y;
     pd.lb = m.b;
+}
+
+fn popup_mouse_body_coords(pd: *const PopupData, m: *const T.MouseEvent) ?struct { x: u32, y: u32 } {
+    if (m.x < pd.px or m.x > pd.px + pd.sx - 1 or
+        m.y < pd.py or m.y > pd.py + pd.sy - 1)
+    {
+        return null;
+    }
+
+    if (pd.border_lines == POPUP_BORDER_NONE)
+        return .{ .x = m.x - pd.px, .y = m.y - pd.py };
+    if (m.x == pd.px or m.x == pd.px + pd.sx - 1 or
+        m.y == pd.py or m.y == pd.py + pd.sy - 1)
+    {
+        return null;
+    }
+    return .{ .x = m.x - pd.px - 1, .y = m.y - pd.py - 1 };
 }
 
 /// Key / mouse dispatch (tmux `popup_key_cb`). Returns 1 to request closing the overlay; 0 otherwise.
@@ -668,14 +883,14 @@ pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) 
                 border = .bottom;
             }
         }
-        if ((m.b & T.MOUSE_MASK_MODIFIERS) == 0 and
+        if ((m.b & (T.MOUSE_MASK_SHIFT | T.MOUSE_MASK_META | T.MOUSE_MASK_CTRL)) == 0 and
             T.mouseButtons(m.b) == T.MOUSE_BUTTON_3 and
             (border == .left or border == .top))
         {
             popupDisplayMenu(c, pd, m);
             return 0;
         }
-        if (((m.b & T.MOUSE_MASK_MODIFIERS) == T.MOUSE_MASK_META) or
+        if (((m.b & (T.MOUSE_MASK_SHIFT | T.MOUSE_MASK_META | T.MOUSE_MASK_CTRL)) == T.MOUSE_MASK_META) or
             (border != .none and !T.mouseDrag(m.lb)))
         {
             if (!T.mouseDrag(m.b)) return 0;
@@ -689,12 +904,38 @@ pub fn popup_key_cb(c: *T.Client, data: ?*anyopaque, event: *const T.key_event) 
         }
     }
 
-    if (event.key == T.C0_ESC or event.key == ('c' | T.KEYC_CTRL))
+    if ((((pd.flags & (POPUP_CLOSEEXIT | POPUP_CLOSEEXITZERO)) == 0) or pd.job == null) and
+        (event.key == T.C0_ESC or event.key == ('c' | T.KEYC_CTRL)))
+    {
         return 1;
+    }
     if ((pd.flags & POPUP_CLOSEANYKEY) != 0 and
         !T.keycIsMouse(event.key) and !T.keycIsPaste(event.key))
     {
         return 1;
+    }
+    if (pd.job) |job| {
+        const bev = job_mod.job_get_event(job) orelse return 0;
+        if (T.keycIsMouse(event.key)) {
+            const point = popup_mouse_body_coords(pd, &event.m) orelse return 0;
+            var buf: [40]u8 = undefined;
+            const bytes = input_keys.input_key_mouse_screen(
+                popup_body_screen(pd) orelse return 0,
+                &event.m,
+                point.x,
+                point.y,
+                &buf,
+            );
+            if (bytes.len == 0) return 0;
+            _ = c_mod.libevent.bufferevent_write(bev, @ptrCast(bytes.ptr), bytes.len);
+            return 0;
+        }
+
+        var buf: [32]u8 = undefined;
+        const screen = popup_body_screen(pd) orelse return 0;
+        const bytes = input_keys.input_key_encode_screen(screen, event.key, &buf) catch return 0;
+        if (bytes.len == 0) return 0;
+        _ = c_mod.libevent.bufferevent_write(bev, @ptrCast(bytes.ptr), bytes.len);
     }
     return 0;
 }
@@ -723,7 +964,7 @@ fn popupDisplayMenu(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
     else
         x = 0;
 
-    if (menu_mod.menu_display(menu, 0, 0, null, x, m.y, c, 0, null, null, null, null) != 0) {
+    if (menu_mod.menu_display(menu, 0, 0, null, x, m.y, c, 0, null, null, null, null, popup_menu_done, pd) != 0) {
         menu.deinit();
     } else {
         c.flags |= T.CLIENT_REDRAWOVERLAY;
@@ -731,124 +972,99 @@ fn popupDisplayMenu(c: *T.Client, pd: *PopupData, m: *const T.MouseEvent) void {
 }
 
 /// Job output hook (tmux `popup_job_update_cb`).
-/// Full input parsing (ictx + bufferevent) is not yet wired; mark dirty so
-/// any content written via popup_write is visible.
-pub fn popup_job_update_cb(data: ?*anyopaque) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
+pub fn popup_job_update_cb(job: *job_mod.Job) void {
+    const pd: *PopupData = @ptrCast(@alignCast(job_mod.job_get_data(job) orelse return));
+    const pane = pd.runtime_pane orelse return;
+    const bev = job_mod.job_get_event(job) orelse return;
+    const input = c_mod.libevent.bufferevent_get_input(bev) orelse return;
+    const len = c_mod.libevent.evbuffer_get_length(input);
+    if (len == 0) return;
+
+    const bytes = c_mod.libevent.evbuffer_pullup(input, @intCast(len)) orelse return;
+    input_mod.input_parse_screen(pane, @as([*]const u8, @ptrCast(bytes))[0..@intCast(len)]);
+    _ = c_mod.libevent.evbuffer_drain(input, len);
+    rebuild_screen(pd);
     pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
 }
 
 /// Job exit hook (tmux `popup_job_complete_cb`).
-pub fn popup_job_complete_cb(data: ?*anyopaque) void {
-    const pd: *PopupData = @ptrCast(@alignCast(data orelse return));
+pub fn popup_job_complete_cb(job: *job_mod.Job) void {
+    const pd: *PopupData = @ptrCast(@alignCast(job_mod.job_get_data(job) orelse return));
     const j = pd.job orelse return;
 
     const raw_status = j.status;
-    if (std.c.WIFEXITED(raw_status)) {
-        pd.command_status = std.c.WEXITSTATUS(raw_status);
-    } else if (std.c.WIFSIGNALED(raw_status)) {
-        pd.command_status = std.c.WTERMSIG(raw_status);
+    if (std.posix.W.IFEXITED(@intCast(raw_status))) {
+        pd.command_status = std.posix.W.EXITSTATUS(@intCast(raw_status));
+    } else if (std.posix.W.IFSIGNALED(@intCast(raw_status))) {
+        pd.command_status = @intCast(std.posix.W.TERMSIG(@intCast(raw_status)));
     } else {
         pd.command_status = 0;
     }
     pd.job = null;
+    if (pd.runtime_pane) |pane| {
+        pane.fd = -1;
+        pane.pid = -1;
+    }
 
     if ((pd.flags & POPUP_CLOSEEXIT) != 0 or
         ((pd.flags & POPUP_CLOSEEXITZERO) != 0 and pd.command_status == 0))
     {
-        server_client.server_client_clear_overlay(pd.client);
+        clear_overlay(pd.client);
+    } else {
+        pd.client.flags |= T.CLIENT_REDRAWOVERLAY;
     }
 }
 
 pub fn popup_editor_free(pe: *PopupEditor) void {
-    if (pe.path) |p| {
-        std.fs.deleteFileAbsolute(p) catch {};
-        xm.allocator.free(p);
-    }
     xm.allocator.destroy(pe);
+}
+
+fn popup_editor_result_cb(buf: ?[]u8, arg: ?*anyopaque) void {
+    const pe: *PopupEditor = @ptrCast(@alignCast(arg orelse return));
+    const len: usize = if (buf) |owned| owned.len else 0;
+    if (pe.cb) |cb| cb(buf, len, pe.arg);
+    popup_editor_free(pe);
 }
 
 /// Close callback for editor popups (tmux `popup_editor_close_cb`).
 pub fn popup_editor_close_cb(exit_status: i32, arg: ?*anyopaque) void {
     const pe: *PopupEditor = @ptrCast(@alignCast(arg orelse return));
-
-    if (exit_status != 0) {
-        if (pe.cb) |cb| cb(null, 0, pe.arg);
-        popup_editor_free(pe);
-        return;
-    }
-
-    const path = pe.path orelse {
-        if (pe.cb) |cb| cb(null, 0, pe.arg);
-        popup_editor_free(pe);
-        return;
-    };
-
-    var buf: ?[]u8 = null;
-    var len: usize = 0;
-
-    read_file: {
-        const f = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch break :read_file;
-        defer f.close();
-        const stat = f.stat() catch break :read_file;
-        const file_len = stat.size;
-        if (file_len == 0) break :read_file;
-        const raw = xm.allocator.alloc(u8, @intCast(file_len)) catch break :read_file;
-        const n = f.readAll(raw) catch {
-            xm.allocator.free(raw);
-            break :read_file;
-        };
-        if (n != @as(usize, @intCast(file_len))) {
-            xm.allocator.free(raw);
-            break :read_file;
-        }
-        buf = raw;
-        len = n;
-    }
-
-    if (pe.cb) |cb| cb(buf, len, pe.arg);
-    popup_editor_free(pe);
+    editor_handoff.handleUnlock(pe.client, exit_status);
 }
 
 /// External editor in a popup (tmux `popup_editor`).
 pub fn popup_editor(c: *T.Client, buf: []const u8, len: usize, cb: ?PopupFinishEditCb, arg: ?*anyopaque) i32 {
-    _ = len;
-
-    const editor = opts_mod.options_get_string(opts_mod.global_options, "editor");
-    if (editor.len == 0) return -1;
-
-    var tmp_path_buf: [64]u8 = undefined;
-    const zmux_mod = @import("zmux.zig");
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/{s}.{d}", .{ zmux_mod.compat_name, std.os.linux.getpid() }) catch return -1;
-
-    {
-        const f = std.fs.createFileAbsolute(tmp_path, .{ .truncate = true }) catch return -1;
-        defer f.close();
-        f.writeAll(buf) catch {};
-    }
-
     const pe = xm.allocator.create(PopupEditor) catch {
-        std.fs.deleteFileAbsolute(tmp_path) catch {};
         return -1;
     };
     pe.* = .{
-        .path = xm.xstrdup(tmp_path),
+        .client = c,
         .cb = cb,
         .arg = arg,
     };
+
+    const command = editor_handoff.begin(c, buf[0..len], popup_editor_result_cb, @ptrCast(pe)) orelse {
+        popup_editor_free(pe);
+        return -1;
+    };
+    defer xm.allocator.free(command);
 
     const sx = c.tty.sx * 9 / 10;
     const sy = c.tty.sy * 9 / 10;
     const px = c.tty.sx / 2 - sx / 2;
     const py = c.tty.sy / 2 - sy / 2;
+    const cwd = if (c.session) |session|
+        if (session.curw) |wl|
+            if (wl.window.active) |wp|
+                wp.cwd orelse session.cwd
+            else
+                session.cwd
+        else
+            session.cwd
+    else
+        "/tmp";
 
-    const cmd = std.fmt.allocPrint(xm.allocator, "{s} {s}", .{ editor, tmp_path }) catch {
-        popup_editor_free(pe);
-        return -1;
-    };
-    defer xm.allocator.free(cmd);
-
-    const rc = popup_display(
+    const rc = popup_display_job(
         POPUP_INTERNAL | POPUP_CLOSEEXIT,
         1, // BOX_LINES_DEFAULT mapped to single border
         null,
@@ -856,20 +1072,19 @@ pub fn popup_editor(c: *T.Client, buf: []const u8, len: usize, cb: ?PopupFinishE
         py,
         sx,
         sy,
-        editor,
+        opts_mod.options_get_string(opts_mod.global_options, "editor"),
         c,
         null,
         null,
+        command,
+        cwd,
         null,
-        cmd,
+        popup_editor_close_cb,
+        pe,
     );
     if (rc != 0) {
-        popup_editor_free(pe);
+        editor_handoff.clearClient(c);
         return -1;
-    }
-    if (state(c)) |pd| {
-        pd.close_cb = popup_editor_close_cb;
-        pd.close_cb_arg = pe;
     }
     return 0;
 }
@@ -965,6 +1180,16 @@ fn rebuild_screen(pd: *PopupData) void {
     const inner_sy: u32 = if (pd.border_lines == 6) pd.sy else pd.sy - 2;
     if (inner_sx == 0 or inner_sy == 0) return;
 
+    if (popup_body_screen(pd)) |body| {
+        blit_screen(screen.grid, inner_x, inner_y, body);
+        screen.cx = inner_x + body.cx;
+        screen.cy = inner_y + body.cy;
+        screen.cursor_visible = body.cursor_visible;
+        screen.cstyle = body.cstyle;
+        screen.ccolour = body.ccolour;
+        return;
+    }
+
     const body = screen_mod.screen_init(inner_sx, inner_sy, 0);
     defer {
         screen_mod.screen_free(body);
@@ -976,6 +1201,9 @@ fn rebuild_screen(pd: *PopupData) void {
     screen_write.putn(&body_ctx, pd.content.items);
     apply_screen_style(body, &pd.defaults);
     blit_screen(screen.grid, inner_x, inner_y, body);
+    screen.cx = inner_x + body.cx;
+    screen.cy = inner_y + body.cy;
+    screen.cursor_visible = false;
 }
 
 fn draw_border(pd: *PopupData, screen: *T.Screen) void {

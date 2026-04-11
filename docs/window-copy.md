@@ -32,7 +32,7 @@
 - Pane drag tracks cursor position but does not maintain a visual
   selection.
 
-## Gaps (tracked in docs/zig-porting-todo.md)
+## Gaps (tracked in docs/zmux-porting-todo.md)
 
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
 - The broader drag, regex-search, and line/word selection semantics are still

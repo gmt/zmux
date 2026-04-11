@@ -29,6 +29,7 @@ const menu_mod = @import("menu.zig");
 const mode_tree = @import("mode-tree.zig");
 const opts = @import("options.zig");
 const paste_mod = @import("paste.zig");
+const popup = @import("popup.zig");
 const key_string = @import("key-string.zig");
 const screen = @import("screen.zig");
 const screen_write = @import("screen-write.zig");
@@ -461,6 +462,11 @@ fn startEditSelected(wme: *T.WindowModeEntry, client: ?*T.Client) void {
         .name = xm.xstrdup(paste_mod.paste_buffer_name(item.buffer)),
         .pb = item.buffer,
     };
+    if (edit_dispatch_hook == null) {
+        if (popup.popup_editor(cl, initial, initial.len, finishEditClosePopup, @ptrCast(ed)) != 0)
+            finishEdit(ed);
+        return;
+    }
     const command = editor_handoff.begin(cl, initial, finishEditClose, @ptrCast(ed)) orelse {
         finishEdit(ed);
         return;
@@ -616,6 +622,11 @@ fn finishEditClose(buf: ?[]u8, arg: ?*anyopaque) void {
             rebuildAndDraw(wme);
     }
     wp.flags |= T.PANE_REDRAW;
+}
+
+fn finishEditClosePopup(buf: ?[]u8, len: usize, arg: ?*anyopaque) void {
+    _ = len;
+    finishEditClose(buf, arg);
 }
 
 fn finishEdit(ed: *EditData) void {

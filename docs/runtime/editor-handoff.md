@@ -2,16 +2,16 @@
 
 Current state:
 
-- `window-buffer` selected edit uses an attached-client editor handoff.
-- zmux writes the selected paste buffer to a temp file, asks the attached
-  client to run the configured `editor`, and applies the saved file on unlock
-  if the buffer identity still matches.
+- `window-buffer` selected edit now opens the configured `editor` inside a
+  popup-backed PTY runtime.
+- zmux still uses the editor handoff helper to manage the temp file and apply
+  the saved contents on popup exit if the buffer identity still matches.
 - if the pane is still in `buffer-mode` when the editor returns, zmux rebuilds
   the mode tree before redraw so the updated sample text is visible
 
 Future intent:
 
-- replace this handoff path with a real popup-editor runtime under the shared
-  popup ownership boundary
-- keep the save callback and mode-tree refresh semantics aligned with tmux as
-  that fuller popup runtime lands
+- keep the temp-file lifecycle helper small and shared rather than growing a
+  second popup-editor implementation
+- continue shrinking any remaining popup/editor behavior drift as the fuller
+  popup runtime matures

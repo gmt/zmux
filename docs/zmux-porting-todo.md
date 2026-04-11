@@ -1,4 +1,4 @@
-# Zig Porting TODO
+# zmux Porting TODO
 
 Live tmux-parity gaps only.
 
@@ -34,9 +34,11 @@ Live tmux-parity gaps only.
 
 - `tmux:` `display-popup` can host a live PTY-backed job with popup-local
   terminal behavior, resize, mouse, menu, and editor interactions.
-- `zmux:` the popup body is still built from captured command output. The live
-  PTY-fed terminal path, format-aware coordinates, and the broader popup job
-  interaction surface are not there yet.
+- `zmux:` `display-popup` now runs a live PTY-backed job with popup-local
+  parsing, resize, key/mouse forwarding, real `-E` close-on-exit behavior,
+  and popup-editor-backed buffer editing. The remaining popup gap is narrower:
+  format-aware coordinate behavior and the last bits of popup pane-promotion
+  and menu/internal interaction polish still trail tmux.
 - `likely files:` `src/popup.zig`, `src/cmd-display-menu.zig`,
   `src/server-client.zig`, `docs/popup-runtime.md`
 

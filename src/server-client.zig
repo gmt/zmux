@@ -261,6 +261,8 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     tty_mod.tty_resize(&cl.tty, sx, sy, xpixel, ypixel);
     tty_mod.tty_repeat_requests(&cl.tty, 0);
     cl.flags |= T.CLIENT_SIZECHANGED;
+    if (popup.overlay_active(cl))
+        popup.popup_resize_cb(cl, cl.popup_data);
 
     if (cl.session) |s| {
         server_client_apply_session_size(cl, s);

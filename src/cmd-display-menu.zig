@@ -18,6 +18,7 @@
 //   ISC licence – same terms as above.
 
 const std = @import("std");
+const c = @import("c.zig");
 const T = @import("types.zig");
 const args_mod = @import("arguments.zig");
 const cmd_display = @import("cmd-display-message.zig");
@@ -27,12 +28,12 @@ const cmd_mod = @import("cmd.zig");
 const cmd_render = @import("cmd-render.zig");
 const cmdq = @import("cmd-queue.zig");
 const format_draw = @import("format-draw.zig");
-const job_mod = @import("job.zig");
 const key_string = @import("key-string.zig");
 const menu_mod = @import("menu.zig");
 const mouse_runtime = @import("mouse-runtime.zig");
 const opts = @import("options.zig");
 const popup = @import("popup.zig");
+const proc_mod = @import("proc.zig");
 const server_client = @import("server-client.zig");
 const server_fn = @import("server-fn.zig");
 const status = @import("status.zig");
@@ -40,6 +41,8 @@ const tty_mod = @import("tty.zig");
 const utf8 = @import("utf8.zig");
 const xm = @import("xmalloc.zig");
 const env_mod = @import("environ.zig");
+const job_mod = @import("job.zig");
+const os_mod = @import("os/linux.zig");
 
 const POPUP_BORDER_NONE: u32 = 6;
 
@@ -588,9 +591,10 @@ fn popup_lines(args: *const args_mod.Arguments, item: *cmdq.CmdqItem, options: *
 }
 
 fn popup_modify_flags(args: *const args_mod.Arguments) ?i32 {
-    if (!args.has('N') and !args.has('k')) return null;
+    if (!args.has('N') and !args.has('k') and !args.has('E')) return null;
     var flags: i32 = 0;
     if (args.has('k')) flags |= popup.POPUP_CLOSEANYKEY;
+    if (args.has('E')) flags |= popup.POPUP_CLOSEEXIT;
     return flags;
 }
 
@@ -633,32 +637,6 @@ fn popup_working_directory(args: *const args_mod.Arguments, target: *const T.Cmd
     if (args.get('d')) |raw|
         return cmd_display.expand_format(xm.allocator, raw, target);
     return xm.xstrdup(server_client.server_client_get_cwd(tc, session));
-}
-
-fn popup_render_environment_prefix(env: *T.Environ) []u8 {
-    const entries = env_mod.environ_sorted_entries(env);
-    defer xm.allocator.free(entries);
-
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-    var first = true;
-    for (entries) |env_entry| {
-        const value = env_entry.value orelse continue;
-        if (!first) out.append(xm.allocator, ' ') catch unreachable;
-        first = false;
-        out.appendSlice(xm.allocator, env_entry.name) catch unreachable;
-        out.append(xm.allocator, '=') catch unreachable;
-        append_popup_shell_word(&out, value);
-    }
-    return out.toOwnedSlice(xm.allocator) catch unreachable;
-}
-
-fn popup_command_with_environment(shell_command: []const u8, env: ?*T.Environ) []u8 {
-    const overlays = env orelse return xm.xstrdup(shell_command);
-    const prefix = popup_render_environment_prefix(overlays);
-    defer xm.allocator.free(prefix);
-    if (prefix.len == 0) return xm.xstrdup(shell_command);
-    return xm.xasprintf("env {s} {s}", .{ prefix, shell_command });
 }
 
 fn popup_job_environment_map(env: ?*T.Environ) ?*std.process.EnvMap {
@@ -795,32 +773,16 @@ fn exec_display_popup(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     defer xm.allocator.free(shell_command);
     const overlay_env = popup_environment_overlays(args);
     defer if (overlay_env) |env| env_mod.environ_free(env);
-    const command = popup_command_with_environment(shell_command, overlay_env);
-    defer xm.allocator.free(command);
-    const job_env = popup_job_environment_map(overlay_env);
-    defer if (job_env) |env_map| {
-        env_map.deinit();
-        xm.allocator.destroy(env_map);
-    };
-
-    var result = job_mod.job_run_shell_command(null, command, .{
-        .cwd = cwd,
-        .merge_stderr = true,
-        .capture_output = true,
-        .env_map = job_env,
-    });
-    defer result.deinit();
-    if (result.spawn_failed) {
-        cmdq.cmdq_error(item, "failed to run command: {s}", .{command});
-        return .@"error";
-    }
-
+    const command = shell_command;
     const title = popup_title(args, &target);
     defer xm.allocator.free(title);
-    var initial_flags: i32 = flags orelse 0;
-    if (args.has('E')) initial_flags |= popup.POPUP_CLOSEANYKEY;
-    if (popup.popup_display(
-        initial_flags,
+    const job_env = popup_job_environment_map(overlay_env);
+    defer if (job_env) |env_map| {
+        @constCast(env_map).deinit();
+        xm.allocator.destroy(@constCast(env_map));
+    };
+    if (popup.popup_display_job(
+        flags orelse 0,
         lines,
         item,
         popup_x,
@@ -829,11 +791,17 @@ fn exec_display_popup(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         popup_h,
         title,
         tc,
-        session,
         style,
         border_style,
-        result.output.items,
-    ) != 0) return .normal;
+        command,
+        cwd,
+        job_env,
+        null,
+        null,
+    ) != 0) {
+        cmdq.cmdq_error(item, "failed to open popup", .{});
+        return .@"error";
+    }
 
     return .wait;
 }
@@ -932,6 +900,55 @@ fn test_teardown(setup: *@TypeOf(test_setup("unused"))) void {
 
 fn bind_test_client(setup: *@TypeOf(test_setup("unused"))) void {
     setup.client.tty.client = &setup.client;
+}
+
+fn popupPayloadContains(client: *T.Client, needle: []const u8) !bool {
+    const payload = (try popup.render_overlay_payload_region(client, 0, 0, client.tty.sx, @intCast(available_popup_height(client)), status.pane_row_offset(client))) orelse return false;
+    defer xm.allocator.free(payload);
+    return std.mem.indexOf(u8, payload, needle) != null;
+}
+
+fn waitForPopupText(client: *T.Client, needle: []const u8) !void {
+    for (0..200) |_| {
+        pump_test_events(1);
+        if (try popupPayloadContains(client, needle)) return;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    return error.TestExpectedEqual;
+}
+
+fn waitForPopupClosed(client: *T.Client) !void {
+    for (0..200) |_| {
+        pump_test_events(1);
+        if (!popup.overlay_active(client)) return;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    return error.TestExpectedEqual;
+}
+
+fn install_test_event_base() ?*c.libevent.event_base {
+    const old_base = proc_mod.libevent;
+    proc_mod.libevent = os_mod.osdep_event_init();
+    return old_base;
+}
+
+fn restore_test_event_base(old_base: ?*c.libevent.event_base) void {
+    if (proc_mod.libevent) |base| c.libevent.event_base_free(base);
+    proc_mod.libevent = old_base;
+}
+
+fn pump_test_events(iterations: usize) void {
+    var spins: usize = 0;
+    while (spins < iterations) : (spins += 1) {
+        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+        var raw_status: i32 = 0;
+        while (true) {
+            const waited = std.c.waitpid(-1, &raw_status, std.c.W.NOHANG);
+            if (waited <= 0) break;
+            job_mod.job_check_died(@intCast(waited), raw_status);
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
 }
 
 fn status_window_range_start(client: *T.Client, idx: i32) ?u32 {
@@ -1147,7 +1164,7 @@ test "display-menu is a no-op while another overlay owns the target client" {
     try std.testing.expect(setup.client.message_string == null);
 }
 
-test "display-popup close is a no-op without popup runtime" {
+test "display-popup close is a no-op without an active popup" {
     var setup = test_setup("display-popup-close");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1163,7 +1180,11 @@ test "display-popup close is a no-op without popup runtime" {
     try std.testing.expect(setup.client.message_string == null);
 }
 
-test "display-popup opens a reduced popup with captured shell output" {
+test "display-popup opens a live popup and parses shell output" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-runtime");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1177,6 +1198,8 @@ test "display-popup opens a reduced popup with captured shell output" {
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(popup.overlay_active(&setup.client));
+    try waitForPopupText(&setup.client, "popup");
+    try waitForPopupText(&setup.client, "output");
 
     const payload = (try popup.render_overlay_payload_region(&setup.client, 0, 0, 80, 24, 0)).?;
     defer xm.allocator.free(payload);
@@ -1186,11 +1209,11 @@ test "display-popup opens a reduced popup with captured shell output" {
 
     var event = T.key_event{ .key = T.C0_ESC, .len = 1 };
     event.data[0] = 0x1b;
-    try std.testing.expect(popup.handle_key(&setup.client, &event));
+    try std.testing.expect(server_fn.server_client_handle_key(&setup.client, &event));
     try std.testing.expect(!popup.overlay_active(&setup.client));
 }
 
-test "display-popup validates size before running the reduced runtime" {
+test "display-popup validates size before opening the popup" {
     var setup = test_setup("display-popup-height");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1206,7 +1229,7 @@ test "display-popup validates size before running the reduced runtime" {
     try std.testing.expectEqualStrings("Height too large", setup.client.message_string.?);
 }
 
-test "display-popup validates popup border lines before the reduced runtime error" {
+test "display-popup validates popup border lines before opening the popup" {
     var setup = test_setup("display-popup-border");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1223,6 +1246,10 @@ test "display-popup validates popup border lines before the reduced runtime erro
 }
 
 test "display-popup without a command falls back to the default shell" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-shell");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1238,26 +1265,31 @@ test "display-popup without a command falls back to the default shell" {
     try std.testing.expect(popup.overlay_active(&setup.client));
 }
 
-test "display-popup accepts environment overlays in the reduced runtime" {
+test "display-popup accepts environment overlays in the live runtime" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-env");
     bind_test_client(&setup);
     defer test_teardown(&setup);
 
     var parse_cause: ?[]u8 = null;
     defer if (parse_cause) |msg| xm.allocator.free(msg);
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-e", "NAME=value", "sh", "-lc", "printf '%s' \"$NAME\"" }, null, &parse_cause);
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "display-popup", "-e", "NAME=value", "printenv", "NAME" }, null, &parse_cause);
     defer cmd_mod.cmd_free(cmd);
 
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
-    const payload = (try popup.render_overlay_payload_region(&setup.client, 0, 0, 80, 24, 0)).?;
-    defer xm.allocator.free(payload);
-    const state = popup.popup_data(&setup.client).?;
-    try std.testing.expectEqualStrings("value", state.content.items);
+    try waitForPopupText(&setup.client, "value");
 }
 
-test "display-popup accepts argv vector commands in the reduced runtime" {
+test "display-popup accepts argv vector commands in the live runtime" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-argv");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1270,11 +1302,14 @@ test "display-popup accepts argv vector commands in the reduced runtime" {
     var list: cmd_mod.CmdList = .{};
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
-    const state = popup.popup_data(&setup.client).?;
-    try std.testing.expectEqualStrings("ready", state.content.items);
+    try waitForPopupText(&setup.client, "ready");
 }
 
-test "display-popup close-on-exit maps to close-any-key in the reduced runtime" {
+test "display-popup -E closes the popup when the command exits" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-close-exit");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1288,14 +1323,14 @@ test "display-popup close-on-exit maps to close-any-key in the reduced runtime" 
     var item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &list };
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expect(popup.overlay_active(&setup.client));
-
-    var event = T.key_event{ .key = 'x', .len = 1 };
-    event.data[0] = 'x';
-    try std.testing.expect(popup.handle_key(&setup.client, &event));
-    try std.testing.expect(!popup.overlay_active(&setup.client));
+    try waitForPopupClosed(&setup.client);
 }
 
-test "display-popup modify updates title and close-any-key handling" {
+test "display-popup modify updates title and popup flags" {
+    const old_base = install_test_event_base();
+    defer restore_test_event_base(old_base);
+    defer job_mod.job_reset_all();
+
     var setup = test_setup("display-popup-modify");
     bind_test_client(&setup);
     defer test_teardown(&setup);
@@ -1308,6 +1343,7 @@ test "display-popup modify updates title and close-any-key handling" {
     var open_list: cmd_mod.CmdList = .{};
     var open_item = cmdq.CmdqItem{ .client = &setup.client, .cmdlist = &open_list };
     try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(open_cmd, &open_item));
+    try waitForPopupText(&setup.client, "ready");
 
     var modify_cause: ?[]u8 = null;
     defer if (modify_cause) |msg| xm.allocator.free(msg);
@@ -1324,8 +1360,8 @@ test "display-popup modify updates title and close-any-key handling" {
 
     var key_event = T.key_event{ .key = 'x', .len = 1 };
     key_event.data[0] = 'x';
-    try std.testing.expect(popup.handle_key(&setup.client, &key_event));
-    try std.testing.expect(!popup.overlay_active(&setup.client));
+    try std.testing.expect(server_fn.server_client_handle_key(&setup.client, &key_event));
+    try waitForPopupClosed(&setup.client);
 }
 
 test "display-popup is a no-op while another overlay owns the target client" {

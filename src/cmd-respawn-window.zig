@@ -78,6 +78,7 @@ pub const entry: cmd_mod.CmdEntry = .{
 };
 
 test "respawn-window collapses a multi-pane window onto the first pane" {
+    const layout_mod = @import("layout.zig");
     const opts = @import("options.zig");
     const sess = @import("session.zig");
     const spawn = @import("spawn.zig");
@@ -119,6 +120,14 @@ test "respawn-window collapses a multi-pane window onto the first pane" {
     std.Thread.sleep(500 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), wl.window.panes.items.len);
     try std.testing.expectEqual(pane_id, wl.window.active.?.id);
+    try std.testing.expect(wl.window.layout_root != null);
+    try std.testing.expectEqual(T.LayoutType.windowpane, wl.window.layout_root.?.type);
+    try std.testing.expect(wl.window.layout_root.?.wp == wl.window.active.?);
+    const layout_dump = layout_mod.dump_window(wl.window).?;
+    defer xm.allocator.free(layout_dump);
+    const root_dump = layout_mod.dump_root(wl.window.layout_root.?).?;
+    defer xm.allocator.free(root_dump);
+    try std.testing.expectEqualStrings(root_dump, layout_dump);
     const output = respawn_pane.read_pane_output(wl.window.active.?);
     defer xm.allocator.free(output);
     try std.testing.expect(std.mem.indexOf(u8, output, "nope") != null);

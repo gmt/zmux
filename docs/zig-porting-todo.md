@@ -61,7 +61,8 @@ Live tmux-parity gaps only.
 - `zmux:` target-pane splits work on the current pane geometry, but the broader
   runtime still reconstructs transient layout state from rectangles in generic
   dump callers and adjacent geometry helpers. `select-layout` now snapshots
-  undo state from `window.layout_root`, but the broader stale-tree fallback
+  undo state from `window.layout_root`, and pane destroy plus respawn teardown
+  now repair the shared tree before removal. The broader stale-tree fallback
   surface is still short of full tmux parity even though `split-window -f` now
   rides the shared layout tree.
 - `likely files:` `src/window.zig`, `src/layout.zig`,

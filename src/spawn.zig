@@ -99,15 +99,21 @@ pub fn spawn_window(sc: *T.SpawnContext, cause: *?[]u8) ?*T.Winlink {
         }
 
         const survivor = w.panes.items[0];
-        while (w.panes.items.len > 1) {
-            const pane = w.panes.items[1];
-            win.window_remove_pane(w, pane);
-        }
+        _ = w.panes.orderedRemove(0);
+
+        layout_mod.layout_free(w);
+        win.window_destroy_panes(w);
+
+        w.panes.insert(xm.allocator, 0, survivor) catch unreachable;
+        survivor.window = w;
+        survivor.options.parent = w.options;
+        w.active = null;
 
         survivor.xoff = 0;
         survivor.yoff = 0;
         win.window_pane_resize(survivor, w.sx, w.sy);
-        w.active = survivor;
+        layout_mod.layout_init(w, survivor);
+        _ = win.window_set_active_pane(w, survivor, false);
         sc.wp0 = survivor;
 
         _ = respawn_pane(sc, cause) orelse return null;

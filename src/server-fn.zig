@@ -26,6 +26,7 @@ const log = @import("log.zig");
 const srv = @import("server.zig");
 const sess = @import("session.zig");
 const win = @import("window.zig");
+const layout_mod = @import("layout.zig");
 const opts = @import("options.zig");
 const format_mod = @import("format.zig");
 const format_draw = @import("format-draw.zig");
@@ -253,6 +254,7 @@ pub fn server_destroy_pane(wp: *T.WindowPane, notify: bool) void {
     }
 
     _ = win.window_unzoom(w);
+    layout_mod.layout_close_pane(wp);
     win.window_remove_pane(w, wp);
     srv.server_redraw_window(w);
     server_status_window(w);
@@ -568,6 +570,7 @@ pub fn server_kill_pane(wp: *T.WindowPane) void {
         resize_mod.recalculate_sizes();
     } else {
         _ = win.window_unzoom(w);
+        layout_mod.layout_close_pane(wp);
         win.window_remove_pane(w, wp);
         srv.server_redraw_window(w);
     }
@@ -623,6 +626,7 @@ test "server_redraw_client and server_status_client set client redraw flags" {
 
 test "server_destroy_pane removes non-last pane and reassigns active pane" {
     const opts_mod = @import("options.zig");
+    const layout = @import("layout.zig");
 
     win.window_init_globals(xm.allocator);
     opts_mod.global_w_options = opts_mod.options_create(null);
@@ -633,7 +637,10 @@ test "server_destroy_pane removes non-last pane and reassigns active pane" {
     defer win.window_remove_ref(w, "test");
 
     const first = win.window_add_pane(w, null, 80, 24);
-    const second = win.window_add_pane(w, null, 80, 24);
+    layout.layout_init(w, first);
+    const second_cell = layout.layout_split_pane(first, .leftright, -1, 0) orelse return error.SplitFailed;
+    const second = win.window_add_pane(w, null, 40, 24);
+    layout.layout_assign_pane(second_cell, second, 0);
     w.active = second;
     w.references = 1;
 
@@ -642,6 +649,9 @@ test "server_destroy_pane removes non-last pane and reassigns active pane" {
     try std.testing.expectEqual(@as(usize, 1), w.panes.items.len);
     try std.testing.expectEqual(first, w.active.?);
     try std.testing.expectEqual(first, w.panes.items[0]);
+    try std.testing.expect(w.layout_root != null);
+    try std.testing.expectEqual(T.LayoutType.windowpane, w.layout_root.?.type);
+    try std.testing.expect(w.layout_root.?.wp == first);
 }
 
 test "server_destroy_pane keeps a dead pane and draws remain-on-exit text" {

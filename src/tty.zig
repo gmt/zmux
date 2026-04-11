@@ -1769,6 +1769,96 @@ pub fn tty_append_mode_update(tty: *T.Tty, mode: i32, out: *std.ArrayList(u8)) !
     tty.mode = actual;
 }
 
+pub fn tty_append_cursor_update(tty: *T.Tty, mode: i32, s: ?*const T.Screen, out: *std.ArrayList(u8)) !i32 {
+    const CURSOR_MODES = T.MODE_CURSOR | T.MODE_CURSOR_BLINKING | T.MODE_CURSOR_VERY_VISIBLE;
+
+    var cmode = mode;
+
+    if (s) |scr| {
+        var ccolour = scr.ccolour;
+        if (scr.ccolour == -1)
+            ccolour = scr.default_ccolour;
+        try append_cursor_colour_update(tty, ccolour, out);
+    }
+
+    if ((cmode & T.MODE_CURSOR) == 0) {
+        if ((tty.mode & T.MODE_CURSOR) != 0)
+            try append_putcode(tty, out, "civis");
+        tty.mode = cmode;
+        return cmode;
+    }
+
+    var cstyle: T.ScreenCursorStyle = undefined;
+    if (s) |scr| {
+        cstyle = scr.cstyle;
+        if (cstyle == .default) {
+            if ((cmode & T.MODE_CURSOR_BLINKING_SET) == 0) {
+                if ((scr.default_mode & T.MODE_CURSOR_BLINKING) != 0)
+                    cmode |= T.MODE_CURSOR_BLINKING
+                else
+                    cmode &= ~T.MODE_CURSOR_BLINKING;
+            }
+            cstyle = scr.default_cstyle;
+        }
+    } else {
+        cstyle = tty.cstyle;
+    }
+
+    const changed = cmode ^ tty.mode;
+    if ((changed & CURSOR_MODES) == 0 and cstyle == tty.cstyle) {
+        tty.mode = cmode;
+        return cmode;
+    }
+
+    try append_putcode(tty, out, "cnorm");
+    switch (cstyle) {
+        .default => {
+            if (tty.cstyle != .default) {
+                if (tty_term.hasCapability(tty, "Se"))
+                    try append_putcode(tty, out, "Se")
+                else
+                    try append_putcode_i(tty, out, "Ss", 0);
+            }
+            if ((cmode & (T.MODE_CURSOR_BLINKING | T.MODE_CURSOR_VERY_VISIBLE)) != 0)
+                try append_putcode(tty, out, "cvvis");
+        },
+        .block => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    try append_putcode_i(tty, out, "Ss", 1)
+                else
+                    try append_putcode_i(tty, out, "Ss", 2);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0) {
+                try append_putcode(tty, out, "cvvis");
+            }
+        },
+        .underline => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    try append_putcode_i(tty, out, "Ss", 3)
+                else
+                    try append_putcode_i(tty, out, "Ss", 4);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0) {
+                try append_putcode(tty, out, "cvvis");
+            }
+        },
+        .bar => {
+            if (tty_term.hasCapability(tty, "Ss")) {
+                if ((cmode & T.MODE_CURSOR_BLINKING) != 0)
+                    try append_putcode_i(tty, out, "Ss", 5)
+                else
+                    try append_putcode_i(tty, out, "Ss", 6);
+            } else if ((cmode & T.MODE_CURSOR_BLINKING) != 0) {
+                try append_putcode(tty, out, "cvvis");
+            }
+        },
+    }
+
+    tty.cstyle = cstyle;
+    tty.mode = cmode;
+    return cmode;
+}
+
 fn appendCapabilityToggle(
     tty: *const T.Tty,
     out: *std.ArrayList(u8),
@@ -1782,6 +1872,47 @@ fn appendCapabilityToggle(
     const fallback = if (enabled) fallback_enable else fallback_disable;
     const sequence = tty_term.stringCapability(tty, cap_name) orelse fallback;
     try out.appendSlice(xm.allocator, sequence);
+}
+
+fn append_putcode(tty: *T.Tty, out: *std.ArrayList(u8), name: []const u8) !void {
+    const s = tty_term.stringCapability(tty, name) orelse return;
+    try out.appendSlice(xm.allocator, s);
+}
+
+fn append_putcode_i(tty: *T.Tty, out: *std.ArrayList(u8), name: []const u8, a: u32) !void {
+    const s = tty_term.stringCapability(tty, name) orelse return;
+    const expanded = try expand_tparm_1(s, a);
+    defer xm.allocator.free(expanded);
+    try out.appendSlice(xm.allocator, expanded);
+}
+
+fn append_cursor_colour_update(tty: *T.Tty, c: i32, out: *std.ArrayList(u8)) !void {
+    var colour = c;
+    if (colour != -1)
+        colour = colour_force_rgb(colour);
+    if (colour == tty.ccolour) return;
+
+    if (colour == -1) {
+        if (tty_term.stringCapability(tty, "Cr")) |cr| {
+            if (cr.len > 0) try out.appendSlice(xm.allocator, cr);
+        }
+    } else {
+        const rgb = colour_split_rgb(colour);
+        const s = try std.fmt.allocPrint(xm.allocator, "rgb:{x:0>2}/{x:0>2}/{x:0>2}", .{ rgb.r, rgb.g, rgb.b });
+        defer xm.allocator.free(s);
+        if (tty_term.stringCapability(tty, "Cs")) |cs| {
+            if (cs.len > 0) {
+                const expanded = try expand_tparm_s(cs, s);
+                defer xm.allocator.free(expanded);
+                try out.appendSlice(xm.allocator, expanded);
+            }
+        } else {
+            const seq = try std.fmt.allocPrint(xm.allocator, "\x1b]12;rgb:{x:0>2}/{x:0>2}/{x:0>2}\x07", .{ rgb.r, rgb.g, rgb.b });
+            defer xm.allocator.free(seq);
+            try out.appendSlice(xm.allocator, seq);
+        }
+    }
+    tty.ccolour = colour;
 }
 
 fn formatClipboardCapability(template: []const u8, clip: []const u8, value: []const u8) ?[]u8 {
@@ -3814,6 +3945,34 @@ test "tty_append_mode_update falls back to standard toggles when only feature bi
     out.clearRetainingCapacity();
     try tty_append_mode_update(&cl.tty, 0, &out);
     try std.testing.expectEqualStrings("\x1b[?2004l\x1b[?1004l", out.items);
+}
+
+test "tty_append_cursor_update emits fallback cursor colour for screen defaults" {
+    const env_mod = @import("environ.zig");
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    tty_init(&cl.tty, &cl);
+
+    const screen = screen_mod.screen_init(8, 1, 0);
+    defer {
+        screen_mod.screen_free(screen);
+        xm.allocator.destroy(screen);
+    }
+    screen.default_ccolour = 0x123456 | T.COLOUR_FLAG_RGB;
+    screen.mode = T.MODE_CURSOR;
+
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(xm.allocator);
+
+    _ = try tty_append_cursor_update(&cl.tty, T.MODE_CURSOR, screen, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b]12;rgb:12/34/56\x07") != null);
 }
 
 test "tty_set_title honours the reduced title capability layer" {

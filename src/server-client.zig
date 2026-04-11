@@ -1557,6 +1557,9 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
         if (body.payload.len != 0 or border_payload.len != 0 or scrollbar_payload.len != 0 or status_render.payload.len != 0 or overlay_payload != null)
             buf.appendSlice(xm.allocator, "\x1b[?25l") catch return null;
     } else if (status_render.cursor_visible) {
+        if (status_render.cursor_screen) |screen| {
+            _ = tty_mod.tty_append_cursor_update(&cl.tty, cl.tty.mode | screen.mode, screen, &buf) catch return null;
+        }
         const cursor = std.fmt.allocPrint(
             xm.allocator,
             "\x1b[{d};{d}H\x1b[?25h",
@@ -1565,6 +1568,9 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
         defer xm.allocator.free(cursor);
         buf.appendSlice(xm.allocator, cursor) catch return null;
     } else if (body.cursor_visible) {
+        if (cl.status.screen) |screen| {
+            _ = tty_mod.tty_append_cursor_update(&cl.tty, cl.tty.mode | T.MODE_CURSOR, screen, &buf) catch return null;
+        }
         const cursor = std.fmt.allocPrint(
             xm.allocator,
             "\x1b[{d};{d}H\x1b[?25h",

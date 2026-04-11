@@ -545,14 +545,16 @@ pub fn copyModeCommand(
         data.scroll_exit = false;
     } else if (std.mem.eql(u8, command, "scroll-exit-toggle")) {
         data.scroll_exit = !data.scroll_exit;
-    } else if (std.mem.eql(u8, command, "centre-vertical")) {
+    } else if (std.mem.eql(u8, command, "centre-vertical") or std.mem.eql(u8, command, "cursor-centre-vertical")) {
         alignCursor(wme, viewRows(wme.wp) / 2);
-    } else if (std.mem.eql(u8, command, "centre-horizontal")) {
+    } else if (std.mem.eql(u8, command, "centre-horizontal") or std.mem.eql(u8, command, "cursor-centre-horizontal")) {
         moveCursorX(wme, @intCast(lineMaxX(data.backing, absoluteCursorRow(wme), wme.wp.screen.grid.sx) / 2));
     } else if (std.mem.eql(u8, command, "scroll-up")) {
         scrollLines(wme, -@as(i32, @intCast(count)));
     } else if (std.mem.eql(u8, command, "pipe") or std.mem.eql(u8, command, "pipe-and-cancel")) {
         cmdPipe(wme, session, args, std.mem.eql(u8, command, "pipe-and-cancel"));
+    } else if (std.mem.eql(u8, command, "copy-pipe-end-of-line-and-cancel")) {
+        cmdCopyEndOfLine(wme, session, args, true);
     } else if (std.mem.eql(u8, command, "pipe-no-clear")) {
         cmdPipeNoClear(wme, session, args);
     } else if (std.mem.eql(u8, command, "previous-matching-bracket")) {
@@ -1944,7 +1946,7 @@ fn matchAtCursor(data: *CopyModeData) ?[]u8 {
     var end: u32 = undefined;
     matchStartEnd(data, at, &start, &end);
 
-    var buf = std.ArrayList(u8).init(xm.allocator);
+    var buf: std.ArrayList(u8) = .{};
     var i: u32 = start;
     while (i <= end) : (i += 1) {
         const py = data.top + (i / sx);
@@ -1952,19 +1954,19 @@ fn matchAtCursor(data: *CopyModeData) ?[]u8 {
         var gc: T.GridCell = undefined;
         absoluteGetCell(gd, py, px, &gc);
         if ((gc.flags & T.GRID_FLAG_TAB) != 0) {
-            buf.append('\t') catch unreachable;
+            buf.append(xm.allocator, '\t') catch unreachable;
         } else if ((gc.flags & T.GRID_FLAG_PADDING) != 0) {
             // skip
         } else {
-            buf.appendSlice(gc.data.data[0..gc.data.size]) catch unreachable;
+            buf.appendSlice(xm.allocator, gc.data.data[0..gc.data.size]) catch unreachable;
         }
     }
 
     if (buf.items.len == 0) {
-        buf.deinit();
+        buf.deinit(xm.allocator);
         return null;
     }
-    return buf.toOwnedSlice() catch unreachable;
+    return buf.toOwnedSlice(xm.allocator) catch unreachable;
 }
 
 fn buildSearchGrid(search_str: []const u8) ?*T.Grid {
@@ -3552,22 +3554,12 @@ pub fn window_copy_cstrtocellpos(gd: *T.Grid, ncells: u32, ppx: *u32, ppy: *u32,
     ppy.* = pywrap;
 }
 
-pub fn window_copy_match_start_end(data: *CopyModeData, _at: u32, start: *u32, end: *u32) void {
-    // Requires searchmark array (not yet added to CopyModeData).
-    // When searchmark is available, this walks backward/forward from `at`
-    // to find the contiguous run of the same mark value.
-    _ = data;
-    _ = _at;
-    start.* = 0;
-    end.* = 0;
+pub fn window_copy_match_start_end(data: *CopyModeData, at: u32, start: *u32, end: *u32) void {
+    matchStartEnd(data, at, start, end);
 }
 
 pub fn window_copy_match_at_cursor(data: *CopyModeData) ?[]u8 {
-    // Requires searchmark array (not yet added to CopyModeData).
-    // When searchmark is available, this extracts the matched text
-    // at the cursor position from the grid.
-    _ = data;
-    return null;
+    return matchAtCursor(data);
 }
 
 // ── Movement helpers ───────────────────────────────────────────────────────

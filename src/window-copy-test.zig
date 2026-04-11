@@ -2058,6 +2058,203 @@ test "window-copy search-forward jumps to matching line" {
     try std.testing.expectEqual(@as(u32, 1), wc.absoluteCursorRow(wme));
 }
 
+test "window-copy public match helpers expose the current search hit" {
+    const opts_mod = @import("options.zig");
+
+    initWindowCopyTestGlobals();
+
+    opts_mod.global_w_options = opts_mod.options_create(null);
+    defer opts_mod.options_free(opts_mod.global_w_options);
+    opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const source_grid = grid.grid_create(8, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2101,
+        .name = xm.xstrdup("copy-match-src"),
+        .sx = 8,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(source_window.name);
+    defer opts_mod.options_free(source_window.options);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 2102,
+        .name = xm.xstrdup("copy-match-tgt"),
+        .sx = 8,
+        .sy = 4,
+        .options = opts_mod.options_create(opts_mod.global_w_options),
+    };
+    defer xm.allocator.free(target_window.name);
+    defer opts_mod.options_free(target_window.options);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2103,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2104,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "needle");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    try runCopyModeTestCommandArgs(wme, null, &.{ "search-forward", "needle" });
+    const matched = wc.window_copy_match_at_cursor(wc.modeData(wme)) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(matched);
+    try std.testing.expectEqualStrings("needle", matched);
+
+    var at: u32 = undefined;
+    try std.testing.expect(wc.window_copy_search_mark_at(wc.modeData(wme), wc.modeData(wme).cx, wc.absoluteCursorRow(wme), &at));
+    var start: u32 = 0;
+    var end: u32 = 0;
+    wc.window_copy_match_start_end(wc.modeData(wme), at, &start, &end);
+    try std.testing.expect(end >= start);
+}
+
+test "window-copy built-in command aliases no longer fall into unsupported-command" {
+    initWindowCopyTestGlobals();
+
+    const source_grid = grid.grid_create(8, 4, 0);
+    defer grid.grid_free(source_grid);
+    const target_grid = grid.grid_create(8, 4, 0);
+    defer grid.grid_free(target_grid);
+    const source_screen = screen.screen_init(8, 4, 0);
+    defer {
+        screen.screen_free(source_screen);
+        xm.allocator.destroy(source_screen);
+    }
+    const target_screen = screen.screen_init(8, 4, 0);
+    defer {
+        screen.screen_free(target_screen);
+        xm.allocator.destroy(target_screen);
+    }
+
+    var source_window = T.Window{
+        .id = 2201,
+        .name = xm.xstrdup("copy-alias-src"),
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer xm.allocator.free(source_window.name);
+    defer source_window.panes.deinit(xm.allocator);
+    defer source_window.last_panes.deinit(xm.allocator);
+    defer source_window.winlinks.deinit(xm.allocator);
+
+    var target_window = T.Window{
+        .id = 2202,
+        .name = xm.xstrdup("copy-alias-tgt"),
+        .sx = 8,
+        .sy = 4,
+        .options = undefined,
+    };
+    defer xm.allocator.free(target_window.name);
+    defer target_window.panes.deinit(xm.allocator);
+    defer target_window.last_panes.deinit(xm.allocator);
+    defer target_window.winlinks.deinit(xm.allocator);
+
+    var source = T.WindowPane{
+        .id = 2203,
+        .window = &source_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = source_screen,
+        .base = .{ .grid = source_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&source);
+
+    var target = T.WindowPane{
+        .id = 2204,
+        .window = &target_window,
+        .options = undefined,
+        .sx = 8,
+        .sy = 4,
+        .screen = target_screen,
+        .base = .{ .grid = target_grid, .rlower = 3 },
+    };
+    defer window_mode_runtime.resetModeAll(&target);
+
+    try source_window.panes.append(xm.allocator, &source);
+    try target_window.panes.append(xm.allocator, &target);
+    source_window.active = &source;
+    target_window.active = &target;
+
+    setGridLineText(source.base.grid, 0, "alpha");
+
+    var args = args_mod.Arguments.init(xm.allocator);
+    defer args.deinit();
+    const wme = wc.enterMode(&target, &source, &args);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .name = "copy-alias-client",
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+    };
+    client.tty = .{ .client = &client };
+    defer if (client.message_string) |msg| xm.allocator.free(msg);
+
+    var vertical_args = args_mod.Arguments.init(xm.allocator);
+    defer vertical_args.deinit();
+    try vertical_args.values.append(xm.allocator, xm.xstrdup("cursor-centre-vertical"));
+    wc.copyModeCommand(wme, &client, undefined, undefined, @ptrCast(&vertical_args), null);
+
+    var horizontal_args = args_mod.Arguments.init(xm.allocator);
+    defer horizontal_args.deinit();
+    try horizontal_args.values.append(xm.allocator, xm.xstrdup("cursor-centre-horizontal"));
+    wc.copyModeCommand(wme, &client, undefined, undefined, @ptrCast(&horizontal_args), null);
+
+    // The built-in alias commands above should complete without surfacing the unsupported status message.
+    try std.testing.expect(client.message_string == null);
+}
+
 /// Enter view mode on the given pane, creating the CopyModeData and pushing
 /// window_view_mode onto the mode stack using the production entry path.
 fn enterViewMode(wp: *T.WindowPane) *T.WindowModeEntry {

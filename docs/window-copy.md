@@ -30,6 +30,6 @@
 ## Gaps (tracked in docs/zig-porting-todo.md)
 
 - Selection, copy, search, marks, drag, and clipboard-selection semantics
-- A few less-common copy-mode commands still fall through to the
+- A smaller tail of less-common copy-mode commands still falls through to the
   unsupported-command path
 - Resize and mode-local draw hooks

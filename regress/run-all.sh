@@ -149,6 +149,7 @@ run_fast_suite() {
         "$SCRIPT_DIR/second-socket-attach.sh" \
         "$SCRIPT_DIR/command-order.sh" \
         "$SCRIPT_DIR/attach-detach-client.sh" \
+        "$SCRIPT_DIR/compat-argv0-config.sh" \
         "$SCRIPT_DIR/list-and-display.sh" \
         "$SCRIPT_DIR/formatter-smoke.sh" \
         "$SCRIPT_DIR/kill-server-cleanup.sh" \

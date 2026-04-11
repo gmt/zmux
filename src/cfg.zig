@@ -24,6 +24,10 @@ const log = @import("log.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
+const opts = @import("options.zig");
+
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const CfgFlags = packed struct {
     quiet: bool = false,
@@ -188,6 +192,120 @@ fn expand_default_path(path: []const u8) ?[]u8 {
     return xm.xstrdup(path);
 }
 
+const SavedEnvVar = struct {
+    name: []const u8,
+    value: ?[]u8,
+
+    fn capture(name: []const u8) SavedEnvVar {
+        return .{
+            .name = name,
+            .value = if (std.posix.getenv(name)) |value| xm.xstrdup(value) else null,
+        };
+    }
+
+    fn restore(self: *SavedEnvVar) void {
+        defer if (self.value) |value| xm.allocator.free(value);
+        if (self.value) |value| {
+            setProcessEnv(self.name, value) catch unreachable;
+        } else {
+            unsetProcessEnv(self.name) catch unreachable;
+        }
+        self.value = null;
+    }
+};
+
+fn setProcessEnv(name: []const u8, value: []const u8) !void {
+    const name_z = xm.xm_dupeZ(name);
+    defer xm.allocator.free(name_z);
+    const value_z = xm.xm_dupeZ(value);
+    defer xm.allocator.free(value_z);
+
+    try std.testing.expectEqual(@as(c_int, 0), setenv(name_z.ptr, value_z.ptr, 1));
+}
+
+fn unsetProcessEnv(name: []const u8) !void {
+    const name_z = xm.xm_dupeZ(name);
+    defer xm.allocator.free(name_z);
+
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv(name_z.ptr));
+}
+
+fn initCfgLoadOptionsForTest() void {
+    opts.global_options = opts.options_create(null);
+    opts.global_s_options = opts.options_create(null);
+    opts.global_w_options = opts.options_create(null);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_ready = true;
+}
+
+fn deinitCfgLoadOptionsForTest() void {
+    opts.options_free(opts.global_w_options);
+    opts.options_free(opts.global_s_options);
+    opts.options_free(opts.global_options);
+    opts.options_ready = false;
+}
+
+fn expectDefaultConfigLoadMarkers(compat_name: []const u8, expected_marker: []const u8, unexpected_marker: []const u8) !void {
+    const zmux_mod = @import("zmux.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    initCfgLoadOptionsForTest();
+    defer deinitCfgLoadOptionsForTest();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("home/.config/zmux");
+    try tmp.dir.makePath("home/.config/tmux");
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.config/zmux/zmux.conf",
+        .data = "set-option -agq status-left zmux-xdg\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.config/tmux/tmux.conf",
+        .data = "set-option -agq status-left tmux-xdg\n",
+    });
+
+    const tmp_root = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmp_root);
+    const home = try std.fs.path.join(xm.allocator, &.{ tmp_root, "home" });
+    defer xm.allocator.free(home);
+    const xdg = try std.fs.path.join(xm.allocator, &.{ home, ".config" });
+    defer xm.allocator.free(xdg);
+
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+
+    try setProcessEnv("HOME", home);
+    try setProcessEnv("XDG_CONFIG_HOME", xdg);
+
+    const saved_compat_name = zmux_mod.compat_name;
+    defer zmux_mod.compat_name = saved_compat_name;
+    zmux_mod.compat_name = compat_name;
+
+    const saved_cfg_quiet = cfg_quiet;
+    defer cfg_quiet = saved_cfg_quiet;
+    const saved_cfg_finished = cfg_finished;
+    defer cfg_finished = saved_cfg_finished;
+    cfg_quiet = true;
+    cfg_finished = false;
+
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    cfg_load(null);
+
+    const status_left = opts.options_get_string(opts.global_s_options, "status-left");
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, expected_marker));
+    try std.testing.expect(std.mem.indexOf(u8, status_left, unexpected_marker) == null);
+}
+
 test "expand_default_path duplicates plain absolute paths" {
     const p = expand_default_path("/tmp/zmux-plain-cfg-path").?;
     defer xm.allocator.free(p);
@@ -286,4 +404,12 @@ test "cfg_add_defaults loads tmux config paths in compat mode" {
         try std.testing.expect(std.mem.indexOf(u8, path, "zmux.conf") == null);
     }
     try std.testing.expect(cfg_file_paths.items.len > 0);
+}
+
+test "cfg_load sources tmux XDG defaults instead of zmux defaults in compat mode" {
+    try expectDefaultConfigLoadMarkers("tmux", "tmux-xdg", "zmux-xdg");
+}
+
+test "cfg_load sources zmux XDG defaults instead of tmux defaults in native mode" {
+    try expectDefaultConfigLoadMarkers("zmux", "zmux-xdg", "tmux-xdg");
 }

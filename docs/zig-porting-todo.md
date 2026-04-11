@@ -58,10 +58,11 @@ Live tmux-parity gaps only.
   authoritative layout tree, so full-window splits and explicit layout
   application preserve one consistent ownership model.
 - `zmux:` target-pane splits work on the current pane geometry, but the broader
-  runtime still reconstructs transient layout state from rectangles. That
-  leaves stale-tree fallback cases and the `select-layout` explicit-layout path
-  short of full tmux parity even though `split-window -f` now rides the shared
-  layout tree.
+  runtime still reconstructs transient layout state from rectangles in generic
+  dump callers and adjacent geometry helpers. `select-layout` now snapshots
+  undo state from `window.layout_root`, but the broader stale-tree fallback
+  surface is still short of full tmux parity even though `split-window -f` now
+  rides the shared layout tree.
 - `likely files:` `src/window.zig`, `src/layout.zig`,
   `src/cmd-split-window.zig`, `src/cmd-select-layout.zig`,
   `docs/layout-split-pane.md`, `docs/layout-select-layout.md`

@@ -224,12 +224,13 @@ pub fn screen_redraw_screen(cl: *T.Client) void {
         draw_panes(&ctx);
     }
 
-    // TODO: screen_redraw_draw_status (delegated to payload path for now).
+    // Status redraw is carried by the shared payload renderer in
+    // server-client.build_client_draw_payload.
     if (ctx.statuslines != 0 and
         (flags & (T.CLIENT_REDRAWSTATUS | T.CLIENT_REDRAWSTATUSALWAYS) != 0))
         log.log_debug("screen_redraw_screen: redrawing status", .{});
 
-    // TODO: overlay_draw callback (delegated to payload path for now).
+    // Overlay redraw is likewise handled by the shared payload renderer.
     if (cl.overlay_draw != null and (flags & T.CLIENT_REDRAWOVERLAY != 0))
         log.log_debug("screen_redraw_screen: redrawing overlay", .{});
 

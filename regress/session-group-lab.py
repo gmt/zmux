@@ -930,6 +930,43 @@ def crash_driver_command(worktree: pathlib.Path, binary: pathlib.Path, socket: p
     return cmd
 
 
+def launch_server(worktree: pathlib.Path, binary: pathlib.Path, socket: pathlib.Path, run_dir: pathlib.Path) -> tuple[subprocess.Popen[str], pathlib.Path]:
+    log_path = run_dir / "server.log"
+    handle = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "-D",
+            "-vv",
+            "-f/dev/null",
+            "-S",
+            str(socket),
+        ],
+        cwd=worktree,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    proc._log_handle = handle  # type: ignore[attr-defined]
+    return proc, log_path
+
+
+def close_server_log(proc: subprocess.Popen[str]) -> None:
+    handle = getattr(proc, "_log_handle", None)
+    if handle is not None:
+        handle.close()
+
+
+def wait_for_process_exit(proc: subprocess.Popen[str], timeout: float) -> int | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            return code
+        time.sleep(0.05)
+    return proc.poll()
+
+
 def coredump_capture(
     *,
     worktree: pathlib.Path,
@@ -947,12 +984,30 @@ def coredump_capture(
         socket = run_dir / "server.sock"
         driver_cmd = crash_driver_command(worktree, binary, socket, artifact_root, mode)
         started_at = datetime.now(timezone.utc).isoformat()
+        proc, server_log = launch_server(worktree, binary, socket, run_dir)
+        if not wait_for_socket(socket, proc):
+            wait_for_process_exit(proc, 1.0)
+            close_server_log(proc)
+            attempt = {
+                "run": run_index,
+                "started_at": started_at,
+                "startup_failed": True,
+                "socket": str(socket),
+                "server_log": str(server_log),
+            }
+            attempts.append(attempt)
+            continue
+
         result = subprocess.run(driver_cmd, cwd=worktree, capture_output=True, text=True)
         stdout_path = run_dir / "driver.stdout"
         stderr_path = run_dir / "driver.stderr"
         stdout_path.write_text(result.stdout, encoding="utf-8")
         stderr_path.write_text(result.stderr, encoding="utf-8")
-        kill_server(binary, socket)
+        exit_code = wait_for_process_exit(proc, 0.5)
+        if exit_code is None:
+            kill_server(binary, socket)
+            exit_code = wait_for_process_exit(proc, 1.0)
+        close_server_log(proc)
         entries = coredump_entries(binary)
         new_entries = [entry for entry in entries if coredump_key(entry) not in baseline]
         if new_entries:
@@ -961,9 +1016,11 @@ def coredump_capture(
             "run": run_index,
             "started_at": started_at,
             "returncode": result.returncode,
+            "server_exit": exit_code,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "socket": str(socket),
+            "server_log": str(server_log),
         }
         driver_temp_dir = parse_driver_temp_dir(result.stderr)
         if driver_temp_dir:

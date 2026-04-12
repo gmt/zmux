@@ -170,7 +170,9 @@ smoke_kill_wedged_server() {
         return 0
     fi
 
-    pids=$(ps -eo pid=,args= | awk -v sock="$TEST_SOCKET" 'index($0, sock) { print $1 }')
+    pids=$(ps -eo pid=,comm=,args= | awk -v sock="$TEST_SOCKET" '
+        ($2 == "tmux" || $2 == "zmux") && index($0, sock) { print $1 }
+    ')
     if [ -n "$pids" ]; then
         kill -9 $pids >/dev/null 2>&1 || true
     fi

@@ -27,6 +27,10 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
+if [ "${SMOKE_CONTAINMENT_ACTIVE-}" != 1 ]; then
+    exec python3 "$SCRIPT_DIR/run-contained.py" -- sh "$SCRIPT_DIR/run-all.sh" "$@"
+fi
+
 : "${TEST_ZMUX:=$ROOT_DIR/zig-out/bin/zmux}"
 : "${TEST_ORACLE_TMUX:=/usr/bin/tmux}"
 : "${SMOKE_ARTIFACT_ROOT:=/tmp}"
@@ -47,15 +51,15 @@ cleanup() {
 trap cleanup 0 1 2 3 15
 
 reap_smoke_processes() {
-    # Kill leftover processes from previous tests.  Exclude our own PID
-    # and the harness RUN_DIR to avoid hitting processes that belong to
-    # the currently-executing test or the harness itself.
-    pids=$(ps -eo pid=,args= | awk -v me="$$" -v rundir="$RUN_DIR" '
+    [ -n "${SMOKE_RUN_ROOT-}" ] || return 0
+
+    pids=$(ps -eo pid=,comm=,args= | awk -v me="$$" -v runroot="$SMOKE_RUN_ROOT" '
         $1 == me { next }
-        index($0, rundir) { next }
-        index($0, "/tmp/zmux-") || index($0, "/tmp/zmux-smoke-") { print $1 }
+        ($2 == "tmux" || $2 == "zmux") && index($0, runroot) { print $1 }
     ')
     if [ -n "$pids" ]; then
+        kill $pids >/dev/null 2>&1 || true
+        sleep 0.2
         kill -9 $pids >/dev/null 2>&1 || true
     fi
 }

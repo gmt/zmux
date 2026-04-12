@@ -7,6 +7,9 @@ management, control mode, rendering, and clean exit behavior.
 
 All smoke infrastructure lives in `regress/`. The harness (`run-all.sh`)
 drives shell-based test scripts and a Python harness (`smoke_harness.py`).
+`run-all.sh` now self-wraps through `regress/run-contained.py`, which gives
+each smoke run its own runtime root and verifies that no net-new `tmux` or
+`zmux` process survives the run.
 
 ## Suites
 
@@ -42,6 +45,7 @@ A test exits 77 to indicate SKIP (missing binary, unsupported feature).
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
 | `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
 | `SMOKE_ARTIFACT_ROOT` | `/tmp` | Base directory for ephemeral test sockets and logs |
+| `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `systemd`, `disciplined`, or `off` |
 | `SMOKE_TEST_TIMEOUT` | `20` | Timeout in seconds for individual shell tests |
 | `SMOKE_PYTHON_TIMEOUT` | `600` | Timeout in seconds for Python harness tests |
 | `SMOKE_DOCKER_TIMEOUT` | `1200` | Timeout in seconds for Docker tests |
@@ -58,6 +62,13 @@ sh regress/run-all.sh soak
 sh regress/run-all.sh recursive
 sh regress/run-all.sh docker
 sh regress/run-all.sh all
+```
+
+For ad hoc repros that should leave no net-new `tmux`/`zmux` processes
+behind, wrap the command explicitly:
+
+```
+python3 regress/run-contained.py -- sh regress/session-group-resize.sh
 ```
 
 Individual test scripts can be run standalone with `TEST_ZMUX` set:

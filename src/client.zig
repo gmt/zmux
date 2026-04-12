@@ -142,22 +142,74 @@ fn set_blocking(fd: i32, state: bool) void {
     _ = std.c.fcntl(fd, std.posix.F.SETFL, new_flags);
 }
 
+fn client_compat_tmux() bool {
+    const zmux_mod = @import("zmux.zig");
+    return std.mem.eql(u8, zmux_mod.compat_name, "tmux");
+}
+
+fn client_wire_longflags() u64 {
+    if (!client_compat_tmux()) return client_flags;
+
+    // tmux's client flag ABI is part of the wire contract in compat mode.
+    // Translate the startup-relevant bits rather than sending zmux-local values.
+    var out: u64 = 0;
+    if (client_flags & T.CLIENT_TERMINAL != 0) out |= 0x1;
+    if (client_flags & T.CLIENT_LOGIN != 0) out |= 0x2;
+    if (client_flags & T.CLIENT_EXIT != 0) out |= 0x4;
+    if (client_flags & T.CLIENT_CONTROL != 0) out |= 0x2000;
+    if (client_flags & T.CLIENT_CONTROLCONTROL != 0) out |= 0x4000;
+    if (client_flags & T.CLIENT_UTF8 != 0) out |= 0x10000;
+    if (client_flags & T.CLIENT_IDENTIFIED != 0) out |= 0x40000;
+    if (client_flags & T.CLIENT_ATTACHED != 0) out |= 0x80;
+    if (client_flags & T.CLIENT_STARTSERVER != 0) out |= 0x10000000;
+    if (client_flags & T.CLIENT_NOSTARTSERVER != 0) out |= 0x1000;
+    if (client_flags & T.CLIENT_READONLY != 0) out |= 0x800;
+    if (client_flags & T.CLIENT_IGNORESIZE != 0) out |= 0x20000;
+    if (client_flags & T.CLIENT_NOFORK != 0) out |= 0x40000000;
+    if (client_flags & T.CLIENT_DEFAULTSOCKET != 0) out |= 0x8000000;
+    if (client_flags & T.CLIENT_SIZECHANGED != 0) out |= 0x400000;
+    if (client_flags & T.CLIENT_STATUSOFF != 0) out |= 0x800000;
+    if (client_flags & T.CLIENT_SUSPENDED != 0) out |= 0x40;
+    if (client_flags & T.CLIENT_CONTROL_NOOUTPUT != 0) out |= 0x4000000;
+    if (client_flags & T.CLIENT_ACTIVEPANE != 0) out |= 0x80000000;
+    if (client_flags & T.CLIENT_CONTROL_PAUSEAFTER != 0) out |= 0x100000000;
+    if (client_flags & T.CLIENT_CONTROL_WAITEXIT != 0) out |= 0x200000000;
+    if (client_flags & T.CLIENT_WINDOWSIZECHANGED != 0) out |= 0x400000000;
+    if (client_flags & T.CLIENT_NO_DETACH_ON_DESTROY != 0) out |= 0x8000000000;
+    if (client_flags & T.CLIENT_DEAD != 0) out |= 0x200;
+    if (client_flags & T.CLIENT_REPEAT != 0) out |= 0x20;
+    return out;
+}
+
 fn client_send_identify(feat: i32) void {
     const peer = client_peer orelse return;
+    const wire_flags = client_wire_longflags();
+    const term = std.posix.getenv("TERM") orelse "";
+    const ttyname = client_ttyname(std.posix.STDIN_FILENO) orelse "";
+    const have_terminal = client_has_terminal();
 
-    _ = proc_mod.proc_send(peer, .identify_longflags, -1, std.mem.asBytes(&client_flags).ptr, @sizeOf(u64));
-
-    const term = std.posix.getenv("TERM") orelse "screen";
-    _ = proc_mod.proc_send(peer, .identify_term, -1, term.ptr, term.len + 1);
-
-    if (client_ttyname(std.posix.STDIN_FILENO)) |ttyname| {
-        _ = proc_mod.proc_send(peer, .identify_ttyname, -1, ttyname.ptr, ttyname.len + 1);
+    _ = proc_mod.proc_send(peer, .identify_longflags, -1, std.mem.asBytes(&wire_flags).ptr, @sizeOf(u64));
+    if (client_compat_tmux()) {
+        _ = proc_mod.proc_send(peer, .identify_longflags, -1, std.mem.asBytes(&wire_flags).ptr, @sizeOf(u64));
     }
+
+    _ = proc_mod.proc_send(peer, .identify_term, -1, term.ptr, term.len + 1);
+    _ = proc_mod.proc_send(peer, .identify_features, -1, std.mem.asBytes(&feat).ptr, @sizeOf(i32));
+
+    _ = proc_mod.proc_send(peer, .identify_ttyname, -1, ttyname.ptr, ttyname.len + 1);
 
     var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
     if (std.posix.getcwd(&cwd_buf)) |cwd_slice| {
         _ = proc_mod.proc_send(peer, .identify_cwd, -1, cwd_slice.ptr, cwd_slice.len + 1);
     } else |_| {}
+
+    if (have_terminal and term.len != 0) {
+        const term_caps = tty_term.readTermCaps(term, std.posix.STDIN_FILENO) catch xm.allocator.alloc([]u8, 0) catch unreachable;
+        defer tty_term.freeTermCaps(term_caps);
+        for (term_caps) |cap| {
+            _ = proc_mod.proc_send(peer, .identify_terminfo, -1, cap.ptr, cap.len + 1);
+        }
+    }
 
     const stdin_fd = c.posix_sys.dup(std.posix.STDIN_FILENO);
     if (stdin_fd != -1) {
@@ -176,15 +228,6 @@ fn client_send_identify(feat: i32) void {
 
     const pid = std.os.linux.getpid();
     _ = proc_mod.proc_send(peer, .identify_clientpid, -1, std.mem.asBytes(&pid).ptr, @sizeOf(std.posix.pid_t));
-
-    _ = proc_mod.proc_send(peer, .identify_features, -1, std.mem.asBytes(&feat).ptr, @sizeOf(i32));
-
-    // Reduced terminfo capability truth for the tty/runtime layer.
-    const term_caps = tty_term.readTermCaps(term, std.posix.STDIN_FILENO) catch xm.allocator.alloc([]u8, 0) catch unreachable;
-    defer tty_term.freeTermCaps(term_caps);
-    for (term_caps) |cap| {
-        _ = proc_mod.proc_send(peer, .identify_terminfo, -1, cap.ptr, cap.len + 1);
-    }
 
     _ = proc_mod.proc_send(peer, .identify_done, -1, null, 0);
 }

@@ -40,7 +40,12 @@ TMPDIR=$(mktemp -d /tmp/view-mode-oracle.XXXXXX)
 OUTER_SOCK="$TMPDIR/outer.sock"
 INNER_SOCK="$TMPDIR/inner.sock"
 INNER_CONF="$TMPDIR/inner.conf"
+SMOKE_OWNER_DIR=${SMOKE_OWNER_DIR:-$TMPDIR/owned-pids}
 trap 'cleanup' 0 1 2 3 15
+
+owner_tool() {
+    python3 "$SCRIPT_DIR/smoke_owner.py" "$@"
+}
 
 cleanup() {
     # Kill inner multiplexer.
@@ -48,12 +53,8 @@ cleanup() {
     # Kill outer tmux.
     env HOME="$TMPDIR" TMUX_TMPDIR="$TMPDIR" \
         "$OUTER_TMUX" -S "$OUTER_SOCK" kill-server >/dev/null 2>&1 || true
-    # Mop up stragglers.
-    sleep 0.2
-    for sock in "$INNER_SOCK" "$OUTER_SOCK"; do
-        pids=$(ps -eo pid=,args= 2>/dev/null | awk -v s="$sock" 'index($0,s){print $1}')
-        [ -z "$pids" ] || kill -9 $pids 2>/dev/null || true
-    done
+    owner_tool cleanup --owner-dir "$SMOKE_OWNER_DIR" --socket-path "$INNER_SOCK" >/dev/null 2>&1 || true
+    owner_tool cleanup --owner-dir "$SMOKE_OWNER_DIR" --socket-path "$OUTER_SOCK" >/dev/null 2>&1 || true
     rm -rf "$TMPDIR"
 }
 
@@ -98,6 +99,17 @@ inner_cursor_pos() {
     inner_cmd display-message -p '#{cursor_x},#{cursor_y}' 2>/dev/null
 }
 
+register_server() {
+    owner_label=$1
+    socket_path=$2
+    shift 2
+    owner_tool register-server \
+        --owner-dir "$SMOKE_OWNER_DIR" \
+        --owner-label "$owner_label" \
+        --socket-path "$socket_path" \
+        -- "$@" >/dev/null
+}
+
 wait_for() {
     tries=$1; shift
     n=0
@@ -120,6 +132,10 @@ wait_for() {
 env -i PATH=/bin:/usr/bin TERM=screen HOME="$TMPDIR" \
     "$CONTAINEE" -S "$INNER_SOCK" -f "$INNER_CONF" \
     new-session -d -s inner || fail "inner containee start"
+register_server inner "$INNER_SOCK" \
+    env -i PATH=/bin:/usr/bin TERM=screen HOME="$TMPDIR" \
+    "$CONTAINEE" -S "$INNER_SOCK" -f "$INNER_CONF" \
+    || fail "inner containee pid"
 
 # Start outer tmux and attach to inner containee inside it.
 # Outer tmux uses empty config and sandboxed HOME to avoid user config leakage.
@@ -129,6 +145,10 @@ env -i PATH=/bin:/usr/bin TERM=screen HOME="$TMPDIR" \
     -s outer -x "$OUTER_COLS" -y "$OUTER_ROWS" \
     "env -i PATH=/bin:/usr/bin TERM=screen HOME=$TMPDIR TMUX_TMPDIR=$TMPDIR XDG_CONFIG_HOME=$TMPDIR/.config $CONTAINEE -S $INNER_SOCK -f $INNER_CONF attach -t inner; sleep 5" \
     || fail "outer tmux start"
+register_server outer "$OUTER_SOCK" \
+    env -i PATH=/bin:/usr/bin TERM=screen HOME="$TMPDIR" TMUX_TMPDIR="$TMPDIR" XDG_CONFIG_HOME="$TMPDIR/.config" \
+    "$OUTER_TMUX" -S "$OUTER_SOCK" -f/dev/null \
+    || fail "outer tmux pid"
 
 # Wait for inner containee to be attached.
 wait_for 10 inner_cmd has-session -t inner || fail "inner containee not ready"

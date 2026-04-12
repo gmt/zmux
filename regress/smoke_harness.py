@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 
 import smoke_env
+import smoke_owner
 
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -190,6 +191,7 @@ class SmokeHarness:
         self.artifact_dir = pathlib.Path(
             tempfile.mkdtemp(prefix="zmux-smoke-", dir=str(artifact_root))
         )
+        self.owner_dir = smoke_owner.resolve_owner_dir() or (self.artifact_dir / "owned-pids")
         self.socket_path = self.artifact_dir / "socket"
         self.temp_buffer = self.artifact_dir / "buffer.txt"
         self.temp_save = self.artifact_dir / "saved-buffer.txt"
@@ -198,6 +200,7 @@ class SmokeHarness:
         self.inner_socket = self.artifact_dir / "inner.socket"
         self.control_clients: list[ControlClient] = []
         self._native_commands: set[str] | None = None
+        self._server_pid: int | None = None
         env_mode = os.environ.get("SMOKE_ENV_MODE", "ambient")
         helper_mode = os.environ.get("ZMUX_SMOKE_HELPER_MODE")
         helper_path = os.environ.get("ZMUX_SMOKE_HELPER_PATH")
@@ -215,10 +218,15 @@ class SmokeHarness:
             client.close()
         self.control_clients.clear()
         self.kill_server()
-        self.kill_wedged_server()
+        self.kill_registered_server()
+        self.kill_inner_server()
+        self._server_pid = None
 
     def mux_base_args(self) -> list[str]:
         return self.binary_argv + ["-S", str(self.socket_path), "-f/dev/null"]
+
+    def base_args_for_socket(self, socket_path: pathlib.Path) -> list[str]:
+        return self.binary_argv + ["-S", str(socket_path), "-f/dev/null"]
 
     def mux(
         self,
@@ -255,22 +263,44 @@ class SmokeHarness:
         except SmokeError:
             pass
 
-    def kill_wedged_server(self) -> None:
-        probe = subprocess.run(
-            ["ps", "-eo", "pid=", "-o", "args="],
-            capture_output=True,
-            text=True,
-            check=True,
+    def register_server(self, socket_path: pathlib.Path | None = None, owner_label: str = "smoke-harness") -> int | None:
+        target_socket = socket_path or self.socket_path
+        entry = smoke_owner.register_server(
+            self.base_args_for_socket(target_socket),
+            self.env,
+            owner_dir=self.owner_dir,
+            owner_label=owner_label,
+            socket_path=str(target_socket),
+            timeout=2.0,
         )
-        pids = []
-        marker = str(self.socket_path)
-        for line in probe.stdout.splitlines():
-            if marker in line:
-                pid = line.strip().split(None, 1)[0]
-                if pid.isdigit():
-                    pids.append(pid)
-        if pids:
-            subprocess.run(["kill", "-9", *pids], check=False)
+        if entry is None:
+            return None
+        if target_socket == self.socket_path:
+            self._server_pid = entry.pid
+        return entry.pid
+
+    def kill_registered_server(self, socket_path: pathlib.Path | None = None) -> None:
+        target_socket = socket_path or self.socket_path
+        smoke_owner.cleanup_registered(
+            self.owner_dir,
+            socket_path=str(target_socket),
+            grace_seconds=0.2,
+        )
+
+    def kill_inner_server(self) -> None:
+        try:
+            subprocess.run(
+                self.base_args_for_socket(self.inner_socket) + ["kill-server"],
+                capture_output=True,
+                text=True,
+                env=self.env,
+                timeout=2.0,
+                start_new_session=True,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        self.kill_registered_server(self.inner_socket)
 
     def native_commands(self) -> set[str]:
         if self._native_commands is not None:
@@ -320,6 +350,8 @@ class SmokeHarness:
 
         if self.supports("set-option"):
             self.mux(["set-option", "-g", "lock-command", "true"], accept_codes=(0, 1))
+
+        self.register_server()
 
         if not needs_client:
             return None
@@ -650,6 +682,7 @@ class SmokeHarness:
                 timeout_s=5.0,
                 message="nested session was not created",
             )
+            self.register_server(self.inner_socket, owner_label="smoke-harness-inner")
 
         primary.send("detach-client")
         self._poll(
@@ -732,19 +765,21 @@ class SmokeHarness:
         return rss_kib, fd_count
 
     def server_pid(self) -> int | None:
-        probe = subprocess.run(
-            ["ps", "-eo", "pid=", "-o", "args="],
-            capture_output=True,
-            text=True,
-            check=True,
+        if self._server_pid is not None:
+            if smoke_owner.read_proc_start_time(self._server_pid) is not None:
+                return self._server_pid
+            self._server_pid = None
+
+        pid = smoke_owner.query_server_pid(
+            self.mux_base_args(),
+            self.env,
+            timeout=2.0,
         )
-        marker = str(self.socket_path)
-        for line in probe.stdout.splitlines():
-            if marker in line:
-                head = line.strip().split(None, 1)[0]
-                if head.isdigit():
-                    return int(head)
-        return None
+        if pid is None:
+            return None
+        self._server_pid = pid
+        self.register_server()
+        return self._server_pid
 
     def truecolor_command(self, offset: int = 0) -> str:
         return (

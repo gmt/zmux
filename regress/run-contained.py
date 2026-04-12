@@ -25,10 +25,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+
+import smoke_owner
 
 
-MUX_NAMES = {"tmux", "zmux"}
 GRACE_SECONDS = 0.5
 TERM_ENV_KEYS = {
     "COLORTERM",
@@ -46,14 +46,6 @@ TERM_ENV_KEYS = {
 TERM_ENV_PREFIXES = ("SMOKE_", "TEST_", "TMUX_", "XDG_", "ZMUX_")
 
 
-@dataclass(frozen=True)
-class ProcInfo:
-    pid: int
-    start_time: int
-    exe_name: str
-    cmdline: str
-
-
 class ContainedSignal(RuntimeError):
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
@@ -66,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=("auto", "systemd", "disciplined", "off"),
+        choices=("auto", "systemd", "disciplined", "systemd-disciplined", "off"),
         default=os.environ.get("SMOKE_CONTAINMENT_BACKEND", "auto"),
         help="Containment backend to use.",
     )
@@ -85,130 +77,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def systemd_backend_available() -> bool:
-    if shutil.which("systemd-run") is None or shutil.which("systemctl") is None:
-        return False
-    probe = subprocess.run(
-        ["systemctl", "--user", "show-environment"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return probe.returncode == 0
-
-
-def choose_backend(requested: str) -> str:
-    if requested == "auto":
-        return "systemd" if systemd_backend_available() else "disciplined"
-    if requested == "systemd" and not systemd_backend_available():
-        raise RuntimeError("systemd containment backend requested but unavailable")
-    return requested
-
-
-def read_proc_cmdline(pid: int) -> str:
-    try:
-        data = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return ""
-    if not data:
-        return ""
-    return " ".join(part.decode(errors="replace") for part in data.split(b"\0") if part)
-
-
-def read_proc_start_time(pid: int) -> int | None:
-    try:
-        stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    end = stat.rfind(")")
-    if end == -1:
-        return None
-    fields = stat[end + 2 :].split()
-    if len(fields) < 20:
-        return None
-    try:
-        return int(fields[19])
-    except ValueError:
-        return None
-
-
-def read_proc_exe_name(pid: int) -> str | None:
-    try:
-        exe = os.readlink(f"/proc/{pid}/exe")
-    except OSError:
-        try:
-            exe = pathlib.Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            return None
-    return pathlib.Path(exe).name
-
-
-def snapshot_mux_processes() -> dict[tuple[int, int], ProcInfo]:
-    snapshot: dict[tuple[int, int], ProcInfo] = {}
-    for proc_dir in pathlib.Path("/proc").iterdir():
-        if not proc_dir.name.isdigit():
-            continue
-        pid = int(proc_dir.name)
-        exe_name = read_proc_exe_name(pid)
-        if exe_name not in MUX_NAMES:
-            continue
-        start_time = read_proc_start_time(pid)
-        if start_time is None:
-            continue
-        snapshot[(pid, start_time)] = ProcInfo(
-            pid=pid,
-            start_time=start_time,
-            exe_name=exe_name,
-            cmdline=read_proc_cmdline(pid),
-        )
-    return snapshot
-
-
-def is_owned_process(info: ProcInfo, run_root: pathlib.Path) -> bool:
-    run_root_text = str(run_root)
-    return run_root_text in info.cmdline
-
-
-def leaked_mux_processes(
-    baseline: dict[tuple[int, int], ProcInfo],
-    run_root: pathlib.Path,
-) -> list[ProcInfo]:
-    current = snapshot_mux_processes()
-    return sorted(
-        (
-            info
-            for key, info in current.items()
-            if key not in baseline and is_owned_process(info, run_root)
-        ),
-        key=lambda info: (info.exe_name, info.pid),
-    )
-
-
-def signal_processes(processes: list[ProcInfo], sig: int) -> None:
-    for info in processes:
-        try:
-            os.kill(info.pid, sig)
-        except ProcessLookupError:
-            continue
-
-
-def cleanup_leaked_processes(
-    baseline: dict[tuple[int, int], ProcInfo],
-    run_root: pathlib.Path,
-) -> list[ProcInfo]:
-    leaked = leaked_mux_processes(baseline, run_root)
-    if not leaked:
-        return leaked
-    signal_processes(leaked, signal.SIGTERM)
-    time.sleep(GRACE_SECONDS)
-    leaked = leaked_mux_processes(baseline, run_root)
-    if not leaked:
-        return leaked
-    signal_processes(leaked, signal.SIGKILL)
-    time.sleep(GRACE_SECONDS)
-    return leaked_mux_processes(baseline, run_root)
-
-
 def process_env_for_systemd(env: dict[str, str]) -> list[str]:
     args: list[str] = []
     for key, value in sorted(env.items()):
@@ -217,6 +85,58 @@ def process_env_for_systemd(env: dict[str, str]) -> list[str]:
         if key in TERM_ENV_KEYS or key.startswith(TERM_ENV_PREFIXES):
             args.append(f"--setenv={key}={value}")
     return args
+
+
+def systemd_probe() -> tuple[bool, str | None]:
+    if shutil.which("systemd-run") is None or shutil.which("systemctl") is None:
+        return False, "systemd-run or systemctl not found"
+
+    true_bin = shutil.which("true") or "/bin/true"
+    try:
+        probe = subprocess.run(
+            [
+                "systemd-run",
+                "--user",
+                "--quiet",
+                "--wait",
+                "--collect",
+                "--pipe",
+                "--service-type=exec",
+                "-p",
+                "KillMode=control-group",
+                true_bin,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+    if probe.returncode == 0:
+        return True, None
+
+    detail = probe.stderr.strip() or probe.stdout.strip() or f"exit {probe.returncode}"
+    return False, detail
+
+
+def choose_backend(requested: str) -> tuple[str, str | None]:
+    needs_systemd = requested in {"auto", "systemd", "systemd-disciplined"}
+    available = False
+    reason: str | None = None
+    if needs_systemd:
+        available, reason = systemd_probe()
+
+    if requested == "auto":
+        if available:
+            return "systemd", None
+        return "disciplined", reason
+
+    if requested in {"systemd", "systemd-disciplined"} and not available:
+        raise RuntimeError(f"{requested} containment backend requested but unavailable: {reason}")
+
+    return requested, None
 
 
 class ContainedRun:
@@ -229,20 +149,37 @@ class ContainedRun:
         self.run_root = pathlib.Path(tempfile.mkdtemp(prefix="zmux-contained-", dir=str(artifact_parent)))
         self.artifact_root = self.run_root / "artifacts"
         self.artifact_root.mkdir(parents=True, exist_ok=True)
-        self.baseline = snapshot_mux_processes()
-        self.process: subprocess.Popen[str] | None = None
+        self.owner_dir = self.run_root / "owned-pids"
+        self.process: subprocess.Popen[bytes] | None = None
         self.unit_name: str | None = None
         self._stopped = False
+        self.script_path = pathlib.Path(__file__).resolve()
 
         self.inner_env = os.environ.copy()
         self.inner_env["SMOKE_CONTAINMENT_ACTIVE"] = "1"
         self.inner_env["SMOKE_CONTAINMENT_BACKEND"] = backend
         self.inner_env["SMOKE_RUN_ROOT"] = str(self.run_root)
         self.inner_env["SMOKE_ARTIFACT_ROOT"] = str(self.artifact_root)
+        self.inner_env["SMOKE_OWNER_DIR"] = str(self.owner_dir)
 
     def run(self) -> int:
         if self.backend == "systemd":
-            return self._run_systemd()
+            return self._run_systemd(self.command, self.inner_env)
+        if self.backend == "systemd-disciplined":
+            nested_command = [
+                sys.executable,
+                str(self.script_path),
+                "--backend",
+                "disciplined",
+            ]
+            if self.keep_run_root:
+                nested_command.append("--keep-run-root")
+            nested_command.extend(["--", *self.command])
+
+            nested_env = os.environ.copy()
+            nested_env["SMOKE_ARTIFACT_ROOT"] = os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp")
+            nested_env["SMOKE_CONTAINMENT_BACKEND"] = "disciplined"
+            return self._run_systemd(nested_command, nested_env)
         if self.backend in {"disciplined", "off"}:
             return self._run_direct()
         raise RuntimeError(f"unknown backend: {self.backend}")
@@ -256,7 +193,7 @@ class ContainedRun:
         )
         return self.process.wait()
 
-    def _run_systemd(self) -> int:
+    def _run_systemd(self, payload: list[str], payload_env: dict[str, str]) -> int:
         self.unit_name = f"zmux-smoke-{os.getpid()}-{random.getrandbits(24):06x}"
         cmd = [
             "systemd-run",
@@ -271,8 +208,8 @@ class ContainedRun:
             self.unit_name,
             "-p",
             "KillMode=control-group",
-            *process_env_for_systemd(self.inner_env),
-            *self.command,
+            *process_env_for_systemd(payload_env),
+            *payload,
         ]
         self.process = subprocess.Popen(cmd, text=False)
         return self.process.wait()
@@ -282,7 +219,7 @@ class ContainedRun:
             return
         self._stopped = True
 
-        if self.backend == "systemd" and self.unit_name is not None:
+        if self.backend in {"systemd", "systemd-disciplined"} and self.unit_name is not None:
             subprocess.run(
                 ["systemctl", "--user", "stop", self.unit_name],
                 stdout=subprocess.DEVNULL,
@@ -299,6 +236,8 @@ class ContainedRun:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        elif self.process is not None and self.process.poll() is None:
+            self.process.terminate()
 
         if self.process is not None and self.process.poll() is None:
             try:
@@ -307,20 +246,24 @@ class ContainedRun:
                 self.process.kill()
                 self.process.wait(timeout=2)
 
-    def finalize(self) -> list[ProcInfo]:
-        leaked = cleanup_leaked_processes(self.baseline, self.run_root)
+    def finalize(self) -> list[smoke_owner.OwnedPid]:
+        leaked = smoke_owner.cleanup_registered(self.owner_dir, grace_seconds=GRACE_SECONDS)
         if not self.keep_run_root:
             shutil.rmtree(self.run_root, ignore_errors=True)
         return leaked
 
 
-def print_leaks(leaked: list[ProcInfo]) -> None:
+def print_leaks(leaked: list[smoke_owner.OwnedPid]) -> None:
     if not leaked:
         return
-    print("leaked tmux/zmux processes from this run:", file=sys.stderr)
-    for info in leaked:
-        cmdline = info.cmdline or f"<{info.exe_name}>"
-        print(f"  pid={info.pid} exe={info.exe_name} cmd={cmdline}", file=sys.stderr)
+    print("leaked owned tmux/zmux processes from this run:", file=sys.stderr)
+    for entry in leaked:
+        socket_info = f" socket={entry.socket_path}" if entry.socket_path else ""
+        exe_info = f" exe={entry.exe_name}" if entry.exe_name else ""
+        print(
+            f"  pid={entry.pid} start={entry.start_time} kind={entry.kind} owner={entry.owner_label}{exe_info}{socket_info}",
+            file=sys.stderr,
+        )
 
 
 def run_uncontained(command: list[str]) -> int:
@@ -334,7 +277,13 @@ def main() -> int:
     if os.environ.get("SMOKE_CONTAINMENT_ACTIVE") == "1":
         return run_uncontained(args.command)
 
-    backend = choose_backend(args.backend)
+    backend, downgrade_reason = choose_backend(args.backend)
+    if args.backend == "auto" and backend != "systemd" and downgrade_reason:
+        print(
+            f"run-contained: systemd unavailable, using disciplined backend ({downgrade_reason})",
+            file=sys.stderr,
+        )
+
     runner = ContainedRun(args.command, backend, args.keep_run_root)
     received_signal: int | None = None
     exit_code = 1

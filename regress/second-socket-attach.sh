@@ -35,10 +35,12 @@ zmux2() {
 
 # Start a detached session on socket 1
 zmux1 new-session -d -s main || exit 1
+smoke_register_server_with_socket "$TEST_ZMUX" "$SOCK1" "socket1" >/dev/null 2>&1 || true
 zmux1 has-session -t main || exit 1
 
 # Connect from a second socket; it should start a fresh independent server
 zmux2 new-session -d -s peer || exit 1
+smoke_register_server_with_socket "$TEST_ZMUX" "$SOCK2" "socket2" >/dev/null 2>&1 || true
 zmux2 has-session -t peer || exit 1
 
 # Sessions on different sockets must be isolated
@@ -50,5 +52,8 @@ zmux2 has-session -t main 2>/dev/null && {
     echo "socket isolation failed"
     exit 1
 }
+
+smoke_cleanup_socket "$TEST_ZMUX" "$SOCK1"
+smoke_cleanup_socket "$TEST_ZMUX" "$SOCK2"
 
 exit 0

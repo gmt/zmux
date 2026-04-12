@@ -27,6 +27,10 @@ SMOKE_ROOT_DIR=$(CDPATH= cd -- "$SMOKE_SCRIPT_DIR/.." && pwd)
 : "${SMOKE_ARTIFACT_ROOT:=/tmp}"
 : "${SMOKE_MATRIX:=$SMOKE_SCRIPT_DIR/oracle-command-matrix.tsv}"
 
+smoke_owner_tool() {
+    python3 "$SMOKE_SCRIPT_DIR/smoke_owner.py" "$@"
+}
+
 smoke_setup_path_shims() {
     mkdir -p "$SMOKE_BIN_DIR" "$SMOKE_TMPDIR"
     ln -sf "$TEST_ZMUX" "$SMOKE_BIN_DIR/zmux"
@@ -60,7 +64,17 @@ smoke_init() {
     SMOKE_SELECTED_SHELL=
     SMOKE_HELPER_MODE=
     SMOKE_HELPER_PATH=
-    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH
+    SMOKE_SOCKET_REGISTRY_FILE="$TEST_TMPDIR/cleanup-sockets.tsv"
+    if [ -z "${SMOKE_OWNER_DIR-}" ]; then
+        if [ -n "${SMOKE_RUN_ROOT-}" ]; then
+            SMOKE_OWNER_DIR="$SMOKE_RUN_ROOT/owned-pids"
+        else
+            SMOKE_OWNER_DIR="$TEST_TMPDIR/owned-pids"
+        fi
+    fi
+    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH SMOKE_OWNER_DIR SMOKE_SOCKET_REGISTRY_FILE
+    : > "$SMOKE_SOCKET_REGISTRY_FILE"
+    smoke_track_socket "$TEST_ZMUX" "$TEST_SOCKET"
     trap 'smoke_cleanup' 0 1 2 3 15
 }
 
@@ -156,31 +170,84 @@ smoke_bin() {
 }
 
 smoke_cmd() {
-    smoke_exec_env "$TEST_ZMUX" -S "$TEST_SOCKET" -f/dev/null "$@"
+    if smoke_exec_env "$TEST_ZMUX" -S "$TEST_SOCKET" -f/dev/null "$@"; then
+        status=0
+        case "${1-}" in
+        kill-server)
+            ;;
+        *)
+            smoke_register_server_with_socket "$TEST_ZMUX" "$TEST_SOCKET" "$TEST_NAME" >/dev/null 2>&1 || true
+            ;;
+        esac
+    else
+        status=$?
+    fi
+    return "$status"
 }
 
-smoke_try_kill_server() {
-    if [ -n "${TEST_SOCKET-}" ]; then
-        smoke_exec_env timeout 2 "$TEST_ZMUX" -S "$TEST_SOCKET" -f/dev/null kill-server >/dev/null 2>&1 || true
+smoke_register_pid() {
+    pid=$1
+    kind=${2:-server}
+    socket_path=${3:-$TEST_SOCKET}
+    label=${4:-$TEST_NAME}
+    smoke_owner_tool register \
+        --owner-dir "$SMOKE_OWNER_DIR" \
+        --pid "$pid" \
+        --kind "$kind" \
+        --owner-label "$label" \
+        --socket-path "$socket_path" >/dev/null
+}
+
+smoke_track_socket() {
+    binary=$1
+    socket_path=$2
+    printf '%s\t%s\n' "$binary" "$socket_path" >> "$SMOKE_SOCKET_REGISTRY_FILE"
+}
+
+smoke_register_server_with_socket() {
+    binary=$1
+    socket_path=${2:-$TEST_SOCKET}
+    label=${3:-$TEST_NAME}
+    pid=$(smoke_exec_env "$binary" -S "$socket_path" -f/dev/null display-message -p '#{pid}' 2>/dev/null || true)
+    case "$pid" in
+    ''|*[!0-9]*)
+        return 1
+        ;;
+    esac
+    smoke_track_socket "$binary" "$socket_path"
+    smoke_register_pid "$pid" server "$socket_path" "$label"
+}
+
+smoke_try_kill_server_with_socket() {
+    binary=${1:-$TEST_ZMUX}
+    socket_path=${2:-$TEST_SOCKET}
+    if [ -n "$socket_path" ]; then
+        smoke_exec_env timeout 2 "$binary" -S "$socket_path" -f/dev/null kill-server >/dev/null 2>&1 || true
     fi
 }
 
-smoke_kill_wedged_server() {
-    if [ -z "${TEST_SOCKET-}" ]; then
-        return 0
+smoke_kill_registered_server() {
+    socket_path=${1:-$TEST_SOCKET}
+    if [ -n "$socket_path" ]; then
+        smoke_owner_tool cleanup --owner-dir "$SMOKE_OWNER_DIR" --socket-path "$socket_path" >/dev/null 2>&1 || true
     fi
+}
 
-    pids=$(ps -eo pid=,comm=,args= | awk -v sock="$TEST_SOCKET" '
-        ($2 == "tmux" || $2 == "zmux") && index($0, sock) { print $1 }
-    ')
-    if [ -n "$pids" ]; then
-        kill -9 $pids >/dev/null 2>&1 || true
-    fi
+smoke_cleanup_socket() {
+    binary=${1:-$TEST_ZMUX}
+    socket_path=${2:-$TEST_SOCKET}
+    smoke_try_kill_server_with_socket "$binary" "$socket_path"
+    smoke_kill_registered_server "$socket_path"
 }
 
 smoke_cleanup() {
-    smoke_try_kill_server
-    smoke_kill_wedged_server
+    if [ -n "${SMOKE_SOCKET_REGISTRY_FILE-}" ] && [ -f "$SMOKE_SOCKET_REGISTRY_FILE" ]; then
+        while IFS='	' read -r binary socket_path; do
+            [ -n "$binary" ] || continue
+            [ -n "$socket_path" ] || continue
+            smoke_cleanup_socket "$binary" "$socket_path"
+        done < "$SMOKE_SOCKET_REGISTRY_FILE"
+    fi
     if [ -n "${TEST_TMPDIR-}" ] && [ -d "$TEST_TMPDIR" ]; then
         rm -rf "$TEST_TMPDIR"
     fi

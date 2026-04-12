@@ -9,7 +9,9 @@ All smoke infrastructure lives in `regress/`. The harness (`run-all.sh`)
 drives shell-based test scripts and a Python harness (`smoke_harness.py`).
 `run-all.sh` now self-wraps through `regress/run-contained.py`, which gives
 each smoke run its own runtime root and verifies that no net-new `tmux` or
-`zmux` process survives the run.
+`zmux` process survives the run. Cleanup is driven by explicit owned server
+PIDs recorded by the harnesses, not by scanning the host process table for
+matching command lines.
 
 ## Suites
 
@@ -45,7 +47,7 @@ A test exits 77 to indicate SKIP (missing binary, unsupported feature).
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
 | `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
 | `SMOKE_ARTIFACT_ROOT` | `/tmp` | Base directory for ephemeral test sockets and logs |
-| `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `systemd`, `disciplined`, or `off` |
+| `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `auto`, `systemd`, `disciplined`, `systemd-disciplined`, or `off` |
 | `SMOKE_TEST_TIMEOUT` | `20` | Timeout in seconds for individual shell tests |
 | `SMOKE_PYTHON_TIMEOUT` | `600` | Timeout in seconds for Python harness tests |
 | `SMOKE_DOCKER_TIMEOUT` | `1200` | Timeout in seconds for Docker tests |
@@ -69,7 +71,12 @@ behind, wrap the command explicitly:
 
 ```
 python3 regress/run-contained.py -- sh regress/session-group-resize.sh
+python3 regress/run-contained.py --backend systemd-disciplined -- sh regress/session-group-resize.sh
 ```
+
+In `auto`, `run-contained.py` actively probes whether transient user
+services with `KillMode=control-group` actually work and downgrades to the
+disciplined backend when they do not.
 
 Individual test scripts can be run standalone with `TEST_ZMUX` set:
 

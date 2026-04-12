@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass
 
 import smoke_env
+import smoke_owner
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve()
@@ -55,6 +56,7 @@ class RecursiveCase:
 class RecursiveAttachHarness:
     def __init__(self, artifact_root: pathlib.Path, zmux_binary: str, oracle_binary: str, timeout_seconds: float) -> None:
         self.artifact_dir = pathlib.Path(tempfile.mkdtemp(prefix="zmux-recursive-attach-", dir=str(artifact_root)))
+        self.owner_dir = smoke_owner.resolve_owner_dir() or (self.artifact_dir / "owned-pids")
         self.zmux_binary = zmux_binary
         self.oracle_binary = oracle_binary
         self.timeout_seconds = timeout_seconds
@@ -138,6 +140,14 @@ class RecursiveAttachHarness:
             raise RecursiveAttachError(
                 f"{case.name}: failed to start root container\nstdout:\n{create.stdout}\nstderr:\n{create.stderr}"
             )
+        smoke_owner.register_server(
+            base,
+            self.env,
+            owner_dir=self.owner_dir,
+            owner_label=f"{case.name}-root",
+            socket_path=str(root_socket),
+            timeout=2.0,
+        )
 
         try:
             self.wait_for_results(results_path)
@@ -175,18 +185,28 @@ class RecursiveAttachHarness:
                 )
 
     def cleanup_root(self, binary: str, socket_path: pathlib.Path) -> None:
-        subprocess.run(
-            self.root_base_args(binary, socket_path) + ["kill-server"],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            timeout=2.0,
-            start_new_session=True,
+        try:
+            subprocess.run(
+                self.root_base_args(binary, socket_path) + ["kill-server"],
+                capture_output=True,
+                text=True,
+                env=self.env,
+                timeout=2.0,
+                start_new_session=True,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        smoke_owner.cleanup_registered(
+            self.owner_dir,
+            socket_path=str(socket_path),
+            grace_seconds=0.2,
         )
 
 
 def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_seconds: float) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
+    owner_dir = smoke_owner.resolve_owner_dir() or (output_json.parent / "owned-pids")
     env = smoke_env.build_smoke_env(
         mode=os.environ.get("SMOKE_ENV_MODE", "ambient"),
         home_dir=output_json.parent / "home",
@@ -214,6 +234,14 @@ def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_second
                 "stderr": proc.stderr,
             }
         )
+    smoke_owner.register_server(
+        base,
+        env,
+        owner_dir=owner_dir,
+        owner_label=f"inner-probe:{output_json.parent.name}",
+        socket_path=str(socket_path),
+        timeout=2.0,
+    )
 
     try:
         proc = subprocess.run(
@@ -244,7 +272,26 @@ def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_second
         "steps": steps,
         "attach_outcome": outcome,
     }
-    output_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        output_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    finally:
+        try:
+            subprocess.run(
+                base + ["kill-server"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=2.0,
+                start_new_session=True,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        smoke_owner.cleanup_registered(
+            owner_dir,
+            socket_path=str(socket_path),
+            grace_seconds=0.2,
+        )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

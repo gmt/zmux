@@ -56,6 +56,10 @@ run_case() {
         echo "$label failed to start server with $program"
         exit 1
     }
+    (
+        cd "$cwd" &&
+        smoke_register_server_with_socket "$program" "$socket" "$label"
+    ) >/dev/null 2>&1 || true
 
     actual=$(
         cd "$cwd" &&
@@ -72,7 +76,7 @@ run_case() {
 
     (
         cd "$cwd" &&
-        smoke_exec_env "$program" -S "$socket" -f/dev/null kill-server >/dev/null 2>&1
+        smoke_cleanup_socket "$program" "$socket"
     ) || true
 }
 

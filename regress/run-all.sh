@@ -45,24 +45,9 @@ FAIL=0
 SKIP=0
 
 cleanup() {
-    reap_smoke_processes
     rm -rf "$RUN_DIR"
 }
 trap cleanup 0 1 2 3 15
-
-reap_smoke_processes() {
-    [ -n "${SMOKE_RUN_ROOT-}" ] || return 0
-
-    pids=$(ps -eo pid=,comm=,args= | awk -v me="$$" -v runroot="$SMOKE_RUN_ROOT" '
-        $1 == me { next }
-        ($2 == "tmux" || $2 == "zmux") && index($0, runroot) { print $1 }
-    ')
-    if [ -n "$pids" ]; then
-        kill $pids >/dev/null 2>&1 || true
-        sleep 0.2
-        kill -9 $pids >/dev/null 2>&1 || true
-    fi
-}
 
 require_bin() {
     bin=$1
@@ -82,7 +67,6 @@ run_sh_test() {
     if TEST_ZMUX="$bin" SMOKE_ARTIFACT_ROOT="$SMOKE_ARTIFACT_ROOT" timeout "$SMOKE_TEST_TIMEOUT" sh "$script" >"$log" 2>&1; then
         printf "PASS\n"
         PASS=$((PASS + 1))
-        reap_smoke_processes
         return 0
     else
         status=$?
@@ -91,14 +75,12 @@ run_sh_test() {
     if [ "$status" -eq 77 ]; then
         printf "SKIP\n"
         SKIP=$((SKIP + 1))
-        reap_smoke_processes
         return 0
     fi
 
     printf "FAIL (exit %d)\n" "$status"
     sed -n '1,80p' "$log"
     FAIL=$((FAIL + 1))
-    reap_smoke_processes
     return 0
 }
 
@@ -112,7 +94,6 @@ run_py_test() {
     if TEST_ZMUX="$bin" SMOKE_ARTIFACT_ROOT="$SMOKE_ARTIFACT_ROOT" timeout "$SMOKE_PYTHON_TIMEOUT" python3 "$SCRIPT_DIR/smoke_harness.py" "$@" >"$log" 2>&1; then
         printf "PASS\n"
         PASS=$((PASS + 1))
-        reap_smoke_processes
         return 0
     else
         status=$?
@@ -121,14 +102,12 @@ run_py_test() {
     if [ "$status" -eq 77 ]; then
         printf "SKIP\n"
         SKIP=$((SKIP + 1))
-        reap_smoke_processes
         return 0
     fi
 
     printf "FAIL (exit %d)\n" "$status"
     sed -n '1,120p' "$log"
     FAIL=$((FAIL + 1))
-    reap_smoke_processes
     return 0
 }
 
@@ -187,7 +166,6 @@ run_recursive_suite() {
         timeout "$SMOKE_PYTHON_TIMEOUT" python3 "$SCRIPT_DIR/recursive_attach_harness.py" run >"$log" 2>&1; then
         printf "PASS\n"
         PASS=$((PASS + 1))
-        reap_smoke_processes
         return 0
     else
         status=$?
@@ -196,7 +174,6 @@ run_recursive_suite() {
     printf "FAIL (exit %d)\n" "$status"
     sed -n '1,120p' "$log"
     FAIL=$((FAIL + 1))
-    reap_smoke_processes
     return 0
 }
 

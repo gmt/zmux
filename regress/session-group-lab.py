@@ -967,6 +967,34 @@ def wait_for_process_exit(proc: subprocess.Popen[str], timeout: float) -> int | 
     return proc.poll()
 
 
+def server_ready(binary: pathlib.Path, socket: pathlib.Path) -> bool:
+    result = subprocess.run(
+        [
+            str(binary),
+            "-N",
+            "-S",
+            str(socket),
+            "-f/dev/null",
+            "start-server",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def wait_for_server_ready(binary: pathlib.Path, socket: pathlib.Path, proc: subprocess.Popen[str], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        if socket.exists() and server_ready(binary, socket):
+            return True
+        time.sleep(0.05)
+    return socket.exists() and server_ready(binary, socket)
+
+
 def coredump_capture(
     *,
     worktree: pathlib.Path,
@@ -985,7 +1013,7 @@ def coredump_capture(
         driver_cmd = crash_driver_command(worktree, binary, socket, artifact_root, mode)
         started_at = datetime.now(timezone.utc).isoformat()
         proc, server_log = launch_server(worktree, binary, socket, run_dir)
-        if not wait_for_socket(socket, proc):
+        if not wait_for_server_ready(binary, socket, proc):
             wait_for_process_exit(proc, 1.0)
             close_server_log(proc)
             attempt = {
@@ -1111,7 +1139,7 @@ def gdb_capture(
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            if not wait_for_socket(socket, proc):
+            if not wait_for_server_ready(binary, socket, proc):
                 proc.wait(timeout=5)
                 gdb_text = gdb_output.read_text(encoding="utf-8", errors="replace")
                 attempt = {

@@ -23,7 +23,7 @@ smoke_init control-client-size
 
 TMP=$(mktemp)
 OUT=$(mktemp)
-trap 'rm -f $TMP $OUT' 0 1 15
+trap 'rm -f "$TMP" "$OUT"; smoke_cleanup' 0 1 2 3 15
 
 # Start a detached session at default size (80x24)
 smoke_cmd new-session -d -s control-size-attach || exit 1

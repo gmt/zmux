@@ -25,7 +25,7 @@ smoke_init session-group-resize
 TMP1=$(mktemp)
 TMP2=$(mktemp)
 TMP3=$(mktemp)
-trap 'rm -f $TMP1 $TMP2 $TMP3' 0 1 15
+trap 'rm -f "$TMP1" "$TMP2" "$TMP3"; smoke_cleanup' 0 1 2 3 15
 
 # Create a session with two windows, staying on window 0
 smoke_cmd new-session -d -s test -x 20 -y 6 || exit 1

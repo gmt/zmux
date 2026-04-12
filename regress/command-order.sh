@@ -26,7 +26,7 @@ TMP1=$(mktemp)
 TMP2=$(mktemp)
 TMP3=$(mktemp)
 TMP4=$(mktemp)
-trap 'rm -f $TMP1 $TMP2 $TMP3 $TMP4' 0 1 15
+trap 'rm -f "$TMP1" "$TMP2" "$TMP3" "$TMP4"; smoke_cleanup' 0 1 2 3 15
 
 # Config A: multiline commands
 cat <<'EOF' >"$TMP1"

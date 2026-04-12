@@ -23,7 +23,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 smoke_init new-session-no-client
 
 TMP=$(mktemp)
-trap 'rm -f $TMP' 0 1 15
+trap 'rm -f "$TMP"; smoke_cleanup' 0 1 2 3 15
 
 cat <<EOF >"$TMP"
 new -stest

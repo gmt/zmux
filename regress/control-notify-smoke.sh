@@ -23,7 +23,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 smoke_init control-notify
 
 TMP=$(mktemp)
-trap 'rm -f "$TMP"' 0 1 15
+trap 'rm -f "$TMP"; smoke_cleanup' 0 1 2 3 15
 
 smoke_cmd new-session -d -s notify-a >/dev/null || exit 1
 sleep 1

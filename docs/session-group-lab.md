@@ -52,6 +52,23 @@ running on the given socket and fails fast if it is not.
 
 ## Phase Ladder
 
+### Parallel tmux-vs-zmux gdb
+
+```sh
+python3 regress/session-group-lab.py parallel-gdb --mode switch-only
+tmux attach-session -t session-group-parallel-gdb
+```
+
+This launches a detached outer `tmux` session with two windows:
+
+- `gdb`: left pane runs zmux gdb, right pane runs museum tmux gdb
+- `drive`: left pane has the zmux driver command preloaded, right pane has the
+  tmux driver command preloaded
+
+The helper prints the exact `runz` and `runt` commands as well, so you can
+retype them manually if you want. The drive panes stay idle until you press
+Enter.
+
 ### Phase 1: zmux gdb, no patches
 
 ```sh
@@ -122,7 +139,8 @@ python3 regress/session-group-lab.py wind-down
 ```
 
 That sends a best-effort `kill-server` to the current phase socket and clears
-the current phase metadata. It does not remove logs or patches.
+the current phase metadata. If `parallel-gdb` is active, it also kills both
+servers and the outer `tmux` session. It does not remove logs or patches.
 
 To preserve any tracked diff from the disposable worktree and remove the
 worktree itself:
@@ -145,9 +163,11 @@ investigation even after the disposable worktree is gone.
 ## Expected Flow
 
 1. `setup`
-2. `phase1-zmux-gdb --run` in one terminal
-3. `drive` in another terminal
-4. `wind-down`
-5. Repeat with phase 2 or phase 3 if the earlier phase did not localize the gap
-6. Use phase 4 and phase 5 only after the no-patch phases stop paying rent
-7. `teardown` when done
+2. `parallel-gdb --mode switch-only`
+3. `tmux attach-session -t session-group-parallel-gdb`
+4. `cont` in both gdb panes
+5. Press Enter on the preloaded `runz` and `runt` commands in the drive panes
+6. `wind-down`
+7. Repeat with the single-phase gdb/strace lanes if the paired view does not localize the gap
+8. Use phase 4 and phase 5 only after the no-patch phases stop paying rent
+9. `teardown` when done

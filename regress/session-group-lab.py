@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 ROOT_DIR = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACT_ROOT = pathlib.Path(tempfile.gettempdir()) / "zmux-session-group-lab"
 DEFAULT_WORKTREE = ROOT_DIR.parent / "zmux-session-group-lab"
+DEFAULT_PARALLEL_TMUX_SESSION = "session-group-parallel-gdb"
 
 
 def die(message: str) -> "NoReturn":
@@ -54,6 +55,10 @@ def manifest_path(artifact_root: pathlib.Path) -> pathlib.Path:
 
 def current_phase_path(artifact_root: pathlib.Path) -> pathlib.Path:
     return artifact_root / "current-phase.json"
+
+
+def parallel_session_path(artifact_root: pathlib.Path) -> pathlib.Path:
+    return artifact_root / "parallel-session.json"
 
 
 def ensure_artifact_dirs(artifact_root: pathlib.Path) -> None:
@@ -176,6 +181,26 @@ def clear_current_phase(artifact_root: pathlib.Path) -> None:
         path.unlink()
 
 
+def write_parallel_session(artifact_root: pathlib.Path, payload: dict[str, object]) -> None:
+    parallel_session_path(artifact_root).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_parallel_session(artifact_root: pathlib.Path) -> dict[str, object]:
+    path = parallel_session_path(artifact_root)
+    if not path.exists():
+        die("no parallel session metadata; run parallel-gdb first")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def clear_parallel_session(artifact_root: pathlib.Path) -> None:
+    path = parallel_session_path(artifact_root)
+    if path.exists():
+        path.unlink()
+
+
 def phase_tag(phase: str, mode: str) -> str:
     return f"{phase}-{mode}"
 
@@ -194,24 +219,24 @@ def line_number(path: pathlib.Path, needle: str) -> int:
 
 def write_zmux_gdb_script(worktree: pathlib.Path, artifact_root: pathlib.Path, mode: str) -> pathlib.Path:
     script_path = lab_paths(artifact_root)["gdb"] / f"{phase_tag('phase1-zmux-gdb', mode)}.gdb"
+    control_line = line_number(worktree / "src" / "control.zig", "pub fn control_read_callback(cl: *T.Client, line: []const u8) void {")
+    new_session_line = line_number(worktree / "src" / "cmd-new-session.zig", "fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
     switch_line = line_number(worktree / "src" / "cmd-switch-client.zig", "fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
+    select_line = line_number(worktree / "src" / "cmd-select-window.zig", "fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
     lines = [
         "set pagination off",
         "set breakpoint pending on",
         "set print pretty on",
         "handle SIGPIPE nostop noprint pass",
-        "echo Loaded zmux session-group breakpoint set.\\n",
+        "echo Loaded zmux session-group handoff breakpoint set.\\n",
         "echo Recommended on stop: bt 8 ; info args ; info locals\\n",
+        f"break {worktree / 'src' / 'control.zig'}:{control_line}",
+        f"break {worktree / 'src' / 'cmd-new-session.zig'}:{new_session_line}",
         f"break {worktree / 'src' / 'cmd-switch-client.zig'}:{switch_line}",
-        "break server_request_exit",
-        "break server_send_exit",
-        "break server_signal",
-        "break control_read_callback",
-        "break server_client_command_done",
-        "break cmd_find_target",
+        f"break {worktree / 'src' / 'cmd-select-window.zig'}:{select_line}",
+        "break server_client_set_session",
         "break resolve_current_state",
-        "break session_repair_current",
-        "break session_set_current",
+        "break cmd_find_target",
     ]
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return script_path
@@ -224,16 +249,14 @@ def write_tmux_gdb_script(artifact_root: pathlib.Path, mode: str) -> pathlib.Pat
         "set breakpoint pending on",
         "set print pretty on",
         "handle SIGPIPE nostop noprint pass",
-        "echo Loaded tmux session-group breakpoint set.\\n",
+        "echo Loaded tmux session-group handoff breakpoint set.\\n",
         "echo Recommended on stop: bt 8 ; info args ; info locals\\n",
-        "break cmd_switch_client_exec",
-        "break server_request_exit",
-        "break server_send_exit",
-        "break server_signal",
         "break control_read_callback",
-        "break server_client_command_done",
+        "break cmd_new_session_exec",
+        "break cmd_switch_client_exec",
+        "break cmd_select_window_exec",
+        "break server_client_set_session",
         "break cmd_find_target",
-        "break session_set_current",
     ]
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return script_path
@@ -248,6 +271,8 @@ def build_zmux_debug(worktree: pathlib.Path) -> pathlib.Path:
 
 
 def build_tmux_debug(worktree: pathlib.Path) -> pathlib.Path:
+    (worktree / "tmux-museum" / "build").mkdir(parents=True, exist_ok=True)
+    (worktree / "tmux-museum" / "out").mkdir(parents=True, exist_ok=True)
     run(["tmux-museum/bin/refresh-museum.sh", "gdb"], cwd=worktree)
     binary = worktree / "tmux-museum" / "out" / "gdb" / "tmux"
     if not binary.exists():
@@ -282,6 +307,21 @@ def print_phase_summary(phase: dict[str, object]) -> None:
     print(f"  {phase['driver_command']}")
     print("wind-down:")
     print(f"  {phase['wind_down_command']}")
+
+
+def print_parallel_summary(payload: dict[str, object]) -> None:
+    print("parallel session:")
+    print(f"  tmux session: {payload['tmux_session']}")
+    print(f"  mode: {payload['mode']}")
+    print(f"  worktree: {payload['worktree']}")
+    print("attach:")
+    print(f"  {payload['attach_command']}")
+    print("runz:")
+    print(f"  {payload['runz_command']}")
+    print("runt:")
+    print(f"  {payload['runt_command']}")
+    print("wind-down:")
+    print(f"  {payload['wind_down_command']}")
 
 
 def save_patch(worktree: pathlib.Path, artifact_root: pathlib.Path, label: str) -> pathlib.Path | None:
@@ -331,6 +371,175 @@ def phase_metadata(
     return payload
 
 
+def tmux_has_session(session_name: str) -> bool:
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def tmux_kill_session(session_name: str) -> None:
+    if tmux_has_session(session_name):
+        subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+def tmux_send_keys(target: str, *keys: str) -> None:
+    run(["tmux", "send-keys", "-t", target, *keys])
+
+
+def tmux_current_pane_id(target: str) -> str:
+    result = run(["tmux", "display-message", "-p", "-t", target, "#{pane_id}"], capture=True)
+    pane_id = result.stdout.strip()
+    if not pane_id:
+        die(f"unable to resolve current pane for tmux target {target!r}")
+    return pane_id
+
+
+def tmux_split_window(target: str) -> str:
+    result = run(["tmux", "split-window", "-h", "-P", "-F", "#{pane_id}", "-t", target], capture=True)
+    pane_id = result.stdout.strip()
+    if not pane_id:
+        die(f"unable to create split pane for tmux target {target!r}")
+    return pane_id
+
+
+def stop_parallel_session(artifact_root: pathlib.Path) -> list[str]:
+    messages: list[str] = []
+    path = parallel_session_path(artifact_root)
+    if not path.exists():
+        return messages
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for prefix in ("zmux", "tmux"):
+        binary = pathlib.Path(str(payload[f"{prefix}_binary"]))
+        socket = pathlib.Path(str(payload[f"{prefix}_socket"]))
+        kill_server(binary, socket)
+        messages.append(f"killed {prefix} server on {socket} (best effort)")
+
+    session_name = str(payload["tmux_session"])
+    if tmux_has_session(session_name):
+        tmux_kill_session(session_name)
+        messages.append(f"killed tmux session {session_name}")
+
+    clear_parallel_session(artifact_root)
+    return messages
+
+
+def shell_command(worktree: pathlib.Path, argv: list[str]) -> str:
+    return f"cd {shlex.quote(str(worktree))} && exec {shlex.join(argv)}"
+
+
+def preload_command(worktree: pathlib.Path, argv: list[str]) -> str:
+    return f"cd {shlex.quote(str(worktree))} && {shlex.join(argv)}"
+
+
+def parallel_session_metadata(
+    *,
+    artifact_root: pathlib.Path,
+    worktree: pathlib.Path,
+    mode: str,
+    tmux_session: str,
+    zmux_binary: pathlib.Path,
+    zmux_socket: pathlib.Path,
+    zmux_gdb_script: pathlib.Path,
+    zmux_driver_cmd: list[str],
+    tmux_binary: pathlib.Path,
+    tmux_socket: pathlib.Path,
+    tmux_gdb_script: pathlib.Path,
+    tmux_driver_cmd: list[str],
+) -> dict[str, object]:
+    return {
+        "artifact_root": str(artifact_root),
+        "mode": mode,
+        "worktree": str(worktree),
+        "tmux_session": tmux_session,
+        "attach_command": shlex.join(["tmux", "attach-session", "-t", tmux_session]),
+        "runz_command": preload_command(worktree, zmux_driver_cmd),
+        "runt_command": preload_command(worktree, tmux_driver_cmd),
+        "wind_down_command": shlex.join(
+            [
+                sys.executable,
+                str(ROOT_DIR / "regress" / "session-group-lab.py"),
+                "--artifact-root",
+                str(artifact_root),
+                "wind-down",
+            ]
+        ),
+        "zmux_binary": str(zmux_binary),
+        "zmux_socket": str(zmux_socket),
+        "zmux_gdb_script": str(zmux_gdb_script),
+        "zmux_driver_command": shlex.join(zmux_driver_cmd),
+        "tmux_binary": str(tmux_binary),
+        "tmux_socket": str(tmux_socket),
+        "tmux_gdb_script": str(tmux_gdb_script),
+        "tmux_driver_command": shlex.join(tmux_driver_cmd),
+    }
+
+
+def start_parallel_tmux_session(
+    *,
+    worktree: pathlib.Path,
+    payload: dict[str, object],
+) -> None:
+    session_name = str(payload["tmux_session"])
+    tmux_kill_session(session_name)
+
+    run(["tmux", "new-session", "-d", "-s", session_name, "-n", "gdb"])
+    zmux_gdb_pane = tmux_current_pane_id(f"{session_name}:gdb")
+    tmux_send_keys(
+        zmux_gdb_pane,
+        shell_command(worktree, [
+            "gdb",
+            "-q",
+            "-x",
+            str(payload["zmux_gdb_script"]),
+            "--args",
+            str(payload["zmux_binary"]),
+            "-D",
+            "-vv",
+            "-f/dev/null",
+            "-S",
+            str(payload["zmux_socket"]),
+        ]),
+        "C-m",
+    )
+    tmux_gdb_pane = tmux_split_window(zmux_gdb_pane)
+    tmux_send_keys(
+        tmux_gdb_pane,
+        shell_command(worktree, [
+            "gdb",
+            "-q",
+            "-x",
+            str(payload["tmux_gdb_script"]),
+            "--args",
+            str(payload["tmux_binary"]),
+            "-D",
+            "-vv",
+            "-f/dev/null",
+            "-S",
+            str(payload["tmux_socket"]),
+        ]),
+        "C-m",
+    )
+    run(["tmux", "select-layout", "-t", f"{session_name}:gdb", "even-horizontal"])
+
+    run(["tmux", "new-window", "-t", session_name, "-n", "drive"])
+    zmux_drive_pane = tmux_current_pane_id(f"{session_name}:drive")
+    tmux_drive_pane = tmux_split_window(zmux_drive_pane)
+    run(["tmux", "select-layout", "-t", f"{session_name}:drive", "even-horizontal"])
+    tmux_send_keys(zmux_drive_pane, str(payload["runz_command"]))
+    tmux_send_keys(tmux_drive_pane, str(payload["runt_command"]))
+    run(["tmux", "select-window", "-t", f"{session_name}:gdb"])
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     artifact_root = args.artifact_root.resolve()
     worktree = args.worktree.resolve()
@@ -359,6 +568,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("--- current phase ---")
     if current.exists():
         print(current.read_text(encoding="utf-8").rstrip())
+    else:
+        print("(none)")
+    parallel = parallel_session_path(artifact_root)
+    print("--- parallel session ---")
+    if parallel.exists():
+        print(parallel.read_text(encoding="utf-8").rstrip())
     else:
         print("(none)")
     return 0
@@ -441,6 +656,47 @@ def cmd_phase2_tmux_gdb(args: argparse.Namespace) -> int:
                 str(socket),
             ],
         )
+    return 0
+
+
+def cmd_parallel_gdb(args: argparse.Namespace) -> int:
+    artifact_root = args.artifact_root.resolve()
+    manifest = load_manifest(artifact_root)
+    worktree = pathlib.Path(manifest["worktree"])
+
+    for message in stop_parallel_session(artifact_root):
+        print(message)
+
+    tmux_session = args.tmux_session
+    if tmux_has_session(tmux_session):
+        tmux_kill_session(tmux_session)
+
+    zmux_binary = build_zmux_debug(worktree)
+    tmux_binary = build_tmux_debug(worktree)
+    zmux_socket = phase_socket(artifact_root, "parallel-zmux-gdb", args.mode)
+    tmux_socket = phase_socket(artifact_root, "parallel-tmux-gdb", args.mode)
+    zmux_gdb_script = write_zmux_gdb_script(worktree, artifact_root, args.mode)
+    tmux_gdb_script = write_tmux_gdb_script(artifact_root, args.mode)
+    zmux_driver_cmd = driver_command(worktree, zmux_binary, zmux_socket, artifact_root, args.mode)
+    tmux_driver_cmd = driver_command(worktree, tmux_binary, tmux_socket, artifact_root, args.mode)
+
+    payload = parallel_session_metadata(
+        artifact_root=artifact_root,
+        worktree=worktree,
+        mode=args.mode,
+        tmux_session=tmux_session,
+        zmux_binary=zmux_binary,
+        zmux_socket=zmux_socket,
+        zmux_gdb_script=zmux_gdb_script,
+        zmux_driver_cmd=zmux_driver_cmd,
+        tmux_binary=tmux_binary,
+        tmux_socket=tmux_socket,
+        tmux_gdb_script=tmux_gdb_script,
+        tmux_driver_cmd=tmux_driver_cmd,
+    )
+    start_parallel_tmux_session(worktree=worktree, payload=payload)
+    write_parallel_session(artifact_root, payload)
+    print_parallel_summary(payload)
     return 0
 
 
@@ -596,12 +852,25 @@ def kill_server(binary: pathlib.Path, socket: pathlib.Path) -> None:
 
 def cmd_wind_down(args: argparse.Namespace) -> int:
     artifact_root = args.artifact_root.resolve()
-    current = load_current_phase(artifact_root)
-    binary = pathlib.Path(str(current["binary"]))
-    socket = pathlib.Path(str(current["socket"]))
-    kill_server(binary, socket)
-    clear_current_phase(artifact_root)
-    print(f"killed server on {socket} (best effort)")
+    messages: list[str] = []
+
+    current = current_phase_path(artifact_root)
+    if current.exists():
+        payload = load_current_phase(artifact_root)
+        binary = pathlib.Path(str(payload["binary"]))
+        socket = pathlib.Path(str(payload["socket"]))
+        kill_server(binary, socket)
+        clear_current_phase(artifact_root)
+        messages.append(f"killed server on {socket} (best effort)")
+
+    messages.extend(stop_parallel_session(artifact_root))
+
+    if not messages:
+        print("lab: nothing to wind down")
+        return 0
+
+    for message in messages:
+        print(message)
     return 0
 
 
@@ -619,6 +888,9 @@ def cmd_teardown(args: argparse.Namespace) -> int:
         current = load_current_phase(artifact_root)
         kill_server(pathlib.Path(str(current["binary"])), pathlib.Path(str(current["socket"])))
         clear_current_phase(artifact_root)
+
+    for message in stop_parallel_session(artifact_root):
+        print(message)
 
     if worktree.exists() and worktree_dirty(worktree):
         label = f"teardown-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
@@ -661,6 +933,11 @@ def build_parser() -> argparse.ArgumentParser:
         phase.add_argument("--mode", choices=("switch-only", "full"), default="switch-only")
         phase.add_argument("--run", action="store_true")
         phase.set_defaults(func=func)
+
+    parallel = sub.add_parser("parallel-gdb")
+    parallel.add_argument("--mode", choices=("switch-only", "full"), default="switch-only")
+    parallel.add_argument("--tmux-session", default=DEFAULT_PARALLEL_TMUX_SESSION)
+    parallel.set_defaults(func=cmd_parallel_gdb)
 
     drive = sub.add_parser("drive")
     drive.add_argument("--mode", choices=("switch-only", "full"))

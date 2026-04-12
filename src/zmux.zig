@@ -378,14 +378,28 @@ pub fn client_utf8_flags_from_locale(
     return out;
 }
 
-/// Build `{tmpdir}/{compat_name}-{uid}/{label_name}` after ensuring the base directory exists.
+/// Build `{tmpdir}/{compat_name}-{uid}/{label_name}` after ensuring
+/// the base directory exists with safe ownership and permissions.
 pub fn make_socket_label_path(tmpdir: []const u8, uid: u32, label_name: []const u8) ?[]u8 {
     const base = xm.xasprintf("{s}/{s}-{d}", .{ tmpdir, compat_name, uid });
     defer xm.allocator.free(base);
 
-    std.fs.makeDirAbsolute(base) catch |err| {
+    // Create with mode 0700 (owner-only access), matching tmux's
+    // mkdir(base, S_IRWXU).
+    std.posix.mkdir(base, std.os.linux.S.IRWXU) catch |err| {
         if (err != error.PathAlreadyExists) return null;
     };
+
+    // Use lstat (AT_SYMLINK_NOFOLLOW) so a symlink cannot redirect
+    // the socket directory to an attacker-controlled location.
+    const sb = std.posix.fstatat(
+        std.posix.AT.FDCWD,
+        base,
+        std.posix.AT.SYMLINK_NOFOLLOW,
+    ) catch return null;
+
+    if (!std.os.linux.S.ISDIR(sb.mode)) return null;
+    if (sb.uid != uid) return null;
 
     return xm.xasprintf("{s}/{s}", .{ base, label_name });
 }
@@ -506,38 +520,53 @@ test "client_utf8_flags_from_locale detects UTF-8 spellings" {
 }
 
 test "make_socket_label_path creates directory and labeled socket path" {
+    const uid: u32 = @truncate(std.os.linux.getuid());
     var tmp = std.testing.tmpDir(.{});
     const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
     defer xm.allocator.free(dir);
 
-    const sock = make_socket_label_path(dir, 424242, "tr6").?;
+    const sock = make_socket_label_path(dir, uid, "tr6").?;
     defer xm.allocator.free(sock);
 
-    try std.testing.expect(std.mem.endsWith(u8, sock, "/zmux-424242/tr6"));
+    const expected_suffix = xm.xasprintf("/zmux-{d}/tr6", .{uid});
+    defer xm.allocator.free(expected_suffix);
+    try std.testing.expect(std.mem.endsWith(u8, sock, expected_suffix));
     const parent = std.fs.path.dirname(sock).?;
     var base_dir = try std.fs.openDirAbsolute(parent, .{});
     defer base_dir.close();
+
+    // Verify the directory was created with mode 0700.
+    const sb = try std.posix.fstatat(
+        std.posix.AT.FDCWD,
+        parent,
+        std.posix.AT.SYMLINK_NOFOLLOW,
+    );
+    try std.testing.expectEqual(@as(u32, std.os.linux.S.IRWXU), sb.mode & 0o777);
 }
 
 test "make_socket_label_path reuses existing base and accepts long labels" {
+    const uid: u32 = @truncate(std.os.linux.getuid());
     var tmp = std.testing.tmpDir(.{});
     const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
     defer xm.allocator.free(dir);
 
-    const first = make_socket_label_path(dir, 7, "first").?;
+    const first = make_socket_label_path(dir, uid, "first").?;
     defer xm.allocator.free(first);
     const long_label = try xm.allocator.alloc(u8, 180);
     defer xm.allocator.free(long_label);
     @memset(long_label, 'x');
-    const second = make_socket_label_path(dir, 7, long_label).?;
+    const second = make_socket_label_path(dir, uid, long_label).?;
     defer xm.allocator.free(second);
 
     try std.testing.expect(std.mem.endsWith(u8, second, long_label));
-    try std.testing.expect(std.mem.indexOf(u8, second, "/zmux-7/") != null);
+    const dir_frag = xm.xasprintf("/zmux-{d}/", .{uid});
+    defer xm.allocator.free(dir_frag);
+    try std.testing.expect(std.mem.indexOf(u8, second, dir_frag) != null);
     try std.testing.expect(std.mem.endsWith(u8, first, "/first"));
 }
 
 test "make_socket_label_path uses compat_name in directory" {
+    const uid: u32 = @truncate(std.os.linux.getuid());
     compat_name = "tmux";
     defer {
         compat_name = "zmux";
@@ -547,11 +576,27 @@ test "make_socket_label_path uses compat_name in directory" {
     const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
     defer xm.allocator.free(dir);
 
-    const sock = make_socket_label_path(dir, 99, "default").?;
+    const sock = make_socket_label_path(dir, uid, "default").?;
     defer xm.allocator.free(sock);
 
-    try std.testing.expect(std.mem.indexOf(u8, sock, "/tmux-99/") != null);
-    try std.testing.expect(std.mem.endsWith(u8, sock, "/tmux-99/default"));
+    const dir_frag = xm.xasprintf("/tmux-{d}/", .{uid});
+    defer xm.allocator.free(dir_frag);
+    try std.testing.expect(std.mem.indexOf(u8, sock, dir_frag) != null);
+    const expected_suffix = xm.xasprintf("/tmux-{d}/default", .{uid});
+    defer xm.allocator.free(expected_suffix);
+    try std.testing.expect(std.mem.endsWith(u8, sock, expected_suffix));
+}
+
+test "make_socket_label_path rejects directory owned by wrong uid" {
+    // Pass a uid that doesn't match the test runner; the directory will
+    // be owned by our real uid, so the ownership check must reject it.
+    const real_uid: u32 = @truncate(std.os.linux.getuid());
+    const fake_uid = if (real_uid != 424242) @as(u32, 424242) else @as(u32, 424243);
+    var tmp = std.testing.tmpDir(.{});
+    const dir = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(dir);
+
+    try std.testing.expectEqual(@as(?[]u8, null), make_socket_label_path(dir, fake_uid, "x"));
 }
 
 test "compat_name defaults to zmux" {

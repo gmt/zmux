@@ -34,6 +34,7 @@
 
 const std = @import("std");
 const T = @import("types.zig");
+const c = @import("c.zig");
 const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
@@ -478,6 +479,10 @@ pub fn control_write_callback(cl: *T.Client) void {
 
 /// Discard all pending output for the control client.
 pub fn control_discard(cl: *T.Client) void {
+    if (cl.control_read_event) |ev| {
+        _ = c.libevent.event_del(ev);
+    }
+    cl.control_ready_flag = false;
     for (cl.control_panes.items) |*cp|
         control_discard_pane(cl, cp);
 }
@@ -543,13 +548,21 @@ pub fn control_start(cl: *T.Client) void {
 
 /// Mark a control client as ready to receive input.
 pub fn control_ready(cl: *T.Client) void {
+    if (cl.control_ready_flag) return;
     cl.control_ready_flag = true;
+    if (cl.control_read_event) |ev| {
+        _ = c.libevent.event_add(ev, null);
+    }
     log.log_debug("control_ready: {s}: control client ready", .{cl.name orelse "<anon>"});
 }
 
 /// Stop control mode and free all associated state.
 pub fn control_stop(cl: *T.Client) void {
     log.log_debug("control_stop: {s}: tearing down control mode", .{cl.name orelse "<anon>"});
+
+    if (cl.control_read_event) |ev| {
+        _ = c.libevent.event_del(ev);
+    }
 
     while (cl.control_all_blocks.items.len > 0) {
         const cb = cl.control_all_blocks.items[0];

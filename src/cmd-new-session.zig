@@ -34,6 +34,7 @@ const spawn_mod = @import("spawn.zig");
 const opts = @import("options.zig");
 const env_mod = @import("environ.zig");
 const protocol = @import("zmux-protocol.zig");
+const proc_mod = @import("proc.zig");
 const server_client_mod = @import("server-client.zig");
 const server_mod = @import("server.zig");
 const cfg_mod = @import("cfg.zig");
@@ -282,13 +283,24 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
 
     if (!args.has('d') and !no_attach) {
         if (cl) |c| {
+            const already_attached = c.session != null;
             if (args.has('x') or args.has('y')) {
                 c.tty.sx = sx;
                 c.tty.sy = sy;
             }
             if (args.get('f')) |flags_text|
                 server_client_mod.server_client_set_flags(c, flags_text);
-            server_client_mod.server_client_attach(c, s);
+            if (already_attached and c.session != null)
+                c.last_session = c.session;
+            server_client_mod.server_client_set_session(c, s);
+            if ((cmdq.cmdq_get_flags(item) & T.CMDQ_STATE_REPEAT) == 0)
+                server_client_mod.server_client_set_key_table(c, null);
+            c.flags |= T.CLIENT_ATTACHED;
+            if (!already_attached and (c.flags & T.CLIENT_CONTROL) == 0) {
+                if (c.peer) |peer| {
+                    _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
+                }
+            }
         }
     }
 
@@ -914,6 +926,64 @@ test "new-session -t joins the target session group and synchronizes windows" {
         const peer_wl = sess.winlink_find_by_index(&peer.windows, leader_entry.key_ptr.*).?;
         try std.testing.expectEqual(leader_entry.value_ptr.*.window, peer_wl.window);
     }
+}
+
+test "new-session -t gives an attached control client the full grouped window set" {
+    new_session_test_init();
+    defer new_session_test_finish();
+
+    var leader_setup = new_session_test_make_session("group-control-leader");
+    defer new_session_test_free_session(&leader_setup);
+
+    const extra_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var extra_cause: ?[]u8 = null;
+    const extra_wl = sess.session_attach(leader_setup.session, extra_window, -1, &extra_cause).?;
+    const extra_wp = win_mod.window_add_pane(extra_window, null, 80, 24);
+    extra_window.active = extra_wp;
+    _ = sess.session_set_current(leader_setup.session, leader_setup.session.curw.?);
+    defer win_mod.window_remove_ref(extra_window, "test");
+
+    var client = new_session_test_client("group-control-client", leader_setup.session);
+    defer new_session_test_free_client(&client);
+    client.flags = T.CLIENT_CONTROL | T.CLIENT_SIZECHANGED | T.CLIENT_ATTACHED;
+    client.tty.sx = 25;
+    client.tty.sy = 8;
+    client_registry.add(&client);
+    defer {
+        client.session = null;
+        client_registry.clients.clearRetainingCapacity();
+    }
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "new-session", "-t", "group-control-leader", "-x", "25", "-y", "8" }, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+
+    var created: ?*T.Session = null;
+    var sit = sess.sessions.valueIterator();
+    while (sit.next()) |session_ptr| {
+        if (session_ptr.* != leader_setup.session) {
+            created = session_ptr.*;
+            break;
+        }
+    }
+    const created_session = created.?;
+    defer if (sess.session_find(created_session.name) != null) sess.session_destroy(created_session, false, "test");
+    try std.testing.expectEqual(created_session, client.session.?);
+    try std.testing.expectEqual(leader_setup.session.windows.count(), created_session.windows.count());
+    try std.testing.expect(sess.winlink_find_by_index(&created_session.windows, extra_wl.idx) != null);
+
+    var select_cause: ?[]u8 = null;
+    const select_cmd = try cmd_mod.cmd_parse_one(&.{ "select-window", "-t", ":1" }, &client, &select_cause);
+    defer cmd_mod.cmd_free(select_cmd);
+
+    var select_list: cmd_mod.CmdList = .{};
+    var select_item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &select_list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(select_cmd, &select_item));
+    try std.testing.expectEqual(extra_wl.idx, created_session.curw.?.idx);
 }
 
 test "new-session queues session-created after the initial window exists" {

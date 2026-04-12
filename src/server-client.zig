@@ -277,6 +277,7 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
 export fn control_stdin_read_cb(_fd: c_int, _events: c_short, arg: ?*anyopaque) void {
     _ = _events;
     const cl: *T.Client = @ptrCast(@alignCast(arg orelse return));
+    if (!cl.control_ready_flag) return;
     const fd: std.posix.fd_t = if (_fd >= 0) _fd else cl.fd;
     if (fd < 0) return;
 
@@ -538,7 +539,6 @@ pub fn server_client_finalize_identify(cl: *T.Client) void {
                 cl,
             );
             if (ev) |e| {
-                _ = c.libevent.event_add(e, null);
                 cl.control_read_event = e;
             }
         }

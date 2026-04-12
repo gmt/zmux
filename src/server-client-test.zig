@@ -27,6 +27,7 @@ const tty_mod = @import("tty.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
 const cmdq_mod = @import("cmd-queue.zig");
+const os_mod = @import("os/linux.zig");
 const c = @import("c.zig");
 const client_registry = @import("client-registry.zig");
 const resize_mod = @import("resize.zig");
@@ -165,6 +166,55 @@ test "server_client_finalize_identify treats tty stdin as terminal and drops cap
     try std.testing.expectEqual(@as(i32, -1), cl.out_fd);
     try std.testing.expect(c.posix_sys.isatty(cl.fd) != 0);
     try std.testing.expectEqualStrings(tty_name[0..tty_len], cl.name.?);
+}
+
+test "server_client_finalize_identify leaves control stdin paused until control_ready" {
+    const old_base = proc_mod.libevent;
+    proc_mod.libevent = os_mod.osdep_event_init();
+    defer {
+        c.libevent.event_base_free(proc_mod.libevent.?);
+        proc_mod.libevent = old_base;
+    }
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    const pipe_fds = try std.posix.pipe();
+
+    var cl = T.Client{
+        .pid = 88,
+        .fd = pipe_fds[0],
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL,
+    };
+    cl.tty = .{ .client = &cl };
+    defer {
+        if (cl.control_read_event) |ev| {
+            _ = c.libevent.event_del(ev);
+            c.libevent.event_free(ev);
+            cl.control_read_event = null;
+        }
+        control.control_stop(&cl);
+        cl.control_input_buf.deinit(xm.allocator);
+        if (cl.fd != -1) _ = c.posix_sys.close(cl.fd);
+        _ = c.posix_sys.close(pipe_fds[1]);
+        deferFreeClientIdentifyState(&cl);
+    }
+
+    server_client_finalize_identify(&cl);
+    try std.testing.expect(cl.control_read_event != null);
+    try std.testing.expect(!cl.control_ready_flag);
+
+    _ = try std.posix.write(pipe_fds[1], "list-sessions\n");
+    _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+    try std.testing.expect(!cmdq_mod.cmdq_has_pending(&cl));
+
+    control.control_ready(&cl);
+    _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+    try std.testing.expect(cmdq_mod.cmdq_has_pending(&cl));
 }
 
 test "server_client_open rejects non-terminal clients but accepts reduced local-terminal path" {

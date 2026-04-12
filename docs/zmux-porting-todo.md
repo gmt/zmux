@@ -11,6 +11,6 @@ Live tmux-parity gaps only.
 - Do not put Zig cleanup, refactors, naming work, type-shape cleanup, or API
   cleanup here. That belongs in `docs/zig-porting-debt.md`.
 - Prefer one section per gap with three bullets:
-  - `tmux:` what behavior exists upstream
-  - `zmux:` what is currently missing or approximate
-  - `likely files:` where the repair probably lives
+   - `tmux:` what behavior exists upstream
+   - `zmux:` what is currently missing or approximate
+   - `likely files:` where the repair probably lives

@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -82,22 +83,67 @@ def repo_head(root: pathlib.Path) -> str:
     return result.stdout.strip()
 
 
+def sanitize_branch_component(name: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-/")
+    return value or "session-group-lab"
+
+
+def default_branch_name(worktree: pathlib.Path) -> str:
+    return f"lab/{sanitize_branch_component(worktree.name)}"
+
+
+def worktree_branch(worktree: pathlib.Path) -> str | None:
+    result = run(["git", "branch", "--show-current"], cwd=worktree, capture=True)
+    branch = result.stdout.strip()
+    return branch or None
+
+
+def branch_exists(repo_root: pathlib.Path, branch: str) -> bool:
+    result = run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo_root,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def worktree_exists(worktree: pathlib.Path) -> bool:
     return (worktree / ".git").exists()
 
 
-def ensure_worktree(repo_root: pathlib.Path, worktree: pathlib.Path) -> None:
+def ensure_worktree(repo_root: pathlib.Path, worktree: pathlib.Path, branch: str) -> str:
     if worktree_exists(worktree):
-        return
+        current_branch = worktree_branch(worktree)
+        if current_branch is not None:
+            return current_branch
+        if worktree_dirty(worktree):
+            die(f"existing detached worktree is dirty: {worktree}")
+        try:
+            if branch_exists(repo_root, branch):
+                run(["git", "checkout", branch], cwd=worktree)
+            else:
+                run(["git", "checkout", "-b", branch], cwd=worktree)
+        except subprocess.CalledProcessError:
+            die(f"unable to attach {worktree} to branch {branch!r}; pass --branch to choose a different breadcrumb")
+        return branch
+
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "worktree", "add", "--detach", str(worktree), "HEAD"], cwd=repo_root)
+    try:
+        if branch_exists(repo_root, branch):
+            run(["git", "worktree", "add", str(worktree), branch], cwd=repo_root)
+        else:
+            run(["git", "worktree", "add", "-b", branch, str(worktree), "HEAD"], cwd=repo_root)
+    except subprocess.CalledProcessError:
+        die(f"unable to create worktree {worktree} on branch {branch!r}; pass --branch to choose a different breadcrumb")
+    return branch
 
 
-def write_manifest(repo_root: pathlib.Path, artifact_root: pathlib.Path, worktree: pathlib.Path) -> None:
+def write_manifest(repo_root: pathlib.Path, artifact_root: pathlib.Path, worktree: pathlib.Path, branch: str) -> None:
     payload = {
         "repo_root": str(repo_root),
         "artifact_root": str(artifact_root),
         "worktree": str(worktree),
+        "branch": branch,
         "head": repo_head(repo_root),
     }
     manifest_path(artifact_root).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -288,11 +334,13 @@ def phase_metadata(
 def cmd_setup(args: argparse.Namespace) -> int:
     artifact_root = args.artifact_root.resolve()
     worktree = args.worktree.resolve()
+    requested_branch = args.branch or default_branch_name(worktree)
     ensure_artifact_dirs(artifact_root)
-    ensure_worktree(ROOT_DIR, worktree)
-    write_manifest(ROOT_DIR, artifact_root, worktree)
+    branch = ensure_worktree(ROOT_DIR, worktree, requested_branch)
+    write_manifest(ROOT_DIR, artifact_root, worktree, branch)
     print(f"artifact root: {artifact_root}")
     print(f"worktree: {worktree}")
+    print(f"branch: {branch}")
     return 0
 
 
@@ -302,6 +350,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(json.dumps(manifest, indent=2, sort_keys=True))
     worktree = pathlib.Path(manifest["worktree"])
     status = run(["git", "status", "--short"], cwd=worktree, capture=True)
+    branch = worktree_branch(worktree)
+    print("--- worktree branch ---")
+    print(branch or "(detached HEAD)")
     print("--- worktree status ---")
     print(status.stdout.rstrip() or "(clean)")
     current = current_phase_path(artifact_root)
@@ -592,6 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     setup = sub.add_parser("setup")
+    setup.add_argument("--branch")
     setup.set_defaults(func=cmd_setup)
 
     status = sub.add_parser("status")

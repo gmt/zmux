@@ -20,7 +20,18 @@ python3 regress/session-group-lab.py status
 Defaults:
 
 - worktree: `../zmux-session-group-lab`
+- branch: `lab/zmux-session-group-lab`
 - artifact root: `/tmp/zmux-session-group-lab`
+
+`setup` now puts the disposable worktree on a real local branch instead of a
+detached `HEAD`. Pass `--branch <name>` if you want a different breadcrumb:
+
+```sh
+python3 regress/session-group-lab.py setup --branch lab/session-group-race
+```
+
+If you already have an older detached lab worktree, rerunning `setup` will
+attach it to the requested branch as long as that worktree is clean.
 
 ## Driver
 
@@ -128,6 +139,8 @@ python3 regress/session-group-lab.py teardown --purge-artifacts
 
 `teardown` saves the current tracked diff as a timestamped patch under
 `/tmp/zmux-session-group-lab/patches/` before removing the worktree.
+It does not delete the local branch, so you keep a breadcrumb back to the
+investigation even after the disposable worktree is gone.
 
 ## Expected Flow
 

@@ -95,9 +95,11 @@ pub fn status_redraw(c: *T.Client) bool {
     }
 
     const width = c.tty.sx;
+    const resized = c.status.screen == null or
+        c.status.screen.?.grid.sx != width or
+        c.status.screen.?.grid.sy != lines;
     const screen = ensure_base_screen(c, width, lines);
-    if (screen.grid.sx != width or screen.grid.sy != lines) {
-        screen_mod.screen_resize(screen, width, lines, false);
+    if (resized) {
         force = true;
     }
 
@@ -1277,6 +1279,66 @@ test "status_init allocates screen and status_redraw detects style changes" {
     // Same content again should be stable
     const fourth = status_redraw(&client);
     try std.testing.expect(!fourth);
+}
+
+test "status_redraw forces repaint when the client width grows" {
+    const env_mod = @import("environ.zig");
+    const grid_mod = @import("grid.zig");
+    const sess = @import("session.zig");
+    const win_mod = @import("window.zig");
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    const session_opts = opts.options_create(opts.global_s_options);
+    opts.options_set_string(session_opts, false, "status-style", "bg=green");
+    opts.options_set_array(session_opts, "status-format", &.{"short"});
+    const session_env = env_mod.environ_create();
+    const s = sess.session_create(null, "status-grow", "/", session_env, session_opts, null);
+    defer sess.session_destroy(s, false, "test");
+
+    const w = win_mod.window_create(20, 3, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+    const wp = win_mod.window_add_pane(w, null, 20, 3);
+    w.active = wp;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = s,
+    };
+    defer {
+        status_free(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 20, .sy = 4 };
+
+    status_init(&client);
+    try std.testing.expect(status_redraw(&client));
+
+    client.tty.sx = 40;
+    try std.testing.expect(status_redraw(&client));
+    try std.testing.expectEqual(@as(u32, 40), client.status.screen.?.grid.sx);
+
+    var first: T.GridCell = undefined;
+    var tail: T.GridCell = undefined;
+    grid_mod.get_cell(client.status.screen.?.grid, 0, 0, &first);
+    grid_mod.get_cell(client.status.screen.?.grid, 0, 39, &tail);
+    try std.testing.expectEqual(first.bg, tail.bg);
+    try std.testing.expectEqual(first.attr, tail.attr);
 }
 
 test "status_prompt_complete matches command names and returns common prefix" {

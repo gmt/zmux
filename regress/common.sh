@@ -23,20 +23,44 @@ SMOKE_ROOT_DIR=$(CDPATH= cd -- "$SMOKE_SCRIPT_DIR/.." && pwd)
 
 : "${TEST_ZMUX:=$SMOKE_ROOT_DIR/zig-out/bin/zmux}"
 : "${TEST_ZMUX_HELPER:=$SMOKE_ROOT_DIR/zig-out/bin/hello-shell-ansi}"
+: "${TEST_ORACLE_TMUX:=/usr/bin/tmux}"
 : "${SMOKE_ARTIFACT_ROOT:=/tmp}"
 : "${SMOKE_MATRIX:=$SMOKE_SCRIPT_DIR/oracle-command-matrix.tsv}"
+
+smoke_setup_path_shims() {
+    mkdir -p "$SMOKE_BIN_DIR" "$SMOKE_TMPDIR"
+    ln -sf "$TEST_ZMUX" "$SMOKE_BIN_DIR/zmux"
+    if [ -x "$TEST_ORACLE_TMUX" ]; then
+        ln -sf "$TEST_ORACLE_TMUX" "$SMOKE_BIN_DIR/tmux"
+    fi
+}
+
+smoke_env_shell() {
+    if [ -n "${SMOKE_SELECTED_SHELL-}" ] && [ -x "$SMOKE_SELECTED_SHELL" ]; then
+        printf '%s\n' "$SMOKE_SELECTED_SHELL"
+        return 0
+    fi
+    if [ -n "${SHELL-}" ] && [ -x "$SHELL" ]; then
+        printf '%s\n' "$SHELL"
+        return 0
+    fi
+    smoke_find_real_shell
+}
 
 smoke_init() {
     TEST_NAME=${1:-smoke}
     TEST_TMPDIR=$(mktemp -d "${SMOKE_ARTIFACT_ROOT%/}/zmux-${TEST_NAME}.XXXXXX") || exit 1
     TEST_SOCKET="$TEST_TMPDIR/socket"
     SMOKE_HOME="$TEST_TMPDIR/home"
+    SMOKE_BIN_DIR="$TEST_TMPDIR/bin"
+    SMOKE_TMPDIR="$TEST_TMPDIR/tmp"
     mkdir -p "$SMOKE_HOME/.config" "$SMOKE_HOME/.cache" "$SMOKE_HOME/.local/share"
+    smoke_setup_path_shims
     SMOKE_ENV_MODE=ambient
     SMOKE_SELECTED_SHELL=
     SMOKE_HELPER_MODE=
     SMOKE_HELPER_PATH=
-    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH
+    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH
     trap 'smoke_cleanup' 0 1 2 3 15
 }
 
@@ -87,17 +111,27 @@ smoke_use_real_shell() {
 }
 
 smoke_exec_env() {
+    shell=$(smoke_env_shell) || shell=/bin/sh
     if [ "${SMOKE_ENV_MODE:-ambient}" = ambient ]; then
         env \
-            PATH="$PATH" \
+            PATH="$SMOKE_BIN_DIR:/bin:/usr/bin" \
             TERM="$TERM" \
             COLORTERM="$COLORTERM" \
+            HOME="$SMOKE_HOME" \
+            USER=smoke \
+            LOGNAME=smoke \
+            XDG_CONFIG_HOME="$SMOKE_HOME/.config" \
+            XDG_CACHE_HOME="$SMOKE_HOME/.cache" \
+            XDG_DATA_HOME="$SMOKE_HOME/.local/share" \
+            TMUX_TMPDIR="$SMOKE_TMPDIR" \
+            ZMUX_TMPDIR="$SMOKE_TMPDIR" \
+            SHELL="$shell" \
             "$@"
         return $?
     fi
 
     env -i \
-        PATH=/bin:/usr/bin \
+        PATH="$SMOKE_BIN_DIR:/bin:/usr/bin" \
         TERM="$TERM" \
         COLORTERM="$COLORTERM" \
         LANG=C \
@@ -109,7 +143,9 @@ smoke_exec_env() {
         XDG_CONFIG_HOME="$SMOKE_HOME/.config" \
         XDG_CACHE_HOME="$SMOKE_HOME/.cache" \
         XDG_DATA_HOME="$SMOKE_HOME/.local/share" \
-        SHELL="$SMOKE_SELECTED_SHELL" \
+        TMUX_TMPDIR="$SMOKE_TMPDIR" \
+        ZMUX_TMPDIR="$SMOKE_TMPDIR" \
+        SHELL="$shell" \
         ZMUX_SMOKE_HELPER_MODE="$SMOKE_HELPER_MODE" \
         ZMUX_SMOKE_HELPER_PATH="$SMOKE_HELPER_PATH" \
         "$@"

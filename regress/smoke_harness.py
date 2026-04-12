@@ -206,6 +206,8 @@ class SmokeHarness:
             home_dir=self.artifact_dir / "home",
             helper_mode=helper_mode,
             helper_path=helper_path,
+            zmux_binary=self.binary_argv[0],
+            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
         )
 
     def cleanup(self) -> None:

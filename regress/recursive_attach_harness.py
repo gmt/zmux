@@ -58,7 +58,12 @@ class RecursiveAttachHarness:
         self.zmux_binary = zmux_binary
         self.oracle_binary = oracle_binary
         self.timeout_seconds = timeout_seconds
-        self.env = smoke_env.build_smoke_env(mode=os.environ.get("SMOKE_ENV_MODE", "ambient"), home_dir=self.artifact_dir / "home")
+        self.env = smoke_env.build_smoke_env(
+            mode=os.environ.get("SMOKE_ENV_MODE", "ambient"),
+            home_dir=self.artifact_dir / "home",
+            zmux_binary=os.environ.get("TEST_ZMUX"),
+            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
+        )
 
     def root_base_args(self, binary: str, socket_path: pathlib.Path) -> list[str]:
         return shlex.split(binary) + ["-S", str(socket_path), "-f/dev/null"]
@@ -182,7 +187,12 @@ class RecursiveAttachHarness:
 
 def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_seconds: float) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
-    env = smoke_env.build_smoke_env(mode=os.environ.get("SMOKE_ENV_MODE", "ambient"), home_dir=output_json.parent / "home")
+    env = smoke_env.build_smoke_env(
+        mode=os.environ.get("SMOKE_ENV_MODE", "ambient"),
+        home_dir=output_json.parent / "home",
+        zmux_binary=os.environ.get("TEST_ZMUX"),
+        oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
+    )
     socket_path = output_json.parent / "inner.socket"
     base = shlex.split(inner_binary) + ["-S", str(socket_path), "-f/dev/null"]
 

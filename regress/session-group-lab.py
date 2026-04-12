@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 
 
@@ -42,6 +43,7 @@ def die(message: str) -> "NoReturn":
 def lab_paths(artifact_root: pathlib.Path) -> dict[str, pathlib.Path]:
     return {
         "root": artifact_root,
+        "crash": artifact_root / "crash",
         "gdb": artifact_root / "gdb",
         "strace": artifact_root / "strace",
         "patches": artifact_root / "patches",
@@ -59,6 +61,14 @@ def current_phase_path(artifact_root: pathlib.Path) -> pathlib.Path:
 
 def parallel_session_path(artifact_root: pathlib.Path) -> pathlib.Path:
     return artifact_root / "parallel-session.json"
+
+
+def latest_crash_path(artifact_root: pathlib.Path) -> pathlib.Path:
+    return lab_paths(artifact_root)["crash"] / "latest.json"
+
+
+def crash_analysis_path(artifact_root: pathlib.Path) -> pathlib.Path:
+    return lab_paths(artifact_root)["crash"] / "analysis.txt"
 
 
 def ensure_artifact_dirs(artifact_root: pathlib.Path) -> None:
@@ -81,6 +91,10 @@ def run(
         kwargs["capture_output"] = True
         kwargs["text"] = True
     return subprocess.run(cmd, **kwargs)
+
+
+def write_json(path: pathlib.Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def repo_head(root: pathlib.Path) -> str:
@@ -217,47 +231,174 @@ def line_number(path: pathlib.Path, needle: str) -> int:
     die(f"unable to find marker {needle!r} in {path}")
 
 
-def write_zmux_gdb_script(worktree: pathlib.Path, artifact_root: pathlib.Path, mode: str) -> pathlib.Path:
-    script_path = lab_paths(artifact_root)["gdb"] / f"{phase_tag('phase1-zmux-gdb', mode)}.gdb"
+def anchor_locations(worktree: pathlib.Path) -> dict[str, dict[str, str]]:
     control_line = line_number(worktree / "src" / "control.zig", "pub fn control_read_callback(cl: *T.Client, line: []const u8) void {")
     new_session_line = line_number(worktree / "src" / "cmd-new-session.zig", "fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
     switch_line = line_number(worktree / "src" / "cmd-switch-client.zig", "fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
     select_line = line_number(worktree / "src" / "cmd-select-window.zig", "fn exec_selectw(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {")
+    return {
+        "control_read_callback": {
+            "zmux": f"{worktree / 'src' / 'control.zig'}:{control_line}",
+            "tmux": "control_read_callback",
+        },
+        "exec_new_session": {
+            "zmux": f"{worktree / 'src' / 'cmd-new-session.zig'}:{new_session_line}",
+            "tmux": "cmd_new_session_exec",
+        },
+        "server_client_set_session": {
+            "zmux": "server_client_set_session",
+            "tmux": "server_client_set_session",
+        },
+        "resolve_current_state": {
+            "zmux": "resolve_current_state",
+            "tmux": "cmd_find_target",
+        },
+        "cmd_find_target": {
+            "zmux": "cmd_find_target",
+            "tmux": "cmd_find_target",
+        },
+        "cmd_switch_client": {
+            "zmux": f"{worktree / 'src' / 'cmd-switch-client.zig'}:{switch_line}",
+            "tmux": "cmd_switch_client_exec",
+        },
+        "cmd_select_window": {
+            "zmux": f"{worktree / 'src' / 'cmd-select-window.zig'}:{select_line}",
+            "tmux": "cmd_select_window_exec",
+        },
+    }
+
+
+def default_anchor_order() -> list[str]:
+    return [
+        "control_read_callback",
+        "exec_new_session",
+        "cmd_switch_client",
+        "cmd_select_window",
+        "server_client_set_session",
+        "resolve_current_state",
+        "cmd_find_target",
+    ]
+
+
+def crash_comment_lines(side: str, analysis: dict[str, object] | None, anchor_name: str | None) -> list[str]:
+    if not analysis:
+        return []
+
+    lines = ["echo Crash replay context loaded.\\n"]
+    crash_signal = analysis.get("signal")
+    crash_site = analysis.get("crash_site")
+    selected_anchor = anchor_name or analysis.get("default_anchor")
+    if crash_signal:
+        lines.append(f"echo Signal: {crash_signal}\\n")
+    if crash_site:
+        lines.append(f"echo Crash site: {crash_site}\\n")
+    if selected_anchor:
+        lines.append(f"echo Replay anchor: {selected_anchor}\\n")
+
+    selected = None
+    if side == "zmux":
+        selected = analysis.get("app_frame") or analysis.get("caller_frame")
+    else:
+        selected = analysis.get("tmux_counterpart")
+
+    if isinstance(selected, dict):
+        func = selected.get("function")
+        location = selected.get("location")
+        if func:
+            lines.append(f"echo Frame: {func}\\n")
+        if location:
+            lines.append(f"echo Location: {location}\\n")
+
+    excerpt = analysis.get("conditional_excerpt")
+    if isinstance(excerpt, list) and excerpt:
+        lines.append("echo Captured locals/args follow in comments.\\n")
+        for item in excerpt[:4]:
+            safe = str(item).replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'echo {safe}\\n')
+        lines.append("echo Example condition template: break <bpnum> if /* use captured values above */\\n")
+    return lines
+
+
+def write_zmux_gdb_script(
+    worktree: pathlib.Path,
+    artifact_root: pathlib.Path,
+    mode: str,
+    *,
+    anchor_name: str | None = None,
+    analysis: dict[str, object] | None = None,
+) -> pathlib.Path:
+    script_path = lab_paths(artifact_root)["gdb"] / f"{phase_tag('phase1-zmux-gdb', mode)}.gdb"
+    anchors = anchor_locations(worktree)
     lines = [
         "set pagination off",
         "set breakpoint pending on",
         "set print pretty on",
+        "set debuginfod enabled off",
         "handle SIGPIPE nostop noprint pass",
         "echo Loaded zmux session-group handoff breakpoint set.\\n",
         "echo Recommended on stop: bt 8 ; info args ; info locals\\n",
-        f"break {worktree / 'src' / 'control.zig'}:{control_line}",
-        f"break {worktree / 'src' / 'cmd-new-session.zig'}:{new_session_line}",
-        f"break {worktree / 'src' / 'cmd-switch-client.zig'}:{switch_line}",
-        f"break {worktree / 'src' / 'cmd-select-window.zig'}:{select_line}",
-        "break server_client_set_session",
-        "break resolve_current_state",
-        "break cmd_find_target",
     ]
+    lines.extend(crash_comment_lines("zmux", analysis, anchor_name))
+    if anchor_name is None and analysis is None:
+        for key in default_anchor_order():
+            lines.append(f"break {anchors[key]['zmux']}")
+    else:
+        selected = anchor_name
+        if selected is None and analysis is not None:
+            value = analysis.get("default_anchor")
+            selected = str(value) if value else None
+        if selected and selected in anchors:
+            lines.append(f"tbreak {anchors[selected]['zmux']}")
+        app_frame = analysis.get("app_frame") if analysis else None
+        caller_frame = analysis.get("caller_frame") if analysis else None
+        for frame in (app_frame, caller_frame):
+            if isinstance(frame, dict):
+                frame_anchor = frame.get("anchor")
+                if isinstance(frame_anchor, str) and frame_anchor in anchors:
+                    lines.append(f"tbreak {anchors[frame_anchor]['zmux']}")
+    lines.append("echo # condition example: break <bpnum> if /* use captured values above */\\n")
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return script_path
 
 
-def write_tmux_gdb_script(artifact_root: pathlib.Path, mode: str) -> pathlib.Path:
+def write_tmux_gdb_script(
+    worktree: pathlib.Path,
+    artifact_root: pathlib.Path,
+    mode: str,
+    *,
+    anchor_name: str | None = None,
+    analysis: dict[str, object] | None = None,
+) -> pathlib.Path:
     script_path = lab_paths(artifact_root)["gdb"] / f"{phase_tag('phase2-tmux-gdb', mode)}.gdb"
+    anchors = anchor_locations(worktree)
     lines = [
         "set pagination off",
         "set breakpoint pending on",
         "set print pretty on",
+        "set debuginfod enabled off",
         "handle SIGPIPE nostop noprint pass",
         "echo Loaded tmux session-group handoff breakpoint set.\\n",
         "echo Recommended on stop: bt 8 ; info args ; info locals\\n",
-        "break control_read_callback",
-        "break cmd_new_session_exec",
-        "break cmd_switch_client_exec",
-        "break cmd_select_window_exec",
-        "break server_client_set_session",
-        "break cmd_find_target",
     ]
+    lines.extend(crash_comment_lines("tmux", analysis, anchor_name))
+    if anchor_name is None and analysis is None:
+        for key in default_anchor_order():
+            lines.append(f"break {anchors[key]['tmux']}")
+    else:
+        selected = anchor_name
+        if selected is None and analysis is not None:
+            value = analysis.get("default_anchor")
+            selected = str(value) if value else None
+        if selected and selected in anchors:
+            lines.append(f"tbreak {anchors[selected]['tmux']}")
+        counterpart = analysis.get("tmux_counterpart") if analysis else None
+        if isinstance(counterpart, dict):
+            counterpart_anchor = counterpart.get("anchor")
+            if isinstance(counterpart_anchor, str) and counterpart_anchor in anchors:
+                lines.append(f"tbreak {anchors[counterpart_anchor]['tmux']}")
+        elif analysis:
+            lines.append("echo No direct tmux counterpart was inferred for the crash frame.\\n")
+    lines.append("echo # condition example: break <bpnum> if /* use captured values above */\\n")
     script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return script_path
 
@@ -411,6 +552,245 @@ def tmux_split_window(target: str) -> str:
     return pane_id
 
 
+def coredumpctl_usable() -> bool:
+    if shutil.which("coredumpctl") is None:
+        return False
+    result = subprocess.run(
+        ["coredumpctl", "--no-pager", "--json=short", "list", "-n", "1"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def coredump_entries(binary: pathlib.Path) -> list[dict[str, object]]:
+    result = subprocess.run(
+        ["coredumpctl", "--no-pager", "--json=short", "list", f"EXE={binary}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    stdout = result.stdout.strip()
+    if not stdout:
+        return []
+    data = json.loads(stdout)
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def coredump_key(entry: dict[str, object]) -> tuple[object, ...]:
+    return (
+        entry.get("time"),
+        entry.get("pid"),
+        entry.get("sig"),
+        entry.get("exe"),
+    )
+
+
+def coredump_info_text(entry: dict[str, object]) -> str:
+    pid = str(entry["pid"])
+    exe = str(entry["exe"])
+    result = run(
+        ["coredumpctl", "--no-pager", "info", f"PID={pid}", f"EXE={exe}"],
+        capture=True,
+    )
+    return result.stdout
+
+
+def dump_coredump(entry: dict[str, object], core_path: pathlib.Path) -> None:
+    subprocess.run(
+        [
+            "coredumpctl",
+            "--no-pager",
+            "dump",
+            "-o",
+            str(core_path),
+            f"PID={entry['pid']}",
+            f"EXE={entry['exe']}",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def wait_for_socket(socket: pathlib.Path, proc: subprocess.Popen[str] | None = None, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if socket.exists():
+            return True
+        if proc is not None and proc.poll() is not None:
+            return False
+        time.sleep(0.05)
+    return socket.exists()
+
+
+def parse_driver_temp_dir(stderr_text: str) -> str | None:
+    match = re.search(r"artifacts kept in (\S+)", stderr_text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def gdb_batch_commands(extra: list[str]) -> list[str]:
+    commands = [
+        "gdb",
+        "-q",
+        "-batch",
+        "-iex",
+        "set debuginfod enabled off",
+        "-iex",
+        "set pagination off",
+        "-iex",
+        "set confirm off",
+        "-ex",
+        "handle SIGPIPE nostop noprint pass",
+    ]
+    for cmd in extra:
+        commands.extend(["-ex", cmd])
+    return commands
+
+
+def parse_gdb_frames(text: str) -> list[dict[str, object]]:
+    frames: list[dict[str, object]] = []
+    pattern = re.compile(r"^#(?P<index>\d+)\s+(?P<body>.*)$")
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        body = match.group("body")
+        func_match = re.search(r"\bin\s+([^(]+)", body)
+        if func_match:
+            function = func_match.group(1).strip()
+        else:
+            function = body.split("(", 1)[0].strip()
+        frames.append(
+            {
+                "index": int(match.group("index")),
+                "function": function,
+                "raw": line,
+            }
+        )
+    return frames
+
+
+def gdb_frame_snapshot(binary: pathlib.Path, frame_index: int, core_path: pathlib.Path | None = None) -> str:
+    cmd = gdb_batch_commands(
+        [
+            f"frame {frame_index}",
+            "info line",
+            "info args",
+            "info locals",
+        ]
+    )
+    cmd.extend([str(binary)])
+    if core_path is not None:
+        cmd.append(str(core_path))
+    result = run(cmd, capture=True)
+    return result.stdout
+
+
+def frame_location_from_snapshot(snapshot: str) -> str | None:
+    for line in snapshot.splitlines():
+        match = re.search(r'Line \d+ of "([^"]+)"', line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def frame_anchor(function: str, location: str | None) -> str | None:
+    if location:
+        path = pathlib.Path(location)
+        name = path.name
+        if name == "control.zig":
+            return "control_read_callback"
+        if name == "cmd-new-session.zig":
+            return "exec_new_session"
+        if name == "cmd-switch-client.zig":
+            return "cmd_switch_client"
+        if name == "cmd-select-window.zig":
+            return "cmd_select_window"
+        if name == "cmd-find.zig":
+            if "resolve_current_state" in function:
+                return "resolve_current_state"
+            return "cmd_find_target"
+        if name == "server-client.zig":
+            return "server_client_set_session"
+    if "control_read_callback" in function:
+        return "control_read_callback"
+    if "exec_new_session" in function or "cmd_new_session_exec" in function:
+        return "exec_new_session"
+    if "server_client_set_session" in function:
+        return "server_client_set_session"
+    if "resolve_current_state" in function:
+        return "resolve_current_state"
+    if "cmd_find_target" in function:
+        return "cmd_find_target"
+    if "cmd_switch_client" in function:
+        return "cmd_switch_client"
+    if "cmd_select_window" in function or "exec_selectw" in function:
+        return "cmd_select_window"
+    return None
+
+
+def runtime_frame(function: str, raw: str, location: str | None) -> bool:
+    if location and "/src/" in location:
+        return False
+    runtime_prefixes = (
+        "pthread_",
+        "raise",
+        "abort",
+        "__libc_start_main",
+        "_start",
+        "posix.abort",
+        "debug.defaultPanic",
+        "callMain",
+        "start.main",
+    )
+    if function.startswith(runtime_prefixes):
+        return True
+    return " from /usr/lib/" in raw or "libc.so" in raw
+
+
+def extract_conditional_excerpt(snapshot: str) -> list[str]:
+    lines: list[str] = []
+    for line in snapshot.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[New LWP "):
+            continue
+        if stripped.startswith("[Thread debugging using "):
+            continue
+        if stripped.startswith("Using host libthread_db library"):
+            continue
+        if stripped.startswith("Core was generated by "):
+            continue
+        if "debuginfod" in stripped.lower():
+            continue
+        if stripped.startswith("This GDB supports auto-downloading debuginfo"):
+            continue
+        if stripped.startswith("Enable debuginfod for this session?"):
+            continue
+        if stripped.startswith("No locals.") or stripped.startswith("No arguments."):
+            continue
+        if stripped.startswith("Stack level") or stripped.startswith("Line "):
+            continue
+        lines.append(stripped)
+    return lines[:6]
+
+
+def latest_crash_manifest(artifact_root: pathlib.Path) -> dict[str, object]:
+    path = latest_crash_path(artifact_root)
+    if not path.exists():
+        die("no crash manifest; run capture-crash first")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def stop_parallel_session(artifact_root: pathlib.Path) -> list[str]:
     messages: list[str] = []
     path = parallel_session_path(artifact_root)
@@ -540,6 +920,359 @@ def start_parallel_tmux_session(
     run(["tmux", "select-window", "-t", f"{session_name}:gdb"])
 
 
+def crash_run_dir(artifact_root: pathlib.Path, run_index: int) -> pathlib.Path:
+    return lab_paths(artifact_root)["crash"] / f"run-{run_index:03d}"
+
+
+def crash_driver_command(worktree: pathlib.Path, binary: pathlib.Path, socket: pathlib.Path, artifact_root: pathlib.Path, mode: str) -> list[str]:
+    cmd = driver_command(worktree, binary, socket, artifact_root, mode)
+    cmd.append("--keep-temp")
+    return cmd
+
+
+def coredump_capture(
+    *,
+    worktree: pathlib.Path,
+    artifact_root: pathlib.Path,
+    binary: pathlib.Path,
+    mode: str,
+    runs: int,
+) -> dict[str, object]:
+    baseline = {coredump_key(entry) for entry in coredump_entries(binary)}
+    crash_root = lab_paths(artifact_root)["crash"]
+    attempts: list[dict[str, object]] = []
+    for run_index in range(1, runs + 1):
+        run_dir = crash_run_dir(artifact_root, run_index)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        socket = run_dir / "server.sock"
+        driver_cmd = crash_driver_command(worktree, binary, socket, artifact_root, mode)
+        started_at = datetime.now(timezone.utc).isoformat()
+        result = subprocess.run(driver_cmd, cwd=worktree, capture_output=True, text=True)
+        stdout_path = run_dir / "driver.stdout"
+        stderr_path = run_dir / "driver.stderr"
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
+        kill_server(binary, socket)
+        entries = coredump_entries(binary)
+        new_entries = [entry for entry in entries if coredump_key(entry) not in baseline]
+        if new_entries:
+            baseline.update(coredump_key(entry) for entry in new_entries)
+        attempt: dict[str, object] = {
+            "run": run_index,
+            "started_at": started_at,
+            "returncode": result.returncode,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "socket": str(socket),
+        }
+        driver_temp_dir = parse_driver_temp_dir(result.stderr)
+        if driver_temp_dir:
+            attempt["driver_temp_dir"] = driver_temp_dir
+        if new_entries:
+            entry = sorted(new_entries, key=lambda item: int(item.get("time", 0)))[-1]
+            info_text = coredump_info_text(entry)
+            info_path = run_dir / "coredumpctl-info.txt"
+            info_path.write_text(info_text, encoding="utf-8")
+            core_path = crash_root / "latest.core"
+            dump_coredump(entry, core_path)
+            attempt["coredump"] = entry
+            manifest = {
+                "backend": "coredumpctl",
+                "binary": str(binary),
+                "mode": mode,
+                "runs": runs,
+                "crash_found": True,
+                "run": run_index,
+                "run_dir": str(run_dir),
+                "driver_command": shlex.join(driver_cmd),
+                "driver_temp_dir": driver_temp_dir,
+                "driver_stdout": str(stdout_path),
+                "driver_stderr": str(stderr_path),
+                "socket": str(socket),
+                "signal": entry.get("sig"),
+                "coredump": entry,
+                "coredump_info": str(info_path),
+                "core_path": str(core_path),
+                "attempts": attempts + [attempt],
+            }
+            write_json(latest_crash_path(artifact_root), manifest)
+            return manifest
+        attempts.append(attempt)
+
+    manifest = {
+        "backend": "coredumpctl",
+        "binary": str(binary),
+        "mode": mode,
+        "runs": runs,
+        "crash_found": False,
+        "attempts": attempts,
+    }
+    write_json(latest_crash_path(artifact_root), manifest)
+    return manifest
+
+
+def gdb_capture(
+    *,
+    worktree: pathlib.Path,
+    artifact_root: pathlib.Path,
+    binary: pathlib.Path,
+    mode: str,
+    runs: int,
+) -> dict[str, object]:
+    attempts: list[dict[str, object]] = []
+    for run_index in range(1, runs + 1):
+        run_dir = crash_run_dir(artifact_root, run_index)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        socket = run_dir / "server.sock"
+        gdb_output = run_dir / "gdb-batch.txt"
+        driver_cmd = crash_driver_command(worktree, binary, socket, artifact_root, mode)
+        started_at = datetime.now(timezone.utc).isoformat()
+        gdb_cmd = gdb_batch_commands(
+            [
+                "run",
+                "echo \\n--- crash backtrace ---\\n",
+                "thread apply all bt full",
+                "echo \\n--- end crash backtrace ---\\n",
+            ]
+        )
+        gdb_cmd.extend(
+            [
+                "--args",
+                str(binary),
+                "-D",
+                "-vv",
+                "-f/dev/null",
+                "-S",
+                str(socket),
+            ]
+        )
+        with gdb_output.open("w", encoding="utf-8") as handle:
+            proc = subprocess.Popen(
+                gdb_cmd,
+                cwd=worktree,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if not wait_for_socket(socket, proc):
+                proc.wait(timeout=5)
+                gdb_text = gdb_output.read_text(encoding="utf-8", errors="replace")
+                attempt = {
+                    "run": run_index,
+                    "started_at": started_at,
+                    "gdb_output": str(gdb_output),
+                    "socket": str(socket),
+                    "startup_failed": True,
+                }
+                attempts.append(attempt)
+                continue
+            result = subprocess.run(driver_cmd, cwd=worktree, capture_output=True, text=True)
+            stdout_path = run_dir / "driver.stdout"
+            stderr_path = run_dir / "driver.stderr"
+            stdout_path.write_text(result.stdout, encoding="utf-8")
+            stderr_path.write_text(result.stderr, encoding="utf-8")
+            kill_server(binary, socket)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+        gdb_text = gdb_output.read_text(encoding="utf-8", errors="replace")
+        signal_match = re.search(r"Program terminated with signal ([A-Z0-9]+)", gdb_text)
+        attempt = {
+            "run": run_index,
+            "started_at": started_at,
+            "returncode": result.returncode,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "socket": str(socket),
+            "gdb_output": str(gdb_output),
+        }
+        driver_temp_dir = parse_driver_temp_dir(result.stderr)
+        if driver_temp_dir:
+            attempt["driver_temp_dir"] = driver_temp_dir
+        if signal_match:
+            manifest = {
+                "backend": "gdb-batch",
+                "binary": str(binary),
+                "mode": mode,
+                "runs": runs,
+                "crash_found": True,
+                "run": run_index,
+                "run_dir": str(run_dir),
+                "driver_command": shlex.join(driver_cmd),
+                "driver_temp_dir": driver_temp_dir,
+                "driver_stdout": str(stdout_path),
+                "driver_stderr": str(stderr_path),
+                "socket": str(socket),
+                "signal": signal_match.group(1),
+                "gdb_output": str(gdb_output),
+                "attempts": attempts + [attempt],
+            }
+            write_json(latest_crash_path(artifact_root), manifest)
+            return manifest
+        attempts.append(attempt)
+
+    manifest = {
+        "backend": "gdb-batch",
+        "binary": str(binary),
+        "mode": mode,
+        "runs": runs,
+        "crash_found": False,
+        "attempts": attempts,
+    }
+    write_json(latest_crash_path(artifact_root), manifest)
+    return manifest
+
+
+def capture_crash_manifest(worktree: pathlib.Path, artifact_root: pathlib.Path, mode: str, runs: int, backend: str) -> dict[str, object]:
+    binary = build_zmux_debug(worktree)
+    if backend == "auto":
+        backend = "coredumpctl" if coredumpctl_usable() else "gdb"
+    if backend == "coredumpctl":
+        return coredump_capture(worktree=worktree, artifact_root=artifact_root, binary=binary, mode=mode, runs=runs)
+    if backend == "gdb":
+        return gdb_capture(worktree=worktree, artifact_root=artifact_root, binary=binary, mode=mode, runs=runs)
+    die(f"unknown crash backend: {backend}")
+
+
+def crash_gdb_backtrace(binary: pathlib.Path, core_path: pathlib.Path | None = None) -> str:
+    cmd = gdb_batch_commands(["bt 32"])
+    cmd.append(str(binary))
+    if core_path is not None:
+        cmd.append(str(core_path))
+    result = run(cmd, capture=True)
+    return result.stdout
+
+
+def crash_gdb_full(binary: pathlib.Path, core_path: pathlib.Path | None = None) -> str:
+    cmd = gdb_batch_commands(["thread apply all bt full"])
+    cmd.append(str(binary))
+    if core_path is not None:
+        cmd.append(str(core_path))
+    result = run(cmd, capture=True)
+    return result.stdout
+
+
+def analyze_crash_manifest(artifact_root: pathlib.Path, manifest: dict[str, object]) -> dict[str, object]:
+    if not manifest.get("crash_found"):
+        die("latest capture did not record a crash")
+
+    binary = pathlib.Path(str(manifest["binary"]))
+    core_path = pathlib.Path(str(manifest["core_path"])) if "core_path" in manifest else None
+    if core_path is not None and not core_path.exists():
+        coredump = manifest.get("coredump")
+        if isinstance(coredump, dict):
+            dump_coredump(coredump, core_path)
+
+    if core_path is not None:
+        bt_text = crash_gdb_backtrace(binary, core_path)
+        full_text = crash_gdb_full(binary, core_path)
+    else:
+        gdb_output_path = pathlib.Path(str(manifest["gdb_output"]))
+        bt_text = gdb_output_path.read_text(encoding="utf-8", errors="replace")
+        full_text = bt_text
+    bt_path = lab_paths(artifact_root)["crash"] / "backtrace.txt"
+    bt_path.write_text(bt_text, encoding="utf-8")
+    full_path = lab_paths(artifact_root)["crash"] / "backtrace-full.txt"
+    full_path.write_text(full_text, encoding="utf-8")
+
+    frames = parse_gdb_frames(bt_text)
+    frame_details: list[dict[str, object]] = []
+    for frame in frames:
+        snapshot = ""
+        location = None
+        if core_path is not None:
+            snapshot = gdb_frame_snapshot(binary, int(frame["index"]), core_path)
+            location = frame_location_from_snapshot(snapshot)
+        anchor = frame_anchor(str(frame["function"]), location)
+        frame_details.append(
+            {
+                **frame,
+                "location": location,
+                "anchor": anchor,
+                "snapshot": snapshot,
+            }
+        )
+
+    app_frame = None
+    for frame in frame_details:
+        if runtime_frame(str(frame["function"]), str(frame["raw"]), frame.get("location")):
+            continue
+        app_frame = frame
+        break
+    if app_frame is None:
+        die("unable to identify application frame from crash backtrace")
+
+    caller_frame = None
+    for frame in frame_details:
+        if int(frame["index"]) == int(app_frame["index"]) + 1:
+            caller_frame = frame
+            break
+
+    default_anchor = app_frame.get("anchor") or (caller_frame.get("anchor") if isinstance(caller_frame, dict) else None)
+    counterpart = None
+    if isinstance(default_anchor, str):
+        tmux_target = anchor_locations(pathlib.Path(load_manifest(artifact_root)["worktree"])).get(default_anchor, {}).get("tmux")
+        if tmux_target:
+            counterpart = {"anchor": default_anchor, "location": tmux_target}
+
+    conditional_excerpt = extract_conditional_excerpt(str(app_frame["snapshot"]))
+    analysis = {
+        "backend": manifest["backend"],
+        "signal": manifest.get("signal"),
+        "binary": str(binary),
+        "core_path": str(core_path) if core_path is not None else None,
+        "backtrace_path": str(bt_path),
+        "backtrace_full_path": str(full_path),
+        "crash_site": str(frame_details[0]["raw"]) if frame_details else None,
+        "app_frame": {
+            "index": app_frame["index"],
+            "function": app_frame["function"],
+            "raw": app_frame["raw"],
+            "location": app_frame.get("location"),
+            "anchor": app_frame.get("anchor"),
+        },
+        "caller_frame": {
+            "index": caller_frame["index"],
+            "function": caller_frame["function"],
+            "raw": caller_frame["raw"],
+            "location": caller_frame.get("location"),
+            "anchor": caller_frame.get("anchor"),
+        } if caller_frame is not None else None,
+        "default_anchor": default_anchor,
+        "tmux_counterpart": counterpart,
+        "conditional_excerpt": conditional_excerpt,
+    }
+
+    summary_lines = [
+        f"backend: {analysis['backend']}",
+        f"signal: {analysis.get('signal')}",
+        f"crash site: {analysis.get('crash_site')}",
+        f"default anchor: {analysis.get('default_anchor')}",
+        "",
+        "application frame:",
+        str(analysis["app_frame"]["raw"]),
+        f"location: {analysis['app_frame'].get('location')}",
+        "",
+        "caller frame:",
+        str(analysis["caller_frame"]["raw"]) if analysis["caller_frame"] else "(none)",
+    ]
+    if analysis["caller_frame"]:
+        summary_lines.append(f"location: {analysis['caller_frame'].get('location')}")
+    if conditional_excerpt:
+        summary_lines.extend(["", "captured locals/args:"])
+        summary_lines.extend(conditional_excerpt)
+    crash_analysis_path(artifact_root).write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+    write_json(lab_paths(artifact_root)["crash"] / "analysis.json", analysis)
+    return analysis
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     artifact_root = args.artifact_root.resolve()
     worktree = args.worktree.resolve()
@@ -574,6 +1307,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("--- parallel session ---")
     if parallel.exists():
         print(parallel.read_text(encoding="utf-8").rstrip())
+    else:
+        print("(none)")
+    crash = latest_crash_path(artifact_root)
+    print("--- latest crash ---")
+    if crash.exists():
+        print(crash.read_text(encoding="utf-8").rstrip())
+    else:
+        print("(none)")
+    analysis = crash_analysis_path(artifact_root)
+    print("--- crash analysis ---")
+    if analysis.exists():
+        print(analysis.read_text(encoding="utf-8").rstrip())
     else:
         print("(none)")
     return 0
@@ -624,7 +1369,7 @@ def cmd_phase2_tmux_gdb(args: argparse.Namespace) -> int:
     worktree = pathlib.Path(load_manifest(artifact_root)["worktree"])
     binary = build_tmux_debug(worktree)
     socket = phase_socket(artifact_root, "phase2-tmux-gdb", args.mode)
-    gdb_script = write_tmux_gdb_script(artifact_root, args.mode)
+    gdb_script = write_tmux_gdb_script(worktree, artifact_root, args.mode)
     driver_cmd = driver_command(worktree, binary, socket, artifact_root, args.mode)
     payload = phase_metadata(
         artifact_root=artifact_root,
@@ -671,19 +1416,31 @@ def cmd_parallel_gdb(args: argparse.Namespace) -> int:
     if tmux_has_session(tmux_session):
         tmux_kill_session(tmux_session)
 
+    analysis = None
+    anchor_name = args.anchor
+    mode = args.mode or "switch-only"
+    if args.from_crash:
+        crash_manifest = latest_crash_manifest(artifact_root)
+        analysis = analyze_crash_manifest(artifact_root, crash_manifest)
+        if args.mode is None:
+            mode = str(crash_manifest.get("mode", "switch-only"))
+        if anchor_name is None:
+            value = analysis.get("default_anchor")
+            anchor_name = str(value) if value else None
+
     zmux_binary = build_zmux_debug(worktree)
     tmux_binary = build_tmux_debug(worktree)
-    zmux_socket = phase_socket(artifact_root, "parallel-zmux-gdb", args.mode)
-    tmux_socket = phase_socket(artifact_root, "parallel-tmux-gdb", args.mode)
-    zmux_gdb_script = write_zmux_gdb_script(worktree, artifact_root, args.mode)
-    tmux_gdb_script = write_tmux_gdb_script(artifact_root, args.mode)
-    zmux_driver_cmd = driver_command(worktree, zmux_binary, zmux_socket, artifact_root, args.mode)
-    tmux_driver_cmd = driver_command(worktree, tmux_binary, tmux_socket, artifact_root, args.mode)
+    zmux_socket = phase_socket(artifact_root, "parallel-zmux-gdb", mode)
+    tmux_socket = phase_socket(artifact_root, "parallel-tmux-gdb", mode)
+    zmux_gdb_script = write_zmux_gdb_script(worktree, artifact_root, mode, anchor_name=anchor_name, analysis=analysis)
+    tmux_gdb_script = write_tmux_gdb_script(worktree, artifact_root, mode, anchor_name=anchor_name, analysis=analysis)
+    zmux_driver_cmd = driver_command(worktree, zmux_binary, zmux_socket, artifact_root, mode)
+    tmux_driver_cmd = driver_command(worktree, tmux_binary, tmux_socket, artifact_root, mode)
 
     payload = parallel_session_metadata(
         artifact_root=artifact_root,
         worktree=worktree,
-        mode=args.mode,
+        mode=mode,
         tmux_session=tmux_session,
         zmux_binary=zmux_binary,
         zmux_socket=zmux_socket,
@@ -697,6 +1454,29 @@ def cmd_parallel_gdb(args: argparse.Namespace) -> int:
     start_parallel_tmux_session(worktree=worktree, payload=payload)
     write_parallel_session(artifact_root, payload)
     print_parallel_summary(payload)
+    return 0
+
+
+def cmd_capture_crash(args: argparse.Namespace) -> int:
+    artifact_root = args.artifact_root.resolve()
+    worktree = pathlib.Path(load_manifest(artifact_root)["worktree"])
+    manifest = capture_crash_manifest(
+        worktree,
+        artifact_root,
+        args.mode,
+        args.runs,
+        args.backend,
+    )
+    print(json.dumps(manifest, indent=2, sort_keys=True))
+    return 0 if manifest.get("crash_found") else 1
+
+
+def cmd_analyze_crash(args: argparse.Namespace) -> int:
+    artifact_root = args.artifact_root.resolve()
+    analysis = analyze_crash_manifest(artifact_root, latest_crash_manifest(artifact_root))
+    print(crash_analysis_path(artifact_root).read_text(encoding="utf-8").rstrip())
+    if analysis.get("default_anchor"):
+        print(f"anchor: {analysis['default_anchor']}")
     return 0
 
 
@@ -935,9 +1715,20 @@ def build_parser() -> argparse.ArgumentParser:
         phase.set_defaults(func=func)
 
     parallel = sub.add_parser("parallel-gdb")
-    parallel.add_argument("--mode", choices=("switch-only", "full"), default="switch-only")
+    parallel.add_argument("--mode", choices=("switch-only", "full"))
+    parallel.add_argument("--from-crash", action="store_true")
+    parallel.add_argument("--anchor", choices=tuple(anchor_locations(ROOT_DIR).keys()))
     parallel.add_argument("--tmux-session", default=DEFAULT_PARALLEL_TMUX_SESSION)
     parallel.set_defaults(func=cmd_parallel_gdb)
+
+    crash = sub.add_parser("capture-crash")
+    crash.add_argument("--mode", choices=("switch-only", "full"), default="switch-only")
+    crash.add_argument("--runs", type=int, default=10)
+    crash.add_argument("--backend", choices=("auto", "coredumpctl", "gdb"), default="auto")
+    crash.set_defaults(func=cmd_capture_crash)
+
+    analyze = sub.add_parser("analyze-crash")
+    analyze.set_defaults(func=cmd_analyze_crash)
 
     drive = sub.add_parser("drive")
     drive.add_argument("--mode", choices=("switch-only", "full"))

@@ -52,11 +52,51 @@ running on the given socket and fails fast if it is not.
 
 ## Phase Ladder
 
+### Crash capture first
+
+```sh
+python3 regress/session-group-lab.py capture-crash --mode switch-only --runs 20
+python3 regress/session-group-lab.py analyze-crash
+```
+
+This is the preferred first move when the bug looks like an intermittent
+segfault. `capture-crash` runs the repro at full speed against the lab zmux
+binary and writes the latest result under `/tmp/zmux-session-group-lab/crash/`.
+
+Backend selection:
+
+- default: prefer `coredumpctl` when it is available and usable
+- fallback: rerun under `gdb --batch` when `coredumpctl` is unavailable
+
+If a crash is captured, `analyze-crash` saves:
+
+- a normalized backtrace
+- the first non-runtime application frame
+- the immediate caller above it
+- any locals/args it can recover from the core
+- a suggested replay anchor for paired gdb
+
+If no crash appears within the run budget, `capture-crash` exits nonzero but
+still keeps the run logs and manifest for inspection.
+
 ### Parallel tmux-vs-zmux gdb
 
 ```sh
 python3 regress/session-group-lab.py parallel-gdb --mode switch-only
 tmux attach-session -t session-group-parallel-gdb
+```
+
+To replay from the latest crash analysis instead of the default handoff preset:
+
+```sh
+python3 regress/session-group-lab.py parallel-gdb --from-crash
+tmux attach-session -t session-group-parallel-gdb
+```
+
+To walk farther up the stack manually:
+
+```sh
+python3 regress/session-group-lab.py parallel-gdb --from-crash --anchor server_client_set_session
 ```
 
 This launches a detached outer `tmux` session with two windows:
@@ -67,7 +107,8 @@ This launches a detached outer `tmux` session with two windows:
 
 The helper prints the exact `runz` and `runt` commands as well, so you can
 retype them manually if you want. The drive panes stay idle until you press
-Enter.
+Enter. With `--from-crash`, the generated gdb scripts also seed a narrow
+replay from the analyzed crash frame/caller instead of the default broad set.
 
 ### Phase 1: zmux gdb, no patches
 
@@ -141,6 +182,8 @@ python3 regress/session-group-lab.py wind-down
 That sends a best-effort `kill-server` to the current phase socket and clears
 the current phase metadata. If `parallel-gdb` is active, it also kills both
 servers and the outer `tmux` session. It does not remove logs or patches.
+Crash artifacts stay under `/tmp/zmux-session-group-lab/crash/` until teardown
+or manual removal.
 
 To preserve any tracked diff from the disposable worktree and remove the
 worktree itself:
@@ -163,11 +206,14 @@ investigation even after the disposable worktree is gone.
 ## Expected Flow
 
 1. `setup`
-2. `parallel-gdb --mode switch-only`
-3. `tmux attach-session -t session-group-parallel-gdb`
-4. `cont` in both gdb panes
-5. Press Enter on the preloaded `runz` and `runt` commands in the drive panes
-6. `wind-down`
-7. Repeat with the single-phase gdb/strace lanes if the paired view does not localize the gap
-8. Use phase 4 and phase 5 only after the no-patch phases stop paying rent
-9. `teardown` when done
+2. `capture-crash --mode switch-only --runs 20`
+3. `analyze-crash`
+4. `parallel-gdb --from-crash`
+5. `tmux attach-session -t session-group-parallel-gdb`
+6. `cont` in both gdb panes
+7. Press Enter on the preloaded `runz` and `runt` commands in the drive panes
+8. If needed, rerun `parallel-gdb --from-crash --anchor <higher-frame>`
+9. `wind-down`
+10. Repeat with the single-phase gdb/strace lanes if the paired view does not localize the gap
+11. Use phase 4 and phase 5 only after the no-patch phases stop paying rent
+12. `teardown` when done

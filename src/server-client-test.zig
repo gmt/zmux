@@ -2178,6 +2178,82 @@ test "server_client_set_session emits control notification for peer clients" {
     try std.testing.expectEqualStrings(expected, payload);
 }
 
+test "server_client_set_session reapplies grouped window size for control clients" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const alpha = sess.session_create(null, "grouped-alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("grouped-alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "grouped-beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("grouped-beta") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    const first = win_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(first, "test");
+    const alpha_wl0 = sess.session_attach(alpha, first, 0, &cause) orelse unreachable;
+    const first_pane = win_mod.window_add_pane(first, null, 20, 6);
+    first.active = first_pane;
+    alpha.curw = alpha_wl0;
+
+    const second = win_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(second, "test");
+    _ = sess.session_attach(alpha, second, 1, &cause) orelse unreachable;
+    const second_pane = win_mod.window_add_pane(second, null, 20, 6);
+    second.active = second_pane;
+
+    const group = sess.session_group_new("grouped-server-client-size");
+    sess.session_group_add(group, alpha);
+    sess.session_group_add(group, beta);
+    sess.session_group_synchronize_from(alpha);
+
+    const beta_wl1 = sess.winlink_find_by_window(&beta.windows, second) orelse unreachable;
+    beta.curw = beta_wl1;
+
+    var control_client = T.Client{
+        .name = "grouped-size-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = alpha,
+        .flags = T.CLIENT_CONTROL | T.CLIENT_SIZECHANGED | T.CLIENT_ATTACHED,
+    };
+    defer env_mod.environ_free(control_client.environ);
+    defer {
+        control_client.session = null;
+        client_registry.clients.clearRetainingCapacity();
+    }
+    control_client.tty = .{
+        .client = &control_client,
+        .sx = 30,
+        .sy = 10,
+    };
+
+    alpha.attached = 1;
+    beta.attached = 0;
+    try client_registry.clients.append(xm.allocator, &control_client);
+
+    sc.server_client_set_session(&control_client, beta);
+
+    try std.testing.expectEqual(beta, control_client.session.?);
+    try std.testing.expectEqual(beta_wl1, beta.curw.?);
+    try std.testing.expectEqual(@as(u32, 30), second.sx);
+    try std.testing.expectEqual(@as(u32, 10), second.sy);
+    try std.testing.expectEqual(@as(u32, 30), second_pane.sx);
+    try std.testing.expectEqual(@as(u32, 10), second_pane.sy);
+}
+
 test "server_client_dispatch_command bad default-client-command sends exit" {
     cfg_mod.cfg_reset_files();
     defer cfg_mod.cfg_reset_files();

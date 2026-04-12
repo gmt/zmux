@@ -993,26 +993,39 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
     const srv = @import("server.zig");
     const old_session = cl.session;
     const now = std.time.milliTimestamp();
-    if (cl.session) |current| {
-        if (current == s) {
-            s.last_attached_time = now;
-            sess.session_update_activity(s, now);
-            server_client_apply_session_size(cl, s);
-            return;
-        }
-        if (current != s and current.attached > 0) current.attached -= 1;
-        cl.last_session = current;
+
+    if (old_session) |current| {
+        if (current != s and current.attached > 0)
+            current.attached -= 1;
+        if (current != s)
+            cl.last_session = current;
+        if (current.curw) |wl|
+            win_mod.window_update_focus(wl.window);
     }
+
     cl.session = s;
-    s.attached += 1;
-    if (s.curw) |wl| wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
-    s.last_attached_time = now;
-    sess.session_update_activity(s, now);
-    alerts.alerts_check_session(s);
+    cl.flags |= T.CLIENT_FOCUSED;
+    if (old_session != s)
+        s.attached += 1;
+
     tty_draw.tty_draw_invalidate(&cl.pane_cache);
-    server_client_apply_session_size(cl, s);
+    if (s.curw) |wl| {
+        wl.window.latest = @ptrCast(cl);
+        resize_mod.recalculate_sizes();
+        win_mod.window_update_focus(wl.window);
+        sess.session_update_activity(s, now);
+        sess.session_theme_changed(s);
+        s.last_attached_time = now;
+        wl.flags &= ~@as(u32, T.WINLINK_ALERTFLAGS);
+        alerts.alerts_check_session(s);
+        tty_mod.tty_update_client_offset(cl);
+        status.status_timer_start(cl);
+        server_fn.server_redraw_client(cl);
+        if (old_session != s)
+            notify.notify_client("client-session-changed", cl);
+    }
+    server_fn.server_check_unattached();
     srv.server_update_socket();
-    if (old_session != s) notify.notify_client("client-session-changed", cl);
 }
 
 pub fn server_client_force_redraw(cl: *T.Client) void {

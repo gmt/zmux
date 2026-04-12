@@ -53,6 +53,7 @@ const screen_mod = @import("screen.zig");
 const screen_redraw = @import("screen-redraw.zig");
 const control = @import("control.zig");
 const control_subscriptions = @import("control-subscriptions.zig");
+const sc_visible = @import("server-client-visible.zig");
 const popup = @import("popup.zig");
 const key_bindings = @import("key-bindings.zig");
 
@@ -1699,77 +1700,11 @@ export fn server_client_overlay_timer(_fd: c_int, _events: c_short, arg: ?*anyop
     server_client_clear_overlay(cl);
 }
 
-pub const VisibleRange = struct {
-    px: u32 = 0,
-    nx: u32 = 0,
-};
-
-pub const VisibleRanges = struct {
-    ranges: ?[]VisibleRange = null,
-    size: u32 = 0,
-    used: u32 = 0,
-};
-
-pub fn server_client_overlay_range(
-    x: u32,
-    y: u32,
-    sx: u32,
-    sy: u32,
-    px: u32,
-    py: u32,
-    nx: u32,
-    r: *VisibleRanges,
-) void {
-    if (py < y or py > y + sy -| 1) {
-        server_client_ensure_ranges(r, 1);
-        r.ranges.?[0].px = px;
-        r.ranges.?[0].nx = nx;
-        r.used = 1;
-        return;
-    }
-    server_client_ensure_ranges(r, 2);
-
-    if (px < x) {
-        r.ranges.?[0].px = px;
-        r.ranges.?[0].nx = @min(x - px, nx);
-    } else {
-        r.ranges.?[0].px = 0;
-        r.ranges.?[0].nx = 0;
-    }
-
-    const ox = if (px > x + sx) px else x + sx;
-    const onx = px + nx;
-    if (onx > ox) {
-        r.ranges.?[1].px = ox;
-        r.ranges.?[1].nx = onx - ox;
-    } else {
-        r.ranges.?[1].px = 0;
-        r.ranges.?[1].nx = 0;
-    }
-    r.used = 2;
-}
-
-pub fn server_client_ranges_is_empty(r: *const VisibleRanges) bool {
-    if (r.ranges == null or r.used == 0) return true;
-    for (r.ranges.?[0..r.used]) |rng| {
-        if (rng.nx != 0) return false;
-    }
-    return true;
-}
-
-pub fn server_client_ensure_ranges(r: *VisibleRanges, n: u32) void {
-    if (r.size >= n) return;
-    if (r.ranges) |old| {
-        const new = xm.allocator.realloc(old, n) catch unreachable;
-        for (new[r.size..n]) |*slot| slot.* = .{};
-        r.ranges = new;
-    } else {
-        const new = xm.allocator.alloc(VisibleRange, n) catch unreachable;
-        for (new) |*slot| slot.* = .{};
-        r.ranges = new;
-    }
-    r.size = n;
-}
+pub const VisibleRange = sc_visible.VisibleRange;
+pub const VisibleRanges = sc_visible.VisibleRanges;
+pub const server_client_overlay_range = sc_visible.server_client_overlay_range;
+pub const server_client_ranges_is_empty = sc_visible.server_client_ranges_is_empty;
+pub const server_client_ensure_ranges = sc_visible.server_client_ensure_ranges;
 
 const MouseWhere = enum {
     nowhere,

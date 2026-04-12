@@ -78,6 +78,9 @@ In `auto`, `run-contained.py` actively probes whether transient user
 services with `KillMode=control-group` actually work and downgrades to the
 disciplined backend when they do not.
 
+For layered gdb/strace work on the grouped-session repro, see
+[docs/session-group-lab.md](./session-group-lab.md).
+
 Individual test scripts can be run standalone with `TEST_ZMUX` set:
 
 ```

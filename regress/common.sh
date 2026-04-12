@@ -31,6 +31,15 @@ smoke_owner_tool() {
     python3 "$SMOKE_SCRIPT_DIR/smoke_owner.py" "$@"
 }
 
+smoke_capture_current_pid() {
+    __smoke_pid_var=$1
+    if IFS=' ' read -r __smoke_pid _rest </proc/self/stat; then
+        eval "$__smoke_pid_var=\$__smoke_pid"
+    else
+        eval "$__smoke_pid_var=\$\$"
+    fi
+}
+
 smoke_setup_path_shims() {
     mkdir -p "$SMOKE_BIN_DIR" "$SMOKE_TMPDIR"
     ln -sf "$TEST_ZMUX" "$SMOKE_BIN_DIR/zmux"
@@ -64,6 +73,7 @@ smoke_init() {
     SMOKE_SELECTED_SHELL=
     SMOKE_HELPER_MODE=
     SMOKE_HELPER_PATH=
+    smoke_capture_current_pid SMOKE_OWNER_PID
     SMOKE_SOCKET_REGISTRY_FILE="$TEST_TMPDIR/cleanup-sockets.tsv"
     if [ -z "${SMOKE_OWNER_DIR-}" ]; then
         if [ -n "${SMOKE_RUN_ROOT-}" ]; then
@@ -72,7 +82,7 @@ smoke_init() {
             SMOKE_OWNER_DIR="$TEST_TMPDIR/owned-pids"
         fi
     fi
-    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH SMOKE_OWNER_DIR SMOKE_SOCKET_REGISTRY_FILE
+    export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH SMOKE_OWNER_DIR SMOKE_OWNER_PID SMOKE_SOCKET_REGISTRY_FILE
     : > "$SMOKE_SOCKET_REGISTRY_FILE"
     smoke_track_socket "$TEST_ZMUX" "$TEST_SOCKET"
     trap 'smoke_cleanup' 0 1 2 3 15
@@ -241,6 +251,10 @@ smoke_cleanup_socket() {
 }
 
 smoke_cleanup() {
+    smoke_capture_current_pid current_pid
+    if [ -n "${SMOKE_OWNER_PID-}" ] && [ "$current_pid" != "$SMOKE_OWNER_PID" ]; then
+        return 0
+    fi
     if [ -n "${SMOKE_SOCKET_REGISTRY_FILE-}" ] && [ -f "$SMOKE_SOCKET_REGISTRY_FILE" ]; then
         while IFS='	' read -r binary socket_path; do
             [ -n "$binary" ] || continue

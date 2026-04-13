@@ -1857,6 +1857,7 @@ test "unknown window-copy commands surface a status message" {
     opts_mod.options_default_all(opts_mod.global_options, T.OPTIONS_TABLE_SERVER);
     opts_mod.options_default_all(opts_mod.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts_mod.options_default_all(opts_mod.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    initWindowCopyTestGlobals();
 
     const source_grid = grid.grid_create(4, 1, 0);
     defer grid.grid_free(source_grid);

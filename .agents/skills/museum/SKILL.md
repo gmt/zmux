@@ -72,6 +72,7 @@ live captures (dynamic).
 
 ### Capture + compare workflow
 
+Same-implementation (shorthand):
 ```bash
 # Capture a zmux wire trace
 tmux-museum/bin/museum-trace capture --zmux new-session -d -s test
@@ -84,16 +85,29 @@ tmux-museum/bin/museum-trace capture --tmux new-session -d -s test
 diff -u tmux-trace-*.spy-log zmux-trace-*.spy-log
 ```
 
+Cross-implementation (all four combos):
+```bash
+museum-trace capture --server zmux --client zmux list-sessions   # zmux↔zmux
+museum-trace capture --server tmux --client tmux list-sessions   # tmux↔tmux
+museum-trace capture --server tmux --client zmux list-sessions   # zmux client → tmux server
+museum-trace capture --server zmux --client tmux list-sessions   # tmux client → zmux server
+```
+
+The client binary is invoked via a symlink matching the server's name, so
+`argv[0]` adopts the server's protocol conventions automatically.
+
+Interactive (no command — attaches to the traced session, detach to finish):
+```bash
+museum-trace capture --zmux
+museum-trace capture --zmux --verbose
+museum-trace capture --server tmux --client zmux
+```
+
 Specify an explicit output path:
 ```bash
 tmux-museum/bin/museum-trace capture --zmux --output zmux-new-session.spy-log new-session -d -s test
 tmux-museum/bin/museum-trace capture --tmux --output tmux-new-session.spy-log new-session -d -s test
 diff -u tmux-new-session.spy-log zmux-new-session.spy-log
-```
-
-Use any binary:
-```bash
-tmux-museum/bin/museum-trace capture --binary /path/to/custom/zmux "kill-server"
 ```
 
 ### Reading a trace

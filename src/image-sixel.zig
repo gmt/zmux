@@ -697,7 +697,7 @@ test "sixel_parse minimal" {
     // Minimal valid sixel: "q" + at least one data character at offset 0.
     // Use colour 1 (index 0 + 1 = dc=1) and draw a single sixel.
     const data = "q#0;2;100;0;0~";
-    const si = sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si = sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
     defer sixel_free(si);
     try @import("std").testing.expect(si.x > 0);
     try @import("std").testing.expect(si.y > 0);
@@ -712,7 +712,7 @@ test "sixel_parse empty rejects" {
 
 test "sixel_get_pixel returns zero for out-of-range coordinates" {
     const data = "q#0;2;100;0;0~";
-    const si = sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si = sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
     defer sixel_free(si);
     try @import("std").testing.expectEqual(@as(u32, 0), sixel_get_pixel(si, 9_999, 9_999));
     try @import("std").testing.expectEqual(@as(u32, 0), sixel_get_pixel(si, 0, 9_999));

@@ -1373,8 +1373,11 @@ test "format_expand resolves tmux-style client metadata keys" {
     }.call;
 
     const uid: std.posix.uid_t = @intCast(std.os.linux.getuid());
-    const pw = c.posix_sys.getpwuid(uid) orelse return error.SkipZigTest;
-    const user_name = std.mem.span(@as([*:0]const u8, @ptrCast(pw.*.pw_name)));
+    const pw = c.posix_sys.getpwuid(uid);
+    const user_name = if (pw) |entry|
+        std.mem.span(@as([*:0]const u8, @ptrCast(entry.*.pw_name)))
+    else
+        "";
 
     sess.session_init_globals(xm.allocator);
     win_mod.window_init_globals(xm.allocator);

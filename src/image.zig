@@ -270,7 +270,7 @@ test "image_store and image_free_all" {
 
     // Allocate a small dummy SixelImage by parsing a minimal sixel stream.
     const data = "q#0;2;100;0;0~";
-    const si = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
 
     // Create a minimal Screen.
     const grid_mod = @import("grid.zig");
@@ -308,10 +308,10 @@ test "image_check_line overlap" {
 
     // Create two sixel images.
     const data = "q#0;2;100;0;0~";
-    const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
     const si2 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse {
         sixel_mod.sixel_free(si1);
-        return error.SkipZigTest;
+        return error.TestUnexpectedResult;
     };
 
     // Place first image at row 2, second at row 10.
@@ -376,10 +376,10 @@ test "image_check_area frees only overlapping rectangles" {
     }
 
     const data = "q#0;2;100;0;0~";
-    const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.SkipZigTest;
+    const si1 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
     const si2 = sixel_mod.sixel_parse(data, 0, 8, 16) orelse {
         sixel_mod.sixel_free(si1);
-        return error.SkipZigTest;
+        return error.TestUnexpectedResult;
     };
 
     s.cx = 0;

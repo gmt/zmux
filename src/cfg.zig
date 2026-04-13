@@ -316,18 +316,21 @@ test "cfg default path expansion handles home and xdg" {
     cfg_reset_files();
     defer cfg_reset_files();
 
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
-    const xdg = std.posix.getenv("XDG_CONFIG_HOME");
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+
+    try setProcessEnv("HOME", "/tmp/zmux-cfg-home");
+    try setProcessEnv("XDG_CONFIG_HOME", "/tmp/zmux-cfg-xdg");
 
     const expanded_home = expand_default_path("~/.zmux.conf").?;
     defer xm.allocator.free(expanded_home);
-    try std.testing.expectEqualStrings(home, expanded_home[0..home.len]);
+    try std.testing.expectEqualStrings("/tmp/zmux-cfg-home/.zmux.conf", expanded_home);
 
-    if (xdg) |base| {
-        const expanded_xdg = expand_default_path("$XDG_CONFIG_HOME/zmux/zmux.conf").?;
-        defer xm.allocator.free(expanded_xdg);
-        try std.testing.expectEqualStrings(base, expanded_xdg[0..base.len]);
-    }
+    const expanded_xdg = expand_default_path("$XDG_CONFIG_HOME/zmux/zmux.conf").?;
+    defer xm.allocator.free(expanded_xdg);
+    try std.testing.expectEqualStrings("/tmp/zmux-cfg-xdg/zmux/zmux.conf", expanded_xdg);
 }
 
 test "cfg parse only does not enqueue commands" {

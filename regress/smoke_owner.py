@@ -234,13 +234,16 @@ def register_server(
     pid = query_server_pid(base_args, env, timeout=timeout)
     if pid is None:
         return None
-    return register_pid(
-        pid,
-        owner_dir=owner_dir,
-        kind=kind,
-        owner_label=owner_label,
-        socket_path=socket_path,
-    )
+    try:
+        return register_pid(
+            pid,
+            owner_dir=owner_dir,
+            kind=kind,
+            owner_label=owner_label,
+            socket_path=socket_path,
+        )
+    except RuntimeError:
+        return None
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

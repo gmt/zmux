@@ -835,9 +835,30 @@ def load_matrix() -> list[MatrixRow]:
     return rows
 
 
+def find_matrix_row(command: str) -> MatrixRow:
+    for row in load_matrix():
+        if row.command == command:
+            return row
+    raise SmokeError(f"unknown sweep command: {command}")
+
+
+def run_case_id(harness: SmokeHarness, case_id: str, mode: str) -> None:
+    if case_id == "inside":
+        harness.run_inside_suite()
+        return
+    if case_id == "soak":
+        harness.run_soak_suite()
+        return
+    if case_id.startswith("sweep:"):
+        harness.exercise_row(find_matrix_row(case_id[len("sweep:") :]), mode)
+        return
+    raise SmokeError(f"unknown case id {case_id}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="zmux smoke harness")
-    parser.add_argument("suite", choices=("sweep", "inside", "soak"))
+    parser.add_argument("suite", choices=("sweep", "inside", "soak", "run-case"))
+    parser.add_argument("case_id", nargs="?")
     parser.add_argument("--mode", choices=("implemented", "oracle"), default="implemented")
     return parser.parse_args(argv)
 
@@ -859,6 +880,12 @@ def main(argv: list[str]) -> int:
             harness.run_inside_suite()
         elif args.suite == "soak":
             harness.run_soak_suite()
+        elif args.suite == "run-case":
+            if args.case_id is None:
+                raise SmokeError("run-case requires a case id")
+            if args.mode == "oracle" and args.case_id.startswith("sweep:"):
+                harness.ensure_oracle_manifest_matches()
+            run_case_id(harness, args.case_id, args.mode)
         else:
             raise SmokeError(f"unknown suite {args.suite}")
     except SmokeError as exc:

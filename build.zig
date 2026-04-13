@@ -115,7 +115,7 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     const smoke_step = b.step("smoke", "Run the fast smoke harness against zig-out/bin/zmux");
     smoke_step.dependOn(b.getInstallStep());
-    const smoke_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "fast" });
+    const smoke_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-fast" });
     smoke_cmd.step.dependOn(b.getInstallStep());
     smoke_step.dependOn(&smoke_cmd.step);
 
@@ -123,7 +123,8 @@ pub fn build(b: *std.Build) void {
     // `zig build smoke-oracle` – oracle harness against installed tmux
     // --------------------------------------------------
     const oracle_step = b.step("smoke-oracle", "Run the oracle smoke harness against installed tmux");
-    const oracle_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "oracle" });
+    const oracle_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-oracle" });
+    oracle_cmd.step.dependOn(b.getInstallStep());
     oracle_step.dependOn(&oracle_cmd.step);
 
     // --------------------------------------------------
@@ -134,7 +135,7 @@ pub fn build(b: *std.Build) void {
         "Run the nested recursive attach characterization harness",
     );
     recursive_attach_step.dependOn(b.getInstallStep());
-    const recursive_attach_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "recursive" });
+    const recursive_attach_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-recursive" });
     recursive_attach_cmd.step.dependOn(b.getInstallStep());
     recursive_attach_step.dependOn(&recursive_attach_cmd.step);
 
@@ -143,7 +144,7 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     const soak_step = b.step("smoke-soak", "Run the heavy soak harness against zig-out/bin/zmux");
     soak_step.dependOn(b.getInstallStep());
-    const soak_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "soak" });
+    const soak_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-soak" });
     soak_cmd.step.dependOn(b.getInstallStep());
     soak_step.dependOn(&soak_cmd.step);
 
@@ -151,7 +152,8 @@ pub fn build(b: *std.Build) void {
     // `zig build smoke-docker` – Docker + SSH harness against system tmux
     // --------------------------------------------------
     const docker_step = b.step("smoke-docker", "Run the Docker + SSH smoke harness");
-    const docker_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "docker" });
+    const docker_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-docker" });
+    docker_cmd.step.dependOn(b.getInstallStep());
     docker_step.dependOn(&docker_cmd.step);
 
     // --------------------------------------------------
@@ -159,7 +161,7 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     const smoke_all_step = b.step("smoke-all", "Run fast local, oracle, and Docker smoke suites");
     smoke_all_step.dependOn(b.getInstallStep());
-    const smoke_all_cmd = b.addSystemCommand(&.{ "sh", "regress/run-all.sh", "all" });
+    const smoke_all_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-all" });
     smoke_all_cmd.step.dependOn(b.getInstallStep());
     smoke_all_step.dependOn(&smoke_all_cmd.step);
 
@@ -173,8 +175,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
         .filters = test_filters,
-        // Custom test runner: per-test SIGALRM watchdog + process-group
-        // management so Ctrl-C and timeouts kill child processes cleanly.
+        // Timed orchestration is handled by regress/test_orchestrator.py,
+        // which runs each test individually in its own sandbox.
         .test_runner = .{
             .path = b.path("src/test-runner.zig"),
             .mode = .server,
@@ -191,7 +193,10 @@ pub fn build(b: *std.Build) void {
     unit_tests.linkSystemLibrary("event_core");
     unit_tests.linkSystemLibrary("ncursesw");
     const test_step = b.step("test", "Run Zig unit tests");
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_unit_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-unit", "--zig-test-binary" });
+    run_unit_tests.step.dependOn(b.getInstallStep());
+    run_unit_tests.addFileArg(unit_tests.getEmittedBin());
+    addTestFilterArgs(run_unit_tests, test_filters);
     test_step.dependOn(&run_unit_tests.step);
 
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
@@ -212,6 +217,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
         .filters = test_filters,
+        .test_runner = .{
+            .path = b.path("src/test-runner.zig"),
+            .mode = .server,
+        },
     });
     stress_tests.root_module.addOptions("build_options", stress_build_options);
     stress_tests.root_module.addIncludePath(b.path("src/compat"));
@@ -224,7 +233,14 @@ pub fn build(b: *std.Build) void {
     stress_tests.linkSystemLibrary("event_core");
     stress_tests.linkSystemLibrary("ncursesw");
     const stress_test_step = b.step("test-stress", "Run heavyweight Zig stress tests");
-    stress_test_step.dependOn(&b.addRunArtifact(stress_tests).step);
+    const run_stress_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-stress", "--zig-test-binary" });
+    run_stress_tests.step.dependOn(b.getInstallStep());
+    run_stress_tests.addFileArg(stress_tests.getEmittedBin());
+    addTestFilterArgs(run_stress_tests, test_filters);
+    stress_test_step.dependOn(&run_stress_tests.step);
+
+    const stress_test_compile_step = b.step("test-stress-compile", "Compile Zig stress tests without running");
+    stress_test_compile_step.dependOn(&stress_tests.step);
 
     // --------------------------------------------------
     // `zig build fuzz`
@@ -280,12 +296,17 @@ pub fn build(b: *std.Build) void {
         fuzz_step.dependOn(&fuzz_input.step);
         fuzz_step.dependOn(&fuzz_cmd_preprocess.step);
 
-        const fuzz_smoke = b.step("fuzz-smoke", "Stdin-replay seeds in fuzz/corpus/ (requires install + -Dfuzzing=true)");
-        const fuzz_smoke_input = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-input-fuzzer" });
-        fuzz_smoke_input.step.dependOn(b.getInstallStep());
-        fuzz_smoke.dependOn(&fuzz_smoke_input.step);
-        const fuzz_smoke_cmd = b.addSystemCommand(&.{ "sh", "-e", "fuzz/run-corpus.sh", "zig-out/bin/zmux-cmd-preprocess-fuzzer" });
+        const fuzz_smoke = b.step("fuzz-smoke", "Timed corpus replay for the fuzz targets (requires install + -Dfuzzing=true)");
+        const fuzz_smoke_cmd = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_orchestrator.py",
+            "fuzz-smoke",
+            "--input-fuzzer",
+        });
         fuzz_smoke_cmd.step.dependOn(b.getInstallStep());
+        fuzz_smoke_cmd.addFileArg(fuzz_input.getEmittedBin());
+        fuzz_smoke_cmd.addArg("--cmd-preprocess-fuzzer");
+        fuzz_smoke_cmd.addFileArg(fuzz_cmd_preprocess.getEmittedBin());
         fuzz_smoke.dependOn(&fuzz_smoke_cmd.step);
     }
 }
@@ -336,4 +357,11 @@ fn parseTestFilters(b: *std.Build, maybe_args: ?[]const []const u8) []const []co
     }
 
     return filters.toOwnedSlice(b.allocator) catch @panic("OOM");
+}
+
+fn addTestFilterArgs(cmd: *std.Build.Step.Run, filters: []const []const u8) void {
+    for (filters) |filter| {
+        cmd.addArg("--test-filter");
+        cmd.addArg(filter);
+    }
 }

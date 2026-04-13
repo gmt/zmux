@@ -70,43 +70,53 @@ class RecursiveAttachHarness:
     def root_base_args(self, binary: str, socket_path: pathlib.Path) -> list[str]:
         return shlex.split(binary) + ["-S", str(socket_path), "-f/dev/null"]
 
-    def run(self) -> None:
-        waves = [
-            (
-                RecursiveCase(
-                    name="tmux-in-zmux",
-                    root_binary=self.zmux_binary,
-                    inner_binary=self.oracle_binary,
-                    expectation=Expectation(kind="timeout"),
-                ),
-                RecursiveCase(
-                    name="zmux-in-tmux",
-                    root_binary=self.oracle_binary,
-                    inner_binary=self.zmux_binary,
-                    expectation=Expectation(kind="timeout"),
-                ),
+    def build_cases(self) -> list[RecursiveCase]:
+        return [
+            RecursiveCase(
+                name="tmux-in-zmux",
+                root_binary=self.zmux_binary,
+                inner_binary=self.oracle_binary,
+                expectation=Expectation(kind="timeout"),
             ),
-            (
-                RecursiveCase(
-                    name="tmux-in-tmux",
-                    root_binary=self.oracle_binary,
-                    inner_binary=self.oracle_binary,
-                    expectation=Expectation(kind="timeout"),
-                ),
-                RecursiveCase(
-                    name="zmux-in-zmux",
-                    root_binary=self.zmux_binary,
-                    inner_binary=self.zmux_binary,
-                    expectation=Expectation(kind="timeout"),
-                ),
+            RecursiveCase(
+                name="zmux-in-tmux",
+                root_binary=self.oracle_binary,
+                inner_binary=self.zmux_binary,
+                expectation=Expectation(kind="timeout"),
+            ),
+            RecursiveCase(
+                name="tmux-in-tmux",
+                root_binary=self.oracle_binary,
+                inner_binary=self.oracle_binary,
+                expectation=Expectation(kind="timeout"),
+            ),
+            RecursiveCase(
+                name="zmux-in-zmux",
+                root_binary=self.zmux_binary,
+                inner_binary=self.zmux_binary,
+                expectation=Expectation(kind="timeout"),
             ),
         ]
+
+    def run(self) -> None:
+        cases = self.build_cases()
+        waves = (
+            tuple(cases[0:2]),
+            tuple(cases[2:4]),
+        )
 
         for wave in waves:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as pool:
                 futures = [pool.submit(self.run_case, case) for case in wave]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
+
+    def run_case_by_name(self, name: str) -> None:
+        for case in self.build_cases():
+            if case.name == name:
+                self.run_case(case)
+                return
+        raise RecursiveAttachError(f"unknown recursive case {name}")
 
     def run_case(self, case: RecursiveCase) -> None:
         case_dir = self.artifact_dir / case.name
@@ -304,6 +314,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run_parser.add_argument("--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"))
     run_parser.add_argument("--timeout-seconds", type=float, default=2.0)
 
+    run_case_parser = sub.add_parser("run-case")
+    run_case_parser.add_argument("case_name")
+    run_case_parser.add_argument("--artifact-root", default=os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp"))
+    run_case_parser.add_argument("--zmux-binary", default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")))
+    run_case_parser.add_argument("--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"))
+    run_case_parser.add_argument("--timeout-seconds", type=float, default=2.0)
+
     inner = sub.add_parser("inner-probe")
     inner.add_argument("--inner-binary", required=True)
     inner.add_argument("--output-json", type=pathlib.Path, required=True)
@@ -324,6 +341,18 @@ def main(argv: list[str]) -> int:
                 timeout_seconds=args.timeout_seconds,
             )
             harness.run()
+            return 0
+
+        if args.command == "run-case":
+            artifact_root = pathlib.Path(args.artifact_root)
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            harness = RecursiveAttachHarness(
+                artifact_root=artifact_root,
+                zmux_binary=args.zmux_binary,
+                oracle_binary=args.oracle_binary,
+                timeout_seconds=args.timeout_seconds,
+            )
+            harness.run_case_by_name(args.case_name)
             return 0
 
         if args.command == "inner-probe":

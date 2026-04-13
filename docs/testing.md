@@ -1,33 +1,59 @@
 Testing lanes:
 
+- `python3 regress/test_orchestrator.py <suite>`
+  Root timed runner. Every runnable case gets its own timer, sandbox,
+  signal handling, cleanup pass, and summary entry. Existing build steps
+  and wrapper scripts delegate here.
+
 - `zig build test`
-  Fast Zig unit lane for the normal warm-cache developer loop. Heavy subprocess,
-  transport, and async shell coverage is intentionally excluded.
+  Fast Zig unit lane for the normal warm-cache developer loop. Runs each
+  Zig unit test individually through the root timed runner.
 
 - `zig build test-stress`
   Heavy Zig stress lane for subprocess, pipe/socket transport, and async shell
-  tests that are too expensive for the main unit loop.
+  tests that are too expensive for the main unit loop. Runs each stress
+  test individually through the root timed runner.
 
 - `zig build smoke`
-  Fast end-to-end harness against `zig-out/bin/zmux`.
+  Fast end-to-end coverage against `zig-out/bin/zmux`. Shell smoke cases,
+  sweep commands, and inside-session checks are all timed one by one.
+
+- `zig build smoke-oracle`
+  Oracle coverage against system tmux. If system tmux is unavailable, the
+  museum build under `tmux-museum/out/gdb/tmux` is used automatically.
 
 - `zig build smoke-soak`
   Heavy end-to-end soak coverage for long-lived or stress-oriented behavior.
 
 - `python3 regress/test-watchdog.py`
-  Wraps `zig build test` with hang detection. Adaptive timeout based on
-  historical runtime data (starts at 120s, converges to mean+3sigma after
-  5 runs). On hang: escalates SIGINT/SIGTERM/SIGKILL, then does a
-  diagnostic re-run to identify the specific hanging test.
+  Compatibility wrapper for the timed Zig unit lane. It no longer adds a
+  separate timeout layer; it delegates to the root runner and keeps timers
+  enabled.
 
 - `zig build test-compile`
-  Compile unit tests without running. Useful with `test-watchdog.py --direct`.
+  Compile the Zig unit test binary without running it.
 
-- `zig build fuzz -Dfuzzing=true`
-  Fuzz target build.
+- `zig build test-stress-compile`
+  Compile the Zig stress test binary without running it.
+
+- `zig build -Dfuzzing=true fuzz`
+  Build the fuzz targets.
+
+- `zig build -Dfuzzing=true fuzz-smoke`
+  Timed corpus replay for each fuzz target and each seed in `fuzz/corpus/`.
 
 Current intent:
 
 - keep warm-cache `zig build test` under 15 seconds
 - preserve heavyweight coverage in `test-stress` and soak, not by bloating the
   main unit lane
+
+Timeout policy:
+
+- `regress/test_timeouts.json` now carries an explicit timeout for every
+  discovered runnable case.
+- Ordinary suite runs require that explicit coverage; `--allow-default-timeouts`
+  is reserved for calibration and bootstrap work only.
+- `python3 regress/calibrate_timeouts.py ...` is the regeneration path for
+  the per-case table. It records reports outside the repo and can merge updated
+  proposals back into `regress/test_timeouts.json`.

@@ -21,9 +21,8 @@
 //! terminates any child processes the tests may have spawned (pty
 //! helpers, sleep guards, etc.) rather than leaving them as orphans.
 //!
-//! Hang detection is handled externally by regress/test-watchdog.py
-//! which wraps the test run with adaptive timeouts, signal escalation,
-//! and diagnostic re-runs.
+//! Direct one-test mode is used by the timed root test runner so every
+//! unit test can be run with its own deadline and sandbox.
 
 const builtin = @import("builtin");
 const std = @import("std");
@@ -38,6 +37,19 @@ var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
 var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
 var stdout_buffer: [4096]u8 = undefined;
+
+const DirectStatus = enum {
+    pass,
+    skip,
+    fail,
+};
+
+const TestExecResult = struct {
+    name: []const u8,
+    status: DirectStatus,
+    leak: bool,
+    log_err_count: usize,
+};
 
 // ── Signal handlers ────────────────────────────────────────────────────────
 
@@ -74,14 +86,21 @@ pub fn main() void {
         @panic("unable to parse command line args");
 
     var listen = false;
+    var list_tests = false;
     var opt_cache_dir: ?[]const u8 = null;
+    var run_test_index: ?usize = null;
 
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--listen=-")) {
             listen = true;
+        } else if (std.mem.eql(u8, arg, "--list-tests")) {
+            list_tests = true;
         } else if (std.mem.startsWith(u8, arg, "--seed=")) {
             testing.random_seed = std.fmt.parseUnsigned(u32, arg["--seed=".len..], 0) catch
                 @panic("unable to parse --seed command line argument");
+        } else if (std.mem.startsWith(u8, arg, "--run-test-index=")) {
+            run_test_index = std.fmt.parseUnsigned(usize, arg["--run-test-index=".len..], 0) catch
+                @panic("unable to parse --run-test-index command line argument");
         } else if (std.mem.startsWith(u8, arg, "--cache-dir")) {
             opt_cache_dir = arg["--cache-dir=".len..];
         } else {
@@ -91,10 +110,77 @@ pub fn main() void {
 
     fba.reset();
 
+    if (list_tests) {
+        return listTests() catch @panic("unable to list tests");
+    }
+
+    if (run_test_index) |index| {
+        return runSingleTest(index) catch @panic("unable to run test");
+    }
+
     if (listen) {
         return mainServer(opt_cache_dir) catch @panic("internal test runner failure");
     } else {
         return mainTerminal();
+    }
+}
+
+fn executeTest(index: usize) TestExecResult {
+    const test_fn = builtin.test_functions[index];
+    testing.allocator_instance = .{};
+    log_err_count = 0;
+
+    var fail = false;
+    var skip = false;
+    test_fn.func() catch |err| switch (err) {
+        error.SkipZigTest => skip = true,
+        else => {
+            fail = true;
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            }
+        },
+    };
+
+    const leak = testing.allocator_instance.deinit() == .leak;
+    return .{
+        .name = test_fn.name,
+        .status = if (skip) .skip else if (fail or leak or log_err_count != 0) .fail else .pass,
+        .leak = leak,
+        .log_err_count = log_err_count,
+    };
+}
+
+fn listTests() !void {
+    var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    for (builtin.test_functions, 0..) |test_fn, index| {
+        try stdout_writer.interface.print("{d}\t{s}\n", .{ index, test_fn.name });
+    }
+    try stdout_writer.interface.flush();
+}
+
+fn runSingleTest(index: usize) !void {
+    if (index >= builtin.test_functions.len) {
+        std.debug.print("invalid test index: {d}\n", .{index});
+        std.process.exit(2);
+    }
+
+    const result = executeTest(index);
+    var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    try stdout_writer.interface.print(
+        "status={s}\nname={s}\nleak={d}\nlog_err_count={d}\n",
+        .{
+            @tagName(result.status),
+            result.name,
+            @intFromBool(result.leak),
+            result.log_err_count,
+        },
+    );
+    try stdout_writer.interface.flush();
+
+    switch (result.status) {
+        .pass, .skip => std.process.exit(0),
+        .fail => std.process.exit(1),
     }
 }
 
@@ -148,34 +234,18 @@ fn mainServer(opt_cache_dir: ?[]const u8) !void {
             },
 
             .run_test => {
-                testing.allocator_instance = .{};
-                log_err_count = 0;
                 const index = try server.receiveBody_u32();
-                const test_fn = builtin.test_functions[index];
-                var fail = false;
-                var skip = false;
-
-                test_fn.func() catch |err| switch (err) {
-                    error.SkipZigTest => skip = true,
-                    else => {
-                        fail = true;
-                        if (@errorReturnTrace()) |trace| {
-                            std.debug.dumpStackTrace(trace.*);
-                        }
-                    },
-                };
-
-                const leak = testing.allocator_instance.deinit() == .leak;
+                const result = executeTest(index);
                 try server.serveTestResults(.{
                     .index = index,
                     .flags = .{
-                        .fail = fail,
-                        .skip = skip,
-                        .leak = leak,
+                        .fail = result.status == .fail,
+                        .skip = result.status == .skip,
+                        .leak = result.leak,
                         .fuzz = false,
                         .log_err_count = std.math.lossyCast(
                             @FieldType(std.zig.Server.Message.TestResults.Flags, "log_err_count"),
-                            log_err_count,
+                            result.log_err_count,
                         ),
                     },
                 });
@@ -199,31 +269,28 @@ fn mainTerminal() void {
     var fail_count: usize = 0;
 
     for (test_fn_list, 0..) |test_fn, i| {
+        const result = executeTest(i);
         std.debug.print("{d}/{d} {s}...", .{ i + 1, test_fn_list.len, test_fn.name });
-        testing.allocator_instance = .{};
-        log_err_count = 0;
-
-        const result = test_fn.func();
-
-        if (testing.allocator_instance.deinit() == .leak) {
-            std.debug.print("FAIL (memory leak)\n", .{});
-            fail_count += 1;
-            continue;
-        }
-        result catch |err| switch (err) {
-            error.SkipZigTest => {
+        switch (result.status) {
+            .skip => {
                 std.debug.print("SKIP\n", .{});
                 skip_count += 1;
-                continue;
             },
-            else => {
-                std.debug.print("FAIL ({s})\n", .{@errorName(err)});
+            .fail => {
+                if (result.leak) {
+                    std.debug.print("FAIL (memory leak)\n", .{});
+                } else if (result.log_err_count != 0) {
+                    std.debug.print("FAIL (logged errors)\n", .{});
+                } else {
+                    std.debug.print("FAIL\n", .{});
+                }
                 fail_count += 1;
-                continue;
             },
-        };
-        std.debug.print("OK\n", .{});
-        ok_count += 1;
+            .pass => {
+                std.debug.print("OK\n", .{});
+                ok_count += 1;
+            },
+        }
     }
 
     if (fail_count > 0) {

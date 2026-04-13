@@ -991,6 +991,26 @@ pub const StressTests = struct {
         file_mod.handleWriteReady(&ready_imsg);
 
         try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+        var error_open_imsg: c.imsg.imsg = undefined;
+        try std.testing.expect(c.imsg.imsg_get(&reader, &error_open_imsg) > 0);
+        defer c.imsg.imsg_free(&error_open_imsg);
+
+        try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_open))), c.imsg.imsg_get_type(&error_open_imsg));
+        const error_open_len = c.imsg.imsg_get_len(&error_open_imsg);
+        var error_open_payload = try xm.allocator.alloc(u8, error_open_len);
+        defer xm.allocator.free(error_open_payload);
+        try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&error_open_imsg, error_open_payload.ptr, error_open_payload.len));
+
+        var error_open_msg: protocol.MsgWriteOpen = undefined;
+        @memcpy(std.mem.asBytes(&error_open_msg), error_open_payload[0..@sizeOf(protocol.MsgWriteOpen)]);
+        try std.testing.expectEqual(@as(i32, 2), error_open_msg.stream);
+        try std.testing.expectEqual(@as(i32, std.posix.STDERR_FILENO), error_open_msg.fd);
+
+        const error_ready = protocol.MsgWriteReady{ .stream = error_open_msg.stream, .@"error" = 0 };
+        var error_ready_imsg = buildImsg(protocol.MsgType.write_ready, std.mem.asBytes(&error_ready));
+        file_mod.handleWriteReadyForClient(&client, &error_ready_imsg);
+
+        try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
         var error_imsg: c.imsg.imsg = undefined;
         try std.testing.expect(c.imsg.imsg_get(&reader, &error_imsg) > 0);
         defer c.imsg.imsg_free(&error_imsg);

@@ -733,5 +733,6 @@ test {
         _ = @import("file-write-stress-test.zig");
         _ = @import("format-async-stress-test.zig");
         _ = @import("job-stress-test.zig");
+        _ = @import("cmd-pipe-pane-stress-test.zig");
     }
 }

@@ -697,6 +697,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("layout-test.zig");
     _ = @import("window-test.zig");
+    _ = @import("session-test.zig");
     _ = @import("cmd-find-test.zig");
     _ = @import("cmd-session-window-test.zig");
     _ = @import("cmd-kill-destructive-test.zig");

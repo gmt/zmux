@@ -710,6 +710,9 @@ fn server_client_dispatch_default_command(cl: *T.Client) void {
 }
 
 pub fn server_client_dispatch_command(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    if (cl.flags & T.CLIENT_EXIT != 0)
+        return;
+
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len < @sizeOf(protocol.MsgCommand)) {
         log.log_warn("client {*} short MSG_COMMAND", .{cl});

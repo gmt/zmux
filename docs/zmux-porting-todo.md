@@ -15,15 +15,6 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## display-message -l (literal) flag missing from template
-
-- `tmux:` template string is `"aCc:d:lINpt:F:v"` — includes `l` so
-  `display-message -l "#{foo}"` prints the literal string without expansion.
-- `zmux:` template string is `"ac:d:F:INpPRt:v"` — `l` is absent, so the
-  flag is rejected at parse time. The code in `expandMessage` checks
-  `args.has('l')` but it can never be true.
-- `likely files:` `src/cmd-display-message.zig` line 161 (entry template)
-
 ## utf8 wide-character width returns 1 instead of 2
 
 - `tmux:` CJK characters (e.g., U+4E00 中) and emoji (e.g., U+1F642 🙂) have
@@ -35,12 +26,3 @@ Live tmux-parity gaps only.
 - `likely files:` `src/utf8.zig` (width calculation), `src/format-draw.zig`
   (consumers of width)
 
-## server-client: command dispatch not dropped during CLIENT_EXIT shutdown
-
-- `tmux:` when a client is in `CLIENT_EXIT` state, tmux drops incoming command
-  messages rather than queuing them. The dispatch table skips command handling
-  once the exit flag is set.
-- `zmux:` `server_client_dispatch_for_test` (and the production dispatch path)
-  still queues command messages even when `CLIENT_EXIT` is set, diverging from
-  tmux's shutdown semantics.
-- `likely files:` `src/server-client.zig` (dispatch table, CLIENT_EXIT check)

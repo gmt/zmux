@@ -16,13 +16,21 @@
 #
 # museum-trace — capture tmux/zmux wire protocol traces via socket-spy
 #
-# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] [--verbose] COMMAND [ARGS...]
+# Usage: museum-trace capture {--zmux|--tmux|--server BIN --client BIN} [--output FILE] [--verbose] COMMAND [ARGS...]
 #
-# Examples:
+# Same-implementation (shorthand):
 #   museum-trace capture --zmux new-session -d -s test
 #   museum-trace capture --tmux new-session -d -s test
-#   museum-trace capture --zmux --verbose new-session -d -s test
-#   museum-trace capture --zmux --output zmux.spy-log list-sessions
+#
+# Cross-implementation (all four combos):
+#   museum-trace capture --server zmux --client tmux list-sessions
+#   museum-trace capture --server tmux --client zmux list-sessions
+#   museum-trace capture --server zmux --client zmux list-sessions
+#   museum-trace capture --server tmux --client tmux list-sessions
+#
+# Options:
+#   --verbose   include hex dumps after each decoded message
+#   --output F  write trace to F (default: trace-PID.spy-log in cwd)
 
 set -euo pipefail
 
@@ -36,34 +44,60 @@ log() { printf '[museum-trace] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
 usage() {
-    grep '^# Usage\|^#   ' "$0" | sed 's/^# \?//' >&2
+    sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# \?//' >&2
     exit "${1:-0}"
 }
 
+# Globals for cleanup (set in cmd_capture before trap fires)
+SERVER_PID=""
+PROXY_PID=""
+SERVER_SOCK=""
+PROXY_SOCK=""
+tmpdir=""
+
 cleanup() {
-    # Kill proxy if still running
-    if [[ -n "${PROXY_PID:-}" ]]; then
+    # Kill proxy first (so it flushes remaining output)
+    if [[ -n "$PROXY_PID" ]]; then
         kill "$PROXY_PID" 2>/dev/null || true
         wait "$PROXY_PID" 2>/dev/null || true
+        PROXY_PID=""
     fi
-    # Kill server if still running
-    if [[ -n "${BINARY:-}" && -n "${SERVER_SOCK:-}" ]]; then
-        "$BINARY" -f/dev/null -S "$SERVER_SOCK" kill-server 2>/dev/null || true
+    # Kill server directly by PID (reliable, works cross-implementation)
+    if [[ -n "$SERVER_PID" ]]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
     fi
-    # Remove temp sockets
-    rm -f "${PROXY_SOCK:-}" "${SERVER_SOCK:-}"
     rm -rf "${tmpdir:-}"
 }
 
-cmd_capture() {
-    local binary="" output="" verbose="" command_args=()
+resolve_binary() {
+    case "$1" in
+        zmux) printf '%s' "$ZMUX_BINARY" ;;
+        tmux) printf '%s' "$TMUX_BINARY" ;;
+        *)    printf '%s' "$1" ;;
+    esac
+}
 
-    # Parse --zmux / --tmux / --binary / --output / --verbose / rest is command
+cmd_capture() {
+    local server_binary="" client_binary="" output="" verbose="" command_args=()
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --zmux)    binary="$ZMUX_BINARY"; shift ;;
-            --tmux)    binary="$TMUX_BINARY"; shift ;;
-            --binary)  binary="$2"; shift 2 ;;
+            --zmux)
+                server_binary="$ZMUX_BINARY"
+                client_binary="$ZMUX_BINARY"
+                shift ;;
+            --tmux)
+                server_binary="$TMUX_BINARY"
+                client_binary="$TMUX_BINARY"
+                shift ;;
+            --server)
+                server_binary="$(resolve_binary "$2")"
+                shift 2 ;;
+            --client)
+                client_binary="$(resolve_binary "$2")"
+                shift 2 ;;
             --output)  output="$2"; shift 2 ;;
             --verbose) verbose=1; shift ;;
             --)        shift; command_args=("$@"); break ;;
@@ -72,17 +106,18 @@ cmd_capture() {
         esac
     done
 
-    [[ -n "$binary" ]] || die "specify --zmux, --tmux, or --binary PATH"
-    [[ -f "$binary" ]] || die "binary not found: $binary"
+    [[ -n "$server_binary" ]] || die "specify server: --zmux, --tmux, or --server {zmux|tmux|PATH}"
+    [[ -n "$client_binary" ]] || die "specify client: --zmux, --tmux, or --client {zmux|tmux|PATH}"
+    [[ -f "$server_binary" ]] || die "server binary not found: $server_binary"
+    [[ -f "$client_binary" ]] || die "client binary not found: $client_binary"
     [[ ${#command_args[@]} -gt 0 ]] || die "specify a command to run through the proxy"
     [[ -f "$SOCKET_SPY" ]] || die "socket_spy.py not found: $SOCKET_SPY"
 
     # Set up temp paths
     tmpdir="/tmp/museum-trace-$$"
-    mkdir -p "$tmpdir"
-    export SERVER_SOCK="$tmpdir/server.sock"
-    export PROXY_SOCK="$tmpdir/proxy.sock"
-    export BINARY="$binary"
+    mkdir -p "$tmpdir/bin"
+    SERVER_SOCK="$tmpdir/server.sock"
+    PROXY_SOCK="$tmpdir/proxy.sock"
 
     if [[ -z "$output" ]]; then
         output="$(pwd)/trace-$$.spy-log"
@@ -90,9 +125,30 @@ cmd_capture() {
 
     trap cleanup EXIT INT TERM
 
-    # Start server
-    log "starting server: $binary"
-    "$binary" -f/dev/null -S "$SERVER_SOCK" new-session -d -s trace-probe
+    # Derive the server's identity name (tmux or zmux) from its binary path.
+    # zmux checks argv[0] to decide protocol conventions, so the client
+    # must be invoked with an argv[0] that matches the server's type for
+    # cross-implementation combos to work transparently.
+    local server_name
+    server_name="$(basename "$server_binary")"
+    # Normalize: anything that isn't literally "tmux" is treated as zmux
+    case "$server_name" in
+        tmux) ;;
+        *)    server_name="zmux" ;;
+    esac
+
+    # Create a symlink so the client binary runs with argv[0] matching
+    # the server's identity.  For same-implementation traces this is a
+    # harmless no-op; for cross-implementation it makes the client adopt
+    # the server's protocol conventions.
+    local client_link="$tmpdir/bin/$server_name"
+    ln -sf "$client_binary" "$client_link"
+
+    # Start server in foreground mode (-D) so we get the PID directly
+    log "server: $server_binary ($server_name protocol)"
+    log "client: $client_binary (invoked as $server_name)"
+    "$server_binary" -D -f/dev/null -S "$SERVER_SOCK" &
+    SERVER_PID=$!
 
     # Poll for server socket (5s timeout)
     local waited=0
@@ -101,7 +157,7 @@ cmd_capture() {
         waited=$((waited + 1))
         [[ $waited -lt 50 ]] || die "server socket did not appear after 5s"
     done
-    log "server ready: $SERVER_SOCK"
+    log "server ready: $SERVER_SOCK (pid $SERVER_PID)"
 
     # Start proxy
     local spy_args=(--listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output")
@@ -118,21 +174,27 @@ cmd_capture() {
     done
     log "proxy ready: $PROXY_SOCK"
 
-    # Run user command through proxy
+    # Run user command through proxy — invoked via the symlink so
+    # argv[0] matches the server's protocol identity
     log "running: ${command_args[*]}"
-    "$binary" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}"
+    "$client_link" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}" || true
 
-    # Kill server (through proxy so proxy sees the conversation end)
-    "$binary" -f/dev/null -S "$PROXY_SOCK" kill-server 2>/dev/null || true
+    # Kill server directly — reliable regardless of client/server implementation match
+    log "stopping server (pid $SERVER_PID)"
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
 
-    # Wait for proxy to exit (it exits when connections close)
-    wait "$PROXY_PID" 2>/dev/null || true
-    PROXY_PID=""
+    # Give proxy a moment to flush, then collect it
+    sleep 0.2
+    if [[ -n "$PROXY_PID" ]]; then
+        kill "$PROXY_PID" 2>/dev/null || true
+        wait "$PROXY_PID" 2>/dev/null || true
+        PROXY_PID=""
+    fi
 
     log "trace written: $output"
     printf '%s\n' "$output"
-
-    cleanup
 }
 
 # Main dispatch

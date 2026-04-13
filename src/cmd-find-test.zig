@@ -645,6 +645,9 @@ test "cmd_find_target @ requires a client on the queue item" {
     cmdq_mod.cmdq_reset_for_tests();
     defer cmdq_mod.cmdq_reset_for_tests();
 
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
     var list: cmd_mod.CmdList = .{};
     var item = cmdq_mod.CmdqItem{ .cmdlist = &list };
     var target: T.CmdFindState = .{};

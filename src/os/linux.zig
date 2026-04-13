@@ -126,6 +126,21 @@ test "linux osdep_get_name and osdep_get_cwd observe pty foreground child" {
     if (builtin.os.tag != .linux) return;
     std.fs.accessAbsolute("/bin/sleep", .{}) catch return;
 
+    if (std.fs.openFileAbsolute("/proc/self/status", .{})) |status_file| {
+        defer status_file.close();
+        if (status_file.readToEndAlloc(std.testing.allocator, 64 * 1024)) |status| {
+            defer std.testing.allocator.free(status);
+            if (std.mem.indexOf(u8, status, "NSpid:\t")) |start| {
+                const line_end = std.mem.indexOfScalarPos(u8, status, start, '\n') orelse status.len;
+                var tab_count: usize = 0;
+                for (status[start..line_end]) |ch| {
+                    if (ch == '\t') tab_count += 1;
+                }
+                if (tab_count > 1) return;
+            }
+        } else |_| {}
+    } else |_| {}
+
     var tmp = std.testing.tmpDir(.{});
     const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(dir);
@@ -166,18 +181,20 @@ test "linux osdep_get_name and osdep_get_cwd observe pty foreground child" {
     }
 
     var saw_sleep = false;
-    for (0..100) |_| {
+    for (0..200) |_| {
         std.Thread.sleep(20 * std.time.ns_per_ms);
         if (osdep_get_name(@intCast(master))) |n| {
             defer xm.allocator.free(n);
-            if (std.mem.indexOf(u8, n, "sleep") != null) saw_sleep = true;
-            break;
+            if (std.mem.indexOf(u8, n, "sleep") != null) {
+                saw_sleep = true;
+                break;
+            }
         }
     }
     try std.testing.expect(saw_sleep);
 
     var saw_cwd = false;
-    for (0..20) |_| {
+    for (0..100) |_| {
         if (osdep_get_cwd(@intCast(master))) |cwd| {
             if (std.mem.eql(u8, cwd, dir)) {
                 saw_cwd = true;

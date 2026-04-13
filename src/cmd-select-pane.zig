@@ -635,6 +635,13 @@ test "select-pane sets pane styles and last-pane falls back to the only other pa
 }
 
 test "select-pane rejects invalid pane styles" {
+    sess_mod.session_init_globals(xm.allocator);
+    defer sess_mod.sessions.deinit();
+    defer sess_mod.session_groups.deinit();
+    win.window_init_globals(xm.allocator);
+    defer win.windows.deinit();
+    defer win.all_window_panes.deinit();
+
     var parse_cause: ?[]u8 = null;
     const select_cmd = try cmd_mod.cmd_parse_one(&.{ "select-pane", "-P", "mystery-token" }, null, &parse_cause);
     defer cmd_mod.cmd_free(select_cmd);

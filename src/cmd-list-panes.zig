@@ -26,21 +26,21 @@ const DEFAULT_PANE_TEMPLATE =
     "[#{pane_width}x#{pane_height}] " ++
     "[history #{history_size}/#{history_limit}, " ++
     "#{history_bytes} bytes] " ++
-    "#{pane_id}" ++
+    "#{pane_id} pid=#{pane_pid}" ++
     "#{?pane_active, (active),}#{?pane_dead, (dead),}";
 const DEFAULT_WINDOW_PANE_TEMPLATE =
     "#{window_index}.#{pane_index}: " ++
     "[#{pane_width}x#{pane_height}] " ++
     "[history #{history_size}/#{history_limit}, " ++
     "#{history_bytes} bytes] " ++
-    "#{pane_id}" ++
+    "#{pane_id} pid=#{pane_pid}" ++
     "#{?pane_active, (active),}#{?pane_dead, (dead),}";
 const DEFAULT_SESSION_PANE_TEMPLATE =
     "#{session_name}:#{window_index}.#{pane_index}: " ++
     "[#{pane_width}x#{pane_height}] " ++
     "[history #{history_size}/#{history_limit}, " ++
     "#{history_bytes} bytes] " ++
-    "#{pane_id}" ++
+    "#{pane_id} pid=#{pane_pid}" ++
     "#{?pane_active, (active),}#{?pane_dead, (dead),}";
 const DEFAULT_CLIENT_TEMPLATE =
     "#{client_name}: #{session_name} " ++
@@ -224,6 +224,7 @@ test "list-panes templates and filters use shared formatter" {
     // Verify format matches: "session:win.pane: [WxH] [history .../..., N bytes] %id (active)"
     try std.testing.expect(std.mem.startsWith(u8, line, "list-panes-test:0.0: [80x24] [history "));
     try std.testing.expect(std.mem.indexOf(u8, line, " bytes] %") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, " pid=") != null);
     try std.testing.expect(std.mem.endsWith(u8, line, " (active)"));
 
     const matched = format_mod.format_filter_match(xm.allocator, "#{==:pane_width,80}", &ctx).?;

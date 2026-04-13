@@ -46,15 +46,6 @@ Live tmux-parity gaps only.
   pane.
 - `likely files:` `src/cmd-respawn-window.zig`
 
-## format-async: allocator mismatch in timeout path
-
-- `tmux:` `format_job_get()` returns timeout text that is freed by the caller
-  without issue.
-- `zmux:` `format_job_get()` formats the timeout text with `xm.xasprintf`
-  (global allocator), but `expand_template()` frees it with the caller
-  allocator, causing a segfault on the timeout branch.
-- `likely files:` `src/format.zig` (`format_job_get`, `expand_template`)
-
 ## cmd-new-session / cmd-attach-session: attach flow divergence
 
 - `tmux:` `new-session` and `attach-session` handle the full client-attach

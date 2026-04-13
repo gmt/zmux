@@ -384,8 +384,7 @@ fn format_job_get(alloc: std.mem.Allocator, cmd: []const u8, ctx: *const FormatC
         fj.last = now;
     } else if (fj.async_shell != null and (now - fj.last) > 1 and fj.out == null) {
         // Still running after >1 s with no output yet.
-        const msg = xm.xasprintf("<'{s}' not ready>", .{fj.cmd});
-        return .{ .text = msg, .complete = true };
+        fj.out = xm.xasprintf("<'{s}' not ready>", .{fj.cmd});
     }
 
     if (fj.out) |out| {

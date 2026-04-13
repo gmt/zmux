@@ -16,12 +16,12 @@
 #
 # museum-trace — capture tmux/zmux wire protocol traces via socket-spy
 #
-# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] COMMAND...
+# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] COMMAND [ARGS...]
 #
 # Examples:
-#   museum-trace capture --zmux "new-session -d -s test"
-#   museum-trace capture --tmux "new-session -d -s test"
-#   museum-trace capture --zmux --output zmux.spy-log "list-sessions"
+#   museum-trace capture --zmux new-session -d -s test
+#   museum-trace capture --tmux new-session -d -s test
+#   museum-trace capture --zmux --output zmux.spy-log list-sessions
 
 set -euo pipefail
 
@@ -51,6 +51,7 @@ cleanup() {
     fi
     # Remove temp sockets
     rm -f "${PROXY_SOCK:-}" "${SERVER_SOCK:-}"
+    rm -rf "${tmpdir:-}"
 }
 
 cmd_capture() {
@@ -75,7 +76,7 @@ cmd_capture() {
     [[ -f "$SOCKET_SPY" ]] || die "socket_spy.py not found: $SOCKET_SPY"
 
     # Set up temp paths
-    local tmpdir="/tmp/museum-trace-$$"
+    tmpdir="/tmp/museum-trace-$$"
     mkdir -p "$tmpdir"
     export SERVER_SOCK="$tmpdir/server.sock"
     export PROXY_SOCK="$tmpdir/proxy.sock"

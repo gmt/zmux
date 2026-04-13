@@ -74,11 +74,11 @@ live captures (dynamic).
 
 ```bash
 # Capture a zmux wire trace
-tmux-museum/bin/museum-trace capture --zmux "new-session -d -s test"
+tmux-museum/bin/museum-trace capture --zmux new-session -d -s test
 # → writes trace-NNNN.spy-log in current directory
 
 # Capture the same command via tmux museum build
-tmux-museum/bin/museum-trace capture --tmux "new-session -d -s test"
+tmux-museum/bin/museum-trace capture --tmux new-session -d -s test
 
 # Compare message sequences (expect PID/path noise; focus on message types and order)
 diff -u tmux-trace-*.spy-log zmux-trace-*.spy-log
@@ -86,8 +86,8 @@ diff -u tmux-trace-*.spy-log zmux-trace-*.spy-log
 
 Specify an explicit output path:
 ```bash
-tmux-museum/bin/museum-trace capture --zmux --output zmux-new-session.spy-log "new-session -d -s test"
-tmux-museum/bin/museum-trace capture --tmux --output tmux-new-session.spy-log "new-session -d -s test"
+tmux-museum/bin/museum-trace capture --zmux --output zmux-new-session.spy-log new-session -d -s test
+tmux-museum/bin/museum-trace capture --tmux --output tmux-new-session.spy-log new-session -d -s test
 diff -u tmux-new-session.spy-log zmux-new-session.spy-log
 ```
 

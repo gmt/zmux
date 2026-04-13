@@ -14,3 +14,21 @@ Live tmux-parity gaps only.
    - `tmux:` what behavior exists upstream
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
+
+## Command output bypasses tmux's write-open/write-ready handshake
+
+- `tmux:` commands that print to stdout in the trace sweep (`list-sessions`, `list-panes`, `display-message -p`) send `write_open(303)` and wait for `write_ready(305)` before sending `write(304)` payloads.
+- `zmux:` the same commands send `write(304)` directly and never emit the `write_open`/`write_ready` pair, so the client-side file-transfer protocol diverges whenever command output is streamed.
+- `likely files:` `src/client.zig`, `src/file-write.zig`, `src/file.zig`
+
+## list-sessions default created-time formatting does not match tmux
+
+- `tmux:` `list-sessions` printed `trace-probe: 1 windows (created Mon Apr 13 00:45:12 2026)` during the sweep.
+- `zmux:` `list-sessions` printed `trace-probe: 1 windows (created 2026-04-13 00:45:11)`, so the default `#{t:session_created}` rendering is using a different timestamp format.
+- `likely files:` `src/cmd-list-sessions.zig`, `src/format.zig`
+
+## list-panes default output is still the simplified placeholder format
+
+- `tmux:` `list-panes -t trace-probe` printed `0: [80x24] [history 0/2000, 1575 bytes] %0 (active)` with the usual pane metadata and decorations.
+- `zmux:` `list-panes -t trace-probe` printed `0: 80x24 pid=470168`, so the default format is still a simplified placeholder rather than tmux's pane listing.
+- `likely files:` `src/cmd-list-panes.zig`, `src/format.zig`

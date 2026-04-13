@@ -705,6 +705,7 @@ test {
     _ = @import("cmd-client-ui-test.zig");
     _ = @import("imsg-roundtrip-test.zig");
     _ = @import("cmd-exec-groups-test.zig");
+    _ = @import("cmd-format-test.zig");
     _ = @import("image-sixel.zig");
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");

@@ -273,15 +273,22 @@ pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow
 }
 
 pub fn client_handle_write_data(imsg_msg: *c.imsg.imsg) void {
-    if (!client_write_files_init) return;
-
     const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
     if (data_len < @sizeOf(protocol.MsgWriteData) or imsg_msg.data == null) return;
 
     const msg: *const protocol.MsgWriteData = @ptrCast(@alignCast(imsg_msg.data.?));
-    const cf = client_write_files.get(msg.stream) orelse return;
     const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
     const payload = raw[@sizeOf(protocol.MsgWriteData)..data_len];
+
+    if (!client_write_files_init) {
+        write_stream_immediate(msg.stream, payload);
+        return;
+    }
+
+    const cf = client_write_files.get(msg.stream) orelse {
+        write_stream_immediate(msg.stream, payload);
+        return;
+    };
 
     if (cf.event) |bev| {
         _ = c.libevent.bufferevent_write(bev, @ptrCast(payload.ptr), payload.len);
@@ -300,6 +307,25 @@ pub fn client_handle_write_data(imsg_msg: *c.imsg.imsg) void {
             }
             remaining = remaining[@as(usize, @intCast(written))..];
         }
+    }
+}
+
+fn write_stream_immediate(stream: i32, payload: []const u8) void {
+    const fd: i32 = switch (stream) {
+        std.posix.STDOUT_FILENO => std.posix.STDOUT_FILENO,
+        std.posix.STDERR_FILENO => std.posix.STDERR_FILENO,
+        else => return,
+    };
+
+    var remaining = payload;
+    while (remaining.len != 0) {
+        const written = c.posix_sys.write(fd, @ptrCast(remaining.ptr), remaining.len);
+        if (written == -1) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+            return;
+        }
+        if (written == 0) return;
+        remaining = remaining[@as(usize, @intCast(written))..];
     }
 }
 
@@ -494,4 +520,38 @@ test "client_handle_write_open keeps stdout stream writes synchronous" {
 
     const cf = client_write_files.get(1) orelse return error.TestUnexpectedResult;
     try std.testing.expect(cf.event == null);
+}
+
+test "client_handle_write_data writes raw stdout stream without write_open" {
+    reset_for_tests();
+    defer reset_for_tests();
+
+    var pipefds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&pipefds));
+    defer std.posix.close(pipefds[0]);
+
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+    try std.posix.dup2(pipefds[1], std.posix.STDOUT_FILENO);
+    defer {
+        std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO) catch {};
+        std.posix.close(pipefds[1]);
+    }
+
+    const payload = blk: {
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(xm.allocator);
+        const header = protocol.MsgWriteData{ .stream = std.posix.STDOUT_FILENO };
+        buf.appendSlice(xm.allocator, std.mem.asBytes(&header)) catch unreachable;
+        buf.appendSlice(xm.allocator, "hello raw stream") catch unreachable;
+        break :blk try buf.toOwnedSlice(xm.allocator);
+    };
+    defer xm.allocator.free(payload);
+
+    var imsg = buildImsg(@intFromEnum(protocol.MsgType.write), payload);
+    client_handle_write_data(&imsg);
+
+    var got: [64]u8 = undefined;
+    const n = try std.posix.read(pipefds[0], &got);
+    try std.testing.expectEqualStrings("hello raw stream", got[0..n]);
 }

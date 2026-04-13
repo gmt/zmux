@@ -36,6 +36,7 @@ const std = @import("std");
 const T = @import("types.zig");
 const c = @import("c.zig");
 const cmd_mod = @import("cmd.zig");
+const cmd_find = @import("cmd-find.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
 const log = @import("log.zig");
@@ -671,7 +672,9 @@ pub fn control_read_callback(cl: *T.Client, line: []const u8) void {
         .success => {
             if (result.cmdlist) |raw| {
                 const cmdlist: *cmd_mod.CmdList = @ptrCast(@alignCast(raw));
-                const state = cmdq.cmdq_new_state(null, null, T.CMDQ_STATE_CONTROL);
+                var current: T.CmdFindState = .{};
+                const current_ptr = if (cl.session != null and cmd_find.cmd_find_from_client(&current, cl, 0)) &current else null;
+                const state = cmdq.cmdq_new_state(current_ptr, null, T.CMDQ_STATE_CONTROL);
                 defer cmdq.cmdq_free_state(state);
                 _ = cmdq.cmdq_append_item(cl, cmdq.cmdq_get_command(@ptrCast(cmdlist), state));
             }

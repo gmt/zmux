@@ -33,6 +33,8 @@
     "zig-unit:server-client-test.test.server_client_attach reattaches after detach and sends ready for the new peer state": 5.0,
     "zig-unit:server-client-test.test.server_client_dispatch_for_test exiting on a detached client sends exited and marks it dead": 5.0,
     "zig-unit:server-client-test.test.server_client_dispatch_for_test ignores command messages once CLIENT_EXIT is set": 5.0,
+    "zig-unit:control-test.test.control_read_callback seeds current state for relative targets": 5.0,
+    "zig-unit:file-write.test.client_handle_write_data writes raw stdout stream without write_open": 5.0,
     "fuzz-corpus:cmd-preprocess:ascii_and_esc": 5.0,
     "fuzz-corpus:cmd-preprocess:empty": 5.0,
     "fuzz-corpus:input:ascii_and_esc": 5.0,

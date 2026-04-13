@@ -21,6 +21,8 @@ const c = @import("c.zig");
 const env_mod = @import("environ.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
+const cmdq = @import("cmd-queue.zig");
+const client_registry = @import("client-registry.zig");
 const sess = @import("session.zig");
 const win_mod = @import("window.zig");
 const ctl = @import("control.zig");
@@ -525,6 +527,60 @@ test "control_write_output flushes escaped pane data for control clients" {
     try std.testing.expectEqual(@as(u32, 0), cl.control_pending_count);
     try std.testing.expectEqual(@as(usize, 0), cl.control_all_blocks.items.len);
     try std.testing.expectEqual(@as(usize, 4), cl.control_panes.items[0].offset.used);
+}
+
+test "control_read_callback seeds current state for relative targets" {
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const s = sess.session_create(null, "control-relative", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("control-relative") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    const w0 = win_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(w0, "test");
+    const wl0 = sess.session_attach(s, w0, 0, &cause) orelse unreachable;
+    const wp0 = win_mod.window_add_pane(w0, null, 20, 6);
+    w0.active = wp0;
+
+    const w1 = win_mod.window_create(20, 6, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(w1, "test");
+    const wl1 = sess.session_attach(s, w1, 1, &cause) orelse unreachable;
+    const wp1 = win_mod.window_add_pane(w1, null, 20, 6);
+    w1.active = wp1;
+    s.curw = wl0;
+
+    var cl = T.Client{
+        .name = "control-relative-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_CONTROL | T.CLIENT_SIZECHANGED | T.CLIENT_ATTACHED,
+        .session = s,
+    };
+    defer env_mod.environ_free(cl.environ);
+    cl.tty = .{ .client = &cl, .sx = 20, .sy = 6 };
+    try client_registry.clients.append(xm.allocator, &cl);
+
+    ctl.control_read_callback(&cl, "select-window -t :1");
+    while (cmdq.cmdq_next(&cl) != 0) {}
+
+    try std.testing.expectEqual(wl1, s.curw.?);
 }
 
 test "control_remove_sub from middle preserves remaining order" {

@@ -1767,3 +1767,89 @@ test "format_expand handles client loops plus multibyte width and style quoting"
     defer xm.allocator.free(rendered);
     try std.testing.expectEqualStrings("3:2:é##", rendered);
 }
+
+test "format_expand handles nested conditionals with empty and missing values" {
+    var ctx = FormatContext{};
+    fmt.format_add(&ctx, "enabled", "1");
+    fmt.format_add(&ctx, "empty", "");
+    defer if (ctx.extras) |extras| {
+        extras.deinit();
+        xm.allocator.destroy(extras);
+    };
+
+    const nested = format_require_complete(
+        xm.allocator,
+        "#{?#{enabled},#{?#{empty},bad,#{?#{missing},bad,deep}},fallback}",
+        &ctx,
+    ).?;
+    defer xm.allocator.free(nested);
+    try std.testing.expectEqualStrings("deep", nested);
+}
+
+test "format_expand applies substitutions with captures, anchors, and invalid regex fallback" {
+    const capture_ctx = FormatContext{ .message_text = "abABab" };
+    const captures = format_require_complete(
+        xm.allocator,
+        "#{s/a(.)/\\1x/i:message_text}",
+        &capture_ctx,
+    ).?;
+    defer xm.allocator.free(captures);
+    try std.testing.expectEqualStrings("bxBxbx", captures);
+
+    const anchored_ctx = FormatContext{ .message_text = "foobar" };
+    const anchored = format_require_complete(
+        xm.allocator,
+        "#{s/^foo/bar/:message_text}",
+        &anchored_ctx,
+    ).?;
+    defer xm.allocator.free(anchored);
+    try std.testing.expectEqualStrings("barbar", anchored);
+
+    const invalid = format_require_complete(
+        xm.allocator,
+        "#{s/[foo/bar/:message_text}",
+        &anchored_ctx,
+    ).?;
+    defer xm.allocator.free(invalid);
+    try std.testing.expectEqualStrings("foobar", invalid);
+}
+
+test "format_expand returns an empty string for empty client loops" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const loop = format_require_complete(xm.allocator, "#{L:#{client_name}}", &FormatContext{}).?;
+    defer xm.allocator.free(loop);
+    try std.testing.expectEqualStrings("", loop);
+}
+
+test "format_expand preserves missing keys and accepts empty templates" {
+    const empty = format_expand(xm.allocator, "", &FormatContext{});
+    defer xm.allocator.free(empty.text);
+    try std.testing.expect(empty.complete);
+    try std.testing.expectEqualStrings("", empty.text);
+
+    const missing = format_expand(xm.allocator, "#{missing_value}", &FormatContext{});
+    defer xm.allocator.free(missing.text);
+    try std.testing.expect(!missing.complete);
+    try std.testing.expectEqualStrings("#{missing_value}", missing.text);
+}
+
+test "format_expand stops recursive option expansion at the loop limit" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    opts.options_set_string(opts.global_options, false, "status-left", "#{E:status-left}");
+
+    const expanded = format_expand(xm.allocator, "#{E:status-left}", &FormatContext{});
+    defer xm.allocator.free(expanded.text);
+    try std.testing.expect(!expanded.complete);
+    try std.testing.expectEqualStrings("#{E:status-left}", expanded.text);
+}

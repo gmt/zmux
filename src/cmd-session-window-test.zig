@@ -488,3 +488,59 @@ test "list-panes -a produces empty output when no sessions exist" {
 
     try std.testing.expectEqualStrings("", output);
 }
+
+test "list-sessions output includes created session names" {
+    init_harness();
+    defer deinit_harness();
+
+    const alpha = sess.session_create(null, "sweep-alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("sweep-alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "sweep-beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("sweep-beta") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    var alpha_sc: T.SpawnContext = .{ .s = alpha, .idx = -1, .flags = T.SPAWN_EMPTY };
+    alpha.curw = spawn.spawn_window(&alpha_sc, &cause).?;
+    var beta_sc: T.SpawnContext = .{ .s = beta, .idx = -1, .flags = T.SPAWN_EMPTY };
+    beta.curw = spawn.spawn_window(&beta_sc, &cause).?;
+
+    const output = try capture_stdout(&.{ "list-sessions", "-F", "#{session_name}" });
+    defer xm.allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "sweep-alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "sweep-beta") != null);
+}
+
+test "show-messages command entry succeeds on attached client" {
+    init_harness();
+    defer deinit_harness();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const session = sess.session_create(null, "show-msg-test", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("show-msg-test") != null) sess.session_destroy(session, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = session, .idx = -1, .flags = T.SPAWN_EMPTY };
+    session.curw = spawn.spawn_window(&sc, &cause).?;
+
+    var client = T.Client{
+        .name = "show-msg-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer env_mod.environ_free(client.environ);
+    tty_mod.tty_init(&client.tty, &client);
+    client_registry.add(&client);
+
+    const cmd = try cmd_mod.cmd_parse_one(&.{"show-messages"}, &client, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = &client, .target_client = &client, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}

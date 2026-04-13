@@ -59,3 +59,30 @@ test "show-options command parses global and option name" {
 test "show-environment command parses -g" {
     try std.testing.expectEqualStrings("show-environment", try parseName(&.{ "show-environment", "-g" }));
 }
+
+test "set-environment -g exec stores a variable in the global environ" {
+    const T = @import("types.zig");
+    const env_mod = @import("environ.zig");
+    const cmdq = @import("cmd-queue.zig");
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    var cause: ?[]u8 = null;
+    const set_cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-g", "ZMUX_SWEEP_VAR", "sweep-value" }, null, &cause);
+    defer cmd_mod.cmd_free(set_cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(set_cmd, &item));
+
+    const found = env_mod.environ_find(env_mod.global_environ, "ZMUX_SWEEP_VAR");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("sweep-value", found.?.value.?);
+
+    // Verify -u removes the entry entirely
+    const unset_cmd = try cmd_mod.cmd_parse_one(&.{ "set-environment", "-gu", "ZMUX_SWEEP_VAR" }, null, &cause);
+    defer cmd_mod.cmd_free(unset_cmd);
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(unset_cmd, &item));
+    try std.testing.expect(env_mod.environ_find(env_mod.global_environ, "ZMUX_SWEEP_VAR") == null);
+}

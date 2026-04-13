@@ -716,6 +716,7 @@ test {
     _ = @import("options-test.zig");
     _ = @import("popup-menu-test.zig");
     _ = @import("control-test.zig");
+    _ = @import("control-notify-test.zig");
     _ = @import("small-modules-test.zig");
     _ = @import("zmux-protocol-test.zig");
     _ = @import("clipboard.zig");

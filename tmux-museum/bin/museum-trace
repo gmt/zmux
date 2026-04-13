@@ -16,11 +16,12 @@
 #
 # museum-trace — capture tmux/zmux wire protocol traces via socket-spy
 #
-# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] COMMAND [ARGS...]
+# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] [--verbose] COMMAND [ARGS...]
 #
 # Examples:
 #   museum-trace capture --zmux new-session -d -s test
 #   museum-trace capture --tmux new-session -d -s test
+#   museum-trace capture --zmux --verbose new-session -d -s test
 #   museum-trace capture --zmux --output zmux.spy-log list-sessions
 
 set -euo pipefail
@@ -55,18 +56,19 @@ cleanup() {
 }
 
 cmd_capture() {
-    local binary="" output="" command_args=()
+    local binary="" output="" verbose="" command_args=()
 
-    # Parse --zmux / --tmux / --binary / --output / rest is command
+    # Parse --zmux / --tmux / --binary / --output / --verbose / rest is command
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --zmux)   binary="$ZMUX_BINARY"; shift ;;
-            --tmux)   binary="$TMUX_BINARY"; shift ;;
-            --binary) binary="$2"; shift 2 ;;
-            --output) output="$2"; shift 2 ;;
-            --)       shift; command_args=("$@"); break ;;
-            -*)       die "unknown option: $1" ;;
-            *)        command_args=("$@"); break ;;
+            --zmux)    binary="$ZMUX_BINARY"; shift ;;
+            --tmux)    binary="$TMUX_BINARY"; shift ;;
+            --binary)  binary="$2"; shift 2 ;;
+            --output)  output="$2"; shift 2 ;;
+            --verbose) verbose=1; shift ;;
+            --)        shift; command_args=("$@"); break ;;
+            -*)        die "unknown option: $1" ;;
+            *)         command_args=("$@"); break ;;
         esac
     done
 
@@ -102,7 +104,9 @@ cmd_capture() {
     log "server ready: $SERVER_SOCK"
 
     # Start proxy
-    python3 "$SOCKET_SPY" --listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output" &
+    local spy_args=(--listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output")
+    [[ -n "$verbose" ]] && spy_args+=(--verbose)
+    python3 "$SOCKET_SPY" "${spy_args[@]}" &
     PROXY_PID=$!
 
     # Wait for proxy listen socket

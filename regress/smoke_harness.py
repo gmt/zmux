@@ -59,9 +59,7 @@ class SmokeTimeoutError(SmokeError):
 
 
 class ControlClient:
-    def __init__(
-        self, harness: "SmokeHarness", name: str, session: str = "smoke"
-    ) -> None:
+    def __init__(self, harness: "SmokeHarness", name: str, session: str = "smoke") -> None:
         self.harness = harness
         self.name = name
         self.session = session
@@ -93,9 +91,7 @@ class ControlClient:
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                raise SmokeError(
-                    f"{self.name}: control client exited early with {self.proc.returncode}"
-                )
+                raise SmokeError(f"{self.name}: control client exited early with {self.proc.returncode}")
             listing = self.harness.mux(
                 ["list-clients"],
                 timeout=2.0,
@@ -143,8 +139,6 @@ class ControlClient:
 
 
 class SmokeHarness:
-    EXERCISE_TIMEOUT_S = 6.0
-    TIMEOUT_IS_EXERCISE_TIMEOUT_S = 3.0
     CLIENTISH_COMMANDS = {
         "attach-session",
         "choose-buffer",
@@ -203,9 +197,7 @@ class SmokeHarness:
         self.artifact_dir = pathlib.Path(
             tempfile.mkdtemp(prefix="zmux-smoke-", dir=str(artifact_root))
         )
-        self.owner_dir = smoke_owner.resolve_owner_dir() or (
-            self.artifact_dir / "owned-pids"
-        )
+        self.owner_dir = smoke_owner.resolve_owner_dir() or (self.artifact_dir / "owned-pids")
         self.socket_path = self.artifact_dir / "socket"
         self.temp_buffer = self.artifact_dir / "buffer.txt"
         self.temp_save = self.artifact_dir / "saved-buffer.txt"
@@ -277,11 +269,7 @@ class SmokeHarness:
         except SmokeError:
             pass
 
-    def register_server(
-        self,
-        socket_path: pathlib.Path | None = None,
-        owner_label: str = "smoke-harness",
-    ) -> int | None:
+    def register_server(self, socket_path: pathlib.Path | None = None, owner_label: str = "smoke-harness") -> int | None:
         target_socket = socket_path or self.socket_path
         entry = smoke_owner.register_server(
             self.base_args_for_socket(target_socket),
@@ -386,9 +374,7 @@ class SmokeHarness:
                 return line.split()[0]
         return None
 
-    def verify_no_unknown_command(
-        self, proc: subprocess.CompletedProcess[str], command: str
-    ) -> None:
+    def verify_no_unknown_command(self, proc: subprocess.CompletedProcess[str], command: str) -> None:
         combined = f"{proc.stdout}\n{proc.stderr}".lower()
         if "unknown command" in combined:
             raise SmokeError(f"{command}: reported as unknown command")
@@ -424,15 +410,10 @@ class SmokeHarness:
         if row.command in self.CONTROL_CLIENT_EXERCISE:
             self.exercise_via_control_client(self.recipe_for(row.command, client_name))
             return
-        timeout_s = (
-            self.TIMEOUT_IS_EXERCISE_TIMEOUT_S
-            if row.command in self.TIMEOUT_IS_EXERCISE
-            else self.EXERCISE_TIMEOUT_S
-        )
         try:
             proc = self.mux(
                 self.recipe_for(row.command, client_name),
-                timeout=timeout_s,
+                timeout=6.0,
                 accept_codes=(0, 1),
             )
         except SmokeTimeoutError:
@@ -454,17 +435,13 @@ class SmokeHarness:
 
         client = self.control_clients[0]
         if client.proc.poll() is not None:
-            raise SmokeError(
-                f"{args[0]}: control client exited before command dispatch"
-            )
+            raise SmokeError(f"{args[0]}: control client exited before command dispatch")
 
         client.send(shlex.join(args))
         deadline = time.time() + 1.5
         while time.time() < deadline:
             if client.proc.poll() is not None:
-                raise SmokeError(
-                    f"{args[0]}: control client exited early with {client.proc.returncode}"
-                )
+                raise SmokeError(f"{args[0]}: control client exited early with {client.proc.returncode}")
             time.sleep(0.05)
 
         if not client.stderr_is_clean():
@@ -472,31 +449,15 @@ class SmokeHarness:
 
     def prepare_command_state(self, command: str) -> None:
         if command in {"unlink-window"} and self.supports("link-window"):
-            self.mux(
-                ["link-window", "-s", "smoke:1", "-t", "peer:9"], accept_codes=(0, 1)
-            )
+            self.mux(["link-window", "-s", "smoke:1", "-t", "peer:9"], accept_codes=(0, 1))
 
         if command in {"swap-window", "move-window"}:
             self.mux(["new-window", "-d", "-t", "peer"], accept_codes=(0, 1))
 
-        if command in {
-            "last-window",
-            "next-window",
-            "previous-window",
-            "swap-window",
-            "move-window",
-        }:
+        if command in {"last-window", "next-window", "previous-window", "swap-window", "move-window"}:
             self.mux(["select-window", "-t", "smoke:0"], accept_codes=(0, 1))
 
-        if command in {
-            "last-pane",
-            "swap-pane",
-            "join-pane",
-            "move-pane",
-            "kill-pane",
-            "break-pane",
-            "resize-pane",
-        } and self.supports("split-window"):
+        if command in {"last-pane", "swap-pane", "join-pane", "move-pane", "kill-pane", "break-pane", "resize-pane"} and self.supports("split-window"):
             self.mux(["select-pane", "-t", "smoke:0.1"], accept_codes=(0, 1))
 
     def recipe_for(self, command: str, client_name: str | None) -> list[str]:
@@ -522,22 +483,9 @@ class SmokeHarness:
         if command == "clock-mode":
             return ["clock-mode", "-t", "smoke:0.0"]
         if command == "command-prompt":
-            return [
-                "command-prompt",
-                "-t",
-                client_target,
-                "display-message command-prompt",
-            ]
+            return ["command-prompt", "-t", client_target, "display-message command-prompt"]
         if command == "confirm-before":
-            return [
-                "confirm-before",
-                "-b",
-                "-y",
-                "-t",
-                client_target,
-                "display-message",
-                "confirmed",
-            ]
+            return ["confirm-before", "-b", "-y", "-t", client_target, "display-message", "confirmed"]
         if command == "copy-mode":
             return ["copy-mode", "-t", "smoke:0.0"]
         if command == "customize-mode":
@@ -547,22 +495,9 @@ class SmokeHarness:
         if command == "detach-client":
             return ["detach-client", "-t", client_target]
         if command == "display-menu":
-            return [
-                "display-menu",
-                "-t",
-                "smoke:0.0",
-                "smoke",
-                "x",
-                "display-message menu",
-            ]
+            return ["display-menu", "-t", "smoke:0.0", "smoke", "x", "display-message menu"]
         if command == "display-message":
-            return [
-                "display-message",
-                "-p",
-                "-t",
-                "smoke:0.0",
-                "#{session_name}:#{window_index}.#{pane_index}",
-            ]
+            return ["display-message", "-p", "-t", "smoke:0.0", "#{session_name}:#{window_index}.#{pane_index}"]
         if command == "display-popup":
             return ["display-popup", "-t", "smoke:0.0", "true"]
         if command == "display-panes":
@@ -642,25 +577,9 @@ class SmokeHarness:
         if command == "resize-window":
             return ["resize-window", "-t", "smoke:0", "-x", "100", "-y", "40"]
         if command == "respawn-pane":
-            return [
-                "respawn-pane",
-                "-k",
-                "-t",
-                "smoke:0.0",
-                "sh",
-                "-lc",
-                "printf respawn-pane; sleep 1",
-            ]
+            return ["respawn-pane", "-k", "-t", "smoke:0.0", "sh", "-lc", "printf respawn-pane; sleep 1"]
         if command == "respawn-window":
-            return [
-                "respawn-window",
-                "-k",
-                "-t",
-                "smoke:1",
-                "sh",
-                "-lc",
-                "printf respawn-window; sleep 1",
-            ]
+            return ["respawn-window", "-k", "-t", "smoke:1", "sh", "-lc", "printf respawn-window; sleep 1"]
         if command == "rotate-window":
             return ["rotate-window", "-t", "smoke:0"]
         if command == "run-shell":
@@ -684,13 +603,7 @@ class SmokeHarness:
         if command == "set-environment":
             return ["set-environment", "-t", "smoke", "SMOKE_VAR", "1"]
         if command == "set-hook":
-            return [
-                "set-hook",
-                "-t",
-                "smoke:0.0",
-                "after-new-window",
-                "display-message hook",
-            ]
+            return ["set-hook", "-t", "smoke:0.0", "after-new-window", "display-message hook"]
         if command == "set-option":
             return ["set-option", "-g", "status", "off"]
         if command == "set-window-option":
@@ -743,19 +656,11 @@ class SmokeHarness:
         primary = self.control_clients[0]
         primary.send("refresh-client -C 110,35")
         self._poll(
-            lambda: (
-                self.mux(
-                    [
-                        "display-message",
-                        "-p",
-                        "-t",
-                        "smoke:0",
-                        "#{window_width}x#{window_height}",
-                    ],
-                    accept_codes=(0, 1),
-                ).stdout.strip()
-                == "110x35"
-            ),
+            lambda: self.mux(
+                ["display-message", "-p", "-t", "smoke:0", "#{window_width}x#{window_height}"],
+                accept_codes=(0, 1),
+            ).stdout.strip()
+            == "110x35",
             timeout_s=5.0,
             message="control resize never propagated",
         )
@@ -763,14 +668,7 @@ class SmokeHarness:
         if self.supports("new-window") and self.supports("select-window"):
             primary.send("new-window -t smoke")
             self._poll(
-                lambda: (
-                    len(
-                        self.mux(
-                            ["list-windows", "-t", "smoke"], accept_codes=(0, 1)
-                        ).stdout.splitlines()
-                    )
-                    >= 3
-                ),
+                lambda: len(self.mux(["list-windows", "-t", "smoke"], accept_codes=(0, 1)).stdout.splitlines()) >= 3,
                 timeout_s=5.0,
                 message="new window never appeared",
             )
@@ -782,27 +680,15 @@ class SmokeHarness:
 
         if self.native_commands():
             nested_cmd = f"env ZMUX= {self.binary} -S {shlex.quote(str(self.inner_socket))} -f/dev/null new-session -d -s inner"
-            self.mux(
-                ["new-window", "-d", "-t", "smoke", nested_cmd], accept_codes=(0, 1)
-            )
+            self.mux(["new-window", "-d", "-t", "smoke", nested_cmd], accept_codes=(0, 1))
             self._poll(
-                lambda: (
-                    subprocess.run(
-                        self.binary_argv
-                        + [
-                            "-S",
-                            str(self.inner_socket),
-                            "-f/dev/null",
-                            "has-session",
-                            "-t",
-                            "inner",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        env=self.env,
-                    ).returncode
-                    == 0
-                ),
+                lambda: subprocess.run(
+                    self.binary_argv + ["-S", str(self.inner_socket), "-f/dev/null", "has-session", "-t", "inner"],
+                    capture_output=True,
+                    text=True,
+                    env=self.env,
+                ).returncode
+                == 0,
                 timeout_s=5.0,
                 message="nested session was not created",
             )
@@ -836,9 +722,7 @@ class SmokeHarness:
             )
             windows = self.mux(["list-windows", "-t", "smoke"], accept_codes=(0, 1))
             if len([line for line in windows.stdout.splitlines() if line.strip()]) < 2:
-                raise SmokeError(
-                    "one-shot control client never created a second window"
-                )
+                raise SmokeError("one-shot control client never created a second window")
 
     def run_soak_suite(self) -> None:
         stress_seconds = int(os.environ.get("SMOKE_STRESS_SECONDS", "20"))
@@ -851,30 +735,9 @@ class SmokeHarness:
 
         if self.supports("split-window") and self.supports("send-keys"):
             self._build_test_video()
-            self.mux(
-                [
-                    "split-window",
-                    "-d",
-                    "-t",
-                    "smoke:0.0",
-                    f"cacademo {self.temp_video}",
-                ],
-                accept_codes=(0, 1),
-            )
-            self.mux(
-                ["split-window", "-d", "-t", "smoke:0.0", self.truecolor_command()],
-                accept_codes=(0, 1),
-            )
-            self.mux(
-                [
-                    "split-window",
-                    "-d",
-                    "-t",
-                    "smoke:0.0",
-                    self.truecolor_command(offset=32),
-                ],
-                accept_codes=(0, 1),
-            )
+            self.mux(["split-window", "-d", "-t", "smoke:0.0", f"cacademo {self.temp_video}"], accept_codes=(0, 1))
+            self.mux(["split-window", "-d", "-t", "smoke:0.0", self.truecolor_command()], accept_codes=(0, 1))
+            self.mux(["split-window", "-d", "-t", "smoke:0.0", self.truecolor_command(offset=32)], accept_codes=(0, 1))
 
         churn_clients: list[ControlClient] = []
         for index in range(max(1, viewer_count)):
@@ -886,9 +749,7 @@ class SmokeHarness:
         end_deadline = time.time() + stress_seconds
 
         while time.time() < end_deadline:
-            short = ControlClient(
-                self, f"burst-{int(time.time() * 1000)}", session="smoke"
-            )
+            short = ControlClient(self, f"burst-{int(time.time() * 1000)}", session="smoke")
             short.wait_attached(minimum_clients=1)
             short.close()
             time.sleep(0.2)
@@ -901,14 +762,10 @@ class SmokeHarness:
         if end_rss > start_rss + 65536:
             raise SmokeError(f"rss grew too far during soak: {start_rss} -> {end_rss}")
         if end_fds > start_fds + 64:
-            raise SmokeError(
-                f"fd count grew too far during soak: {start_fds} -> {end_fds}"
-            )
+            raise SmokeError(f"fd count grew too far during soak: {start_fds} -> {end_fds}")
 
     def sample_process(self, pid: int) -> tuple[int, int]:
-        status = pathlib.Path(f"/proc/{pid}/status").read_text(
-            encoding="utf-8", errors="replace"
-        )
+        status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace")
         rss_kib = 0
         for line in status.splitlines():
             if line.startswith("VmRSS:"):
@@ -937,14 +794,14 @@ class SmokeHarness:
     def truecolor_command(self, offset: int = 0) -> str:
         return (
             "sh -lc 'i=0; "
-            'while [ "$i" -lt 80 ]; do '
+            "while [ \"$i\" -lt 80 ]; do "
             f"r=$((({offset} + i * 3) % 255)); "
             f"g=$((({offset} + i * 5) % 255)); "
             f"b=$((({offset} + i * 7) % 255)); "
-            'printf "\\033[48;2;%s;%s;%sm  \\033[0m" "$r" "$g" "$b"; '
+            "printf \"\\033[48;2;%s;%s;%sm  \\033[0m\" \"$r\" \"$g\" \"$b\"; "
             "i=$((i + 1)); "
             "done; "
-            'printf "\\n"; '
+            "printf \"\\n\"; "
             "while true; do sleep 1; done'"
         )
 
@@ -1013,9 +870,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="zmux smoke harness")
     parser.add_argument("suite", choices=("sweep", "inside", "soak", "run-case"))
     parser.add_argument("case_id", nargs="?")
-    parser.add_argument(
-        "--mode", choices=("implemented", "oracle"), default="implemented"
-    )
+    parser.add_argument("--mode", choices=("implemented", "oracle"), default="implemented")
     return parser.parse_args(argv)
 
 

@@ -190,15 +190,22 @@ fn ensure_view_mode(wp: *T.WindowPane) bool {
     }
 
     _ = window_mod.window_pane_set_mode(wp, null, &window_copy.window_view_mode, null);
-    window_mode_runtime.noteModeChange(wp);
+    // window_pane_set_mode already notifies internally
     return true;
 }
 
+
+fn initServerPrintTestGlobals() void {
+    const sess = @import("session.zig");
+    sess.session_init_globals(xm.allocator);
+    window_mod.window_init_globals(xm.allocator);
+}
 fn clearClientRedrawFlags(client: *T.Client) void {
     client.flags &= ~@as(u64, T.CLIENT_REDRAW);
 }
 
 test "server_client_print appends parsed output in the shared view mode" {
+    initServerPrintTestGlobals();
     const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
@@ -293,6 +300,7 @@ test "server_client_print appends parsed output in the shared view mode" {
 }
 
 test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared runtime path" {
+    initServerPrintTestGlobals();
     const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
@@ -454,6 +462,7 @@ test "server_client_print keeps direct control-client output on the shared sanit
 }
 
 test "server_client_print preserves utf8 payloads on the shared attached view-mode path" {
+    initServerPrintTestGlobals();
     const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
@@ -541,6 +550,7 @@ test "server_client_print preserves utf8 payloads on the shared attached view-mo
 }
 
 test "server_client_print raw attached output uses the shared escaped-byte writer path" {
+    initServerPrintTestGlobals();
     const client_registry = @import("client-registry.zig");
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();

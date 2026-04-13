@@ -718,4 +718,11 @@ test {
     _ = @import("proc-test.zig");
     _ = @import("xmalloc-log-test.zig");
     _ = @import("invariants-test.zig");
+    if (build_options.stress_tests) {
+        _ = @import("cmd-run-shell-stress-test.zig");
+        _ = @import("cmd-save-buffer-stress-test.zig");
+        _ = @import("cmd-source-file-stress-test.zig");
+        _ = @import("file-write-stress-test.zig");
+        _ = @import("job-stress-test.zig");
+    }
 }

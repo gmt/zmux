@@ -31,7 +31,6 @@ const protocol = @import("zmux-protocol.zig");
 const screen_mod = @import("screen.zig");
 const server_print = @import("server-print.zig");
 const window_mod = @import("window.zig");
-const build_options = @import("build_options");
 
 fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     const args = cmd_mod.cmd_get_args(cmd);
@@ -151,11 +150,6 @@ fn free_options_for_tests() void {
 fn test_peer_dispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
     _ = _imsg;
     _ = _arg;
-}
-
-fn requireStressTests() !void {
-    if (!build_options.stress_tests)
-        return error.SkipZigTest;
 }
 
 test "save-buffer writes and appends a named buffer using client cwd for relative paths" {
@@ -696,8 +690,8 @@ test "show-buffer attached view escapes control bytes instead of replacing them"
     try std.testing.expectEqualStrings("A\\001\\177B", first_row);
 }
 
-test "show-buffer uses the remote write-open handshake for detached clients" {
-    try requireStressTests();
+pub const StressTests = struct {
+pub fn showBufferUsesTheRemoteWriteOpenHandshakeForDetachedClients() !void {
     paste_mod.paste_reset_for_tests();
     file_mod.resetForTests();
     defer file_mod.resetForTests();
@@ -760,8 +754,7 @@ test "show-buffer uses the remote write-open handshake for detached clients" {
     try std.testing.expectEqualStrings("-", open_payload[@sizeOf(protocol.MsgWriteOpen) .. open_payload.len - 1]);
 }
 
-test "save-buffer writes detached file paths through write-ready then write-close" {
-    try requireStressTests();
+pub fn saveBufferWritesDetachedFilePathsThroughWriteReadyThenWriteClose() !void {
     paste_mod.paste_reset_for_tests();
     file_mod.resetForTests();
     defer file_mod.resetForTests();
@@ -867,7 +860,7 @@ test "save-buffer writes detached file paths through write-ready then write-clos
     try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_close))), c.imsg.imsg_get_type(&close_imsg));
 }
 
-test "save-buffer reports bad file descriptor for dash on attached clients" {
+pub fn saveBufferReportsBadFileDescriptorForDashOnAttachedClients() !void {
     paste_mod.paste_reset_for_tests();
     init_options_for_tests();
     defer free_options_for_tests();
@@ -909,8 +902,7 @@ test "save-buffer reports bad file descriptor for dash on attached clients" {
     try std.testing.expectEqualStrings("Bad file descriptor: -\n", output[0..got]);
 }
 
-test "save-buffer reports client-side open errors from write-ready" {
-    try requireStressTests();
+pub fn saveBufferReportsClientSideOpenErrorsFromWriteReady() !void {
     init_options_for_tests();
     defer free_options_for_tests();
     paste_mod.paste_reset_for_tests();
@@ -1004,8 +996,7 @@ test "save-buffer reports client-side open errors from write-ready" {
     try std.testing.expect(std.mem.indexOf(u8, text, "missing/buffer.txt") != null);
 }
 
-test "show-buffer writes raw bytes over the peer transport for control clients" {
-    try requireStressTests();
+pub fn showBufferWritesRawBytesOverThePeerTransportForControlClients() !void {
     paste_mod.paste_reset_for_tests();
 
     var cause: ?[]u8 = null;
@@ -1066,6 +1057,11 @@ test "show-buffer writes raw bytes over the peer transport for control clients" 
     @memcpy(std.mem.asBytes(&stream), payload[0..@sizeOf(i32)]);
     try std.testing.expectEqual(@as(i32, 1), stream);
     try std.testing.expectEqualStrings("peer-data", payload[@sizeOf(i32)..]);
+}
+};
+
+test "save-buffer reports bad file descriptor for dash on attached clients" {
+    try StressTests.saveBufferReportsBadFileDescriptorForDashOnAttachedClients();
 }
 
 test "save-buffer reports strerror text for write failures" {

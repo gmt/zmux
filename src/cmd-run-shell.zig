@@ -39,7 +39,6 @@ const server = @import("server.zig");
 const session_mod = @import("session.zig");
 const status_runtime = @import("status-runtime.zig");
 const window_mod = @import("window.zig");
-const build_options = @import("build_options");
 
 const TargetSnapshot = struct {
     session_id: ?u32 = null,
@@ -621,330 +620,6 @@ fn waitForQueueProgress(client: ?*T.Client, expected: u32) !void {
     try std.testing.expectEqual(expected, processed);
 }
 
-fn captureStdout(ctx: anytype, comptime run: fn (@TypeOf(ctx)) anyerror!void) ![]u8 {
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
-
-    const pipe_fds = try std.posix.pipe();
-    defer std.posix.close(pipe_fds[0]);
-
-    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
-    defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
-
-    try run(ctx);
-    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
-    std.posix.close(pipe_fds[1]);
-
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(xm.allocator);
-    var buf: [256]u8 = undefined;
-    while (true) {
-        const amt = try std.posix.read(pipe_fds[0], &buf);
-        if (amt == 0) break;
-        try out.appendSlice(xm.allocator, buf[0..amt]);
-    }
-    return out.toOwnedSlice(xm.allocator);
-}
-
-fn gridRowString(grid: *T.Grid, row: u32) ![]u8 {
-    return grid_mod.string_cells(grid, row, grid.sx, .{
-        .trim_trailing_spaces = true,
-    });
-}
-
-fn requireStressTests() !void {
-    if (!build_options.stress_tests)
-        return error.SkipZigTest;
-}
-
-test "run-shell writes output to stdout for detached clients when no target pane is forced" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-stdout");
-    defer testTeardown(&setup);
-    setup.client.flags = 0;
-    setup.client.session = null;
-    setup.client.cwd = "/";
-
-    const output = try captureStdout(&setup.client, struct {
-        fn run(client: *T.Client) !void {
-            try appendCommand(client, &.{
-                "run-shell",
-                "printf 'foo\\nbar'",
-            });
-            try appendCommand(client, &.{
-                "rename-window",
-                "-t",
-                "run-shell-stdout:0",
-                "stdout-finished",
-            });
-            try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
-            try waitForQueueProgress(client, 1);
-        }
-    }.run);
-    defer xm.allocator.free(output);
-
-    try std.testing.expectEqualStrings("foo\nbar\n", output);
-    try std.testing.expectEqualStrings("stdout-finished", setup.window.name);
-}
-
-test "run-shell -E forwards stderr into detached stdout output" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-stderr");
-    defer testTeardown(&setup);
-    setup.client.flags = 0;
-    setup.client.session = null;
-    setup.client.cwd = "/";
-
-    const output = try captureStdout(&setup.client, struct {
-        fn run(client: *T.Client) !void {
-            try appendCommand(client, &.{
-                "run-shell",
-                "-E",
-                "printf 'out\\n'; printf 'err\\n' >&2",
-            });
-            try appendCommand(client, &.{
-                "rename-window",
-                "-t",
-                "run-shell-stderr:0",
-                "stderr-finished",
-            });
-            try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
-            try waitForQueueProgress(client, 1);
-        }
-    }.run);
-    defer xm.allocator.free(output);
-
-    try std.testing.expectEqualStrings("out\nerr\n", output);
-    try std.testing.expectEqualStrings("stderr-finished", setup.window.name);
-}
-
-test "run-shell without -t shows shell output in the attached current pane view mode" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-current-pane");
-    defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
-
-    const output = try captureStdout(&setup.client, struct {
-        fn run(client: *T.Client) !void {
-            try appendCommand(client, &.{
-                "run-shell",
-                "printf 'pane\\noutput'",
-            });
-            try appendCommand(client, &.{
-                "rename-window",
-                "-t",
-                "run-shell-current-pane:0",
-                "current-pane-finished",
-            });
-            try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
-            try waitForQueueProgress(client, 1);
-        }
-    }.run);
-    defer xm.allocator.free(output);
-
-    try std.testing.expectEqualStrings("", output);
-    try std.testing.expectEqualStrings("current-pane-finished", setup.window.name);
-    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
-    try std.testing.expect(window_mod.window_pane_mode(setup.pane) != null);
-
-    const first = try gridRowString(setup.pane.screen.grid, 0);
-    defer xm.allocator.free(first);
-    const second = try gridRowString(setup.pane.screen.grid, 1);
-    defer xm.allocator.free(second);
-    try std.testing.expectEqualStrings("pane", first);
-    try std.testing.expectEqualStrings("output", second);
-}
-
-test "run-shell -t shows shell output in the target pane view mode" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-pane");
-    defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
-
-    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
-    defer xm.allocator.free(target);
-
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "-t",
-        target,
-        "printf 'pane\\noutput'",
-    });
-    try appendCommand(&setup.client, &.{
-        "rename-window",
-        "-t",
-        "run-shell-pane:0",
-        "pane-finished",
-    });
-
-    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(&setup.client, 1);
-    try std.testing.expectEqualStrings("pane-finished", setup.window.name);
-    try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
-    try std.testing.expect(window_mod.window_pane_mode(setup.pane) != null);
-
-    const first = try gridRowString(setup.pane.screen.grid, 0);
-    defer xm.allocator.free(first);
-    const second = try gridRowString(setup.pane.screen.grid, 1);
-    defer xm.allocator.free(second);
-    try std.testing.expectEqualStrings("pane", first);
-    try std.testing.expectEqualStrings("output", second);
-}
-
-test "run-shell target-pane output preserves shared utf8 grid payloads" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-pane-utf8");
-    defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
-
-    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
-    defer xm.allocator.free(target);
-
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "-t",
-        target,
-        "printf '\\360\\237\\231\\202\\n\\316\\262'",
-    });
-
-    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
-    try waitForAlternateScreen(setup.pane);
-
-    const first = try gridRowString(setup.pane.screen.grid, 0);
-    defer xm.allocator.free(first);
-    const second = try gridRowString(setup.pane.screen.grid, 1);
-    defer xm.allocator.free(second);
-    try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first);
-    try std.testing.expectEqualStrings("\xce\xb2", second);
-}
-
-test "run-shell -bC preserves the original target context for delayed commands" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-background-command");
-    defer testTeardown(&setup);
-
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "-bC",
-        "rename-window -t #{session_name}:#{window_index} queued-from-run-shell",
-    });
-
-    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(&setup.client, 1);
-    try std.testing.expectEqualStrings("queued-from-run-shell", setup.window.name);
-}
-
-test "run-shell -bC preserves quoted semicolons inside delayed commands" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var setup = testSetup("run-shell-quoted-semicolon");
-    defer testTeardown(&setup);
-
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "-bC",
-        "rename-window -t #{session_name}:#{window_index} 'semi;colon'",
-    });
-
-    try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(&setup.client, 1);
-    try std.testing.expectEqualStrings("semi;colon", setup.window.name);
-}
-
-test "run-shell registers the shared reduced job summary while work is active" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-    defer job_mod.job_reset_all();
-
-    var setup = testSetup("run-shell-job-summary");
-    defer testTeardown(&setup);
-
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "sleep 0.2",
-    });
-
-    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
-
-    var saw_summary = false;
-    for (0..50) |_| {
-        pumpAsyncNonblock();
-        const rendered = job_mod.job_render_summary(std.testing.allocator);
-        defer std.testing.allocator.free(rendered);
-        if (std.mem.indexOf(u8, rendered, "sleep 0.2") != null) {
-            saw_summary = true;
-            break;
-        }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
-    }
-    try std.testing.expect(saw_summary);
-
-    var cleared_summary = false;
-    for (0..100) |_| {
-        pumpAsyncNonblock();
-        const rendered = job_mod.job_render_summary(std.testing.allocator);
-        defer std.testing.allocator.free(rendered);
-        if (rendered.len == 0) {
-            cleared_summary = true;
-            break;
-        }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
-    }
-    try std.testing.expect(cleared_summary);
-}
-
-test "run-shell -b without a client falls back to the best session pane" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-
-    var first = testSetup("run-shell-no-client-first");
-    defer testTeardown(&first);
-    defer if (window_mod.window_pane_mode(first.pane)) |_| server_print.server_client_close_view_mode(first.pane);
-
-    var second = addSessionPane("run-shell-no-client-second");
-    defer removeSessionPane(&second);
-    defer if (window_mod.window_pane_mode(second.pane)) |_| server_print.server_client_close_view_mode(second.pane);
-
-    first.session.activity_time = 100;
-    second.session.activity_time = 200;
-
-    try appendCommand(null, &.{
-        "run-shell",
-        "-b",
-        "printf 'best-pane'",
-    });
-
-    try std.testing.expect(cmdq.cmdq_next(null) >= 1);
-    try waitForAlternateScreen(second.pane);
-    try std.testing.expect(!screen_mod.screen_alternate_active(first.pane));
-
-    const line = try gridRowString(second.pane.screen.grid, 0);
-    defer xm.allocator.free(line);
-    try std.testing.expectEqualStrings("best-pane", line);
-}
-
 test "run-shell parse captures shell command argument" {
     var cause: ?[]u8 = null;
     const cmd = try cmd_mod.cmd_parse_one(&.{ "run-shell", "/bin/true" }, null, &cause);
@@ -955,44 +630,355 @@ test "run-shell parse captures shell command argument" {
     try std.testing.expectEqualStrings("/bin/true", args.value_at(0).?);
 }
 
-test "run-shell does not truncate large target-pane output" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
+pub const StressTests = struct {
+    fn captureStdout(ctx: anytype, comptime run: fn (@TypeOf(ctx)) anyerror!void) ![]u8 {
+        const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
+        defer std.posix.close(saved_stdout);
 
-    var setup = testSetup("run-shell-large-output");
-    defer testTeardown(&setup);
-    defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+        const pipe_fds = try std.posix.pipe();
+        defer std.posix.close(pipe_fds[0]);
 
-    const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
-    defer xm.allocator.free(target);
+        try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
+        defer std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
 
-    try appendCommand(&setup.client, &.{
-        "run-shell",
-        "-t",
-        target,
-        "python3 -c \"import sys; sys.stdout.write('a' * 1100000 + '\\nEND')\"",
-    });
-    try appendCommand(&setup.client, &.{
-        "rename-window",
-        "-t",
-        "run-shell-large-output:0",
-        "large-output-finished",
-    });
+        try run(ctx);
+        try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
+        std.posix.close(pipe_fds[1]);
 
-    try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
-    try waitForQueueProgress(&setup.client, 1);
-
-    var found_end = false;
-    for (0..setup.pane.screen.grid.sy) |row| {
-        const line = try gridRowString(setup.pane.screen.grid, @intCast(row));
-        defer xm.allocator.free(line);
-        if (std.mem.eql(u8, line, "END")) {
-            found_end = true;
-            break;
+        var out: std.ArrayList(u8) = .{};
+        errdefer out.deinit(xm.allocator);
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const amt = try std.posix.read(pipe_fds[0], &buf);
+            if (amt == 0) break;
+            try out.appendSlice(xm.allocator, buf[0..amt]);
         }
+        return out.toOwnedSlice(xm.allocator);
     }
 
-    try std.testing.expect(found_end);
-    try std.testing.expectEqualStrings("large-output-finished", setup.window.name);
-}
+    fn gridRowString(grid: *T.Grid, row: u32) ![]u8 {
+        return grid_mod.string_cells(grid, row, grid.sx, .{
+            .trim_trailing_spaces = true,
+        });
+    }
+
+    pub fn runShellWritesOutputToStdoutForDetachedClientsWhenNoTargetPaneIsForced() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-stdout");
+        defer testTeardown(&setup);
+        setup.client.flags = 0;
+        setup.client.session = null;
+        setup.client.cwd = "/";
+
+        const output = try captureStdout(&setup.client, struct {
+            fn run(client: *T.Client) !void {
+                try appendCommand(client, &.{
+                    "run-shell",
+                    "printf 'foo\\nbar'",
+                });
+                try appendCommand(client, &.{
+                    "rename-window",
+                    "-t",
+                    "run-shell-stdout:0",
+                    "stdout-finished",
+                });
+                try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
+                try waitForQueueProgress(client, 1);
+            }
+        }.run);
+        defer xm.allocator.free(output);
+
+        try std.testing.expectEqualStrings("foo\nbar\n", output);
+        try std.testing.expectEqualStrings("stdout-finished", setup.window.name);
+    }
+
+    pub fn runShellEForwardsStderrIntoDetachedStdoutOutput() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-stderr");
+        defer testTeardown(&setup);
+        setup.client.flags = 0;
+        setup.client.session = null;
+        setup.client.cwd = "/";
+
+        const output = try captureStdout(&setup.client, struct {
+            fn run(client: *T.Client) !void {
+                try appendCommand(client, &.{
+                    "run-shell",
+                    "-E",
+                    "printf 'out\\n'; printf 'err\\n' >&2",
+                });
+                try appendCommand(client, &.{
+                    "rename-window",
+                    "-t",
+                    "run-shell-stderr:0",
+                    "stderr-finished",
+                });
+                try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
+                try waitForQueueProgress(client, 1);
+            }
+        }.run);
+        defer xm.allocator.free(output);
+
+        try std.testing.expectEqualStrings("out\nerr\n", output);
+        try std.testing.expectEqualStrings("stderr-finished", setup.window.name);
+    }
+
+    pub fn runShellWithoutTShowsShellOutputInTheAttachedCurrentPaneViewMode() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-current-pane");
+        defer testTeardown(&setup);
+        defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+        const output = try captureStdout(&setup.client, struct {
+            fn run(client: *T.Client) !void {
+                try appendCommand(client, &.{
+                    "run-shell",
+                    "printf 'pane\\noutput'",
+                });
+                try appendCommand(client, &.{
+                    "rename-window",
+                    "-t",
+                    "run-shell-current-pane:0",
+                    "current-pane-finished",
+                });
+                try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
+                try waitForQueueProgress(client, 1);
+            }
+        }.run);
+        defer xm.allocator.free(output);
+
+        try std.testing.expectEqualStrings("", output);
+        try std.testing.expectEqualStrings("current-pane-finished", setup.window.name);
+        try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+        try std.testing.expect(window_mod.window_pane_mode(setup.pane) != null);
+
+        const first = try gridRowString(setup.pane.screen.grid, 0);
+        defer xm.allocator.free(first);
+        const second = try gridRowString(setup.pane.screen.grid, 1);
+        defer xm.allocator.free(second);
+        try std.testing.expectEqualStrings("pane", first);
+        try std.testing.expectEqualStrings("output", second);
+    }
+
+    pub fn runShellTShowsShellOutputInTheTargetPaneViewMode() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-pane");
+        defer testTeardown(&setup);
+        defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+        const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
+        defer xm.allocator.free(target);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "-t",
+            target,
+            "printf 'pane\\noutput'",
+        });
+        try appendCommand(&setup.client, &.{
+            "rename-window",
+            "-t",
+            "run-shell-pane:0",
+            "pane-finished",
+        });
+
+        try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+        try waitForQueueProgress(&setup.client, 1);
+        try std.testing.expectEqualStrings("pane-finished", setup.window.name);
+        try std.testing.expect(screen_mod.screen_alternate_active(setup.pane));
+        try std.testing.expect(window_mod.window_pane_mode(setup.pane) != null);
+
+        const first = try gridRowString(setup.pane.screen.grid, 0);
+        defer xm.allocator.free(first);
+        const second = try gridRowString(setup.pane.screen.grid, 1);
+        defer xm.allocator.free(second);
+        try std.testing.expectEqualStrings("pane", first);
+        try std.testing.expectEqualStrings("output", second);
+    }
+
+    pub fn runShellTargetPaneOutputPreservesSharedUtf8GridPayloads() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-pane-utf8");
+        defer testTeardown(&setup);
+        defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+        const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
+        defer xm.allocator.free(target);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "-t",
+            target,
+            "printf '\\360\\237\\231\\202\\n\\316\\262'",
+        });
+
+        try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+        try waitForAlternateScreen(setup.pane);
+
+        const first = try gridRowString(setup.pane.screen.grid, 0);
+        defer xm.allocator.free(first);
+        const second = try gridRowString(setup.pane.screen.grid, 1);
+        defer xm.allocator.free(second);
+        try std.testing.expectEqualStrings("\xf0\x9f\x99\x82", first);
+        try std.testing.expectEqualStrings("\xce\xb2", second);
+    }
+
+    pub fn runShellBCPreservesTheOriginalTargetContextForDelayedCommands() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-background-command");
+        defer testTeardown(&setup);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "-bC",
+            "rename-window -t #{session_name}:#{window_index} queued-from-run-shell",
+        });
+
+        try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
+        try waitForQueueProgress(&setup.client, 1);
+        try std.testing.expectEqualStrings("queued-from-run-shell", setup.window.name);
+    }
+
+    pub fn runShellBCPreservesQuotedSemicolonsInsideDelayedCommands() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-quoted-semicolon");
+        defer testTeardown(&setup);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "-bC",
+            "rename-window -t #{session_name}:#{window_index} 'semi;colon'",
+        });
+
+        try std.testing.expectEqual(@as(u32, 1), cmdq.cmdq_next(&setup.client));
+        try waitForQueueProgress(&setup.client, 1);
+        try std.testing.expectEqualStrings("semi;colon", setup.window.name);
+    }
+
+    pub fn runShellRegistersTheSharedReducedJobSummaryWhileWorkIsActive() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+        defer job_mod.job_reset_all();
+
+        var setup = testSetup("run-shell-job-summary");
+        defer testTeardown(&setup);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "sleep 0.2",
+        });
+
+        try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+
+        var saw_summary = false;
+        for (0..50) |_| {
+            pumpAsyncNonblock();
+            const rendered = job_mod.job_render_summary(std.testing.allocator);
+            defer std.testing.allocator.free(rendered);
+            if (std.mem.indexOf(u8, rendered, "sleep 0.2") != null) {
+                saw_summary = true;
+                break;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+        try std.testing.expect(saw_summary);
+
+        var cleared_summary = false;
+        for (0..100) |_| {
+            pumpAsyncNonblock();
+            const rendered = job_mod.job_render_summary(std.testing.allocator);
+            defer std.testing.allocator.free(rendered);
+            if (rendered.len == 0) {
+                cleared_summary = true;
+                break;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+        try std.testing.expect(cleared_summary);
+    }
+
+    pub fn runShellBWithoutAClientFallsBackToTheBestSessionPane() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var first = testSetup("run-shell-no-client-first");
+        defer testTeardown(&first);
+        defer if (window_mod.window_pane_mode(first.pane)) |_| server_print.server_client_close_view_mode(first.pane);
+
+        var second = addSessionPane("run-shell-no-client-second");
+        defer removeSessionPane(&second);
+        defer if (window_mod.window_pane_mode(second.pane)) |_| server_print.server_client_close_view_mode(second.pane);
+
+        first.session.activity_time = 100;
+        second.session.activity_time = 200;
+
+        try appendCommand(null, &.{
+            "run-shell",
+            "-b",
+            "printf 'best-pane'",
+        });
+
+        try std.testing.expect(cmdq.cmdq_next(null) >= 1);
+        try waitForAlternateScreen(second.pane);
+        try std.testing.expect(!screen_mod.screen_alternate_active(first.pane));
+
+        const line = try gridRowString(second.pane.screen.grid, 0);
+        defer xm.allocator.free(line);
+        try std.testing.expectEqualStrings("best-pane", line);
+    }
+
+    pub fn runShellDoesNotTruncateLargeTargetPaneOutput() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-large-output");
+        defer testTeardown(&setup);
+        defer if (window_mod.window_pane_mode(setup.pane)) |_| server_print.server_client_close_view_mode(setup.pane);
+
+        const target = try std.fmt.allocPrint(xm.allocator, "%{d}", .{setup.pane.id});
+        defer xm.allocator.free(target);
+
+        try appendCommand(&setup.client, &.{
+            "run-shell",
+            "-t",
+            target,
+            "python3 -c \"import sys; sys.stdout.write('a' * 1100000 + '\\nEND')\"",
+        });
+        try appendCommand(&setup.client, &.{
+            "rename-window",
+            "-t",
+            "run-shell-large-output:0",
+            "large-output-finished",
+        });
+
+        try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(&setup.client));
+        try waitForQueueProgress(&setup.client, 1);
+
+        var found_end = false;
+        for (0..setup.pane.screen.grid.sy) |row| {
+            const line = try gridRowString(setup.pane.screen.grid, @intCast(row));
+            defer xm.allocator.free(line);
+            if (std.mem.eql(u8, line, "END")) {
+                found_end = true;
+                break;
+            }
+        }
+
+        try std.testing.expect(found_end);
+        try std.testing.expectEqualStrings("large-output-finished", setup.window.name);
+    }
+};

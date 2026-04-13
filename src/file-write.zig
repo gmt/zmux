@@ -24,7 +24,6 @@ const xm = @import("xmalloc.zig");
 const cmdq = @import("cmd-queue.zig");
 const proc_mod = @import("proc.zig");
 const protocol = @import("zmux-protocol.zig");
-const build_options = @import("build_options");
 const file_mod = @import("file.zig");
 
 const max_imsg_payload = c.imsg.MAX_IMSGSIZE - c.imsg.IMSG_HEADER_SIZE - @sizeOf(protocol.MsgWriteData);
@@ -354,92 +353,88 @@ pub fn client_cleanup() void {
     client_write_files_init = false;
 }
 
-fn requireStressTests() !void {
-    if (!build_options.stress_tests)
-        return error.SkipZigTest;
-}
-
 test "file write reset clears state without pending work" {
     reset_for_tests();
     defer reset_for_tests();
 }
 
-test "client write handlers open, write, and close files" {
-    try requireStressTests();
-    reset_for_tests();
-    defer reset_for_tests();
+pub const StressTests = struct {
+    pub fn clientWriteHandlersOpenWriteAndCloseFiles() !void {
+        reset_for_tests();
+        defer reset_for_tests();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
 
-    const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
-    defer xm.allocator.free(cwd);
-    const path = try std.fmt.allocPrint(xm.allocator, "{s}/client-write.txt", .{cwd});
-    defer xm.allocator.free(path);
+        const cwd = try tmp.dir.realpathAlloc(xm.allocator, ".");
+        defer xm.allocator.free(cwd);
+        const path = try std.fmt.allocPrint(xm.allocator, "{s}/client-write.txt", .{cwd});
+        defer xm.allocator.free(path);
 
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+        var pair: [2]i32 = undefined;
+        try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
 
-    var proc = T.ZmuxProc{ .name = "file-write-client-test" };
-    defer proc.peers.deinit(xm.allocator);
+        var proc = T.ZmuxProc{ .name = "file-write-client-test" };
+        defer proc.peers.deinit(xm.allocator);
 
-    const peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
-    defer {
-        c.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
+        const peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+        defer {
+            c.imsg.imsgbuf_clear(&peer.ibuf);
+            std.posix.close(peer.ibuf.fd);
+            xm.allocator.destroy(peer);
+            proc.peers.clearRetainingCapacity();
+        }
+
+        var reader: c.imsg.imsgbuf = undefined;
+        try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+        defer {
+            c.imsg.imsgbuf_clear(&reader);
+            std.posix.close(pair[1]);
+        }
+
+        var open_payload = std.ArrayList(u8){};
+        defer open_payload.deinit(xm.allocator);
+        const open_msg = protocol.MsgWriteOpen{
+            .stream = 19,
+            .fd = -1,
+            .flags = c.posix_sys.O_TRUNC,
+        };
+        open_payload.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch unreachable;
+        open_payload.appendSlice(xm.allocator, path) catch unreachable;
+        open_payload.append(xm.allocator, 0) catch unreachable;
+
+        var open_imsg = buildImsg(@intFromEnum(protocol.MsgType.write_open), open_payload.items);
+        client_handle_write_open(peer, &open_imsg, true, false);
+
+        try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+        var reply_imsg: c.imsg.imsg = undefined;
+        try std.testing.expect(c.imsg.imsg_get(&reader, &reply_imsg) > 0);
+        defer c.imsg.imsg_free(&reply_imsg);
+
+        const reply: *const protocol.MsgWriteReady = @ptrCast(@alignCast(reply_imsg.data.?));
+        try std.testing.expectEqual(@as(i32, 19), reply.stream);
+        try std.testing.expectEqual(@as(i32, 0), reply.@"error");
+
+        var data_payload = std.ArrayList(u8){};
+        defer data_payload.deinit(xm.allocator);
+        const data_msg = protocol.MsgWriteData{ .stream = 19 };
+        data_payload.appendSlice(xm.allocator, std.mem.asBytes(&data_msg)) catch unreachable;
+        data_payload.appendSlice(xm.allocator, "client-write") catch unreachable;
+
+        var data_imsg = buildImsg(@intFromEnum(protocol.MsgType.write), data_payload.items);
+        client_handle_write_data(&data_imsg);
+
+        const close_msg = protocol.MsgWriteClose{ .stream = 19 };
+        var close_imsg = buildImsg(@intFromEnum(protocol.MsgType.write_close), std.mem.asBytes(&close_msg));
+        client_handle_write_close(&close_imsg);
+
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+        const contents = try file.readToEndAlloc(xm.allocator, 1024);
+        defer xm.allocator.free(contents);
+        try std.testing.expectEqualStrings("client-write", contents);
     }
-
-    var reader: c.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
-
-    var open_payload = std.ArrayList(u8){};
-    defer open_payload.deinit(xm.allocator);
-    const open_msg = protocol.MsgWriteOpen{
-        .stream = 19,
-        .fd = -1,
-        .flags = c.posix_sys.O_TRUNC,
-    };
-    open_payload.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch unreachable;
-    open_payload.appendSlice(xm.allocator, path) catch unreachable;
-    open_payload.append(xm.allocator, 0) catch unreachable;
-
-    var open_imsg = buildImsg(@intFromEnum(protocol.MsgType.write_open), open_payload.items);
-    client_handle_write_open(peer, &open_imsg, true, false);
-
-    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
-    var reply_imsg: c.imsg.imsg = undefined;
-    try std.testing.expect(c.imsg.imsg_get(&reader, &reply_imsg) > 0);
-    defer c.imsg.imsg_free(&reply_imsg);
-
-    const reply: *const protocol.MsgWriteReady = @ptrCast(@alignCast(reply_imsg.data.?));
-    try std.testing.expectEqual(@as(i32, 19), reply.stream);
-    try std.testing.expectEqual(@as(i32, 0), reply.@"error");
-
-    var data_payload = std.ArrayList(u8){};
-    defer data_payload.deinit(xm.allocator);
-    const data_msg = protocol.MsgWriteData{ .stream = 19 };
-    data_payload.appendSlice(xm.allocator, std.mem.asBytes(&data_msg)) catch unreachable;
-    data_payload.appendSlice(xm.allocator, "client-write") catch unreachable;
-
-    var data_imsg = buildImsg(@intFromEnum(protocol.MsgType.write), data_payload.items);
-    client_handle_write_data(&data_imsg);
-
-    const close_msg = protocol.MsgWriteClose{ .stream = 19 };
-    var close_imsg = buildImsg(@intFromEnum(protocol.MsgType.write_close), std.mem.asBytes(&close_msg));
-    client_handle_write_close(&close_imsg);
-
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const contents = try file.readToEndAlloc(xm.allocator, 1024);
-    defer xm.allocator.free(contents);
-    try std.testing.expectEqualStrings("client-write", contents);
-}
+};
 
 fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
     _ = _imsg;

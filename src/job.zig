@@ -36,7 +36,6 @@ const c = @import("c.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
-const build_options = @import("build_options");
 
 // ── Job flags (matches tmux JOB_* constants) ─────────────────────────────
 
@@ -996,11 +995,6 @@ fn testAsyncComplete(async_shell: *AsyncShell, arg: ?*anyopaque) void {
     done.* = true;
 }
 
-fn requireStressTests() !void {
-    if (!build_options.stress_tests)
-        return error.SkipZigTest;
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 test "job_register returns distinct heap jobs with copied commands" {
@@ -1042,187 +1036,179 @@ test "job registry renders reduced tmux-style summaries" {
     job_free(second);
 }
 
-test "job shared shell runner captures stdout and merged stderr" {
-    try requireStressTests();
-    defer job_reset_all();
+pub const StressTests = struct {
+    pub fn jobSharedShellRunnerCapturesStdoutAndMergedStderr() !void {
+        defer job_reset_all();
 
-    const job = job_register("printf 'out'; printf 'err' >&2", 0);
-    defer job_free(job);
+        const job = job_register("printf 'out'; printf 'err' >&2", 0);
+        defer job_free(job);
 
-    var result = job_run_shell_command(job, "printf 'out'; printf 'err' >&2", .{
-        .cwd = "/",
-        .merge_stderr = true,
-        .capture_output = true,
-    });
-    defer result.deinit();
+        var result = job_run_shell_command(job, "printf 'out'; printf 'err' >&2", .{
+            .cwd = "/",
+            .merge_stderr = true,
+            .capture_output = true,
+        });
+        defer result.deinit();
 
-    try std.testing.expect(!result.spawn_failed);
-    try std.testing.expectEqual(@as(i32, 0), result.retcode);
-    try std.testing.expectEqualStrings("outerr", result.output.items);
-}
-
-test "job_free terminates a live shared job process" {
-    try requireStressTests();
-    defer job_reset_all();
-
-    var child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    const job = job_register("sleep 30", 0);
-    job_started(job, @intCast(child.id), -1);
-    job_free(job);
-
-    const term = try child.wait();
-    switch (term) {
-        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "job_kill_all terminates all live shared job processes" {
-    try requireStressTests();
-    defer job_reset_all();
-
-    var first_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
-    first_child.stdin_behavior = .Ignore;
-    first_child.stdout_behavior = .Ignore;
-    first_child.stderr_behavior = .Ignore;
-    try first_child.spawn();
-
-    var second_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
-    second_child.stdin_behavior = .Ignore;
-    second_child.stdout_behavior = .Ignore;
-    second_child.stderr_behavior = .Ignore;
-    try second_child.spawn();
-
-    const first = job_register("sleep 30", 0);
-    const second = job_register("sleep 30", JOB_NOWAIT);
-    job_started(first, @intCast(first_child.id), -1);
-    job_started(second, @intCast(second_child.id), -1);
-
-    job_kill_all();
-
-    const first_term = try first_child.wait();
-    const second_term = try second_child.wait();
-
-    switch (first_term) {
-        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (second_term) {
-        .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "job server reaper async shell captures output and completion" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-    job_enable_server_reaper(true);
-    defer job_enable_server_reaper(false);
-    defer job_reset_all();
-
-    var completed = false;
-    const job = job_register("printf 'out'; printf 'err' >&2", 0);
-    defer job_free(job);
-
-    const async_s = async_shell_start(job, "printf 'out'; printf 'err' >&2", .{
-        .cwd = "/",
-        .merge_stderr = true,
-        .capture_output = true,
-    }, testAsyncComplete, &completed) orelse return error.TestUnexpectedResult;
-    defer async_shell_free(async_s);
-
-    var raw_status: i32 = 0;
-    const waited = std.c.waitpid(job.pid, &raw_status, 0);
-    try std.testing.expectEqual(job.pid, waited);
-    job_check_died(@intCast(waited), raw_status);
-
-    var spins: usize = 0;
-    while (!completed and spins < 200) : (spins += 1) {
-        _ = c.libevent.event_loop(c.libevent.EVLOOP_NONBLOCK);
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        try std.testing.expect(!result.spawn_failed);
+        try std.testing.expectEqual(@as(i32, 0), result.retcode);
+        try std.testing.expectEqualStrings("outerr", result.output.items);
     }
 
-    try std.testing.expect(completed);
-    try std.testing.expectEqual(@as(i32, 0), async_s.result.retcode);
-    try std.testing.expectEqualStrings("outerr", async_s.result.output.items);
-}
+    pub fn jobFreeTerminatesALiveSharedJobProcess() !void {
+        defer job_reset_all();
 
-test "job_run streams output via bufferevent" {
-    try requireStressTests();
-    const old_base = installEventBase();
-    defer restoreEventBase(old_base);
-    defer job_reset_all();
+        var child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
 
-    const TestCtx = struct {
-        update_count: u32 = 0,
-        completed: bool = false,
-    };
-    var ctx = TestCtx{};
+        const job = job_register("sleep 30", 0);
+        job_started(job, @intCast(child.id), -1);
+        job_free(job);
 
-    const update_cb = struct {
-        fn cb(job: *Job) void {
-            const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
-            tc.update_count += 1;
-            // Drain the input buffer
-            if (job.event) |bev| {
-                const input = c.libevent.bufferevent_get_input(bev);
-                if (input != null) {
-                    const len = c.libevent.evbuffer_get_length(input);
-                    if (len > 0)
-                        _ = c.libevent.evbuffer_drain(input, len);
+        const term = try child.wait();
+        switch (term) {
+            .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    pub fn jobKillAllTerminatesAllLiveSharedJobProcesses() !void {
+        defer job_reset_all();
+
+        var first_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+        first_child.stdin_behavior = .Ignore;
+        first_child.stdout_behavior = .Ignore;
+        first_child.stderr_behavior = .Ignore;
+        try first_child.spawn();
+
+        var second_child = std.process.Child.init(&.{ "/bin/sh", "-c", "exec sleep 30" }, std.testing.allocator);
+        second_child.stdin_behavior = .Ignore;
+        second_child.stdout_behavior = .Ignore;
+        second_child.stderr_behavior = .Ignore;
+        try second_child.spawn();
+
+        const first = job_register("sleep 30", 0);
+        const second = job_register("sleep 30", JOB_NOWAIT);
+        job_started(first, @intCast(first_child.id), -1);
+        job_started(second, @intCast(second_child.id), -1);
+
+        job_kill_all();
+
+        const first_term = try first_child.wait();
+        const second_term = try second_child.wait();
+
+        switch (first_term) {
+            .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (second_term) {
+            .Signal => |signal_code| try std.testing.expectEqual(std.posix.SIG.TERM, signal_code),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    pub fn jobServerReaperAsyncShellCapturesOutputAndCompletion() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+        job_enable_server_reaper(true);
+        defer job_enable_server_reaper(false);
+        defer job_reset_all();
+
+        var completed = false;
+        const job = job_register("printf 'out'; printf 'err' >&2", 0);
+        defer job_free(job);
+
+        const async_s = async_shell_start(job, "printf 'out'; printf 'err' >&2", .{
+            .cwd = "/",
+            .merge_stderr = true,
+            .capture_output = true,
+        }, testAsyncComplete, &completed) orelse return error.TestUnexpectedResult;
+        defer async_shell_free(async_s);
+
+        var raw_status: i32 = 0;
+        const waited = std.c.waitpid(job.pid, &raw_status, 0);
+        try std.testing.expectEqual(job.pid, waited);
+        job_check_died(@intCast(waited), raw_status);
+
+        var spins: usize = 0;
+        while (!completed and spins < 200) : (spins += 1) {
+            _ = c.libevent.event_loop(c.libevent.EVLOOP_NONBLOCK);
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+
+        try std.testing.expect(completed);
+        try std.testing.expectEqual(@as(i32, 0), async_s.result.retcode);
+        try std.testing.expectEqualStrings("outerr", async_s.result.output.items);
+    }
+
+    pub fn jobRunStreamsOutputViaBufferevent() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+        defer job_reset_all();
+
+        const TestCtx = struct {
+            update_count: u32 = 0,
+            completed: bool = false,
+        };
+        var ctx = TestCtx{};
+
+        const update_cb = struct {
+            fn cb(job: *Job) void {
+                const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
+                tc.update_count += 1;
+                if (job.event) |bev| {
+                    const input = c.libevent.bufferevent_get_input(bev);
+                    if (input != null) {
+                        const len = c.libevent.evbuffer_get_length(input);
+                        if (len > 0)
+                            _ = c.libevent.evbuffer_drain(input, len);
+                    }
                 }
             }
+        }.cb;
+
+        const complete_cb = struct {
+            fn cb(job: *Job) void {
+                const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
+                tc.completed = true;
+            }
+        }.cb;
+
+        const job = job_run(
+            "printf 'hello world'",
+            "/",
+            null,
+            update_cb,
+            complete_cb,
+            null,
+            &ctx,
+            JOB_SHOWSTDERR,
+            80,
+            24,
+        ) orelse return error.TestUnexpectedResult;
+
+        var spins: usize = 0;
+        while (job.state != .dead and job.state != .closed and spins < 400) : (spins += 1) {
+            _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+            var raw_status: i32 = 0;
+            const waited = std.c.waitpid(-1, &raw_status, std.c.W.NOHANG);
+            if (waited > 0)
+                job_check_died(@intCast(waited), raw_status);
         }
-    }.cb;
 
-    const complete_cb = struct {
-        fn cb(job: *Job) void {
-            const tc: *TestCtx = @ptrCast(@alignCast(job.data orelse return));
-            tc.completed = true;
+        spins = 0;
+        while (spins < 50) : (spins += 1) {
+            _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
+            std.Thread.sleep(2 * std.time.ns_per_ms);
         }
-    }.cb;
 
-    const job = job_run(
-        "printf 'hello world'",
-        "/",
-        null,
-        update_cb,
-        complete_cb,
-        null,
-        &ctx,
-        JOB_SHOWSTDERR,
-        80,
-        24,
-    ) orelse return error.TestUnexpectedResult;
-
-    // Run event loop until the job completes or timeout
-    var spins: usize = 0;
-    while (job.state != .dead and job.state != .closed and spins < 400) : (spins += 1) {
-        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
-        std.Thread.sleep(5 * std.time.ns_per_ms);
-        // Reap child
-        var raw_status: i32 = 0;
-        const waited = std.c.waitpid(-1, &raw_status, std.c.W.NOHANG);
-        if (waited > 0)
-            job_check_died(@intCast(waited), raw_status);
+        try std.testing.expect(job.state == .dead or job.state == .closed);
     }
-
-    // Run a few more iterations to let bufferevent callbacks fire
-    spins = 0;
-    while (spins < 50) : (spins += 1) {
-        _ = c.libevent.event_base_loop(proc_mod.libevent.?, c.libevent.EVLOOP_NONBLOCK);
-        std.Thread.sleep(2 * std.time.ns_per_ms);
-    }
-
-    // The job should have produced some output
-    try std.testing.expect(job.state == .dead or job.state == .closed);
-}
+};
 
 test "job_resize is no-op for non-PTY jobs" {
     defer job_reset_all();

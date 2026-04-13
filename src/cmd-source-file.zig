@@ -32,7 +32,6 @@ const proc_mod = @import("proc.zig");
 const server_client_mod = @import("server-client.zig");
 const protocol = @import("zmux-protocol.zig");
 const c = @import("c.zig");
-const build_options = @import("build_options");
 
 const SourceFileState = struct {
     item: *cmdq.CmdqItem,
@@ -235,94 +234,90 @@ fn read_single_peer_imsg(reader: *c.imsg.imsgbuf) c.imsg.imsg {
     return imsg_msg;
 }
 
-fn requireStressTests() !void {
-    if (!build_options.stress_tests)
-        return error.SkipZigTest;
-}
+pub const StressTests = struct {
+    pub fn sourceFileWaitsForDetachedClientReadsAndLoadsRemoteContent() !void {
+        paste_mod.paste_reset_for_tests();
+        file_mod.resetForTests();
+        defer file_mod.resetForTests();
 
-test "source-file waits for detached client reads and loads remote content" {
-    try requireStressTests();
-    paste_mod.paste_reset_for_tests();
-    file_mod.resetForTests();
-    defer file_mod.resetForTests();
+        var env = T.Environ.init(xm.allocator);
+        defer env.deinit();
 
-    var env = T.Environ.init(xm.allocator);
-    defer env.deinit();
+        var pair: [2]i32 = undefined;
+        try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
 
-    var pair: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+        var proc = T.ZmuxProc{ .name = "source-file-remote-test" };
+        defer proc.peers.deinit(xm.allocator);
 
-    var proc = T.ZmuxProc{ .name = "source-file-remote-test" };
-    defer proc.peers.deinit(xm.allocator);
-
-    var client = T.Client{
-        .environ = &env,
-        .tty = undefined,
-        .status = .{},
-    };
-    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
-    defer {
-        const peer = client.peer.?;
-        c.imsg.imsgbuf_clear(&peer.ibuf);
-        std.posix.close(peer.ibuf.fd);
-        xm.allocator.destroy(peer);
-        proc.peers.clearRetainingCapacity();
-    }
-
-    var reader: c.imsg.imsgbuf = undefined;
-    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
-    defer {
-        c.imsg.imsgbuf_clear(&reader);
-        std.posix.close(pair[1]);
-    }
-
-    const saved_stdin = try std.posix.dup(std.posix.STDIN_FILENO);
-    defer std.posix.close(saved_stdin);
-
-    const pipe_fds = try std.posix.pipe();
-    defer std.posix.close(pipe_fds[0]);
-
-    _ = try std.posix.write(pipe_fds[1], "set-buffer -b sourced loaded\n");
-    std.posix.close(pipe_fds[1]);
-
-    try std.posix.dup2(pipe_fds[0], std.posix.STDIN_FILENO);
-    defer std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO) catch {};
-
-    var cause: ?[]u8 = null;
-    var list: cmd_mod.CmdList = .{};
-    var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
-
-    const cmd = try cmd_mod.cmd_parse_one(&.{ "source-file", "-" }, null, &cause);
-    defer cmd_mod.cmd_free(cmd);
-
-    try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
-
-    var open_imsg = read_single_peer_imsg(&reader);
-    defer c.imsg.imsg_free(&open_imsg);
-    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.read_open))), c.imsg.imsg_get_type(&open_imsg));
-
-    file_mod.clientHandleReadOpen(client.peer.?, &open_imsg, true, false);
-
-    while (true) {
-        var imsg_msg = read_single_peer_imsg(&reader);
-        defer c.imsg.imsg_free(&imsg_msg);
-
-        const msg_type = std.meta.intToEnum(protocol.MsgType, imsg_msg.hdr.type) catch unreachable;
-        switch (msg_type) {
-            .read => file_mod.handleReadData(&imsg_msg),
-            .read_done => {
-                file_mod.handleReadDone(&imsg_msg);
-                break;
-            },
-            else => unreachable,
+        var client = T.Client{
+            .environ = &env,
+            .tty = undefined,
+            .status = .{},
+        };
+        client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+        defer {
+            const peer = client.peer.?;
+            c.imsg.imsgbuf_clear(&peer.ibuf);
+            std.posix.close(peer.ibuf.fd);
+            xm.allocator.destroy(peer);
+            proc.peers.clearRetainingCapacity();
         }
+
+        var reader: c.imsg.imsgbuf = undefined;
+        try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+        defer {
+            c.imsg.imsgbuf_clear(&reader);
+            std.posix.close(pair[1]);
+        }
+
+        const saved_stdin = try std.posix.dup(std.posix.STDIN_FILENO);
+        defer std.posix.close(saved_stdin);
+
+        const pipe_fds = try std.posix.pipe();
+        defer std.posix.close(pipe_fds[0]);
+
+        _ = try std.posix.write(pipe_fds[1], "set-buffer -b sourced loaded\n");
+        std.posix.close(pipe_fds[1]);
+
+        try std.posix.dup2(pipe_fds[0], std.posix.STDIN_FILENO);
+        defer std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO) catch {};
+
+        var cause: ?[]u8 = null;
+        var list: cmd_mod.CmdList = .{};
+        var item = cmdq.CmdqItem{ .client = &client, .cmdlist = &list };
+
+        const cmd = try cmd_mod.cmd_parse_one(&.{ "source-file", "-" }, null, &cause);
+        defer cmd_mod.cmd_free(cmd);
+
+        try std.testing.expectEqual(T.CmdRetval.wait, cmd_mod.cmd_execute(cmd, &item));
+
+        var open_imsg = read_single_peer_imsg(&reader);
+        defer c.imsg.imsg_free(&open_imsg);
+        try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.read_open))), c.imsg.imsg_get_type(&open_imsg));
+
+        file_mod.clientHandleReadOpen(client.peer.?, &open_imsg, true, false);
+
+        while (true) {
+            var imsg_msg = read_single_peer_imsg(&reader);
+            defer c.imsg.imsg_free(&imsg_msg);
+
+            const msg_type = std.meta.intToEnum(protocol.MsgType, imsg_msg.hdr.type) catch unreachable;
+            switch (msg_type) {
+                .read => file_mod.handleReadData(&imsg_msg),
+                .read_done => {
+                    file_mod.handleReadDone(&imsg_msg);
+                    break;
+                },
+                else => unreachable,
+            }
+        }
+
+        try std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO);
+
+        const pb = paste_mod.paste_get_name("sourced") orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("loaded", paste_mod.paste_buffer_data(pb, null));
     }
-
-    try std.posix.dup2(saved_stdin, std.posix.STDIN_FILENO);
-
-    const pb = paste_mod.paste_get_name("sourced") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("loaded", paste_mod.paste_buffer_data(pb, null));
-}
+};
 
 test "source-file expands relative glob patterns from the client cwd" {
     paste_mod.paste_reset_for_tests();

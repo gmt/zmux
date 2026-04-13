@@ -24,8 +24,6 @@ Use this file for deliberate test exceptions only.
 | `smoke-recursive:tmux-in-zmux` | `smoke-recursive` | `skip-global` | The tmux recursive attach timeout assumption is not a stable oracle baseline in this environment. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 | `smoke-recursive:tmux-in-tmux` | `smoke-recursive` | `skip-global` | The pure tmux recursive case does not currently validate the timeout expectation. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 
-| Pre-existing reds in both lanes: `cmd-find_target @ requires a client` (SIGSEGV), `cmd-save-buffer` attached view-mode cases (4 tests, SIGSEGV), `os.linux` foreground child lookup (assertion) | `zig-unit`, `zig-stress` | `red` | These are real module-level bugs exposed by the warm and stress lanes alike. They are not caused by stress-only infrastructure. | Fix the listed module bugs; the stress lane additions are clean once these pre-existing reds are resolved. |
-
 ## Notes
 
 - This registry is not the place for ordinary zmux failures. Real product bugs should remain red.

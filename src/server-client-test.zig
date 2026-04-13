@@ -1597,6 +1597,51 @@ test "server_client_dispatch_for_test wakeup clears CLIENT_SUSPENDED" {
     try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
 }
 
+test "server_client_dispatch_for_test unlock resumes tty and redraws attached client" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    var options = T.Options.init(xm.allocator, null);
+    defer options.deinit();
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session = T.Session{
+        .id = 11,
+        .name = @constCast("unlock-dispatch"),
+        .cwd = "/tmp",
+        .options = &options,
+        .environ = &session_env,
+        .attached = 1,
+    };
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, null, null));
+    defer _ = c.posix_sys.close(master);
+    defer _ = c.posix_sys.close(slave);
+
+    var client = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_SUSPENDED,
+        .fd = slave,
+        .session = &session,
+    };
+    tty_mod.tty_init(&client.tty, &client);
+
+    var unlock_status: i32 = 0;
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.unlock), std.mem.asBytes(&unlock_status));
+    sc.server_client_dispatch_for_test(&imsg, &client);
+
+    try std.testing.expect(client.flags & T.CLIENT_SUSPENDED == 0);
+    try std.testing.expect(client.flags & T.CLIENT_REDRAW != 0);
+    try std.testing.expect((client.tty.flags & @as(i32, @intCast(T.TTY_STARTED))) != 0);
+}
+
 test "server_client_dispatch_for_test ignores unknown wire message type" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);
@@ -2304,6 +2349,159 @@ test "server_client_set_session reapplies grouped window size for control client
     try std.testing.expectEqual(@as(u32, 10), second_pane.sy);
 }
 
+test "server_client_attach reattaches after detach and sends ready for the new peer state" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    const alpha = sess.session_create(null, "reattach-alpha", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("reattach-alpha") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "reattach-beta", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("reattach-beta") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    const alpha_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(alpha_window, "test");
+    const alpha_wl = sess.session_attach(alpha, alpha_window, -1, &cause).?;
+    const alpha_pane = win_mod.window_add_pane(alpha_window, null, 80, 24);
+    alpha_window.active = alpha_pane;
+    alpha.curw = alpha_wl;
+
+    const beta_window = win_mod.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer win_mod.window_remove_ref(beta_window, "test");
+    const beta_wl = sess.session_attach(beta, beta_window, -1, &cause).?;
+    const beta_pane = win_mod.window_add_pane(beta_window, null, 80, 24);
+    beta_window.active = beta_pane;
+    beta.curw = beta_wl;
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-reattach" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var client = T.Client{
+        .name = xm.xstrdup("reattach-client"),
+        .environ = env_mod.environ_create(),
+        .tty = .{ .client = undefined },
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = alpha,
+    };
+    defer {
+        env_mod.environ_free(client.environ);
+        if (client.name) |name| xm.allocator.free(@constCast(name));
+        if (client.exit_session) |name| xm.allocator.free(name);
+    }
+    client.tty.client = &client;
+    tty_mod.tty_init(&client.tty, &client);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        if (client.peer) |peer| {
+            c.imsg.imsgbuf_clear(&peer.ibuf);
+            std.posix.close(peer.ibuf.fd);
+            xm.allocator.destroy(peer);
+            proc.peers.clearRetainingCapacity();
+            client.peer = null;
+        }
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    alpha.attached = 1;
+    beta.attached = 0;
+
+    server_client_detach(&client, .detach);
+    try std.testing.expect(client.session == null);
+    try std.testing.expectEqual(alpha, client.last_session.?);
+    try std.testing.expectEqual(@as(u32, 0), alpha.attached);
+
+    sc.server_client_check_exit(&client);
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var detach_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &detach_msg) > 0);
+    defer c.imsg.imsg_free(&detach_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.detach))), c.imsg.imsg_get_type(&detach_msg));
+    const detach_len = detach_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    var detach_payload = try xm.allocator.alloc(u8, detach_len);
+    defer xm.allocator.free(detach_payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&detach_msg, detach_payload.ptr, detach_payload.len));
+    try std.testing.expectEqualStrings("reattach-alpha", detach_payload[0 .. detach_payload.len - 1]);
+
+    server_client_attach(&client, beta);
+    try std.testing.expectEqual(beta, client.session.?);
+    try std.testing.expectEqual(alpha, client.last_session.?);
+    try std.testing.expect(client.flags & T.CLIENT_ATTACHED != 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var ready_again: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &ready_again) > 0);
+    defer c.imsg.imsg_free(&ready_again);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.ready))), c.imsg.imsg_get_type(&ready_again));
+}
+
+test "server_client_dispatch_for_test exiting on a detached client sends exited and marks it dead" {
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    sess.session_init_globals(xm.allocator);
+    win_mod.window_init_globals(xm.allocator);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "server-client-exiting-detached" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const client = try xm.allocator.create(T.Client);
+    client.* = .{
+        .name = xm.xstrdup("detached-exiting-client"),
+        .references = 2,
+        .environ = env_mod.environ_create(),
+        .tty = .{ .client = client },
+        .status = .{},
+        .flags = T.CLIENT_IDENTIFIED,
+    };
+    tty_mod.tty_init(&client.tty, client);
+    client.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    client_registry.add(client);
+    defer sc.server_client_unref(client);
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.exiting), &.{});
+    sc.server_client_dispatch_for_test(&imsg, client);
+
+    try std.testing.expect((client.flags & T.CLIENT_DEAD) != 0);
+    try std.testing.expect(client.peer == null);
+    try std.testing.expect(client.session == null);
+    try std.testing.expectEqual(@as(usize, 0), client_registry.clients.items.len);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var exited_msg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &exited_msg) > 0);
+    defer c.imsg.imsg_free(&exited_msg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exited))), c.imsg.imsg_get_type(&exited_msg));
+}
+
 test "server_client_dispatch_command bad default-client-command sends exit" {
     cfg_mod.cfg_reset_files();
     defer cfg_mod.cfg_reset_files();
@@ -2369,6 +2567,44 @@ test "server_client_dispatch_command bad default-client-command sends exit" {
 
     const rv = try drainPeerUntilExit(&reader, pair[1]);
     try std.testing.expectEqual(@as(i32, 1), rv);
+}
+
+test "server_client_dispatch_for_test ignores command messages once CLIENT_EXIT is set" {
+    cmdq_mod.cmdq_reset_for_tests();
+    defer cmdq_mod.cmdq_reset_for_tests();
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    opts.options_set_command(opts.global_options, "default-client-command", "list-commands");
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .pane_cache = .{},
+        .stdin_pending = .{},
+        .flags = T.CLIENT_IDENTIFIED | T.CLIENT_EXIT,
+    };
+    defer env_mod.environ_free(client.environ);
+    defer client.stdin_pending.deinit(xm.allocator);
+    client.tty = .{ .client = &client };
+
+    var payload = protocol.MsgCommand{ .argc = 0 };
+    var imsg_msg = std.mem.zeroes(c.imsg.imsg);
+    imsg_msg.hdr.type = @as(@TypeOf(imsg_msg.hdr.type), @intCast(@intFromEnum(protocol.MsgType.command)));
+    imsg_msg.hdr.len = @as(@TypeOf(imsg_msg.hdr.len), @sizeOf(c.imsg.imsg_hdr) + @sizeOf(protocol.MsgCommand));
+    imsg_msg.data = @ptrCast(&payload);
+
+    sc.server_client_dispatch_for_test(&imsg_msg, &client);
+
+    try std.testing.expect(!cmdq_mod.cmdq_has_pending(&client));
 }
 
 test "server_client readonly enqueue rejects non-readonly command list" {

@@ -526,3 +526,184 @@ test "control_write_output flushes escaped pane data for control clients" {
     try std.testing.expectEqual(@as(usize, 0), cl.control_all_blocks.items.len);
     try std.testing.expectEqual(@as(usize, 4), cl.control_panes.items[0].offset.used);
 }
+
+test "control_remove_sub from middle preserves remaining order" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl_sub.control_add_sub(&cl, "alpha", T.ControlSubType.session, 0, "fmt-a");
+    ctl_sub.control_add_sub(&cl, "bravo", T.ControlSubType.pane, 1, "fmt-b");
+    ctl_sub.control_add_sub(&cl, "charlie", T.ControlSubType.window, 2, "fmt-c");
+    try std.testing.expectEqual(@as(usize, 3), cl.control_subscriptions.items.len);
+
+    ctl_sub.control_remove_sub(&cl, "bravo");
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("alpha", cl.control_subscriptions.items[0].name);
+    try std.testing.expectEqualStrings("charlie", cl.control_subscriptions.items[1].name);
+    try std.testing.expectEqual(T.ControlSubType.session, cl.control_subscriptions.items[0].sub_type);
+    try std.testing.expectEqual(T.ControlSubType.window, cl.control_subscriptions.items[1].sub_type);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_add_sub re-registration moves subscription to end of list" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl_sub.control_add_sub(&cl, "first", T.ControlSubType.session, 0, "#{session_name}");
+    ctl_sub.control_add_sub(&cl, "second", T.ControlSubType.window, 5, "#{window_id}");
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("first", cl.control_subscriptions.items[0].name);
+
+    // Re-add "first" with different type and format — old entry removed, new appended at end
+    ctl_sub.control_add_sub(&cl, "first", T.ControlSubType.all_panes, 0, "#{pane_id}");
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+    try std.testing.expectEqualStrings("second", cl.control_subscriptions.items[0].name);
+    try std.testing.expectEqualStrings("first", cl.control_subscriptions.items[1].name);
+    try std.testing.expectEqual(T.ControlSubType.all_panes, cl.control_subscriptions.items[1].sub_type);
+    try std.testing.expectEqualStrings("#{pane_id}", cl.control_subscriptions.items[1].format);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}
+
+test "control_subscriptions_deinit frees nested pane and window tracking state" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+    };
+    cl.tty = .{ .client = &cl };
+
+    ctl_sub.control_add_sub(&cl, "pane-watch", T.ControlSubType.all_panes, 0, "#{pane_id}");
+    ctl_sub.control_add_sub(&cl, "win-watch", T.ControlSubType.all_windows, 0, "#{window_id}");
+
+    // Manually populate nested pane/window tracking state with cached values,
+    // simulating what control_check_subscriptions would build up over time.
+    var pane_sub = &cl.control_subscriptions.items[0];
+    pane_sub.panes.append(xm.allocator, .{
+        .pane = 42,
+        .idx = 0,
+        .last = xm.allocator.dupe(u8, "cached-pane-val") catch unreachable,
+    }) catch unreachable;
+    pane_sub.panes.append(xm.allocator, .{
+        .pane = 43,
+        .idx = 1,
+        .last = null,
+    }) catch unreachable;
+
+    var win_sub = &cl.control_subscriptions.items[1];
+    win_sub.windows.append(xm.allocator, .{
+        .window = 99,
+        .idx = 0,
+        .last = xm.allocator.dupe(u8, "cached-win-val") catch unreachable,
+    }) catch unreachable;
+
+    // deinit must free all nested state — names, formats, cached values, sub-lists
+    ctl_sub.control_subscriptions_deinit(&cl);
+
+    // After deinit the list is reset to empty
+    try std.testing.expectEqual(@as(usize, 0), cl.control_subscriptions.items.len);
+}
+
+test "control_check_subscriptions emits all registered subscriptions in insertion order" {
+    var session_env = T.Environ.init(xm.allocator);
+    defer session_env.deinit();
+    var session_options = T.Options.init(xm.allocator, null);
+    defer session_options.deinit();
+
+    var session = T.Session{
+        .id = 77,
+        .name = xm.xstrdup("ordered"),
+        .cwd = "/",
+        .options = &session_options,
+        .environ = &session_env,
+    };
+    defer xm.allocator.free(session.name);
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = &session,
+    };
+    defer env_mod.environ_free(client.environ);
+    client.tty = .{ .client = &client };
+
+    // Two session subscriptions — both should fire on first check, in insertion order
+    ctl_sub.control_add_sub(&client, "first", T.ControlSubType.session, 0, "#{session_name}");
+    ctl_sub.control_add_sub(&client, "second", T.ControlSubType.session, 0, "#{session_name}");
+    defer ctl_sub.control_subscriptions_deinit(&client);
+
+    var pipe_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.pipe(&pipe_fds));
+    defer {
+        std.posix.close(pipe_fds[0]);
+        if (pipe_fds[1] != -1) std.posix.close(pipe_fds[1]);
+    }
+    const stdout_dup = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(stdout_dup);
+    try std.posix.dup2(pipe_fds[1], std.posix.STDOUT_FILENO);
+    ctl_sub.control_check_subscriptions(&client);
+    try std.posix.dup2(stdout_dup, std.posix.STDOUT_FILENO);
+    std.posix.close(pipe_fds[1]);
+    pipe_fds[1] = -1;
+
+    var buf: [512]u8 = undefined;
+    const len = try std.posix.read(pipe_fds[0], &buf);
+    const output = buf[0..len];
+
+    // "first" emitted before "second", matching insertion order
+    const expected =
+        "%subscription-changed first $77 - - - : ordered\n" ++
+        "%subscription-changed second $77 - - - : ordered\n";
+    try std.testing.expectEqualStrings(expected, output);
+}
+
+test "control_check_subs_timer_fire with subscriptions but no session is safe" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var cl: T.Client = undefined;
+    cl = .{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    cl.tty = .{ .client = &cl };
+
+    // Register subscriptions but leave session null — timer fire should no-op
+    ctl_sub.control_add_sub(&cl, "watch-a", T.ControlSubType.session, 0, "#{session_name}");
+    ctl_sub.control_add_sub(&cl, "watch-b", T.ControlSubType.all_panes, 0, "#{pane_id}");
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+
+    // Timer fire dispatches to control_check_subscriptions which returns early on null session
+    ctl_sub.control_check_subs_timer_fire(&cl);
+
+    // Subscriptions still present, no cached values populated
+    try std.testing.expectEqual(@as(usize, 2), cl.control_subscriptions.items.len);
+    try std.testing.expect(cl.control_subscriptions.items[0].last == null);
+    try std.testing.expect(cl.control_subscriptions.items[1].last == null);
+
+    ctl_sub.control_subscriptions_deinit(&cl);
+}

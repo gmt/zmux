@@ -23,6 +23,7 @@ Use this file for deliberate test exceptions only.
 | `smoke-sweep:show-messages` | `smoke`, `smoke-oracle` | `skip-global` | The oracle run exits the control client immediately, so the exercise is not a trustworthy parity check today. | Tighten the control-client exercise and restore the case once tmux is green. |
 | `smoke-recursive:tmux-in-zmux` | `smoke-recursive` | `skip-global` | The tmux recursive attach timeout assumption is not a stable oracle baseline in this environment. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 | `smoke-recursive:tmux-in-tmux` | `smoke-recursive` | `skip-global` | The pure tmux recursive case does not currently validate the timeout expectation. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
+| `os.linux.test.linux osdep_get_name and osdep_get_cwd observe pty foreground child` | `zig-unit` | `env-skip` | The test orchestrator runs each zig-unit case inside `unshare --pid --fork` without `--mount-proc`. Inside that namespace `tcgetpgrp` returns namespace-local PIDs but `/proc` still shows host PIDs, so the lookup always fails. The test detects this via `NSpid` in `/proc/self/status` and returns early. The test passes correctly when run directly outside the namespace. | Remove the guard once the orchestrator mounts a private `/proc` in the pid namespace, or once a mock pty harness replaces the live fork. |
 
 ## Notes
 

@@ -227,6 +227,33 @@ test "display-message format expansion renders session name in status bar" {
     try std.testing.expectEqualStrings("dm-format", client.message_string.?);
 }
 
+test "display-message -l keeps format tokens literal" {
+    init_harness();
+    defer deinit_harness();
+
+    const session = sess.session_create(null, "dm-literal", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("dm-literal") != null) sess.session_destroy(session, false, "test");
+    attach_placeholder_window(session);
+
+    var client = T.Client{
+        .name = "dm-literal-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const r = try execWithClient(&client, &.{ "display-message", "-d", "0", "-l", "#{session_name}" });
+    try std.testing.expectEqual(T.CmdRetval.normal, r);
+    try std.testing.expectEqualStrings("#{session_name}", client.message_string.?);
+}
+
 test "display-message survives long output in status bar" {
     init_harness();
     defer deinit_harness();

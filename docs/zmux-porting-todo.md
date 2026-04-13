@@ -31,13 +31,6 @@ Live tmux-parity gaps only.
   rendering artifacts at region boundaries.
 - `likely files:` `src/tty-draw.zig`
 
-## cmd-set-option: exact match loses to longer prefix
-
-- `tmux:` `set-window-option` exact-matches an option name before considering
-  prefix matches, so `set -w status` sets the `status` option.
-- `zmux:` the prefix matcher picks a longer name over the exact match.
-- `likely files:` `src/cmd-set-option.zig`
-
 ## cmd-new-session / cmd-attach-session: attach flow divergence
 
 - `tmux:` `new-session` and `attach-session` handle the full client-attach

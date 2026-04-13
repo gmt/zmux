@@ -313,6 +313,8 @@ class Forwarder:
 
         try:
             peer.sendmsg([data], out_anc)
+        except BrokenPipeError:
+            return False
         finally:
             for fd in fds:
                 try:

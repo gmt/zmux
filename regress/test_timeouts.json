@@ -11,6 +11,10 @@
     "fuzz-corpus": 60
   },
   "cases": {
+    "zig-unit:zmux-protocol-test.test.zmux protocol version and enum numbering stay C-compatible": 5.0,
+    "zig-unit:zmux-protocol-test.test.zmux wire structs match tmux layout exactly": 5.0,
+    "zig-unit:zmux-protocol-test.test.zmux wire structs round-trip through raw bytes": 5.0,
+    "zig-unit:zmux-protocol-test.test.zmux wire envelopes preserve empty and max payloads": 5.0,
     "fuzz-corpus:cmd-preprocess:ascii_and_esc": 5.0,
     "fuzz-corpus:cmd-preprocess:empty": 5.0,
     "fuzz-corpus:input:ascii_and_esc": 5.0,

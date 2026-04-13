@@ -17,25 +17,41 @@
 const std = @import("std");
 const p = @import("zmux-protocol.zig");
 
-test "zmux protocol version and extern payload sizes stay C-compatible" {
-    try std.testing.expectEqual(@as(u32, 8), p.PROTOCOL_VERSION);
+fn expectSequentialCInts(comptime T: type) !void {
+    const fields = std.meta.fields(T);
+    try std.testing.expect(fields.len > 0);
+    try std.testing.expectEqual(@as(usize, fields.len) * @sizeOf(c_int), @sizeOf(T));
+    try std.testing.expectEqual(@alignOf(c_int), @alignOf(T));
 
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgCommand));
-
-    try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgReadOpen));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgReadData));
-    try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgReadDone));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgReadCancel));
-
-    try std.testing.expectEqual(3 * @sizeOf(c_int), @sizeOf(p.MsgWriteOpen));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgWriteData));
-    try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgWriteReady));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgWriteClose));
-
-    try std.testing.expectEqual(@alignOf(c_int), @alignOf(p.MsgCommand));
+    inline for (fields, 0..) |field, i| {
+        try std.testing.expect(field.type == c_int);
+        try std.testing.expectEqual(i * @sizeOf(c_int), @offsetOf(T, field.name));
+    }
 }
 
-test "zmux MsgType enum values match tmux wire numbering bands" {
+fn roundTripStruct(comptime T: type, value: T) !void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    @memcpy(encoded[0..], std.mem.asBytes(&value));
+    const decoded = std.mem.bytesAsValue(T, encoded[0..]);
+    try std.testing.expectEqual(value, decoded.*);
+}
+
+fn roundTripEnvelope(comptime T: type, value: T, payload: []const u8) !void {
+    var buf: [16 * 1024]u8 = undefined;
+    const used = @sizeOf(T) + payload.len;
+    try std.testing.expect(used <= buf.len);
+
+    @memcpy(buf[0..@sizeOf(T)], std.mem.asBytes(&value));
+    @memcpy(buf[@sizeOf(T)..used], payload);
+
+    const decoded = std.mem.bytesAsValue(T, buf[0..@sizeOf(T)]);
+    try std.testing.expectEqual(value, decoded.*);
+    try std.testing.expectEqualSlices(u8, payload, buf[@sizeOf(T)..used]);
+}
+
+test "zmux protocol version and enum numbering stay C-compatible" {
+    try std.testing.expectEqual(@as(u32, 8), p.PROTOCOL_VERSION);
+
     try std.testing.expectEqual(@as(i32, 12), @intFromEnum(p.MsgType.version));
     try std.testing.expectEqual(@as(i32, 100), @intFromEnum(p.MsgType.identify_flags));
     try std.testing.expectEqual(@as(i32, 112), @intFromEnum(p.MsgType.identify_terminfo));
@@ -51,16 +67,45 @@ test "zmux identify message types stay contiguous after identify_flags" {
     try std.testing.expectEqual(@intFromEnum(p.MsgType.identify_term) + 1, @intFromEnum(p.MsgType.identify_ttyname));
 }
 
-test "zmux MsgCommand holds argc as c_int" {
-    const m: p.MsgCommand = .{ .argc = 7 };
-    try std.testing.expectEqual(@as(c_int, 7), m.argc);
+test "zmux wire structs match tmux layout exactly" {
+    try expectSequentialCInts(p.MsgCommand);
+    try expectSequentialCInts(p.MsgReadOpen);
+    try expectSequentialCInts(p.MsgReadData);
+    try expectSequentialCInts(p.MsgReadDone);
+    try expectSequentialCInts(p.MsgReadCancel);
+    try expectSequentialCInts(p.MsgWriteOpen);
+    try expectSequentialCInts(p.MsgWriteData);
+    try expectSequentialCInts(p.MsgWriteReady);
+    try expectSequentialCInts(p.MsgWriteClose);
 }
 
-test "zmux read/write open structs are packed c_int fields only" {
-    try std.testing.expectEqual(2 * @sizeOf(c_int), @sizeOf(p.MsgReadOpen));
-    try std.testing.expectEqual(3 * @sizeOf(c_int), @sizeOf(p.MsgWriteOpen));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgReadData));
-    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(p.MsgWriteData));
+test "zmux wire structs round-trip through raw bytes" {
+    try roundTripStruct(p.MsgCommand, .{ .argc = std.math.maxInt(c_int) });
+    try roundTripStruct(p.MsgReadOpen, .{ .stream = 0, .fd = -1 });
+    try roundTripStruct(p.MsgReadData, .{ .stream = std.math.minInt(c_int) });
+    try roundTripStruct(p.MsgReadDone, .{ .stream = 2, .@"error" = std.math.maxInt(c_int) });
+    try roundTripStruct(p.MsgReadCancel, .{ .stream = 7 });
+    try roundTripStruct(p.MsgWriteOpen, .{ .stream = 3, .fd = 4, .flags = std.math.maxInt(c_int) });
+    try roundTripStruct(p.MsgWriteData, .{ .stream = 9 });
+    try roundTripStruct(p.MsgWriteReady, .{ .stream = 11, .@"error" = std.math.minInt(c_int) });
+    try roundTripStruct(p.MsgWriteClose, .{ .stream = 13 });
+}
+
+test "zmux wire envelopes preserve empty and max payloads" {
+    try roundTripEnvelope(p.MsgReadData, .{ .stream = 0 }, &.{});
+    try roundTripEnvelope(p.MsgWriteData, .{ .stream = 1 }, &.{});
+
+    var max_argv_payload: [15 * 1024]u8 = undefined;
+    for (&max_argv_payload, 0..) |*b, i| {
+        b.* = @as(u8, @intCast(i % 251));
+    }
+    try roundTripEnvelope(p.MsgCommand, .{ .argc = 2048 }, max_argv_payload[0..]);
+
+    var max_data_payload: [15 * 1024]u8 = undefined;
+    for (&max_data_payload, 0..) |*b, i| {
+        b.* = @as(u8, @intCast(255 - (i % 251)));
+    }
+    try roundTripEnvelope(p.MsgWriteData, .{ .stream = 42 }, max_data_payload[0..]);
 }
 
 test "zmux PROTOCOL_VERSION fits in peerid low byte" {

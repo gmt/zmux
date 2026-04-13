@@ -282,13 +282,15 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
         null;
 
     if (wp.argv) |old_argv| free_argv(old_argv);
-    if (wp.shell) |old_shell| xm.allocator.free(old_shell);
     const reuse_cwd = sc.flags & T.SPAWN_RESPAWN != 0 and cwd_owned == null and wp.cwd != null;
+    if (sc.flags & T.SPAWN_RESPAWN == 0) {
+        if (wp.shell) |old_shell| xm.allocator.free(old_shell);
+        wp.shell = xm.xstrdup(shell);
+    }
     if (!reuse_cwd) {
         if (wp.cwd) |old_cwd| xm.allocator.free(old_cwd);
     }
     wp.argv = argv;
-    wp.shell = xm.xstrdup(shell);
     if (reuse_cwd) {
         // Keep the existing pane cwd string for respawns when no override is provided.
     } else if (cwd_owned) |owned| {

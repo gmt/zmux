@@ -22,6 +22,7 @@ const cmdq = @import("cmd-queue.zig");
 const cmd_start_server = @import("cmd-start-server.zig");
 const cmd_new_window = @import("cmd-new-window.zig");
 const cmd_list_clients = @import("cmd-list-clients.zig");
+const cmd_list_panes = @import("cmd-list-panes.zig");
 const cmd_list_sessions = @import("cmd-list-sessions.zig");
 const sess = @import("session.zig");
 const win_mod = @import("window.zig");
@@ -113,6 +114,7 @@ test {
     _ = @import("cmd-respawn-pane.zig");
     _ = @import("cmd-respawn-window.zig");
     _ = @import("cmd-list-sessions.zig");
+    _ = @import("cmd-list-panes.zig");
 }
 
 test "kill-window command parses target flag" {
@@ -403,4 +405,86 @@ test "list-sessions with format flag executes" {
     var item = cmdq.CmdqItem{ .cmdlist = &list };
 
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+}
+
+// ── list-panes tests ─────────────────────────────────────────────────
+
+test "list-panes command parses target and format flags" {
+    try std.testing.expectEqualStrings("list-panes", try parseName(&.{ "list-panes", "-t", "mysess:0", "-F", "#{pane_index}" }));
+}
+
+test "list-panes command entry rejects invalid sort order" {
+    init_harness();
+    defer deinit_harness();
+
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "list-panes", "-a", "-O", "not-a-valid-order" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .cmdlist = &list };
+
+    try std.testing.expectEqual(cmd_list_panes.entry.exec, cmd_mod.cmd_get_entry(cmd).exec);
+    try std.testing.expectEqual(T.CmdRetval.@"error", cmd_mod.cmd_execute(cmd, &item));
+}
+
+test "list-panes -a lists all session panes with session-qualified format" {
+    init_harness();
+    defer deinit_harness();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const s = sess.session_create(null, "lsp-fmt", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("lsp-fmt") != null) sess.session_destroy(s, false, "test");
+
+    var cause: ?[]u8 = null;
+    var sc: T.SpawnContext = .{ .s = s, .idx = -1, .flags = T.SPAWN_EMPTY };
+    s.curw = spawn.spawn_window(&sc, &cause).?;
+
+    const output = try capture_stdout(&.{
+        "list-panes", "-a",
+        "-F",         "#{session_name}:#{window_index}.#{pane_index}: #{pane_width}x#{pane_height}",
+    });
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings("lsp-fmt:0.0: 80x24\n", output);
+}
+
+test "list-panes -a with filter excludes non-matching session panes" {
+    init_harness();
+    defer deinit_harness();
+
+    client_registry.clients.clearRetainingCapacity();
+    defer client_registry.clients.clearRetainingCapacity();
+
+    const alpha = sess.session_create(null, "lsp-filter-keep", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("lsp-filter-keep") != null) sess.session_destroy(alpha, false, "test");
+    const beta = sess.session_create(null, "lsp-filter-drop", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("lsp-filter-drop") != null) sess.session_destroy(beta, false, "test");
+
+    var cause: ?[]u8 = null;
+    var alpha_sc: T.SpawnContext = .{ .s = alpha, .idx = -1, .flags = T.SPAWN_EMPTY };
+    alpha.curw = spawn.spawn_window(&alpha_sc, &cause).?;
+    var beta_sc: T.SpawnContext = .{ .s = beta, .idx = -1, .flags = T.SPAWN_EMPTY };
+    beta.curw = spawn.spawn_window(&beta_sc, &cause).?;
+
+    const output = try capture_stdout(&.{
+        "list-panes", "-a",
+        "-f",         "#{==:#{session_name},lsp-filter-keep}",
+        "-F",         "#{session_name}:#{pane_index}",
+    });
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings("lsp-filter-keep:0\n", output);
+}
+
+test "list-panes -a produces empty output when no sessions exist" {
+    init_harness();
+    defer deinit_harness();
+
+    const output = try capture_stdout(&.{ "list-panes", "-a", "-F", "#{session_name}" });
+    defer xm.allocator.free(output);
+
+    try std.testing.expectEqualStrings("", output);
 }

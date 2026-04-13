@@ -21,11 +21,6 @@ Live tmux-parity gaps only.
 - `zmux:` the same commands send `write(304)` directly and never emit the `write_open`/`write_ready` pair, so the client-side file-transfer protocol diverges whenever command output is streamed.
 - `likely files:` `src/client.zig`, `src/file-write.zig`, `src/file.zig`
 
-## list-sessions default created-time formatting does not match tmux
-
-- `tmux:` `list-sessions` printed `trace-probe: 1 windows (created Mon Apr 13 00:45:12 2026)` during the sweep.
-- `zmux:` `list-sessions` printed `trace-probe: 1 windows (created 2026-04-13 00:45:11)`, so the default `#{t:session_created}` rendering is using a different timestamp format.
-- `likely files:` `src/cmd-list-sessions.zig`, `src/format.zig`
 
 ## list-panes default output is still the simplified placeholder format
 

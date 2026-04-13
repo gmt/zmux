@@ -823,7 +823,7 @@ fn eval_modified_expr(
                 defer alloc.free(expanded_fmt.text);
                 if (!expanded_fmt.complete) return unresolved_expr(alloc, original_expr);
                 break :blk_fmt expanded_fmt.text;
-            } else "%Y-%m-%d %H:%M:%S";
+            } else "%a %b %e %H:%M:%S %Y";
             break :blk format_timestamp_local(alloc, working, fmt);
         };
         if (rendered == null) {

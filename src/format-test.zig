@@ -579,7 +579,7 @@ test "format_expand resolves pane dead status signal and time keys" {
 
     const exited = format_require_complete(xm.allocator, "#{pane_dead_status}:#{pane_dead_signal}:#{t:pane_dead_time}", &ctx).?;
     defer xm.allocator.free(exited);
-    const expected_time = format_timestamp_local(xm.allocator, "1234567890", "%Y-%m-%d %H:%M:%S").?;
+    const expected_time = format_timestamp_local(xm.allocator, "1234567890", "%a %b %e %H:%M:%S %Y").?;
     defer xm.allocator.free(expected_time);
     const expected_exit = try std.fmt.allocPrint(xm.allocator, "7::{s}", .{expected_time});
     defer xm.allocator.free(expected_exit);
@@ -876,7 +876,7 @@ test "format_expand handles time modifier and incomplete formats" {
     const timed = format_expand(xm.allocator, "#{t:session_created}", &ctx);
     defer xm.allocator.free(timed.text);
     try std.testing.expect(timed.complete);
-    const expected = format_timestamp_local(xm.allocator, "0", "%Y-%m-%d %H:%M:%S").?;
+    const expected = format_timestamp_local(xm.allocator, "0", "%a %b %e %H:%M:%S %Y").?;
     defer xm.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, timed.text);
 

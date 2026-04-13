@@ -37,6 +37,11 @@ const WidthCacheItem = struct {
     width: u8,
 };
 
+const CodepointInterval = struct {
+    first: u21,
+    last: u21,
+};
+
 const default_width_cache = [_]WidthCacheItem{
     .{ .wc = 0x0261D, .width = 2 },
     .{ .wc = 0x026F9, .width = 2 },
@@ -205,9 +210,227 @@ const default_width_cache = [_]WidthCacheItem{
 var utf8_items: std.ArrayList(Utf8Item) = .{};
 var utf8_width_cache: std.ArrayList(WidthCacheItem) = .{};
 var utf8_next_index: u32 = 0;
-var locale_ready = false;
 var utf8_no_width = false;
 var utf8_width_cache_ready = false;
+
+const combining_intervals = [_]CodepointInterval{
+    .{ .first = 0x0300, .last = 0x036f },   .{ .first = 0x0483, .last = 0x0489 },
+    .{ .first = 0x0591, .last = 0x05bd },   .{ .first = 0x05bf, .last = 0x05bf },
+    .{ .first = 0x05c1, .last = 0x05c2 },   .{ .first = 0x05c4, .last = 0x05c5 },
+    .{ .first = 0x05c7, .last = 0x05c7 },   .{ .first = 0x0610, .last = 0x061a },
+    .{ .first = 0x064b, .last = 0x065f },   .{ .first = 0x0670, .last = 0x0670 },
+    .{ .first = 0x06d6, .last = 0x06dc },   .{ .first = 0x06df, .last = 0x06e4 },
+    .{ .first = 0x06e7, .last = 0x06e8 },   .{ .first = 0x06ea, .last = 0x06ed },
+    .{ .first = 0x0711, .last = 0x0711 },   .{ .first = 0x0730, .last = 0x074a },
+    .{ .first = 0x07a6, .last = 0x07b0 },   .{ .first = 0x07eb, .last = 0x07f3 },
+    .{ .first = 0x07fd, .last = 0x07fd },   .{ .first = 0x0816, .last = 0x0819 },
+    .{ .first = 0x081b, .last = 0x0823 },   .{ .first = 0x0825, .last = 0x0827 },
+    .{ .first = 0x0829, .last = 0x082d },   .{ .first = 0x0859, .last = 0x085b },
+    .{ .first = 0x0898, .last = 0x089f },   .{ .first = 0x08ca, .last = 0x08e1 },
+    .{ .first = 0x08e3, .last = 0x0902 },   .{ .first = 0x093a, .last = 0x093a },
+    .{ .first = 0x093c, .last = 0x093c },   .{ .first = 0x0941, .last = 0x0948 },
+    .{ .first = 0x094d, .last = 0x094d },   .{ .first = 0x0951, .last = 0x0957 },
+    .{ .first = 0x0962, .last = 0x0963 },   .{ .first = 0x0981, .last = 0x0981 },
+    .{ .first = 0x09bc, .last = 0x09bc },   .{ .first = 0x09c1, .last = 0x09c4 },
+    .{ .first = 0x09cd, .last = 0x09cd },   .{ .first = 0x09e2, .last = 0x09e3 },
+    .{ .first = 0x09fe, .last = 0x09fe },   .{ .first = 0x0a01, .last = 0x0a02 },
+    .{ .first = 0x0a3c, .last = 0x0a3c },   .{ .first = 0x0a41, .last = 0x0a42 },
+    .{ .first = 0x0a47, .last = 0x0a48 },   .{ .first = 0x0a4b, .last = 0x0a4d },
+    .{ .first = 0x0a51, .last = 0x0a51 },   .{ .first = 0x0a70, .last = 0x0a71 },
+    .{ .first = 0x0a75, .last = 0x0a75 },   .{ .first = 0x0a81, .last = 0x0a82 },
+    .{ .first = 0x0abc, .last = 0x0abc },   .{ .first = 0x0ac1, .last = 0x0ac5 },
+    .{ .first = 0x0ac7, .last = 0x0ac8 },   .{ .first = 0x0acd, .last = 0x0acd },
+    .{ .first = 0x0ae2, .last = 0x0ae3 },   .{ .first = 0x0afa, .last = 0x0aff },
+    .{ .first = 0x0b01, .last = 0x0b01 },   .{ .first = 0x0b3c, .last = 0x0b3c },
+    .{ .first = 0x0b3f, .last = 0x0b3f },   .{ .first = 0x0b41, .last = 0x0b44 },
+    .{ .first = 0x0b4d, .last = 0x0b4d },   .{ .first = 0x0b55, .last = 0x0b56 },
+    .{ .first = 0x0b62, .last = 0x0b63 },   .{ .first = 0x0b82, .last = 0x0b82 },
+    .{ .first = 0x0bc0, .last = 0x0bc0 },   .{ .first = 0x0bcd, .last = 0x0bcd },
+    .{ .first = 0x0c00, .last = 0x0c00 },   .{ .first = 0x0c04, .last = 0x0c04 },
+    .{ .first = 0x0c3c, .last = 0x0c3c },   .{ .first = 0x0c3e, .last = 0x0c40 },
+    .{ .first = 0x0c46, .last = 0x0c48 },   .{ .first = 0x0c4a, .last = 0x0c4d },
+    .{ .first = 0x0c55, .last = 0x0c56 },   .{ .first = 0x0c62, .last = 0x0c63 },
+    .{ .first = 0x0c81, .last = 0x0c81 },   .{ .first = 0x0cbc, .last = 0x0cbc },
+    .{ .first = 0x0cbf, .last = 0x0cbf },   .{ .first = 0x0cc6, .last = 0x0cc6 },
+    .{ .first = 0x0ccc, .last = 0x0ccd },   .{ .first = 0x0ce2, .last = 0x0ce3 },
+    .{ .first = 0x0d00, .last = 0x0d01 },   .{ .first = 0x0d3b, .last = 0x0d3c },
+    .{ .first = 0x0d41, .last = 0x0d44 },   .{ .first = 0x0d4d, .last = 0x0d4d },
+    .{ .first = 0x0d62, .last = 0x0d63 },   .{ .first = 0x0d81, .last = 0x0d81 },
+    .{ .first = 0x0dca, .last = 0x0dca },   .{ .first = 0x0dd2, .last = 0x0dd4 },
+    .{ .first = 0x0dd6, .last = 0x0dd6 },   .{ .first = 0x0e31, .last = 0x0e31 },
+    .{ .first = 0x0e34, .last = 0x0e3a },   .{ .first = 0x0e47, .last = 0x0e4e },
+    .{ .first = 0x0eb1, .last = 0x0eb1 },   .{ .first = 0x0eb4, .last = 0x0ebc },
+    .{ .first = 0x0ec8, .last = 0x0ece },   .{ .first = 0x0f18, .last = 0x0f19 },
+    .{ .first = 0x0f35, .last = 0x0f35 },   .{ .first = 0x0f37, .last = 0x0f37 },
+    .{ .first = 0x0f39, .last = 0x0f39 },   .{ .first = 0x0f71, .last = 0x0f7e },
+    .{ .first = 0x0f80, .last = 0x0f84 },   .{ .first = 0x0f86, .last = 0x0f87 },
+    .{ .first = 0x0f8d, .last = 0x0f97 },   .{ .first = 0x0f99, .last = 0x0fbc },
+    .{ .first = 0x0fc6, .last = 0x0fc6 },   .{ .first = 0x102d, .last = 0x1030 },
+    .{ .first = 0x1032, .last = 0x1037 },   .{ .first = 0x1039, .last = 0x103a },
+    .{ .first = 0x103d, .last = 0x103e },   .{ .first = 0x1058, .last = 0x1059 },
+    .{ .first = 0x105e, .last = 0x1060 },   .{ .first = 0x1071, .last = 0x1074 },
+    .{ .first = 0x1082, .last = 0x1082 },   .{ .first = 0x1085, .last = 0x1086 },
+    .{ .first = 0x108d, .last = 0x108d },   .{ .first = 0x109d, .last = 0x109d },
+    .{ .first = 0x135d, .last = 0x135f },   .{ .first = 0x1712, .last = 0x1714 },
+    .{ .first = 0x1732, .last = 0x1734 },   .{ .first = 0x1752, .last = 0x1753 },
+    .{ .first = 0x1772, .last = 0x1773 },   .{ .first = 0x17b4, .last = 0x17b5 },
+    .{ .first = 0x17b7, .last = 0x17bd },   .{ .first = 0x17c6, .last = 0x17c6 },
+    .{ .first = 0x17c9, .last = 0x17d3 },   .{ .first = 0x17dd, .last = 0x17dd },
+    .{ .first = 0x180b, .last = 0x180f },   .{ .first = 0x1885, .last = 0x1886 },
+    .{ .first = 0x18a9, .last = 0x18a9 },   .{ .first = 0x1920, .last = 0x1922 },
+    .{ .first = 0x1927, .last = 0x1928 },   .{ .first = 0x1932, .last = 0x1932 },
+    .{ .first = 0x1939, .last = 0x193b },   .{ .first = 0x1a17, .last = 0x1a18 },
+    .{ .first = 0x1a1b, .last = 0x1a1b },   .{ .first = 0x1a56, .last = 0x1a56 },
+    .{ .first = 0x1a58, .last = 0x1a5e },   .{ .first = 0x1a60, .last = 0x1a60 },
+    .{ .first = 0x1a62, .last = 0x1a62 },   .{ .first = 0x1a65, .last = 0x1a6c },
+    .{ .first = 0x1a73, .last = 0x1a7c },   .{ .first = 0x1a7f, .last = 0x1a7f },
+    .{ .first = 0x1ab0, .last = 0x1ace },   .{ .first = 0x1b00, .last = 0x1b03 },
+    .{ .first = 0x1b34, .last = 0x1b34 },   .{ .first = 0x1b36, .last = 0x1b3a },
+    .{ .first = 0x1b3c, .last = 0x1b3c },   .{ .first = 0x1b42, .last = 0x1b42 },
+    .{ .first = 0x1b6b, .last = 0x1b73 },   .{ .first = 0x1b80, .last = 0x1b81 },
+    .{ .first = 0x1ba2, .last = 0x1ba5 },   .{ .first = 0x1ba8, .last = 0x1ba9 },
+    .{ .first = 0x1bab, .last = 0x1bad },   .{ .first = 0x1be6, .last = 0x1be6 },
+    .{ .first = 0x1be8, .last = 0x1be9 },   .{ .first = 0x1bed, .last = 0x1bed },
+    .{ .first = 0x1bef, .last = 0x1bf1 },   .{ .first = 0x1c2c, .last = 0x1c33 },
+    .{ .first = 0x1c36, .last = 0x1c37 },   .{ .first = 0x1cd0, .last = 0x1cd2 },
+    .{ .first = 0x1cd4, .last = 0x1ce0 },   .{ .first = 0x1ce2, .last = 0x1ce8 },
+    .{ .first = 0x1ced, .last = 0x1ced },   .{ .first = 0x1cf4, .last = 0x1cf4 },
+    .{ .first = 0x1cf8, .last = 0x1cf9 },   .{ .first = 0x1dc0, .last = 0x1dff },
+    .{ .first = 0x200b, .last = 0x200f },   .{ .first = 0x202a, .last = 0x202e },
+    .{ .first = 0x2060, .last = 0x2064 },   .{ .first = 0x2066, .last = 0x206f },
+    .{ .first = 0x20d0, .last = 0x20f0 },   .{ .first = 0x2cef, .last = 0x2cf1 },
+    .{ .first = 0x2d7f, .last = 0x2d7f },   .{ .first = 0x2de0, .last = 0x2dff },
+    .{ .first = 0x302a, .last = 0x302f },   .{ .first = 0x3099, .last = 0x309a },
+    .{ .first = 0xa66f, .last = 0xa672 },   .{ .first = 0xa674, .last = 0xa67d },
+    .{ .first = 0xa69e, .last = 0xa69f },   .{ .first = 0xa6f0, .last = 0xa6f1 },
+    .{ .first = 0xa802, .last = 0xa802 },   .{ .first = 0xa806, .last = 0xa806 },
+    .{ .first = 0xa80b, .last = 0xa80b },   .{ .first = 0xa825, .last = 0xa826 },
+    .{ .first = 0xa82c, .last = 0xa82c },   .{ .first = 0xa8c4, .last = 0xa8c5 },
+    .{ .first = 0xa8e0, .last = 0xa8f1 },   .{ .first = 0xa8ff, .last = 0xa8ff },
+    .{ .first = 0xa926, .last = 0xa92d },   .{ .first = 0xa947, .last = 0xa951 },
+    .{ .first = 0xa980, .last = 0xa982 },   .{ .first = 0xa9b3, .last = 0xa9b3 },
+    .{ .first = 0xa9b6, .last = 0xa9b9 },   .{ .first = 0xa9bc, .last = 0xa9bd },
+    .{ .first = 0xa9e5, .last = 0xa9e5 },   .{ .first = 0xaa29, .last = 0xaa2e },
+    .{ .first = 0xaa31, .last = 0xaa32 },   .{ .first = 0xaa35, .last = 0xaa36 },
+    .{ .first = 0xaa43, .last = 0xaa43 },   .{ .first = 0xaa4c, .last = 0xaa4c },
+    .{ .first = 0xaa7c, .last = 0xaa7c },   .{ .first = 0xaab0, .last = 0xaab0 },
+    .{ .first = 0xaab2, .last = 0xaab4 },   .{ .first = 0xaab7, .last = 0xaab8 },
+    .{ .first = 0xaabe, .last = 0xaabf },   .{ .first = 0xaac1, .last = 0xaac1 },
+    .{ .first = 0xaaec, .last = 0xaaed },   .{ .first = 0xaaf6, .last = 0xaaf6 },
+    .{ .first = 0xabe5, .last = 0xabe5 },   .{ .first = 0xabe8, .last = 0xabe8 },
+    .{ .first = 0xabed, .last = 0xabed },   .{ .first = 0xfb1e, .last = 0xfb1e },
+    .{ .first = 0xfe00, .last = 0xfe0f },   .{ .first = 0xfe20, .last = 0xfe2f },
+    .{ .first = 0xfeff, .last = 0xfeff },   .{ .first = 0xfff9, .last = 0xfffb },
+    .{ .first = 0x101fd, .last = 0x101fd }, .{ .first = 0x102e0, .last = 0x102e0 },
+    .{ .first = 0x10376, .last = 0x1037a }, .{ .first = 0x10a01, .last = 0x10a03 },
+    .{ .first = 0x10a05, .last = 0x10a06 }, .{ .first = 0x10a0c, .last = 0x10a0f },
+    .{ .first = 0x10a38, .last = 0x10a3a }, .{ .first = 0x10a3f, .last = 0x10a3f },
+    .{ .first = 0x10ae5, .last = 0x10ae6 }, .{ .first = 0x10d24, .last = 0x10d27 },
+    .{ .first = 0x10eab, .last = 0x10eac }, .{ .first = 0x10efd, .last = 0x10eff },
+    .{ .first = 0x10f46, .last = 0x10f50 }, .{ .first = 0x10f82, .last = 0x10f85 },
+    .{ .first = 0x11001, .last = 0x11001 }, .{ .first = 0x11038, .last = 0x11046 },
+    .{ .first = 0x11070, .last = 0x11070 }, .{ .first = 0x11073, .last = 0x11074 },
+    .{ .first = 0x1107f, .last = 0x11081 }, .{ .first = 0x110b3, .last = 0x110b6 },
+    .{ .first = 0x110b9, .last = 0x110ba }, .{ .first = 0x110bd, .last = 0x110bd },
+    .{ .first = 0x110cd, .last = 0x110cd }, .{ .first = 0x11100, .last = 0x11102 },
+    .{ .first = 0x11127, .last = 0x1112b }, .{ .first = 0x1112d, .last = 0x11134 },
+    .{ .first = 0x11173, .last = 0x11173 }, .{ .first = 0x11180, .last = 0x11181 },
+    .{ .first = 0x111b6, .last = 0x111be }, .{ .first = 0x111c9, .last = 0x111cc },
+    .{ .first = 0x111cf, .last = 0x111cf }, .{ .first = 0x1122f, .last = 0x11231 },
+    .{ .first = 0x11234, .last = 0x11234 }, .{ .first = 0x11236, .last = 0x11237 },
+    .{ .first = 0x1123e, .last = 0x1123e }, .{ .first = 0x112df, .last = 0x112df },
+    .{ .first = 0x112e3, .last = 0x112ea }, .{ .first = 0x11300, .last = 0x11301 },
+    .{ .first = 0x1133b, .last = 0x1133c }, .{ .first = 0x11340, .last = 0x11340 },
+    .{ .first = 0x11366, .last = 0x1136c }, .{ .first = 0x11370, .last = 0x11374 },
+    .{ .first = 0x11438, .last = 0x1143f }, .{ .first = 0x11442, .last = 0x11444 },
+    .{ .first = 0x11446, .last = 0x11446 }, .{ .first = 0x1145e, .last = 0x1145e },
+    .{ .first = 0x114b3, .last = 0x114b8 }, .{ .first = 0x114ba, .last = 0x114ba },
+    .{ .first = 0x114bf, .last = 0x114c0 }, .{ .first = 0x114c2, .last = 0x114c3 },
+    .{ .first = 0x115b2, .last = 0x115b5 }, .{ .first = 0x115bc, .last = 0x115bd },
+    .{ .first = 0x115bf, .last = 0x115c0 }, .{ .first = 0x115dc, .last = 0x115dd },
+    .{ .first = 0x11633, .last = 0x1163a }, .{ .first = 0x1163d, .last = 0x1163d },
+    .{ .first = 0x1163f, .last = 0x11640 }, .{ .first = 0x116ab, .last = 0x116ab },
+    .{ .first = 0x116ad, .last = 0x116ad }, .{ .first = 0x116b0, .last = 0x116b5 },
+    .{ .first = 0x116b7, .last = 0x116b7 }, .{ .first = 0x1171d, .last = 0x1171f },
+    .{ .first = 0x11722, .last = 0x11725 }, .{ .first = 0x11727, .last = 0x1172b },
+    .{ .first = 0x1182f, .last = 0x11837 }, .{ .first = 0x11839, .last = 0x1183a },
+    .{ .first = 0x1193b, .last = 0x1193c }, .{ .first = 0x1193e, .last = 0x1193e },
+    .{ .first = 0x11943, .last = 0x11943 }, .{ .first = 0x119d4, .last = 0x119d7 },
+    .{ .first = 0x119da, .last = 0x119db }, .{ .first = 0x119e0, .last = 0x119e0 },
+    .{ .first = 0x11a01, .last = 0x11a0a }, .{ .first = 0x11a33, .last = 0x11a38 },
+    .{ .first = 0x11a3b, .last = 0x11a3e }, .{ .first = 0x11a47, .last = 0x11a47 },
+    .{ .first = 0x11a51, .last = 0x11a56 }, .{ .first = 0x11a59, .last = 0x11a5b },
+    .{ .first = 0x11a8a, .last = 0x11a96 }, .{ .first = 0x11a98, .last = 0x11a99 },
+    .{ .first = 0x11c30, .last = 0x11c36 }, .{ .first = 0x11c38, .last = 0x11c3d },
+    .{ .first = 0x11c3f, .last = 0x11c3f }, .{ .first = 0x11c92, .last = 0x11ca7 },
+    .{ .first = 0x11caa, .last = 0x11cb0 }, .{ .first = 0x11cb2, .last = 0x11cb3 },
+    .{ .first = 0x11cb5, .last = 0x11cb6 }, .{ .first = 0x11d31, .last = 0x11d36 },
+    .{ .first = 0x11d3a, .last = 0x11d3a }, .{ .first = 0x11d3c, .last = 0x11d3d },
+    .{ .first = 0x11d3f, .last = 0x11d45 }, .{ .first = 0x11d47, .last = 0x11d47 },
+    .{ .first = 0x11d90, .last = 0x11d91 }, .{ .first = 0x11d95, .last = 0x11d95 },
+    .{ .first = 0x11d97, .last = 0x11d97 }, .{ .first = 0x11ef3, .last = 0x11ef4 },
+    .{ .first = 0x13430, .last = 0x13438 }, .{ .first = 0x16af0, .last = 0x16af4 },
+    .{ .first = 0x16b30, .last = 0x16b36 }, .{ .first = 0x16f4f, .last = 0x16f4f },
+    .{ .first = 0x16f8f, .last = 0x16f92 }, .{ .first = 0x16fe4, .last = 0x16fe4 },
+    .{ .first = 0x1bc9d, .last = 0x1bc9e }, .{ .first = 0x1cf00, .last = 0x1cf2d },
+    .{ .first = 0x1cf30, .last = 0x1cf46 }, .{ .first = 0x1d167, .last = 0x1d169 },
+    .{ .first = 0x1d17b, .last = 0x1d182 }, .{ .first = 0x1d185, .last = 0x1d18b },
+    .{ .first = 0x1d1aa, .last = 0x1d1ad }, .{ .first = 0x1d242, .last = 0x1d244 },
+    .{ .first = 0x1da00, .last = 0x1da36 }, .{ .first = 0x1da3b, .last = 0x1da6c },
+    .{ .first = 0x1da75, .last = 0x1da75 }, .{ .first = 0x1da84, .last = 0x1da84 },
+    .{ .first = 0x1da9b, .last = 0x1da9f }, .{ .first = 0x1daa1, .last = 0x1daaf },
+    .{ .first = 0x1e000, .last = 0x1e006 }, .{ .first = 0x1e008, .last = 0x1e018 },
+    .{ .first = 0x1e01b, .last = 0x1e021 }, .{ .first = 0x1e023, .last = 0x1e024 },
+    .{ .first = 0x1e026, .last = 0x1e02a }, .{ .first = 0x1e08f, .last = 0x1e08f },
+    .{ .first = 0x1e130, .last = 0x1e136 }, .{ .first = 0x1e2ae, .last = 0x1e2ae },
+    .{ .first = 0x1e2ec, .last = 0x1e2ef }, .{ .first = 0x1e4ec, .last = 0x1e4ef },
+    .{ .first = 0x1e8d0, .last = 0x1e8d6 }, .{ .first = 0x1e944, .last = 0x1e94a },
+    .{ .first = 0xe0100, .last = 0xe01ef },
+};
+
+const wide_intervals = [_]CodepointInterval{
+    .{ .first = 0x1100, .last = 0x115f },   .{ .first = 0x231a, .last = 0x231b },
+    .{ .first = 0x2329, .last = 0x232a },   .{ .first = 0x23e9, .last = 0x23ec },
+    .{ .first = 0x23f0, .last = 0x23f0 },   .{ .first = 0x23f3, .last = 0x23f3 },
+    .{ .first = 0x25fd, .last = 0x25fe },   .{ .first = 0x2614, .last = 0x2615 },
+    .{ .first = 0x2648, .last = 0x2653 },   .{ .first = 0x267f, .last = 0x267f },
+    .{ .first = 0x2693, .last = 0x2693 },   .{ .first = 0x26a1, .last = 0x26a1 },
+    .{ .first = 0x26aa, .last = 0x26ab },   .{ .first = 0x26bd, .last = 0x26be },
+    .{ .first = 0x26c4, .last = 0x26c5 },   .{ .first = 0x26ce, .last = 0x26ce },
+    .{ .first = 0x26d4, .last = 0x26d4 },   .{ .first = 0x26ea, .last = 0x26ea },
+    .{ .first = 0x26f2, .last = 0x26f3 },   .{ .first = 0x26f5, .last = 0x26f5 },
+    .{ .first = 0x26fa, .last = 0x26fa },   .{ .first = 0x26fd, .last = 0x26fd },
+    .{ .first = 0x2705, .last = 0x2705 },   .{ .first = 0x270a, .last = 0x270b },
+    .{ .first = 0x2728, .last = 0x2728 },   .{ .first = 0x274c, .last = 0x274c },
+    .{ .first = 0x274e, .last = 0x274e },   .{ .first = 0x2753, .last = 0x2755 },
+    .{ .first = 0x2757, .last = 0x2757 },   .{ .first = 0x2795, .last = 0x2797 },
+    .{ .first = 0x27b0, .last = 0x27b0 },   .{ .first = 0x27bf, .last = 0x27bf },
+    .{ .first = 0x2b1b, .last = 0x2b1c },   .{ .first = 0x2b50, .last = 0x2b50 },
+    .{ .first = 0x2b55, .last = 0x2b55 },   .{ .first = 0x2e80, .last = 0x2ffb },
+    .{ .first = 0x3000, .last = 0x303e },   .{ .first = 0x3041, .last = 0x33ff },
+    .{ .first = 0x3400, .last = 0x4dbf },   .{ .first = 0x4e00, .last = 0xa4c6 },
+    .{ .first = 0xa960, .last = 0xa97c },   .{ .first = 0xac00, .last = 0xd7a3 },
+    .{ .first = 0xf900, .last = 0xfaff },   .{ .first = 0xfe10, .last = 0xfe19 },
+    .{ .first = 0xfe30, .last = 0xfe6b },   .{ .first = 0xff01, .last = 0xff60 },
+    .{ .first = 0xffe0, .last = 0xffe6 },   .{ .first = 0x16fe0, .last = 0x16fe4 },
+    .{ .first = 0x16ff0, .last = 0x16ff1 }, .{ .first = 0x17000, .last = 0x187f7 },
+    .{ .first = 0x18800, .last = 0x18cd5 }, .{ .first = 0x18d00, .last = 0x18d08 },
+    .{ .first = 0x1f004, .last = 0x1f004 }, .{ .first = 0x1f0cf, .last = 0x1f0cf },
+    .{ .first = 0x1f18e, .last = 0x1f18e }, .{ .first = 0x1f191, .last = 0x1f19a },
+    .{ .first = 0x1f200, .last = 0x1f251 }, .{ .first = 0x1f300, .last = 0x1f64f },
+    .{ .first = 0x1f680, .last = 0x1f6ff }, .{ .first = 0x1f700, .last = 0x1f773 },
+    .{ .first = 0x1f780, .last = 0x1f7d8 }, .{ .first = 0x1f7e0, .last = 0x1f7eb },
+    .{ .first = 0x1f7f0, .last = 0x1f7f0 }, .{ .first = 0x1f800, .last = 0x1f80b },
+    .{ .first = 0x1f810, .last = 0x1f847 }, .{ .first = 0x1f850, .last = 0x1f859 },
+    .{ .first = 0x1f860, .last = 0x1f887 }, .{ .first = 0x1f890, .last = 0x1f8ad },
+    .{ .first = 0x1f90c, .last = 0x1f93a }, .{ .first = 0x1f93c, .last = 0x1f945 },
+    .{ .first = 0x1f947, .last = 0x1f978 }, .{ .first = 0x1f97a, .last = 0x1f9cb },
+    .{ .first = 0x1f9cd, .last = 0x1f9ff }, .{ .first = 0x1fa70, .last = 0x1fa7c },
+    .{ .first = 0x1fa80, .last = 0x1fa88 }, .{ .first = 0x1fa90, .last = 0x1fabd },
+    .{ .first = 0x1fabf, .last = 0x1fac5 }, .{ .first = 0x1face, .last = 0x1fadb },
+    .{ .first = 0x1fae0, .last = 0x1fae8 }, .{ .first = 0x1faf0, .last = 0x1faf8 },
+    .{ .first = 0x20000, .last = 0x2fffd }, .{ .first = 0x30000, .last = 0x3fffd },
+};
 
 pub const VIS_OCTAL: u32 = 0x01;
 pub const VIS_CSTYLE: u32 = 0x02;
@@ -1271,29 +1494,16 @@ fn findUtf8ItemByIndex(index: u32) ?Utf8Item {
 fn utf8Width(ud: *const T.Utf8Data, width: *u8) T.Utf8State {
     var wc: WChar = undefined;
     if (utf8_towc(ud, &wc) != .done) return .@"error";
+    const cp = wcharToCodepoint(wc) orelse return .@"error";
 
     ensureDefaultWidthCache();
-    if (findWidthInCache(wcharKey(wc))) |cached| {
+    if (findWidthInCache(cp)) |cached| {
         width.* = cached;
         return .done;
     }
 
-    ensureLocale();
-    var resolved = c.posix_sys.wcwidth(wc);
-    if (resolved < 0) {
-        const cp = wcharToCodepoint(wc) orelse return .@"error";
-        resolved = if (cp >= 0x80 and cp <= 0x9f) 0 else 1;
-    }
-    if (resolved < 0 or resolved > 0xff) return .@"error";
-
-    width.* = @intCast(resolved);
+    width.* = codepointWidth(cp);
     return .done;
-}
-
-fn ensureLocale() void {
-    if (locale_ready) return;
-    _ = std.c.setlocale(std.c.LC.CTYPE, "");
-    locale_ready = true;
 }
 
 fn ensureDefaultWidthCache() void {
@@ -1379,6 +1589,31 @@ fn parseCodepoint(hex: []const u8) ?u32 {
 fn wcharKey(wc: WChar) u32 {
     const cp = wcharToCodepoint(wc) orelse return 0;
     return cp;
+}
+
+fn codepointWidth(cp: u21) u8 {
+    if (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return 0;
+    if (cp < 0x7f) return 1;
+    if (isInIntervals(cp, &combining_intervals)) return 0;
+    if (isInIntervals(cp, &wide_intervals)) return 2;
+    return 1;
+}
+
+fn isInIntervals(cp: u21, intervals: []const CodepointInterval) bool {
+    var left: usize = 0;
+    var right: usize = intervals.len;
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        const interval = intervals[mid];
+        if (cp < interval.first) {
+            right = mid;
+        } else if (cp > interval.last) {
+            left = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn wcharToCodepoint(wc: WChar) ?u21 {
@@ -1573,6 +1808,18 @@ test "utf8 width policy and display helpers share the tmux width surface" {
     const rpad = policy.pad("x🙂", .right, 4);
     defer xm.allocator.free(rpad);
     try std.testing.expectEqualStrings(" x🙂", rpad);
+}
+
+test "utf8 width matches tmux-style narrow, combining, and wide codepoints" {
+    resetUtf8StateForTests();
+
+    try std.testing.expectEqual(@as(?u8, 2), WidthPolicy.shared().codepointWidth(0x4e00));
+    try std.testing.expectEqual(@as(?u8, 2), WidthPolicy.shared().codepointWidth(0x1f642));
+    try std.testing.expectEqual(@as(?u8, 2), WidthPolicy.shared().codepointWidth(0xff01));
+    try std.testing.expectEqual(@as(?u8, 1), WidthPolicy.shared().codepointWidth('A'));
+    try std.testing.expectEqual(@as(?u8, 1), WidthPolicy.shared().codepointWidth(0x00e9));
+    try std.testing.expectEqual(@as(?u8, 0), WidthPolicy.shared().codepointWidth(0x0301));
+    try std.testing.expectEqual(@as(?u8, 0), WidthPolicy.shared().codepointWidth(0x001b));
 }
 
 test "utf8_set and utf8_copy handle single-byte data" {

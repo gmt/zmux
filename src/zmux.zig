@@ -731,6 +731,7 @@ test {
         _ = @import("cmd-save-buffer-stress-test.zig");
         _ = @import("cmd-source-file-stress-test.zig");
         _ = @import("file-write-stress-test.zig");
+        _ = @import("format-async-stress-test.zig");
         _ = @import("job-stress-test.zig");
     }
 }

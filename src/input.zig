@@ -2563,8 +2563,14 @@ test "input swallows OSC 52 clipboard and OSC 104 palette reset" {
     const win = @import("window.zig");
     const grid = @import("grid.zig");
 
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
     win.window_init_globals(@import("xmalloc.zig").allocator);
 

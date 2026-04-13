@@ -1021,9 +1021,9 @@ pub fn server_client_set_session(cl: *T.Client, s: *T.Session) void {
         tty_mod.tty_update_client_offset(cl);
         status.status_timer_start(cl);
         server_fn.server_redraw_client(cl);
-        if (old_session != s)
-            notify.notify_client("client-session-changed", cl);
     }
+    if (old_session != s)
+        notify.notify_client("client-session-changed", cl);
     server_fn.server_check_unattached();
     srv.server_update_socket();
 }

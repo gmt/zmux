@@ -148,10 +148,12 @@ cmd_capture() {
     ln -sf "$client_binary" "$client_link"
 
     # Start server in foreground mode (-D) so we get the PID directly.
-    # Seed it with a detached session so clients have something to attach to.
+    # Note: tmux -D cannot be combined with a command (new-session), so
+    # we start the bare server first, wait for the socket, then seed a
+    # session via a separate client invocation.
     log "server: $server_binary ($server_name protocol)"
     log "client: $client_binary (invoked as $server_name)"
-    "$server_binary" -D -f/dev/null -S "$SERVER_SOCK" new-session -d -s trace-probe &
+    "$server_binary" -D -f /dev/null -S "$SERVER_SOCK" &
     SERVER_PID=$!
 
     # Poll for server socket (5s timeout)
@@ -162,6 +164,9 @@ cmd_capture() {
         [[ $waited -lt 50 ]] || die "server socket did not appear after 5s"
     done
     log "server ready: $SERVER_SOCK (pid $SERVER_PID)"
+
+    # Seed a detached session so clients have something to attach to
+    "$server_binary" -f /dev/null -S "$SERVER_SOCK" new-session -d -s trace-probe || die "failed to create seed session"
 
     # Start proxy
     local spy_args=(--listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output")
@@ -183,10 +188,10 @@ cmd_capture() {
     # No command args = interactive attach (like bare "tmux").
     if [[ ${#command_args[@]} -gt 0 ]]; then
         log "running: ${command_args[*]}"
-        "$client_link" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}" || true
+        "$client_link" -f /dev/null -S "$PROXY_SOCK" "${command_args[@]}" || true
     else
         log "attaching interactively (detach to finish trace)"
-        "$client_link" -f/dev/null -S "$PROXY_SOCK" || true
+        "$client_link" -f /dev/null -S "$PROXY_SOCK" || true
     fi
 
     # Kill server directly — reliable regardless of client/server implementation match

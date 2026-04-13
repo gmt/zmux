@@ -33,6 +33,14 @@ const xm = @import("xmalloc.zig");
 const FormatContext = fmt.FormatContext;
 const format_require_complete = fmt.format_require_complete;
 
+fn deinit_context_extras(ctx: *FormatContext) void {
+    if (ctx.extras) |extras| {
+        extras.deinit();
+        xm.allocator.destroy(extras);
+        ctx.extras = null;
+    }
+}
+
 test "lookup_option_value reads server-scoped option from global_options" {
     opts.global_options = opts.options_create(null);
     defer opts.options_free(opts.global_options);
@@ -297,6 +305,207 @@ test "child_context_for_client fills session chain when client is attached" {
     try std.testing.expectEqual(w, child.window.?);
     try std.testing.expectEqual(wp, child.pane.?);
     try std.testing.expectEqual(true, child.loop_last_flag.?);
+}
+
+test "lookup_option_value resolves custom options through pane window session and global scope chain" {
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "fmt-resolve-scope-chain", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("fmt-resolve-scope-chain") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(8, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wp = win.window_add_pane(w, null, 8, 4);
+    w.active = wp;
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+
+    opts.options_set_string(opts.global_options, false, "@fmtresolve_scope_chain", "global-value");
+    opts.options_set_string(opts.global_s_options, false, "@fmtresolve_scope_chain", "global-session-value");
+    opts.options_set_string(opts.global_w_options, false, "@fmtresolve_scope_chain", "global-window-value");
+    opts.options_set_string(s.options, false, "@fmtresolve_scope_chain", "session-value");
+    opts.options_set_string(w.options, false, "@fmtresolve_scope_chain", "window-value");
+    opts.options_set_string(wp.options, false, "@fmtresolve_scope_chain", "pane-value");
+
+    const pane_ctx = FormatContext{ .session = s, .winlink = wl, .window = w, .pane = wp };
+    const pane_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_scope_chain", &pane_ctx).?;
+    defer xm.allocator.free(pane_value);
+    try std.testing.expectEqualStrings("pane-value", pane_value);
+
+    w.active = null;
+
+    const window_ctx = FormatContext{ .window = w };
+    const window_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_scope_chain", &window_ctx).?;
+    defer xm.allocator.free(window_value);
+    try std.testing.expectEqualStrings("window-value", window_value);
+
+    s.curw = null;
+
+    const session_ctx = FormatContext{ .session = s };
+    const session_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_scope_chain", &session_ctx).?;
+    defer xm.allocator.free(session_value);
+    try std.testing.expectEqualStrings("session-value", session_value);
+
+    const empty_ctx = FormatContext{};
+    const global_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_scope_chain", &empty_ctx).?;
+    defer xm.allocator.free(global_value);
+    try std.testing.expectEqualStrings("global-value", global_value);
+}
+
+test "lookup_option_value handles orphan window scope and empty custom scopes" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(8, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wp = win.window_add_pane(w, null, 8, 4);
+    w.active = wp;
+    defer {
+        _ = win.all_window_panes.remove(wp.id);
+        win.window_pane_destroy(wp);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    opts.options_set_string(opts.global_w_options, false, "@fmtresolve_orphan_scope", "global-window-value");
+    opts.options_set_string(w.options, false, "@fmtresolve_orphan_scope", "window-value");
+
+    const orphan_window_ctx = FormatContext{ .window = w };
+    try std.testing.expect(null == fmt_resolve.ctx_session(&orphan_window_ctx));
+
+    const orphan_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_orphan_scope", &orphan_window_ctx).?;
+    defer xm.allocator.free(orphan_value);
+    try std.testing.expectEqualStrings("window-value", orphan_value);
+
+    const empty_ctx = FormatContext{};
+    const empty_value = fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_orphan_scope", &empty_ctx).?;
+    defer xm.allocator.free(empty_value);
+    try std.testing.expectEqualStrings("global-window-value", empty_value);
+
+    try std.testing.expect(null == fmt_resolve.lookup_option_value(xm.allocator, "@fmtresolve_missing_scope", &empty_ctx));
+}
+
+test "child_context_for_pane preserves inherited metadata and extras" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wp = win.window_add_pane(w, null, 4, 4);
+    defer {
+        _ = win.all_window_panes.remove(wp.id);
+        win.window_pane_destroy(wp);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    var base = FormatContext{
+        .message_text = "keep",
+        .command_name = "display-message",
+        .line = 7,
+    };
+    defer deinit_context_extras(&base);
+    fmt.format_add(&base, "fmtresolve_child_note", "inherited-extra");
+
+    const child = fmt_resolve.child_context_for_pane(&base, w, wp, false);
+    try std.testing.expectEqualStrings("keep", child.message_text.?);
+    try std.testing.expectEqualStrings("display-message", child.command_name.?);
+    try std.testing.expectEqual(@as(u32, 7), child.line.?);
+    try std.testing.expectEqual(base.extras, child.extras);
+    try std.testing.expectEqual(w, child.window.?);
+    try std.testing.expectEqual(wp, child.pane.?);
+    try std.testing.expectEqual(false, child.loop_last_flag.?);
+    try std.testing.expectEqual(fmt.FormatType.pane, child.format_type);
+
+    const inherited = format_require_complete(xm.allocator, "#{message_text}|#{command_name}|#{line}|#{fmtresolve_child_note}", &child).?;
+    defer xm.allocator.free(inherited);
+    try std.testing.expectEqualStrings("keep|display-message|7|inherited-extra", inherited);
+}
+
+test "child_context_for_client without attached session keeps parent scope chain" {
+    sess.session_init_globals(xm.allocator);
+    win.window_init_globals(xm.allocator);
+
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    env_mod.global_environ = env_mod.environ_create();
+    defer env_mod.environ_free(env_mod.global_environ);
+
+    const s = sess.session_create(null, "fmt-resolve-orphan-client", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("fmt-resolve-orphan-client") != null) sess.session_destroy(s, false, "test");
+
+    const w = win.window_create(8, 4, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const wp = win.window_add_pane(w, null, 8, 4);
+    w.active = wp;
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, 0, &cause).?;
+    s.curw = wl;
+
+    var client = T.Client{
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+    };
+    defer env_mod.environ_free(client.environ);
+
+    var base = FormatContext{
+        .session = s,
+        .winlink = wl,
+        .window = w,
+        .pane = wp,
+        .message_text = "base-message",
+    };
+    defer deinit_context_extras(&base);
+    fmt.format_add(&base, "fmtresolve_base_extra", "extra-value");
+
+    const child = fmt_resolve.child_context_for_client(&base, &client, true);
+    try std.testing.expectEqual(&client, child.client.?);
+    try std.testing.expectEqual(s, child.session.?);
+    try std.testing.expectEqual(wl, child.winlink.?);
+    try std.testing.expectEqual(w, child.window.?);
+    try std.testing.expectEqual(wp, child.pane.?);
+    try std.testing.expectEqualStrings("base-message", child.message_text.?);
+    try std.testing.expectEqual(base.extras, child.extras);
+    try std.testing.expectEqual(true, child.loop_last_flag.?);
+
+    const inherited = format_require_complete(xm.allocator, "#{session_name}|#{message_text}|#{fmtresolve_base_extra}", &child).?;
+    defer xm.allocator.free(inherited);
+    try std.testing.expectEqualStrings("fmt-resolve-orphan-client|base-message|extra-value", inherited);
 }
 
 test "child_context_for_winlink sets window pane and loop_last_flag" {

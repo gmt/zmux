@@ -32,6 +32,8 @@ const env_mod = @import("environ.zig");
 const format_mod = @import("format.zig");
 const names_mod = @import("names.zig");
 const pane_io = @import("pane-io.zig");
+const screen_mod = @import("screen.zig");
+const input_mod = @import("input.zig");
 const resize_mod = @import("resize.zig");
 const zmux_mod = @import("zmux.zig");
 const server_mod = @import("server.zig");
@@ -258,13 +260,12 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
     const target = if (item) |cmd_item| cmdq.cmdq_get_target(@ptrCast(@alignCast(cmd_item))) else T.CmdFindState{};
     const cl = if (item) |cmd_item| cmdq.cmdq_get_client(@ptrCast(@alignCast(cmd_item))) else null;
 
-    const cwd_owned = if (sc.cwd) |raw_cwd|
+    var cwd_owned = if (sc.cwd) |raw_cwd|
         resolve_spawn_cwd(raw_cwd, item, cl, target.s)
     else if (sc.flags & T.SPAWN_RESPAWN == 0)
         xm.xstrdup(server_client_mod.server_client_get_cwd(cl, target.s))
     else
         null;
-    defer if (cwd_owned) |owned| xm.allocator.free(owned);
 
     const cwd: []const u8 = cwd_owned orelse blk: {
         if (sc.flags & T.SPAWN_RESPAWN != 0) {
@@ -282,10 +283,21 @@ fn spawn_pane_exec(wp: *T.WindowPane, sc: *T.SpawnContext) !void {
 
     if (wp.argv) |old_argv| free_argv(old_argv);
     if (wp.shell) |old_shell| xm.allocator.free(old_shell);
-    if (wp.cwd) |old_cwd| xm.allocator.free(old_cwd);
+    const reuse_cwd = sc.flags & T.SPAWN_RESPAWN != 0 and cwd_owned == null and wp.cwd != null;
+    if (!reuse_cwd) {
+        if (wp.cwd) |old_cwd| xm.allocator.free(old_cwd);
+    }
     wp.argv = argv;
     wp.shell = xm.xstrdup(shell);
-    wp.cwd = xm.xstrdup(cwd);
+    if (reuse_cwd) {
+        // Keep the existing pane cwd string for respawns when no override is provided.
+    } else if (cwd_owned) |owned| {
+        wp.cwd = owned;
+        cwd_owned = null;
+    } else {
+        wp.cwd = xm.xstrdup(cwd);
+    }
+    if (cwd_owned) |owned| xm.allocator.free(owned);
 
     const child_env = build_child_environment(sc, wp, cl, shell);
     defer env_mod.environ_free(child_env);
@@ -450,7 +462,9 @@ fn prepare_pane_for_respawn(wp: *T.WindowPane) void {
     wp.flags &= ~(T.PANE_EXITED | T.PANE_STATUSREADY | T.PANE_STATUSDRAWN | T.PANE_EMPTY);
     wp.status = 0;
     wp.dead_time = 0;
-    win.window_pane_reset_contents(wp);
+    win.window_pane_reset_mode_all(wp);
+    screen_mod.screen_reinit(&wp.base);
+    input_mod.input_free(wp);
 }
 
 fn pane_index(w: *T.Window, wp: *T.WindowPane) usize {

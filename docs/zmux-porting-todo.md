@@ -38,14 +38,6 @@ Live tmux-parity gaps only.
 - `zmux:` the prefix matcher picks a longer name over the exact match.
 - `likely files:` `src/cmd-set-option.zig`
 
-## cmd-respawn-window: only-pane restart fails
-
-- `tmux:` `respawn-window` successfully restarts the sole pane in a
-  single-pane window.
-- `zmux:` the same operation fails or crashes when the window has exactly one
-  pane.
-- `likely files:` `src/cmd-respawn-window.zig`
-
 ## cmd-new-session / cmd-attach-session: attach flow divergence
 
 - `tmux:` `new-session` and `attach-session` handle the full client-attach

@@ -501,6 +501,7 @@ test "new-session -A attaches to an existing named session" {
     defer new_session_test_free_session(&existing_setup);
 
     var client = new_session_test_client("new-session-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 
@@ -523,6 +524,7 @@ test "new-session -f applies client flags before attaching a new session" {
     defer new_session_test_free_session(&current_setup);
 
     var client = new_session_test_client("new-session-flags-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 
@@ -555,8 +557,10 @@ test "new-session -A -f applies client flags to the invoking client" {
     defer new_session_test_free_session(&existing_setup);
 
     var client = new_session_test_client("new-session-attach-flags-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     var peer = new_session_test_client("new-session-attach-flags-peer", existing_setup.session);
+    peer.tty.client = &peer;
     defer new_session_test_free_client(&peer);
     client_registry.add(&client);
     client_registry.add(&peer);
@@ -598,6 +602,7 @@ test "new-session -A -c updates the attached session cwd" {
     defer xm.allocator.free(attach_cwd);
 
     var client = new_session_test_client("new-session-attach-cwd-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 
@@ -629,8 +634,10 @@ test "new-session -A -t attaches to the target session and detaches peers with -
     defer new_session_test_free_session(&target_setup);
 
     var client = new_session_test_client("new-session-target-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     var peer = new_session_test_client("new-session-target-peer", target_setup.session);
+    peer.tty.client = &peer;
     defer new_session_test_free_client(&peer);
     client_registry.add(&client);
     client_registry.add(&peer);
@@ -668,6 +675,7 @@ test "new-session -c stores the session cwd and resolves the first pane from the
     defer xm.allocator.free(expected_pane_cwd);
 
     var client = new_session_test_client("new-session-cwd-client", null);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client.cwd = xm.xstrdup(client_root);
     client_registry.add(&client);
@@ -729,6 +737,7 @@ test "new-session seeds the session environment from update-environment and repe
     opts.options_set_array(opts.global_s_options, "update-environment", &.{ "DISPLAY", "SSH_AUTH_SOCK", "MISSING" });
 
     var client = new_session_test_client("new-session-env-client", null);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     env_mod.environ_set(client.environ, "DISPLAY", 0, ":1");
     env_mod.environ_set(client.environ, "SSH_AUTH_SOCK", 0, "/tmp/agent");
@@ -772,6 +781,7 @@ test "new-session -E skips update-environment and applies repeated -e overrides 
     opts.options_set_array(opts.global_s_options, "update-environment", &.{"DISPLAY"});
 
     var client = new_session_test_client("new-session-pane-env-client", null);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     env_mod.environ_set(client.environ, "DISPLAY", 0, ":1");
 
@@ -824,6 +834,7 @@ test "new-session rejects nested unattached clients before opening a terminal" {
     current_setup.window.active.?.fd = try std.posix.dup(std.posix.STDERR_FILENO);
 
     var client = new_session_test_client("new-session-nested-client", null);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client.fd = std.posix.STDIN_FILENO;
     client.ttyname = xm.xstrdup(tty);
@@ -856,6 +867,7 @@ test "new-session -d skips the nested-session guard" {
     current_setup.window.active.?.fd = try std.posix.dup(std.posix.STDERR_FILENO);
 
     var client = new_session_test_client("new-session-detached-nested-client", null);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client.fd = std.posix.STDIN_FILENO;
     client.ttyname = xm.xstrdup(tty);
@@ -944,6 +956,7 @@ test "new-session -t gives an attached control client the full grouped window se
     defer win_mod.window_remove_ref(extra_window, "test");
 
     var client = new_session_test_client("group-control-client", leader_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client.flags = T.CLIENT_CONTROL | T.CLIENT_SIZECHANGED | T.CLIENT_ATTACHED;
     client.tty.sx = 25;
@@ -1068,6 +1081,7 @@ test "new-session updates the current state to the created session" {
     defer new_session_test_free_session(&current_setup);
 
     var client = new_session_test_client("new-session-current-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 
@@ -1109,6 +1123,7 @@ test "new-session rejects -t combined with a window name" {
     var current_setup = new_session_test_make_session("target-validation-current");
     defer new_session_test_free_session(&current_setup);
     var client = new_session_test_client("target-validation-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 
@@ -1139,6 +1154,7 @@ test "new-session rejects -t combined with a shell command" {
     var current_setup = new_session_test_make_session("target-validation-command");
     defer new_session_test_free_session(&current_setup);
     var client = new_session_test_client("target-validation-command-client", current_setup.session);
+    client.tty.client = &client;
     defer new_session_test_free_client(&client);
     client_registry.add(&client);
 

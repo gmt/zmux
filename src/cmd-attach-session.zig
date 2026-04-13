@@ -285,6 +285,7 @@ test "attach-session applies cwd, environment, and readonly flags" {
     env_mod.environ_set(target_setup.session.environ, "UNCHANGED", 0, "session");
 
     var invoker = detach_test_client("invoker", source_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     invoker.flags |= T.CLIENT_TERMINAL;
     env_mod.environ_set(invoker.environ, "DISPLAY", 0, ":1");
@@ -332,6 +333,7 @@ test "attach-session -E skips update-environment" {
     env_mod.environ_set(target_setup.session.environ, "DISPLAY", 0, ":0");
 
     var invoker = detach_test_client("invoker", source_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     invoker.flags |= T.CLIENT_TERMINAL;
     env_mod.environ_set(invoker.environ, "DISPLAY", 0, ":1");
@@ -360,11 +362,14 @@ test "attach-session -d detaches other clients in the target session" {
     defer detach_test_free_session(&other_setup);
 
     var invoker = detach_test_client("invoker", source_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     invoker.flags |= T.CLIENT_TERMINAL;
     var peer = detach_test_client("peer", target_setup.session);
+    peer.tty.client = &peer;
     defer detach_test_free_client(&peer);
     var outsider = detach_test_client("outsider", other_setup.session);
+    outsider.tty.client = &outsider;
     defer detach_test_free_client(&outsider);
 
     client_registry.add(&invoker);
@@ -395,9 +400,11 @@ test "attach-session -x detach-kills other clients in the target session" {
     defer detach_test_free_session(&target_setup);
 
     var invoker = detach_test_client("invoker", source_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     invoker.flags |= T.CLIENT_TERMINAL;
     var peer = detach_test_client("peer", target_setup.session);
+    peer.tty.client = &peer;
     defer detach_test_free_client(&peer);
 
     client_registry.add(&invoker);
@@ -423,8 +430,10 @@ test "detach-client -t resolves target-client and detaches only that client" {
     defer detach_test_free_session(&session_setup);
 
     var invoker = detach_test_client("invoker", session_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     var target = detach_test_client("target", session_setup.session);
+    target.tty.client = &target;
     defer detach_test_free_client(&target);
 
     client_registry.add(&invoker);
@@ -452,10 +461,13 @@ test "detach-client -a detaches every other attached client" {
     defer detach_test_free_session(&secondary_setup);
 
     var invoker = detach_test_client("invoker", primary_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     var peer = detach_test_client("peer", primary_setup.session);
+    peer.tty.client = &peer;
     defer detach_test_free_client(&peer);
     var outsider = detach_test_client("outsider", secondary_setup.session);
+    outsider.tty.client = &outsider;
     defer detach_test_free_client(&outsider);
 
     client_registry.add(&invoker);
@@ -484,10 +496,13 @@ test "detach-client -s detaches every client in the target session" {
     defer detach_test_free_session(&other_setup);
 
     var session_member_a = detach_test_client("member-a", target_setup.session);
+    session_member_a.tty.client = &session_member_a;
     defer detach_test_free_client(&session_member_a);
     var session_member_b = detach_test_client("member-b", target_setup.session);
+    session_member_b.tty.client = &session_member_b;
     defer detach_test_free_client(&session_member_b);
     var outsider = detach_test_client("outsider", other_setup.session);
+    outsider.tty.client = &outsider;
     defer detach_test_free_client(&outsider);
 
     client_registry.add(&session_member_a);
@@ -514,9 +529,11 @@ test "suspend-client -t resolves target-client and marks it suspended" {
     defer detach_test_free_session(&session_setup);
 
     var invoker = detach_test_client("invoker", session_setup.session);
+    invoker.tty.client = &invoker;
     defer detach_test_free_client(&invoker);
     invoker.flags |= T.CLIENT_TERMINAL;
     var target = detach_test_client("target", session_setup.session);
+    target.tty.client = &target;
     defer detach_test_free_client(&target);
     target.flags |= T.CLIENT_TERMINAL;
     tty_mod.tty_init(&target.tty, &target);

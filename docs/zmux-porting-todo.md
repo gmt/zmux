@@ -21,9 +21,3 @@ Live tmux-parity gaps only.
 - `zmux:` the same commands send `write(304)` directly and never emit the `write_open`/`write_ready` pair, so the client-side file-transfer protocol diverges whenever command output is streamed.
 - `likely files:` `src/client.zig`, `src/file-write.zig`, `src/file.zig`
 
-
-## list-panes default output is still the simplified placeholder format
-
-- `tmux:` `list-panes -t trace-probe` printed `0: [80x24] [history 0/2000, 1575 bytes] %0 (active)` with the usual pane metadata and decorations.
-- `zmux:` `list-panes -t trace-probe` printed `0: 80x24 pid=470168`, so the default format is still a simplified placeholder rather than tmux's pane listing.
-- `likely files:` `src/cmd-list-panes.zig`, `src/format.zig`

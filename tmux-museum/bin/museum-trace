@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
+#
+# Permission to use, copy, modify, and distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+# IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+# OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# museum-trace — capture tmux/zmux wire protocol traces via socket-spy
+#
+# Usage: museum-trace capture {--zmux|--tmux|--binary PATH} [--output FILE] COMMAND...
+#
+# Examples:
+#   museum-trace capture --zmux "new-session -d -s test"
+#   museum-trace capture --tmux "new-session -d -s test"
+#   museum-trace capture --zmux --output zmux.spy-log "list-sessions"
+
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$LAB_ROOT/.." && pwd)"
+SOCKET_SPY="${SOCKET_SPY:-$REPO_ROOT/regress/socket_spy.py}"
+ZMUX_BINARY="${ZMUX_BINARY:-$REPO_ROOT/zig-out/bin/zmux}"
+TMUX_BINARY="${TMUX_BINARY:-$LAB_ROOT/out/gdb/tmux}"
+
+log() { printf '[museum-trace] %s\n' "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+usage() {
+    grep '^# Usage\|^#   ' "$0" | sed 's/^# \?//' >&2
+    exit "${1:-0}"
+}
+
+cleanup() {
+    # Kill proxy if still running
+    if [[ -n "${PROXY_PID:-}" ]]; then
+        kill "$PROXY_PID" 2>/dev/null || true
+        wait "$PROXY_PID" 2>/dev/null || true
+    fi
+    # Kill server if still running
+    if [[ -n "${BINARY:-}" && -n "${SERVER_SOCK:-}" ]]; then
+        "$BINARY" -f/dev/null -S "$SERVER_SOCK" kill-server 2>/dev/null || true
+    fi
+    # Remove temp sockets
+    rm -f "${PROXY_SOCK:-}" "${SERVER_SOCK:-}"
+}
+
+cmd_capture() {
+    local binary="" output="" command_args=()
+
+    # Parse --zmux / --tmux / --binary / --output / rest is command
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --zmux)   binary="$ZMUX_BINARY"; shift ;;
+            --tmux)   binary="$TMUX_BINARY"; shift ;;
+            --binary) binary="$2"; shift 2 ;;
+            --output) output="$2"; shift 2 ;;
+            --)       shift; command_args=("$@"); break ;;
+            -*)       die "unknown option: $1" ;;
+            *)        command_args=("$@"); break ;;
+        esac
+    done
+
+    [[ -n "$binary" ]] || die "specify --zmux, --tmux, or --binary PATH"
+    [[ -f "$binary" ]] || die "binary not found: $binary"
+    [[ ${#command_args[@]} -gt 0 ]] || die "specify a command to run through the proxy"
+    [[ -f "$SOCKET_SPY" ]] || die "socket_spy.py not found: $SOCKET_SPY"
+
+    # Set up temp paths
+    local tmpdir="/tmp/museum-trace-$$"
+    mkdir -p "$tmpdir"
+    export SERVER_SOCK="$tmpdir/server.sock"
+    export PROXY_SOCK="$tmpdir/proxy.sock"
+    export BINARY="$binary"
+
+    if [[ -z "$output" ]]; then
+        output="$(pwd)/trace-$$.spy-log"
+    fi
+
+    trap cleanup EXIT INT TERM
+
+    # Start server
+    log "starting server: $binary"
+    "$binary" -f/dev/null -S "$SERVER_SOCK" new-session -d -s trace-probe
+
+    # Poll for server socket (5s timeout)
+    local waited=0
+    while [[ ! -S "$SERVER_SOCK" ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+        [[ $waited -lt 50 ]] || die "server socket did not appear after 5s"
+    done
+    log "server ready: $SERVER_SOCK"
+
+    # Start proxy
+    python3 "$SOCKET_SPY" --listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output" &
+    PROXY_PID=$!
+
+    # Wait for proxy listen socket
+    waited=0
+    while [[ ! -S "$PROXY_SOCK" ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+        [[ $waited -lt 30 ]] || die "proxy socket did not appear after 3s"
+    done
+    log "proxy ready: $PROXY_SOCK"
+
+    # Run user command through proxy
+    log "running: ${command_args[*]}"
+    "$binary" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}"
+
+    # Kill server (through proxy so proxy sees the conversation end)
+    "$binary" -f/dev/null -S "$PROXY_SOCK" kill-server 2>/dev/null || true
+
+    # Wait for proxy to exit (it exits when connections close)
+    wait "$PROXY_PID" 2>/dev/null || true
+    PROXY_PID=""
+
+    log "trace written: $output"
+    printf '%s\n' "$output"
+
+    cleanup
+}
+
+# Main dispatch
+case "${1:-}" in
+    capture) shift; cmd_capture "$@" ;;
+    --help|-h|help) usage 0 ;;
+    "") usage 1 ;;
+    *) die "unknown command: $1 (try --help)" ;;
+esac

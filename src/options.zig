@@ -165,9 +165,12 @@ pub fn options_match(s: []const u8, idx: *?u32, ambiguous: *bool) ?[]u8 {
     if (parsed.len != 0 and parsed[0] == '@') return xm.xstrdup(parsed);
 
     const name = options_map_name(parsed);
-    var found: ?*const T.OptionsTableEntry = null;
     for (table.options_table) |*oe| {
         if (std.mem.eql(u8, oe.name, name)) return xm.xstrdup(oe.name);
+    }
+
+    var found: ?*const T.OptionsTableEntry = null;
+    for (table.options_table) |*oe| {
         if (std.mem.startsWith(u8, oe.name, name)) {
             if (found != null) {
                 ambiguous.* = true;

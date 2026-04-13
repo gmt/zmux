@@ -913,6 +913,7 @@ test "set-window-option exact matches win over longer prefixed names" {
     defer opts.options_free(opts.global_s_options);
     opts.global_w_options = opts.options_create(null);
     defer opts.options_free(opts.global_w_options);
+    win.window_init_globals(xm.allocator);
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);

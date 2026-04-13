@@ -230,12 +230,14 @@ pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow
     }
 
     var fd: i32 = -1;
+    var stdio_stream = false;
     if (msg.fd == -1) {
         const path_z = xm.xm_dupeZ(path);
         defer xm.allocator.free(path_z);
         fd = c.posix_sys.open(path_z, c.posix_sys.O_NONBLOCK | c.posix_sys.O_WRONLY | c.posix_sys.O_CREAT | msg.flags, @as(c.posix_sys.mode_t, 0o644));
     } else if (allow_streams and (msg.fd == std.posix.STDOUT_FILENO or msg.fd == std.posix.STDERR_FILENO)) {
         fd = c.posix_sys.dup(msg.fd);
+        stdio_stream = true;
         if (fd != -1 and close_received) _ = c.posix_sys.close(msg.fd);
     } else {
         std.c._errno().* = @intFromEnum(std.posix.E.BADF);
@@ -250,18 +252,20 @@ pub fn client_handle_write_open(peer: *T.ZmuxPeer, imsg_msg: *c.imsg.imsg, allow
     const cf = file_mod.createWithPeer(peer, &client_write_files, msg.stream, null, null);
     cf.fd = fd;
 
-    if (proc_mod.libevent) |base| {
-        set_nonblocking(fd);
-        cf.event = c.libevent.bufferevent_socket_new(base, fd, 0);
-        if (cf.event) |bev| {
-            c.libevent.bufferevent_setcb(
-                bev,
-                null,
-                file_mod.fileWriteCallback,
-                file_mod.fileWriteErrorCallback,
-                cf,
-            );
-            _ = c.libevent.bufferevent_enable(bev, c.libevent.EV_WRITE);
+    if (!stdio_stream) {
+        if (proc_mod.libevent) |base| {
+            set_nonblocking(fd);
+            cf.event = c.libevent.bufferevent_socket_new(base, fd, 0);
+            if (cf.event) |bev| {
+                c.libevent.bufferevent_setcb(
+                    bev,
+                    null,
+                    file_mod.fileWriteCallback,
+                    file_mod.fileWriteErrorCallback,
+                    cf,
+                );
+                _ = c.libevent.bufferevent_enable(bev, c.libevent.EV_WRITE);
+            }
         }
     }
 
@@ -452,4 +456,42 @@ fn buildImsg(msg_type: u32, payload: []const u8) c.imsg.imsg {
         .data = if (payload.len == 0) null else @constCast(payload.ptr),
         .buf = null,
     };
+}
+
+test "client_handle_write_open keeps stdout stream writes synchronous" {
+    reset_for_tests();
+    defer reset_for_tests();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "file-write-stdout-stream" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    const open_msg = protocol.MsgWriteOpen{ .stream = 1, .fd = std.posix.STDOUT_FILENO, .flags = 0 };
+    var open_imsg = buildImsg(@intFromEnum(protocol.MsgType.write_open), std.mem.asBytes(&open_msg));
+    client_handle_write_open(peer, &open_imsg, true, false);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var reply_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &reply_imsg) > 0);
+    defer c.imsg.imsg_free(&reply_imsg);
+
+    const cf = client_write_files.get(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(cf.event == null);
 }

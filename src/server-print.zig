@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const c = @import("c.zig");
 const T = @import("types.zig");
 const file_mod = @import("file.zig");
 const grid_mod = @import("grid.zig");
@@ -44,6 +45,7 @@ const DirectPrintData = struct {
 
 pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const u8) void {
     if (client) |cl| {
+        if (write_detached_stream_fd(cl, stream, data)) return;
         if (cl.peer) |peer| {
             if (file_mod.writeStreamData(cl, stream, data)) return;
             _ = file_mod.sendPeerStream(peer, stream, data);
@@ -55,6 +57,28 @@ pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const
 
     const file = if (stream == 2) std.fs.File.stderr() else std.fs.File.stdout();
     _ = file.writeAll(data) catch {};
+}
+
+fn write_detached_stream_fd(client: *T.Client, stream: i32, data: []const u8) bool {
+    if ((client.flags & (T.CLIENT_ATTACHED | T.CLIENT_CONTROL)) != 0) return false;
+
+    const fd = switch (stream) {
+        1 => client.out_fd,
+        else => -1,
+    };
+    if (fd == -1) return false;
+
+    var remaining = data;
+    while (remaining.len != 0) {
+        const written = c.posix_sys.write(fd, @ptrCast(remaining.ptr), remaining.len);
+        if (written == -1) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+            return false;
+        }
+        if (written == 0) return false;
+        remaining = remaining[@as(usize, @intCast(written))..];
+    }
+    return true;
 }
 
 fn suppressExpectedTestStderr(data: []const u8) bool {
@@ -194,7 +218,6 @@ fn ensure_view_mode(wp: *T.WindowPane) bool {
     return true;
 }
 
-
 fn initServerPrintTestGlobals() void {
     const sess = @import("session.zig");
     sess.session_init_globals(xm.allocator);
@@ -297,6 +320,29 @@ test "server_client_print appends parsed output in the shared view mode" {
     defer xm.allocator.free(second_row);
     try std.testing.expectEqualStrings("alpha", first_row);
     try std.testing.expectEqualStrings("beta", second_row);
+}
+
+test "server_client_print writes detached stdout directly to captured stdout fd" {
+    const pipe_fds = try std.posix.pipe();
+    defer std.posix.close(pipe_fds[0]);
+    defer std.posix.close(pipe_fds[1]);
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+
+    var client = T.Client{
+        .out_fd = pipe_fds[1],
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+    };
+    client.tty = .{ .client = &client };
+
+    server_client_print(&client, true, "hello");
+
+    var buf: [16]u8 = undefined;
+    const got = try std.posix.read(pipe_fds[0], &buf);
+    try std.testing.expectEqualStrings("hello\n", buf[0..got]);
 }
 
 test "server_client_close_view_mode keeps pane-mode redraw fallout on the shared runtime path" {

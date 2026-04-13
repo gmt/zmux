@@ -153,7 +153,11 @@ cmd_capture() {
     # session via a separate client invocation.
     log "server: $server_binary ($server_name protocol)"
     log "client: $client_binary (invoked as $server_name)"
-    "$server_binary" -D -f /dev/null -S "$SERVER_SOCK" &
+    # Redirect server stdio to /dev/null so the server's fds 0/1/2 don't
+    # reference the user's tty.  server_client_uses_server_tty() rejects
+    # clients whose ttyname matches ttyname(0|1|2) of the server process,
+    # so the server must not hold the terminal open on any standard fd.
+    "$server_binary" -D -f /dev/null -S "$SERVER_SOCK" </dev/null >/dev/null 2>&1 &
     SERVER_PID=$!
 
     # Poll for server socket (5s timeout)

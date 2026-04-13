@@ -707,6 +707,7 @@ test {
     _ = @import("image.zig");
     _ = @import("screen-redraw.zig");
     _ = @import("format-test.zig");
+    _ = @import("format-draw-test.zig");
     _ = @import("format-resolve-grid-test.zig");
     _ = @import("format-resolve-test.zig");
     _ = @import("options-test.zig");

@@ -22,6 +22,8 @@ Use this file for deliberate test exceptions only.
 | `smoke-recursive:tmux-in-zmux` | `smoke-recursive` | `skip-global` | The tmux recursive attach timeout assumption is not a stable oracle baseline in this environment. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 | `smoke-recursive:tmux-in-tmux` | `smoke-recursive` | `skip-global` | The pure tmux recursive case does not currently validate the timeout expectation. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 
+| format-draw wide character width tests (4 cases in format-draw-test + 2 pre-existing inline) | `zig-unit` | `red` | UTF-8 decoder returns width 1 for CJK/emoji glyphs that tmux treats as width 2. Affects `format_width`, `format_trim_left`, `format_trim_right`, and screen rendering of wide characters. | Fix the width lookup in `utf8.zig` decoder to match tmux `utf8proc`/`wcwidth` behavior, then all 6 cases should go green. |
+
 ## Notes
 
 - This registry is not the place for ordinary zmux failures. Real product bugs should remain red.

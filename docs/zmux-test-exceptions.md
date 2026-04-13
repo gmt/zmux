@@ -23,6 +23,7 @@ Use this file for deliberate test exceptions only.
 | `smoke-recursive:tmux-in-tmux` | `smoke-recursive` | `skip-global` | The pure tmux recursive case does not currently validate the timeout expectation. | Rework the recursive harness to measure a stable tmux baseline, then restore. |
 
 | format-draw wide character width tests (4 cases in format-draw-test + 2 pre-existing inline) | `zig-unit` | `red` | UTF-8 decoder returns width 1 for CJK/emoji glyphs that tmux treats as width 2. Affects `format_width`, `format_trim_left`, `format_trim_right`, and screen rendering of wide characters. | Fix the width lookup in `utf8.zig` decoder to match tmux `utf8proc`/`wcwidth` behavior, then all 6 cases should go green. |
+| `server-print` attached view-mode print cases matched by `zig build test -- --test-filter server` (4 cases, signal 11) | `zig-unit` | `red` | The shared attached/view-mode print path still segfaults in `server_client_print` and `server_client_close_view_mode`, so a broad `server` filter picks up pre-existing crashes outside the new `server-test.zig` suite. | Repair the `server-print` view-mode print path so the broad `server` filter can go green without narrowing the selector. |
 
 ## Notes
 

@@ -694,6 +694,7 @@ test {
     _ = @import("cmd-send-keys-test.zig");
     _ = @import("window-copy-test.zig");
     _ = @import("server-client-test.zig");
+    _ = @import("server-test.zig");
     _ = @import("layout.zig");
     _ = @import("layout-test.zig");
     _ = @import("window-test.zig");

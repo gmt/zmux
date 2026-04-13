@@ -1846,6 +1846,8 @@ test "unknown window-copy commands surface a status message" {
     var env = T.Environ.init(xm.allocator);
     defer env.deinit();
 
+    initWindowCopyTestGlobals();
+
     opts_mod.global_options = opts_mod.options_create(null);
     defer opts_mod.options_free(opts_mod.global_options);
     opts_mod.global_s_options = opts_mod.options_create(null);

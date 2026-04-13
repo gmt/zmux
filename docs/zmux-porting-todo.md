@@ -31,14 +31,6 @@ Live tmux-parity gaps only.
   rendering artifacts at region boundaries.
 - `likely files:` `src/tty-draw.zig`
 
-## window-copy: unknown commands cause signal 11
-
-- `tmux:` unknown window-copy mode commands produce a status message and
-  continue normally.
-- `zmux:` unknown window-copy commands cause signal 11 instead of surfacing a
-  status message.
-- `likely files:` `src/window-copy.zig`
-
 ## cmd-set-option: exact match loses to longer prefix
 
 - `tmux:` `set-window-option` exact-matches an option name before considering

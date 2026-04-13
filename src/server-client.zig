@@ -99,6 +99,7 @@ pub fn server_client_lost(cl: *T.Client) void {
     log.log_debug("lost client {*}", .{cl});
     cl.flags |= T.CLIENT_DEAD;
     const was_attached = (cl.flags & T.CLIENT_ATTACHED) != 0;
+    file_mod.cleanupServerStreamFilesForClient(cl);
     file_mod.failPendingReadsForClient(cl);
     file_mod.failPendingWritesForClient(cl);
     editor_handoff.clearClient(cl);
@@ -224,7 +225,7 @@ export fn server_client_dispatch(imsg_ptr: ?*c.imsg.imsg, arg: ?*anyopaque) void
         .wakeup => server_client_unlock(cl),
         .read => file_mod.handleReadData(imsg_msg),
         .read_done => file_mod.handleReadDone(imsg_msg),
-        .write_ready => file_mod.handleWriteReady(imsg_msg),
+        .write_ready => file_mod.handleWriteReadyForClient(cl, imsg_msg),
         .exiting => {
             if (cl.peer) |peer| _ = proc_mod.proc_send(peer, .exited, -1, null, 0);
             server_client_lost(cl);
@@ -790,6 +791,7 @@ pub fn server_client_loop() void {
 /// Check if client should be exited and send the appropriate message.
 pub fn server_client_check_exit(cl: *T.Client) void {
     if (cl.flags & T.CLIENT_EXIT == 0) return;
+    if (file_mod.clientWriteLeft(cl)) return;
 
     if (cl.flags & T.CLIENT_CONTROL != 0) {
         control.control_discard(cl);
@@ -977,6 +979,7 @@ pub fn server_client_write(cl: *T.Client, data: []const u8) void {
     }
 
     const peer = cl.peer orelse return;
+    if (file_mod.writeStreamData(cl, 1, data)) return;
     _ = file_mod.sendPeerStream(peer, 1, data);
 }
 

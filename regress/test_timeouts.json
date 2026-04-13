@@ -2279,6 +2279,7 @@
     "zig-unit:file.test.readResolvedPathAlloc reads stdin for reduced detached consumers": 5.0,
     "zig-unit:file.test.readResolvedPathAlloc rejects stdin dash for attached clients": 5.0,
     "zig-unit:file.test.readResolvedPathAlloc reports error for missing absolute paths": 5.0,
+    "zig-unit:file.test.filePrint waits for write_ready before sending stdout payload": 5.0,
     "zig-unit:file.test.sendPeerStream chunks oversized write payloads across imsg boundaries": 5.0,
     "zig-unit:format-draw.test.format_draw trims list output with markers around focus": 5.0,
     "zig-unit:format-draw.test.format_draw writes utf8 cells through the shared screen writer": 5.0,

@@ -265,20 +265,7 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             client_exitreason = .lost_server;
             proc_mod.proc_exit(client_proc.?);
         },
-        .write => {
-            const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
-            if (data_len <= @sizeOf(i32) or imsg_msg.data == null) return;
-
-            const raw: [*]const u8 = @ptrCast(imsg_msg.data.?);
-            const stream: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
-            if (stream.* <= 2) {
-                const text = raw[@sizeOf(i32)..data_len];
-                const file = if (stream.* == 2) std.fs.File.stderr() else std.fs.File.stdout();
-                _ = file.writeAll(text) catch {};
-                return;
-            }
-            file_mod.clientHandleWriteData(imsg_msg);
-        },
+        .write => file_mod.clientHandleWriteData(imsg_msg),
         .read_open => {
             const peer = client_peer orelse return;
             file_mod.clientHandleReadOpen(peer, imsg_msg, client_flags & T.CLIENT_CONTROL == 0, true);

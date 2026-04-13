@@ -15,9 +15,3 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## Command output bypasses tmux's write-open/write-ready handshake
-
-- `tmux:` commands that print to stdout in the trace sweep (`list-sessions`, `list-panes`, `display-message -p`) send `write_open(303)` and wait for `write_ready(305)` before sending `write(304)` payloads.
-- `zmux:` the same commands send `write(304)` directly and never emit the `write_open`/`write_ready` pair, so the client-side file-transfer protocol diverges whenever command output is streamed.
-- `likely files:` `src/client.zig`, `src/file-write.zig`, `src/file.zig`
-

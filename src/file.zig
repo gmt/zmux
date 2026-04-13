@@ -194,6 +194,23 @@ pub fn handleWriteReady(imsg_msg: *c.imsg.imsg) void {
     file_write_mod.handle_write_ready(imsg_msg);
 }
 
+pub fn handleWriteReadyForClient(client: *T.Client, imsg_msg: *c.imsg.imsg) void {
+    const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    if (data_len == @sizeOf(protocol.MsgWriteReady) and imsg_msg.data != null) {
+        const msg: *const protocol.MsgWriteReady = @ptrCast(@alignCast(imsg_msg.data.?));
+        if (lookupServerStreamFile(client, msg.stream)) |cf| {
+            if (msg.@"error" != 0) {
+                cf.@"error" = msg.@"error";
+                fireDone(cf);
+            } else {
+                filePush(cf);
+            }
+            return;
+        }
+    }
+    handleWriteReady(imsg_msg);
+}
+
 pub fn failPendingReadsForClient(client: *T.Client) void {
     file_read_mod.fail_pending_reads_for_client(client);
 }
@@ -225,6 +242,16 @@ pub fn clientHandleWriteClose(imsg_msg: *c.imsg.imsg) void {
 pub fn resetForTests() void {
     file_read_mod.reset_for_tests();
     file_write_mod.reset_for_tests();
+    if (server_stream_files_init) {
+        var it = server_stream_files.valueIterator();
+        while (it.next()) |cf_ptr| {
+            const cf = cf_ptr.*;
+            cf.client = null;
+            fileFree(cf);
+        }
+        server_stream_files.deinit();
+        server_stream_files_init = false;
+    }
 }
 
 pub fn clientCleanup() void {
@@ -247,6 +274,35 @@ pub const ClientFiles = T.ClientFiles;
 pub const ClientFileCb = T.ClientFileCb;
 
 var file_next_stream: i32 = 3;
+var server_stream_files: std.AutoHashMap(u64, *ClientFile) = undefined;
+var server_stream_files_init = false;
+
+fn ensureServerStreamFiles() void {
+    if (server_stream_files_init) return;
+    server_stream_files = std.AutoHashMap(u64, *ClientFile).init(xm.allocator);
+    server_stream_files_init = true;
+}
+
+fn serverStreamKey(client: *T.Client, stream: i32) u64 {
+    return (@as(u64, @intFromPtr(client)) << 2) | @as(u64, @intCast(stream));
+}
+
+fn lookupServerStreamFile(client: *T.Client, stream: i32) ?*ClientFile {
+    if (!server_stream_files_init) return null;
+    return server_stream_files.get(serverStreamKey(client, stream));
+}
+
+fn trackServerStreamFile(client: *T.Client, cf: *ClientFile) void {
+    ensureServerStreamFiles();
+    server_stream_files.put(serverStreamKey(client, cf.stream), cf) catch unreachable;
+}
+
+fn untrackServerStreamFile(client: *T.Client, stream: i32, cf: *ClientFile) void {
+    if (!server_stream_files_init) return;
+    const key = serverStreamKey(client, stream);
+    const existing = server_stream_files.get(key) orelse return;
+    if (existing == cf) _ = server_stream_files.remove(key);
+}
 
 /// Tree comparison function. (tmux: file_cmp)
 ///
@@ -326,6 +382,7 @@ pub fn fileFree(cf: *ClientFile) void {
     if (cf.path) |p| xm.allocator.free(p);
 
     if (cf.tree) |tree| _ = tree.remove(cf.stream);
+    if (cf.client) |cl| untrackServerStreamFile(cl, cf.stream, cf);
     if (cf.client) |cl| server_client_mod.server_client_unref(cl);
 
     xm.allocator.destroy(cf);
@@ -401,6 +458,17 @@ pub fn printBuffer(client: ?*T.Client, data: []const u8) void {
     printToStream(client.?, 1, data, std.posix.STDOUT_FILENO);
 }
 
+pub fn writeStreamData(client: ?*T.Client, stream: i32, data: []const u8) bool {
+    if (!canPrint(client)) return false;
+    const fd_hint: i32 = switch (stream) {
+        1 => std.posix.STDOUT_FILENO,
+        2 => std.posix.STDERR_FILENO,
+        else => return false,
+    };
+    printToStream(client.?, stream, data, fd_hint);
+    return true;
+}
+
 /// Report an error to a client's stderr stream. (tmux: file_error)
 ///
 /// Uses stream 2 (stderr).
@@ -414,6 +482,20 @@ pub fn fileError(client: ?*T.Client, comptime fmt: []const u8, args: anytype) vo
 fn printToStream(client: *T.Client, stream: i32, data: []const u8, fd_hint: i32) void {
     const peer = client.peer orelse return;
 
+    if (lookupServerStreamFile(client, stream)) |cf| {
+        cf.buffer.appendSlice(xm.allocator, data) catch return;
+        filePush(cf);
+        return;
+    }
+
+    const cf = createWithClient(client, stream, null, null);
+    trackServerStreamFile(client, cf);
+    cf.path = xm.xstrdup("-");
+    cf.buffer.appendSlice(xm.allocator, data) catch {
+        fileFree(cf);
+        return;
+    };
+
     var payload = std.ArrayList(u8){};
     defer payload.deinit(xm.allocator);
 
@@ -422,29 +504,28 @@ fn printToStream(client: *T.Client, stream: i32, data: []const u8, fd_hint: i32)
         .fd = fd_hint,
         .flags = 0,
     };
-    payload.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch return;
-    payload.appendSlice(xm.allocator, "-") catch return;
-    payload.append(xm.allocator, 0) catch return;
+    payload.appendSlice(xm.allocator, std.mem.asBytes(&open_msg)) catch {
+        fileFree(cf);
+        return;
+    };
 
     if (proc_mod.proc_send(peer, .write_open, -1, payload.items.ptr, payload.items.len) != 0)
-        return;
+        fileFree(cf);
+}
 
-    var remaining = data;
-    while (remaining.len != 0) {
-        const chunk_len = @min(remaining.len, max_stream_payload);
-        var dpayload = std.ArrayList(u8){};
-        defer dpayload.deinit(xm.allocator);
-
-        const header = protocol.MsgWriteData{ .stream = stream };
-        dpayload.appendSlice(xm.allocator, std.mem.asBytes(&header)) catch return;
-        dpayload.appendSlice(xm.allocator, remaining[0..chunk_len]) catch return;
-        if (proc_mod.proc_send(peer, .write, -1, dpayload.items.ptr, dpayload.items.len) != 0)
-            return;
-        remaining = remaining[chunk_len..];
+pub fn cleanupServerStreamFilesForClient(client: *T.Client) void {
+    for ([_]i32{ 1, 2 }) |stream| {
+        const cf = lookupServerStreamFile(client, stream) orelse continue;
+        fileFree(cf);
     }
+}
 
-    const close_msg = protocol.MsgWriteClose{ .stream = stream };
-    _ = proc_mod.proc_send(peer, .write_close, -1, std.mem.asBytes(&close_msg).ptr, @sizeOf(protocol.MsgWriteClose));
+pub fn clientWriteLeft(client: *T.Client) bool {
+    for ([_]i32{ 1, 2 }) |stream| {
+        const cf = lookupServerStreamFile(client, stream) orelse continue;
+        if (cf.buffer.items.len != 0) return true;
+    }
+    return false;
 }
 
 /// Cancel a pending file read. (tmux: file_cancel)
@@ -803,6 +884,83 @@ test "readResolvedPathAlloc reads stdin for reduced detached consumers" {
 fn noopDispatch(_imsg: ?*c.imsg.imsg, _arg: ?*anyopaque) callconv(.c) void {
     _ = _imsg;
     _ = _arg;
+}
+
+fn buildImsg(msg_type: protocol.MsgType, payload: []const u8) c.imsg.imsg {
+    return .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(msg_type)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = if (payload.len == 0) null else @constCast(payload.ptr),
+        .buf = null,
+    };
+}
+
+test "filePrint waits for write_ready before sending stdout payload" {
+    resetForTests();
+    defer resetForTests();
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "file-print-ready-test" };
+    defer proc.peers.deinit(xm.allocator);
+
+    const peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
+    defer {
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    var env = T.Environ.init(xm.allocator);
+    defer env.deinit();
+    var client = T.Client{
+        .references = 2,
+        .peer = peer,
+        .environ = &env,
+        .tty = undefined,
+        .status = .{},
+    };
+
+    filePrint(&client, "{s}", .{"hello"});
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var open_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &open_imsg) > 0);
+    defer c.imsg.imsg_free(&open_imsg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write_open))), c.imsg.imsg_get_type(&open_imsg));
+
+    const ready = protocol.MsgWriteReady{ .stream = 1, .@"error" = 0 };
+    var ready_imsg = buildImsg(.write_ready, std.mem.asBytes(&ready));
+    handleWriteReadyForClient(&client, &ready_imsg);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var data_imsg: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &data_imsg) > 0);
+    defer c.imsg.imsg_free(&data_imsg);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.write))), c.imsg.imsg_get_type(&data_imsg));
+
+    const payload_len = c.imsg.imsg_get_len(&data_imsg);
+    var payload = try xm.allocator.alloc(u8, payload_len);
+    defer xm.allocator.free(payload);
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsg_get_data(&data_imsg, payload.ptr, payload.len));
+
+    var header: protocol.MsgWriteData = undefined;
+    @memcpy(std.mem.asBytes(&header), payload[0..@sizeOf(protocol.MsgWriteData)]);
+    try std.testing.expectEqual(@as(i32, 1), header.stream);
+    try std.testing.expectEqualStrings("hello", payload[@sizeOf(protocol.MsgWriteData)..]);
 }
 
 test "sendPeerStream chunks oversized write payloads across imsg boundaries" {

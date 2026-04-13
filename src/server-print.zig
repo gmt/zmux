@@ -45,6 +45,7 @@ const DirectPrintData = struct {
 pub fn server_client_write_stream(client: ?*T.Client, stream: i32, data: []const u8) void {
     if (client) |cl| {
         if (cl.peer) |peer| {
+            if (file_mod.writeStreamData(cl, stream, data)) return;
             _ = file_mod.sendPeerStream(peer, stream, data);
             return;
         }

@@ -147,10 +147,11 @@ cmd_capture() {
     local client_link="$tmpdir/bin/$server_name"
     ln -sf "$client_binary" "$client_link"
 
-    # Start server in foreground mode (-D) so we get the PID directly
+    # Start server in foreground mode (-D) so we get the PID directly.
+    # Seed it with a detached session so clients have something to attach to.
     log "server: $server_binary ($server_name protocol)"
     log "client: $client_binary (invoked as $server_name)"
-    "$server_binary" -D -f/dev/null -S "$SERVER_SOCK" &
+    "$server_binary" -D -f/dev/null -S "$SERVER_SOCK" new-session -d -s trace-probe &
     SERVER_PID=$!
 
     # Poll for server socket (5s timeout)

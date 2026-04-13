@@ -15,26 +15,17 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## server-print: attached view-mode print path segfaults
-
-- `tmux:` `server_client_print` and `server_client_close_view_mode` handle
-  attached view-mode output without crashing.
-- `zmux:` the same code paths produce signal 11 (4 test cases). The shared
-  attached/view-mode print path has a use-after-free or null-pointer issue.
-- `likely files:` `src/server-print.zig`
-
-## tty-draw: clipped wide-cell padding incorrect
-
-- `tmux:` `tty_draw_render_window_region` correctly clears padding when a
-  leading wide cell is clipped at the left edge of a region.
-- `zmux:` the clipped leading wide-cell padding is not cleared, causing
-  rendering artifacts at region boundaries.
-- `likely files:` `src/tty-draw.zig`
-
 ## cmd-new-session / cmd-attach-session: attach flow divergence
 
-- `tmux:` `new-session` and `attach-session` handle the full client-attach
-  lifecycle including terminal setup, session switching, and notification.
-- `zmux:` the attach flow crashes or diverges during terminal setup in certain
-  configurations.
-- `likely files:` `src/cmd-new-session.zig`, `src/cmd-attach-session.zig`
+- `tmux:` `new-session -A` routes through `cmd_attach_session()` directly,
+  sharing the full attach lifecycle. `session_create()` stores captured
+  termios. First attach sends `READY` only for non-control clients and emits
+  `notify_client("client-attached", c)`.
+- `zmux:` `new-session -A` uses a separate `attach_existing_session()` helper
+  that misses `-E` handling, pane-target attach semantics, nested-session
+  guard, and client-attached notification. `session_create()` ignores the
+  passed termios (`src/session.zig:271-280`). `server_client_attach()` always
+  sends `READY` regardless of client type.
+- `likely files:` `src/cmd-new-session.zig` (route `-A` through shared attach),
+  `src/session.zig` (preserve termios), `src/server-client.zig` (conditional
+  `READY` send)

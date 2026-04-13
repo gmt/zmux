@@ -176,13 +176,27 @@ fn cfg_note_cause(comptime fmt: []const u8, args: anytype, quiet: bool) void {
     cfg_causes.append(xm.allocator, xm.xasprintf(fmt, args)) catch unreachable;
 }
 
+/// Resolve the user's home directory, matching tmux's find_home() behavior.
+/// Tries $HOME first; falls back to getpwuid(getuid()).pw_dir when $HOME is
+/// unset or empty, so config paths still resolve on headless systems and in
+/// cron jobs where $HOME is sometimes stripped.
+fn find_home() ?[]const u8 {
+    if (std.posix.getenv("HOME")) |home| {
+        if (home.len > 0) return home;
+    }
+    const c_mod = @import("c.zig");
+    const pw = c_mod.posix_sys.getpwuid(std.os.linux.getuid()) orelse return null;
+    const dir: [*c]const u8 = pw.*.pw_dir;
+    return std.mem.span(@as([*:0]const u8, @ptrCast(dir orelse return null)));
+}
+
 fn expand_default_path(path: []const u8) ?[]u8 {
     if (std.mem.startsWith(u8, path, "~/")) {
-        const home = std.posix.getenv("HOME") orelse return null;
+        const home = find_home() orelse return null;
         return xm.xasprintf("{s}/{s}", .{ home, path[2..] });
     }
     if (std.mem.eql(u8, path, "~")) {
-        const home = std.posix.getenv("HOME") orelse return null;
+        const home = find_home() orelse return null;
         return xm.xstrdup(home);
     }
     if (std.mem.startsWith(u8, path, "$XDG_CONFIG_HOME/")) {
@@ -415,4 +429,259 @@ test "cfg_load sources tmux XDG defaults instead of zmux defaults in compat mode
 
 test "cfg_load sources zmux XDG defaults instead of tmux defaults in native mode" {
     try expectDefaultConfigLoadMarkers("zmux", "zmux-xdg", "tmux-xdg");
+}
+
+test "cfg_add_defaults produces exactly four paths per personality" {
+    const zmux_mod = @import("zmux.zig");
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+    try setProcessEnv("HOME", "/test-home");
+    try setProcessEnv("XDG_CONFIG_HOME", "/test-xdg");
+
+    {
+        const saved = zmux_mod.compat_name;
+        defer zmux_mod.compat_name = saved;
+        zmux_mod.compat_name = "zmux";
+        cfg_reset_files();
+        defer cfg_reset_files();
+        cfg_add_defaults();
+        try std.testing.expectEqual(@as(usize, 4), cfg_file_paths.items.len);
+        try std.testing.expectEqualStrings("/etc/zmux.conf", cfg_file_paths.items[0]);
+        try std.testing.expectEqualStrings("/test-home/.zmux.conf", cfg_file_paths.items[1]);
+        try std.testing.expectEqualStrings("/test-xdg/zmux/zmux.conf", cfg_file_paths.items[2]);
+        try std.testing.expectEqualStrings("/test-home/.config/zmux/zmux.conf", cfg_file_paths.items[3]);
+    }
+
+    {
+        const saved = zmux_mod.compat_name;
+        defer zmux_mod.compat_name = saved;
+        zmux_mod.compat_name = "tmux";
+        cfg_reset_files();
+        defer cfg_reset_files();
+        cfg_add_defaults();
+        try std.testing.expectEqual(@as(usize, 4), cfg_file_paths.items.len);
+        try std.testing.expectEqualStrings("/etc/tmux.conf", cfg_file_paths.items[0]);
+        try std.testing.expectEqualStrings("/test-home/.tmux.conf", cfg_file_paths.items[1]);
+        try std.testing.expectEqualStrings("/test-xdg/tmux/tmux.conf", cfg_file_paths.items[2]);
+        try std.testing.expectEqualStrings("/test-home/.config/tmux/tmux.conf", cfg_file_paths.items[3]);
+    }
+}
+
+test "cfg_load sources home-dir zmux.conf in native mode" {
+    const zmux_mod = @import("zmux.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    initCfgLoadOptionsForTest();
+    defer deinitCfgLoadOptionsForTest();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home");
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.zmux.conf",
+        .data = "set-option -agq status-left zmux-home\n",
+    });
+
+    const tmp_root = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmp_root);
+    const home = try std.fs.path.join(xm.allocator, &.{ tmp_root, "home" });
+    defer xm.allocator.free(home);
+
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+    try setProcessEnv("HOME", home);
+    unsetProcessEnv("XDG_CONFIG_HOME") catch unreachable;
+
+    const saved_compat = zmux_mod.compat_name;
+    defer zmux_mod.compat_name = saved_compat;
+    zmux_mod.compat_name = "zmux";
+
+    const saved_q = cfg_quiet;
+    defer cfg_quiet = saved_q;
+    const saved_f = cfg_finished;
+    defer cfg_finished = saved_f;
+    cfg_quiet = true;
+    cfg_finished = false;
+
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    cfg_load(null);
+
+    const status_left = opts.options_get_string(opts.global_s_options, "status-left");
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, "zmux-home"));
+}
+
+test "cfg_load sources home-dir tmux.conf in compat mode" {
+    const zmux_mod = @import("zmux.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    initCfgLoadOptionsForTest();
+    defer deinitCfgLoadOptionsForTest();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("home");
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.tmux.conf",
+        .data = "set-option -agq status-left tmux-home\n",
+    });
+
+    const tmp_root = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmp_root);
+    const home = try std.fs.path.join(xm.allocator, &.{ tmp_root, "home" });
+    defer xm.allocator.free(home);
+
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+    try setProcessEnv("HOME", home);
+    unsetProcessEnv("XDG_CONFIG_HOME") catch unreachable;
+
+    const saved_compat = zmux_mod.compat_name;
+    defer zmux_mod.compat_name = saved_compat;
+    zmux_mod.compat_name = "tmux";
+
+    const saved_q = cfg_quiet;
+    defer cfg_quiet = saved_q;
+    const saved_f = cfg_finished;
+    defer cfg_finished = saved_f;
+    cfg_quiet = true;
+    cfg_finished = false;
+
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    cfg_load(null);
+
+    const status_left = opts.options_get_string(opts.global_s_options, "status-left");
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, "tmux-home"));
+    try std.testing.expect(std.mem.indexOf(u8, status_left, "zmux") == null);
+}
+
+test "cfg_load sources all user config paths in correct order" {
+    const zmux_mod = @import("zmux.zig");
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+    initCfgLoadOptionsForTest();
+    defer deinitCfgLoadOptionsForTest();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create config files at all three user-writable locations, each
+    // appending a numbered marker so we can verify load order.
+    try tmp.dir.makePath("home/.config/zmux");
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.zmux.conf",
+        .data = "set-option -agq status-left :p2-home:\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "home/.config/zmux/zmux.conf",
+        .data = "set-option -agq status-left :p4-xdg-fallback:\n",
+    });
+
+    const tmp_root = try tmp.dir.realpathAlloc(xm.allocator, ".");
+    defer xm.allocator.free(tmp_root);
+    const home = try std.fs.path.join(xm.allocator, &.{ tmp_root, "home" });
+    defer xm.allocator.free(home);
+
+    // Also create a separate XDG_CONFIG_HOME directory so the $XDG
+    // expansion and the ~/.config fallback exercise independent paths.
+    try tmp.dir.makePath("xdg-home/zmux");
+    try tmp.dir.writeFile(.{
+        .sub_path = "xdg-home/zmux/zmux.conf",
+        .data = "set-option -agq status-left :p3-xdg:\n",
+    });
+    const xdg_separate = try std.fs.path.join(xm.allocator, &.{ tmp_root, "xdg-home" });
+    defer xm.allocator.free(xdg_separate);
+
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    var saved_xdg = SavedEnvVar.capture("XDG_CONFIG_HOME");
+    defer saved_xdg.restore();
+    try setProcessEnv("HOME", home);
+    try setProcessEnv("XDG_CONFIG_HOME", xdg_separate);
+
+    const saved_compat = zmux_mod.compat_name;
+    defer zmux_mod.compat_name = saved_compat;
+    zmux_mod.compat_name = "zmux";
+
+    const saved_q = cfg_quiet;
+    defer cfg_quiet = saved_q;
+    const saved_f = cfg_finished;
+    defer cfg_finished = saved_f;
+    cfg_quiet = true;
+    cfg_finished = false;
+
+    cfg_reset_files();
+    defer cfg_reset_files();
+    cfg_add_defaults();
+    cfg_load(null);
+
+    const status_left = opts.options_get_string(opts.global_s_options, "status-left");
+
+    // All three markers must appear.
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, ":p2-home:"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, ":p3-xdg:"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, status_left, 1, ":p4-xdg-fallback:"));
+
+    // Verify ordering: home-dir before XDG before XDG-fallback.
+    const idx_home = std.mem.indexOf(u8, status_left, ":p2-home:").?;
+    const idx_xdg = std.mem.indexOf(u8, status_left, ":p3-xdg:").?;
+    const idx_fallback = std.mem.indexOf(u8, status_left, ":p4-xdg-fallback:").?;
+    try std.testing.expect(idx_home < idx_xdg);
+    try std.testing.expect(idx_xdg < idx_fallback);
+}
+
+test "find_home prefers HOME when set" {
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    try setProcessEnv("HOME", "/my/test/home");
+
+    try std.testing.expectEqualStrings("/my/test/home", find_home().?);
+}
+
+test "find_home falls back to getpwuid when HOME is unset" {
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    unsetProcessEnv("HOME") catch unreachable;
+
+    const home = find_home();
+    try std.testing.expect(home != null);
+    try std.testing.expect(home.?.len > 0);
+    try std.testing.expect(home.?[0] == '/');
+}
+
+test "find_home falls back to getpwuid when HOME is empty" {
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    try setProcessEnv("HOME", "");
+
+    const home = find_home();
+    try std.testing.expect(home != null);
+    try std.testing.expect(home.?.len > 0);
+    try std.testing.expect(home.?[0] == '/');
+}
+
+test "expand_default_path uses getpwuid fallback for tilde when HOME is unset" {
+    var saved_home = SavedEnvVar.capture("HOME");
+    defer saved_home.restore();
+    unsetProcessEnv("HOME") catch unreachable;
+
+    // With HOME unset, find_home should fall back to getpwuid, so ~/
+    // expansion should still work on any system with a valid passwd entry.
+    const expanded = expand_default_path("~/.zmux.conf");
+    try std.testing.expect(expanded != null);
+    defer if (expanded) |e| xm.allocator.free(e);
+    if (expanded) |e| {
+        try std.testing.expect(e.len > "/.zmux.conf".len);
+        try std.testing.expect(std.mem.endsWith(u8, e, "/.zmux.conf"));
+        try std.testing.expect(e[0] == '/');
+    }
 }

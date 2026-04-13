@@ -29,7 +29,7 @@ Track the scary semantics, not a flat percentage.
   - `scanned`
   - `testing`
   - `covered`
-  - `known-fail` (tracked in [docs/zmux-todo-test-fails.md](zmux-todo-test-fails.md))
+  - `known-fail` (tracked in [docs/zmux-test-exceptions.md](zmux-test-exceptions.md))
   - `self-evident`
 - `Lane`
   - `test`
@@ -39,7 +39,7 @@ Track the scary semantics, not a flat percentage.
 ## Tracker
 
 > [!IMPORTANT]
-> Log all `known-fail` status entries in [docs/zmux-todo-test-fails.md](zmux-todo-test-fails.md).
+> Log all `known-fail` status entries in [docs/zmux-test-exceptions.md](zmux-test-exceptions.md).
 
 | Subsystem | Module | Facet | Scary Signals | Tmux Anchor | Current Tests | Lane | Priority | Status | Owner | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -71,5 +71,5 @@ Track the scary semantics, not a flat percentage.
 
 - Add multiple rows for a module when it clearly has multiple scary facets.
 - Mark units `self-evident` when they were scanned and genuinely do not merit new tests.
-- Point every intentional red test at [docs/zmux-todo-test-fails.md](zmux-todo-test-fails.md).
+- Point every intentional red test at [docs/zmux-test-exceptions.md](zmux-test-exceptions.md).
 - If a module spans both warm-lane and stress-lane behavior, split it into separate rows.

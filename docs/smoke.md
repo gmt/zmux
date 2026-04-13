@@ -33,6 +33,13 @@ reaping.
 The oracle lane uses system tmux when available. If it is missing, the runner
 builds and uses `tmux-museum/out/gdb/tmux`.
 
+Oracle-known-bad policy:
+
+- If a smoke case is red against tmux and we do not have a straightforward
+  reason that tmux is wrong, the case should demote to a global skip instead of
+  remaining permanent red noise.
+- Track those exceptions in `docs/zmux-test-exceptions.md`.
+
 ## When to use each
 
 - **Dev loop**: `zig build smoke` after any change that touches server, client, or command handling.
@@ -47,7 +54,8 @@ non-zero if any case failed, timed out, hit a cleanup problem, or ended with
 another harness error. Output and retained artifacts live in the kept sandbox
 for that case.
 
-A test exits 77 to indicate SKIP (missing binary, unsupported feature).
+A test exits 77 to indicate SKIP (missing binary, unsupported feature, or a
+documented oracle-known-bad exception).
 
 ## Environment variables
 

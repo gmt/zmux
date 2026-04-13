@@ -7,7 +7,8 @@ Testing lanes:
 
 - `zig build test`
   Fast Zig unit lane for the normal warm-cache developer loop. Runs each
-  Zig unit test individually through the root timed runner.
+  Zig unit test individually through the root timed runner. This lane should
+  not discover stress-only cases just to skip them.
 
 - `zig build test-stress`
   Heavy Zig stress lane for subprocess, pipe/socket transport, and async shell
@@ -47,6 +48,13 @@ Current intent:
 - keep warm-cache `zig build test` under 15 seconds
 - preserve heavyweight coverage in `test-stress` and soak, not by bloating the
   main unit lane
+
+Exception policy:
+
+- Prefer a failing test to a skip whenever the test expresses product truth.
+- Keep skips for lane selection, external prerequisites, or oracle-known-bad
+  cases only.
+- Track every deliberate exception in `docs/zmux-test-exceptions.md`.
 
 Timeout policy:
 

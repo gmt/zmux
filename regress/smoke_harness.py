@@ -40,9 +40,15 @@ class MatrixRow:
     command: str
     context: str
     zmux_status: str
+    exception_policy: str = ""
+    note: str = ""
 
 
 class SmokeError(RuntimeError):
+    pass
+
+
+class SmokeSkip(SmokeError):
     pass
 
 
@@ -387,6 +393,10 @@ class SmokeHarness:
             )
 
     def exercise_row(self, row: MatrixRow, mode: str) -> None:
+        if row.exception_policy == "skip-global":
+            raise SmokeSkip(f"{row.command}: {row.note or 'skipped globally'}")
+        if mode == "oracle" and row.exception_policy == "oracle-bug":
+            raise SmokeSkip(f"{row.command}: {row.note or 'skipped in oracle lane'}")
         if mode == "implemented" and row.zmux_status == "unsupported":
             self.mux([row.command], accept_codes=(0, 1))
             return
@@ -831,7 +841,8 @@ def load_matrix() -> list[MatrixRow]:
         for row in reader:
             if not row or row[0].startswith("#"):
                 continue
-            rows.append(MatrixRow(*row))
+            padded = row + ["", ""]
+            rows.append(MatrixRow(*padded[:5]))
     return rows
 
 
@@ -888,6 +899,9 @@ def main(argv: list[str]) -> int:
             run_case_id(harness, args.case_id, args.mode)
         else:
             raise SmokeError(f"unknown suite {args.suite}")
+    except SmokeSkip as exc:
+        print(str(exc), file=sys.stderr)
+        return 77
     except SmokeError as exc:
         print(str(exc), file=sys.stderr)
         print(f"artifacts: {harness.artifact_dir}", file=sys.stderr)

@@ -26,6 +26,7 @@ const env_mod = @import("environ.zig");
 const client_registry = @import("client-registry.zig");
 const tty_mod = @import("tty.zig");
 const cfg_mod = @import("cfg.zig");
+const status_runtime = @import("status-runtime.zig");
 
 fn parseName(argv: []const []const u8) ![]const u8 {
     var cause: ?[]u8 = null;
@@ -170,4 +171,117 @@ test "cmd UI commands reject bogus flags at parse time" {
             if (cause) |c| xm.allocator.free(c);
         }
     }
+}
+
+test "display-message empty string sets empty status message" {
+    init_harness();
+    defer deinit_harness();
+
+    const session = sess.session_create(null, "dm-empty", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("dm-empty") != null) sess.session_destroy(session, false, "test");
+    attach_placeholder_window(session);
+
+    var client = T.Client{
+        .name = "dm-empty-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const r = try execWithClient(&client, &.{ "display-message", "-d", "0", "" });
+    try std.testing.expectEqual(T.CmdRetval.normal, r);
+    try std.testing.expectEqualStrings("", client.message_string.?);
+}
+
+test "display-message format expansion renders session name in status bar" {
+    init_harness();
+    defer deinit_harness();
+
+    const session = sess.session_create(null, "dm-format", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("dm-format") != null) sess.session_destroy(session, false, "test");
+    attach_placeholder_window(session);
+
+    var client = T.Client{
+        .name = "dm-format-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const r = try execWithClient(&client, &.{ "display-message", "-d", "0", "#{session_name}" });
+    try std.testing.expectEqual(T.CmdRetval.normal, r);
+    try std.testing.expectEqualStrings("dm-format", client.message_string.?);
+}
+
+test "display-message survives long output in status bar" {
+    init_harness();
+    defer deinit_harness();
+
+    const session = sess.session_create(null, "dm-long", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("dm-long") != null) sess.session_destroy(session, false, "test");
+    attach_placeholder_window(session);
+
+    var client = T.Client{
+        .name = "dm-long-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const long_msg = "X" ** 500;
+    const r = try execWithClient(&client, &.{ "display-message", "-d", "0", long_msg });
+    try std.testing.expectEqual(T.CmdRetval.normal, r);
+    try std.testing.expect(client.message_string != null);
+    try std.testing.expectEqual(@as(usize, 500), client.message_string.?.len);
+}
+
+test "display-message default template includes session name" {
+    init_harness();
+    defer deinit_harness();
+
+    const session = sess.session_create(null, "dm-default-tpl", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("dm-default-tpl") != null) sess.session_destroy(session, false, "test");
+    attach_placeholder_window(session);
+
+    var client = T.Client{
+        .name = "dm-default-tpl-client",
+        .environ = env_mod.environ_create(),
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_ATTACHED,
+        .session = session,
+    };
+    defer {
+        status_runtime.status_message_clear(&client);
+        env_mod.environ_free(client.environ);
+    }
+    client.tty = .{ .client = &client, .sx = 80, .sy = 24 };
+
+    const r = try execWithClient(&client, &.{ "display-message", "-d", "0" });
+    try std.testing.expectEqual(T.CmdRetval.normal, r);
+    // Default template starts with [session_name]
+    try std.testing.expect(std.mem.indexOf(u8, client.message_string.?, "[dm-default-tpl]") != null);
+    // Default template should have time expanded (no raw strftime directives)
+    try std.testing.expect(std.mem.indexOfScalar(u8, client.message_string.?, '%') == null);
 }

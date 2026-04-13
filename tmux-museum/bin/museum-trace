@@ -16,7 +16,7 @@
 #
 # museum-trace — capture tmux/zmux wire protocol traces via socket-spy
 #
-# Usage: museum-trace capture {--zmux|--tmux|--server BIN --client BIN} [--output FILE] [--verbose] COMMAND [ARGS...]
+# Usage: museum-trace capture {--zmux|--tmux|--server BIN --client BIN} [--output FILE] [--verbose] [COMMAND [ARGS...]]
 #
 # Same-implementation (shorthand):
 #   museum-trace capture --zmux new-session -d -s test
@@ -27,6 +27,10 @@
 #   museum-trace capture --server tmux --client zmux list-sessions
 #   museum-trace capture --server zmux --client zmux list-sessions
 #   museum-trace capture --server tmux --client tmux list-sessions
+#
+# Interactive (no command — attaches to the traced session):
+#   museum-trace capture --zmux
+#   museum-trace capture --zmux --verbose
 #
 # Options:
 #   --verbose   include hex dumps after each decoded message
@@ -110,7 +114,6 @@ cmd_capture() {
     [[ -n "$client_binary" ]] || die "specify client: --zmux, --tmux, or --client {zmux|tmux|PATH}"
     [[ -f "$server_binary" ]] || die "server binary not found: $server_binary"
     [[ -f "$client_binary" ]] || die "client binary not found: $client_binary"
-    [[ ${#command_args[@]} -gt 0 ]] || die "specify a command to run through the proxy"
     [[ -f "$SOCKET_SPY" ]] || die "socket_spy.py not found: $SOCKET_SPY"
 
     # Set up temp paths
@@ -174,10 +177,16 @@ cmd_capture() {
     done
     log "proxy ready: $PROXY_SOCK"
 
-    # Run user command through proxy — invoked via the symlink so
-    # argv[0] matches the server's protocol identity
-    log "running: ${command_args[*]}"
-    "$client_link" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}" || true
+    # Run client through proxy — invoked via the symlink so
+    # argv[0] matches the server's protocol identity.
+    # No command args = interactive attach (like bare "tmux").
+    if [[ ${#command_args[@]} -gt 0 ]]; then
+        log "running: ${command_args[*]}"
+        "$client_link" -f/dev/null -S "$PROXY_SOCK" "${command_args[@]}" || true
+    else
+        log "attaching interactively (detach to finish trace)"
+        "$client_link" -f/dev/null -S "$PROXY_SOCK" || true
+    fi
 
     # Kill server directly — reliable regardless of client/server implementation match
     log "stopping server (pid $SERVER_PID)"

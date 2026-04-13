@@ -686,6 +686,7 @@ test {
     _ = @import("tty-keys.zig");
     _ = @import("tty-keys-test.zig");
     _ = @import("input-keys.zig");
+    _ = @import("input-keys-test.zig");
     _ = @import("mode-tree.zig");
     _ = @import("utf8.zig");
     _ = @import("window-client.zig");

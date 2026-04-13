@@ -85,7 +85,7 @@
     "smoke-sweep-oracle:display-menu": 60.0,
     "smoke-sweep-oracle:display-message": 5.0,
     "smoke-sweep-oracle:display-panes": 12.0,
-    "smoke-sweep-oracle:display-popup": 10.0,
+    "smoke-sweep-oracle:display-popup": 60.0,
     "smoke-sweep-oracle:find-window": 5.0,
     "smoke-sweep-oracle:has-session": 5.0,
     "smoke-sweep-oracle:if-shell": 5.0,

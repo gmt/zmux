@@ -1041,3 +1041,185 @@ test "window_count_panes window_has_pane and directional pane neighbors after ho
     try std.testing.expectEqual(@as(usize, 1), win.window_pane_index(w, right).?);
     try std.testing.expect(win.window_pane_at_index(w, 1).? == right);
 }
+
+test "window create attach and destroy keep notify refs until hooks drain" {
+    const cmdq = @import("cmd-queue.zig");
+
+    cmdq.cmdq_reset_for_tests();
+    defer cmdq.cmdq_reset_for_tests();
+
+    init_session_window_test_globals();
+    defer deinit_session_window_test_globals();
+
+    opts.options_set_array(opts.global_s_options, "window-linked", &.{
+        "set-environment -g -F WINDOW_LINKED '#{hook_window}'",
+    });
+    opts.options_set_array(opts.global_s_options, "window-unlinked", &.{
+        "set-environment -g -F WINDOW_UNLINKED '#{hook_window}'",
+    });
+    opts.options_set_array(opts.global_s_options, "session-closed", &.{
+        "set-environment -g -F SESSION_CLOSED '#{hook_session_name}'",
+    });
+
+    const s = sess.session_create(null, "window-destroy-hooks", "/", env_mod.environ_create(), opts.options_create(opts.global_s_options), null);
+    defer if (sess.session_find("window-destroy-hooks") != null) {
+        sess.session_destroy(s, false, "test-cleanup");
+        while (cmdq.cmdq_next(null) != 0) {}
+    };
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    const w_id = w.id;
+    _ = win.window_add_pane(w, null, 80, 24);
+
+    try std.testing.expectEqual(@as(u32, 0), w.references);
+    try std.testing.expectEqual(w, win.window_find_by_id(w.id).?);
+
+    var cause: ?[]u8 = null;
+    const wl = sess.session_attach(s, w, -1, &cause).?;
+    s.curw = wl;
+
+    try std.testing.expectEqual(@as(u32, 2), w.references);
+    try std.testing.expect(win.windows.get(w_id) != null);
+
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    const linked_expected = xm.xasprintf("@{d}", .{w_id});
+    defer xm.allocator.free(linked_expected);
+    try std.testing.expectEqual(@as(u32, 1), w.references);
+    try std.testing.expectEqualStrings(linked_expected, env_mod.environ_find(env_mod.global_environ, "WINDOW_LINKED").?.value.?);
+
+    sess.session_destroy(s, true, "test");
+
+    try std.testing.expect(sess.session_find("window-destroy-hooks") == null);
+    try std.testing.expect(win.windows.get(w_id) != null);
+    try std.testing.expectEqual(@as(u32, 1), w.references);
+
+    while (cmdq.cmdq_next(null) != 0) {}
+
+    try std.testing.expect(win.windows.get(w_id) == null);
+    try std.testing.expectEqualStrings(linked_expected, env_mod.environ_find(env_mod.global_environ, "WINDOW_UNLINKED").?.value.?);
+    try std.testing.expectEqualStrings("window-destroy-hooks", env_mod.environ_find(env_mod.global_environ, "SESSION_CLOSED").?.value.?);
+}
+
+test "window option side effects refresh inherited pane state without clobbering overrides" {
+    const cmd_opts = @import("cmd-options.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const inherited = win.window_add_pane(w, null, 80, 24);
+    const sibling = win.window_add_pane(w, null, 80, 24);
+    const overridden = win.window_add_pane(w, null, 80, 24);
+
+    opts.options_set_string(overridden.options, false, "pane-scrollbars-style", "fg=yellow,pad=7");
+    win.window_pane_options_changed(overridden, "pane-scrollbars-style");
+
+    opts.options_set_string(w.options, false, "pane-scrollbars-style", "fg=blue,pad=5");
+    cmd_opts.apply_target_side_effects(.{
+        .kind = .window,
+        .options = w.options,
+        .global = false,
+        .window = w,
+    }, "pane-scrollbars-style");
+
+    try std.testing.expectEqual(@as(i32, 5), inherited.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 5), sibling.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 7), overridden.scrollbar_style.pad);
+    try std.testing.expectEqual(@as(i32, 4), inherited.scrollbar_style.gc.fg);
+    try std.testing.expectEqual(@as(i32, 4), sibling.scrollbar_style.gc.fg);
+    try std.testing.expectEqual(@as(i32, 3), overridden.scrollbar_style.gc.fg);
+}
+
+test "resize_window reflows split panes and queues pane resizes" {
+    const resize_mod = @import("resize.zig");
+
+    init_session_window_test_globals();
+    defer deinit_session_window_test_globals();
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    const left = win.window_add_pane(w, null, 80, 24);
+    layout_mod.layout_init(w, left);
+
+    const right_cell = layout_mod.layout_split_pane(left, .leftright, -1, 0) orelse
+        return error.SplitFailed;
+    const right = win.window_add_pane(w, null, 40, 24);
+    layout_mod.layout_assign_pane(right_cell, right, 0);
+
+    const left_before = pane_geometry_for_test(left);
+    const right_before = pane_geometry_for_test(right);
+
+    resize_mod.resize_window(w, 100, 30, 9, 13);
+
+    try std.testing.expectEqual(@as(u32, 100), w.sx);
+    try std.testing.expectEqual(@as(u32, 30), w.sy);
+    try std.testing.expectEqual(@as(u32, 9), w.xpixel);
+    try std.testing.expectEqual(@as(u32, 13), w.ypixel);
+    try std.testing.expectEqual(@as(u32, 30), left.sy);
+    try std.testing.expectEqual(@as(u32, 30), right.sy);
+    try std.testing.expect(left.sx != left_before.sx);
+    try std.testing.expect(right.sx != right_before.sx);
+    try std.testing.expectEqual(@as(u32, 0), left.xoff);
+    try std.testing.expect(right.xoff > left.xoff);
+    try std.testing.expect(left.resize_queue.items.len >= 1);
+    try std.testing.expect(right.resize_queue.items.len >= 1);
+    const left_resize = left.resize_queue.items[left.resize_queue.items.len - 1];
+    const right_resize = right.resize_queue.items[right.resize_queue.items.len - 1];
+    try std.testing.expectEqual(left_before.sx, left_resize.osx);
+    try std.testing.expectEqual(right_before.sx, right_resize.osx);
+}
+
+test "window_destroy_all_panes is stable for empty windows" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer destroyTestWindow(w);
+
+    try std.testing.expectEqual(@as(usize, 0), win.window_count_panes(w));
+    try std.testing.expect(w.active == null);
+
+    win.window_destroy_all_panes(w);
+
+    try std.testing.expectEqual(@as(usize, 0), win.window_count_panes(w));
+    try std.testing.expect(w.active == null);
+    try std.testing.expectEqual(@as(usize, 0), w.last_panes.items.len);
+}
+
+test "window_remove_ref closes pane io across rapid create destroy cycles" {
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    var cycle: usize = 0;
+    while (cycle < 4) : (cycle += 1) {
+        const w = win.window_create(80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+        const w_id = w.id;
+        const wp = win.window_add_pane(w, null, 80, 24);
+
+        const pane_fds = try std.posix.pipe();
+        defer std.posix.close(pane_fds[0]);
+        const pipe_fds = try std.posix.pipe();
+        defer std.posix.close(pipe_fds[0]);
+
+        wp.fd = pane_fds[1];
+        wp.pipe_fd = pipe_fds[1];
+
+        win.window_add_ref(w, "test");
+        win.window_remove_ref(w, "test");
+
+        var buf: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 0), try std.posix.read(pane_fds[0], &buf));
+        try std.testing.expectEqual(@as(usize, 0), try std.posix.read(pipe_fds[0], &buf));
+        try std.testing.expect(win.windows.get(w_id) == null);
+    }
+}

@@ -48,6 +48,10 @@ smoke_setup_path_shims() {
     fi
 }
 
+smoke_require_af_unix() {
+    python3 "$SMOKE_SCRIPT_DIR/host_caps.py" --artifact-root "$TEST_TMPDIR"
+}
+
 smoke_env_shell() {
     if [ -n "${SMOKE_SELECTED_SHELL-}" ] && [ -x "$SMOKE_SELECTED_SHELL" ]; then
         printf '%s\n' "$SMOKE_SELECTED_SHELL"
@@ -84,8 +88,13 @@ smoke_init() {
     fi
     export TEST_NAME TEST_TMPDIR TEST_SOCKET SMOKE_HOME SMOKE_BIN_DIR SMOKE_TMPDIR SMOKE_ENV_MODE SMOKE_SELECTED_SHELL SMOKE_HELPER_MODE SMOKE_HELPER_PATH SMOKE_OWNER_DIR SMOKE_OWNER_PID SMOKE_SOCKET_REGISTRY_FILE
     : > "$SMOKE_SOCKET_REGISTRY_FILE"
-    smoke_track_socket "$TEST_ZMUX" "$TEST_SOCKET"
     trap 'smoke_cleanup' 0 1 2 3 15
+    smoke_require_af_unix
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        exit "$status"
+    fi
+    smoke_track_socket "$TEST_ZMUX" "$TEST_SOCKET"
 }
 
 smoke_use_ambient_shell() {

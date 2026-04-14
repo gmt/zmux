@@ -57,6 +57,14 @@ for that case.
 A test exits 77 to indicate SKIP (missing binary, unsupported feature, or a
 documented oracle-known-bad exception).
 
+Host capability policy:
+
+- Smoke lanes depend on local `AF_UNIX` sockets because tmux and zmux talk to
+  their servers over a UNIX-domain socket.
+- The root runner probes that capability once and pre-skips smoke cases when
+  the host or sandbox forbids it.
+- Direct smoke entrypoints honor the same policy through `SMOKE_AF_UNIX`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -64,9 +72,12 @@ documented oracle-known-bad exception).
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
 | `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
 | `SMOKE_ARTIFACT_ROOT` | `/tmp` | Base directory for ephemeral test sockets and logs |
+| `SMOKE_AF_UNIX` | `auto` | Host capability policy for UNIX-domain sockets: `auto` probes and skips smoke cases if unavailable, `require` fails instead of skipping, `skip` forces an environment skip without probing |
 | `ZMUX_TEST_TIMEOUT_MULTIPLIER` | `1.0` | Multiply the checked-in case timers when a slower host needs more slack |
 | `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `auto`, `systemd`, `disciplined`, `systemd-disciplined`, or `off` |
 | `SMOKE_TEST_SHELL` | (system default) | Override the shell used in deterministic-env tests |
+
+The root runner exposes the same knob as `python3 regress/test_orchestrator.py --af-unix {auto,require,skip}`.
 
 ## Running tests directly
 

@@ -26,6 +26,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import host_caps
 import smoke_env
 import smoke_owner
 
@@ -218,6 +219,15 @@ class SmokeHarness:
             zmux_binary=self.binary_argv[0],
             oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
         )
+
+    def require_host_capabilities(self) -> None:
+        mode = host_caps.normalize_af_unix_mode(None)
+        ok, _status, message = host_caps.enforce_af_unix(mode=mode, artifact_root=self.artifact_dir)
+        if ok:
+            return
+        if mode == "require":
+            raise SmokeError(message)
+        raise SmokeSkip(message)
 
     def cleanup(self) -> None:
         for client in reversed(self.control_clients):
@@ -882,6 +892,7 @@ def main(argv: list[str]) -> int:
     harness = SmokeHarness(binary, artifact_root)
 
     try:
+        harness.require_host_capabilities()
         if args.suite == "sweep":
             if args.mode == "oracle":
                 harness.ensure_oracle_manifest_matches()

@@ -27,6 +27,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import host_caps
 import smoke_env
 import smoke_owner
 
@@ -72,6 +73,15 @@ class RecursiveAttachHarness:
             zmux_binary=os.environ.get("TEST_ZMUX"),
             oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
         )
+
+    def require_host_capabilities(self) -> None:
+        mode = host_caps.normalize_af_unix_mode(None)
+        ok, _status, message = host_caps.enforce_af_unix(mode=mode, artifact_root=self.artifact_dir)
+        if ok:
+            return
+        if mode == "require":
+            raise RecursiveAttachError(message)
+        raise RecursiveAttachSkip(message)
 
     def root_base_args(self, binary: str, socket_path: pathlib.Path) -> list[str]:
         return shlex.split(binary) + ["-S", str(socket_path), "-f/dev/null"]
@@ -357,6 +367,7 @@ def main(argv: list[str]) -> int:
                 oracle_binary=args.oracle_binary,
                 timeout_seconds=args.timeout_seconds,
             )
+            harness.require_host_capabilities()
             harness.run()
             return 0
 
@@ -369,6 +380,7 @@ def main(argv: list[str]) -> int:
                 oracle_binary=args.oracle_binary,
                 timeout_seconds=args.timeout_seconds,
             )
+            harness.require_host_capabilities()
             harness.run_case_by_name(args.case_name)
             return 0
 

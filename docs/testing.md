@@ -65,3 +65,13 @@ Timeout policy:
 - `python3 regress/calibrate_timeouts.py ...` is the regeneration path for
   the per-case table. It records reports outside the repo and can merge updated
   proposals back into `regress/test_timeouts.json`.
+
+Host capability policy:
+
+- Smoke-family lanes may declare required host capabilities when the harness
+  depends on external primitives rather than product behavior.
+- The current capability gate is `AF_UNIX`, which tmux and zmux need for their
+  local server socket.
+- `python3 regress/test_orchestrator.py --af-unix {auto,require,skip}` controls
+  whether missing `AF_UNIX` support becomes an environment skip or an immediate
+  harness failure.

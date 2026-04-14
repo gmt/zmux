@@ -28,6 +28,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 
+import host_caps
 import smoke_owner
 
 
@@ -83,6 +84,7 @@ class Case:
     argv: list[str]
     env_overrides: dict[str, str] = field(default_factory=dict)
     stdin_path: str | None = None
+    required_capabilities: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass
@@ -304,6 +306,7 @@ def build_case_env(
     oracle_tmux: pathlib.Path,
     helper_binary: pathlib.Path | None,
     extra_env: dict[str, str],
+    af_unix_mode: str,
 ) -> dict[str, str]:
     home_dir = sandbox / "home"
     tmp_dir = sandbox / "tmp"
@@ -333,6 +336,7 @@ def build_case_env(
         "SMOKE_OWNER_DIR": str(sandbox / "owned-pids"),
         "SMOKE_KEEP_RUN_ROOT": "1",
         "SMOKE_CONTAINMENT_ACTIVE": "1",
+        "SMOKE_AF_UNIX": af_unix_mode,
     }
     if helper_binary is not None:
         env["TEST_ZMUX_HELPER"] = str(helper_binary)
@@ -388,6 +392,10 @@ class SuiteRunner:
         helper_path = pathlib.Path(args.helper_binary or DEFAULT_HELPER)
         if helper_path.is_file() and os.access(helper_path, os.X_OK):
             self.helper_binary = helper_path
+        self.af_unix_mode = host_caps.normalize_af_unix_mode(args.af_unix)
+        self.af_unix_status = host_caps.af_unix_status(mode=self.af_unix_mode)
+        if self.af_unix_mode == "require" and not self.af_unix_status.available:
+            raise HarnessError(host_caps.capability_reason("af_unix", self.af_unix_status))
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self.results: list[CaseResult] = []
         self.interrupted_by: int | None = None
@@ -486,6 +494,7 @@ class SuiteRunner:
                     label=pathlib.Path(script_name).stem,
                     family="smoke-shell",
                     argv=["sh", str(REGRESS_DIR / script_name)],
+                    required_capabilities=frozenset({"af_unix"}),
                 )
             )
         for command in load_matrix_commands():
@@ -495,6 +504,7 @@ class SuiteRunner:
                     label=command,
                     family="smoke-sweep",
                     argv=[sys.executable, str(SMOKE_HARNESS), "run-case", f"sweep:{command}", "--mode", "implemented"],
+                    required_capabilities=frozenset({"af_unix"}),
                 )
             )
         cases.append(
@@ -503,6 +513,7 @@ class SuiteRunner:
                 label="inside",
                 family="smoke-inside",
                 argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "inside", "--mode", "implemented"],
+                required_capabilities=frozenset({"af_unix"}),
             )
         )
         return cases
@@ -521,6 +532,7 @@ class SuiteRunner:
                     family="smoke-sweep",
                     argv=[sys.executable, str(SMOKE_HARNESS), "run-case", f"sweep:{command}", "--mode", "oracle"],
                     env_overrides=env,
+                    required_capabilities=frozenset({"af_unix"}),
                 )
             )
         cases.append(
@@ -530,6 +542,7 @@ class SuiteRunner:
                 family="smoke-inside",
                 argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "inside", "--mode", "oracle"],
                 env_overrides=env,
+                required_capabilities=frozenset({"af_unix"}),
             )
         )
         return cases
@@ -541,6 +554,7 @@ class SuiteRunner:
                 label="soak",
                 family="smoke-soak",
                 argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "soak", "--mode", "implemented"],
+                required_capabilities=frozenset({"af_unix"}),
             )
         ]
 
@@ -551,6 +565,7 @@ class SuiteRunner:
                 label=name,
                 family="smoke-recursive",
                 argv=[sys.executable, str(RECURSIVE_HARNESS), "run-case", name],
+                required_capabilities=frozenset({"af_unix"}),
             )
             for name in RECURSIVE_CASES
         ]
@@ -562,6 +577,7 @@ class SuiteRunner:
                 label="docker-ssh",
                 family="smoke-docker",
                 argv=["sh", str(REGRESS_DIR / "docker-ssh.sh")],
+                required_capabilities=frozenset({"af_unix"}),
             )
         ]
 
@@ -603,13 +619,19 @@ class SuiteRunner:
             ]
         return cases
 
+    def missing_capability_reason(self, case: Case) -> str | None:
+        if "af_unix" in case.required_capabilities and not self.af_unix_status.available:
+            return host_caps.capability_reason("af_unix", self.af_unix_status)
+        return None
+
     def run(self) -> int:
         cases = self.selected_cases()
         if self.args.list_cases:
             for case in cases:
                 timeout_s, source = self.timeout_policy.lookup_case(case)
                 timeout_text = f"{timeout_s:.1f}" if timeout_s is not None else "MISSING"
-                print(f"{case.case_id}\t{timeout_text}\t{source}\t{case.argv[0]}")
+                caps_text = ",".join(sorted(case.required_capabilities)) or "-"
+                print(f"{case.case_id}\t{timeout_text}\t{source}\t{caps_text}\t{case.argv[0]}")
             return 0
 
         if not cases:
@@ -628,7 +650,12 @@ class SuiteRunner:
                 )
 
         namespace_text = "enabled" if self.use_namespaces else f"disabled ({self.namespace_reason})"
-        print(f"orchestrator: suite={self.args.suite} namespace={namespace_text}")
+        print(
+            "orchestrator: "
+            f"suite={self.args.suite} "
+            f"namespace={namespace_text} "
+            f"{self.af_unix_status.summary()}"
+        )
         for case in cases:
             result = self.run_case(case)
             self.results.append(result)
@@ -644,6 +671,14 @@ class SuiteRunner:
         return 0 if all(result.status in {"PASS", "SKIP"} and not result.cleanup_failed for result in self.results) else 1
 
     def run_case(self, case: Case, timeout_s: float | None = None) -> CaseResult:
+        missing_reason = self.missing_capability_reason(case)
+        if missing_reason is not None:
+            return CaseResult(
+                case=case,
+                status="SKIP",
+                elapsed_s=0.0,
+                detail=missing_reason,
+            )
         if timeout_s is None:
             timeout_s = self.timeout_policy.for_case(case)
         sandbox = make_sandbox()
@@ -659,6 +694,7 @@ class SuiteRunner:
             oracle_tmux=self.oracle_tmux,
             helper_binary=self.helper_binary,
             extra_env=case.env_overrides,
+            af_unix_mode=self.af_unix_mode,
         )
         stdout_path = sandbox / "logs" / "stdout.log"
         stderr_path = sandbox / "logs" / "stderr.log"
@@ -815,6 +851,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--zmux-binary")
     parser.add_argument("--oracle-binary")
     parser.add_argument("--helper-binary")
+    parser.add_argument("--af-unix", choices=host_caps.AF_UNIX_MODES)
     parser.add_argument("--test-filter", action="append", default=[])
     parser.add_argument("--case-filter", action="append", default=[])
     parser.add_argument("--timeout-override", type=float)

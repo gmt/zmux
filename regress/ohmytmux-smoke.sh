@@ -217,10 +217,17 @@ for row in range(rows - 2, rows + 1):
 
 themed = False
 default_pattern = False
+# oh-my-tmux default theme uses these Unicode indicators regardless of
+# .tmux.conf.local customisation (the local shell variables are not
+# sourced into _apply_theme; it always uses its built-in defaults):
+#   ❐  session indicator
+#   ↑  uptime arrow
+#   ↗  prefix/mouse/pairing indicator area
+theme_indicators = ("\u2750", "\u2191", "\u2197")
 for row, text in status_rows.items():
     if not text.strip():
         continue
-    if "OMTSMOKELEFT" in text or "OMTSMOKERIGHT" in text:
+    if any(ind in text for ind in theme_indicators):
         themed = True
         break
     if "[0]" in text and "bash*" in text:
@@ -230,7 +237,9 @@ garbage_rows = []
 for row in range(1, rows - 2):
     rendered = "".join(screen.get_abs(row, col) for col in range(1, cols + 1))
     for ch in rendered:
-        if ch != ' ' and (ord(ch) < 0x20 or ord(ch) == 0x7f):
+        # BEL (\x07) is a valid terminal control character (OSC terminator
+        # from set-titles) — not garbage.
+        if ch != ' ' and ord(ch) != 0x07 and (ord(ch) < 0x20 or ord(ch) == 0x7f):
             garbage_rows.append((row, repr(rendered.rstrip())))
             break
 

@@ -21,8 +21,14 @@ Live tmux-parity gaps only.
 - `zmux:` the format string is passed literally as the option value, producing "invalid choice" errors for choice-type options
 - `likely files:` `src/cmd-set-option.zig` (option execution), `src/format.zig` (format expansion)
 
-## run-shell does not work during config loading
+## bind-key \; command chaining
 
-- `tmux:` `run-shell` commands in config files are enqueued asynchronously and execute during the event loop; oh-my-tmux uses `run-shell` extensively for setup
-- `zmux:` `cmdq_run_immediate_flags` rejects `.wait` returns with "config command can't wait yet", so `run-shell` in config files is a no-op
-- `likely files:` `src/cmd-queue.zig` (`cmdq_run_immediate_flags`), `src/cmd-run-shell.zig`
+- `tmux:` `bind r run "..." \; display "..."` chains two commands with `\;`; `cmd_parse_from_argv` splits on `\;` and builds a command list
+- `zmux:` `cmd_parse_from_argv` does not split on `\;`, so the entire tail is passed as a single command and fails with "invalid command"
+- `likely files:` `src/cmd.zig` (`cmd_parse_from_argv`), `src/cmd-bind-key.zig`
+
+## oh-my-tmux _apply_configuration fails
+
+- `tmux:` oh-my-tmux's embedded `_apply_configuration` shell function uses `$TMUX_PROGRAM` to run a long chain of `set-option`, `bind-key`, and perl-based config rewriting that sets up the themed status bar
+- `zmux:` the script runs but produces errors ("not in a mode", perl syntax error) suggesting some commands used by the script are not fully supported or return unexpected output
+- `likely files:` multiple — probably needs command-by-command triage of the _apply_configuration output

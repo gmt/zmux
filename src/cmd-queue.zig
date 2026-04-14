@@ -555,6 +555,7 @@ pub fn cmdq_run_immediate_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, state
         .cmdlist = cmdlist,
     };
 
+    var had_error = false;
     var cmd_node = cmdlist.head;
     while (cmd_node) |cmd| {
         cmd_node = cmd.next;
@@ -567,15 +568,15 @@ pub fn cmdq_run_immediate_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, state
         };
         switch (result) {
             .normal => {},
-            .@"error" => return .@"error",
+            .@"error" => had_error = true,
             .wait => {
                 cmdq_write_client(cl, 2, "config command can't wait yet: {s}", .{cmd.entry.name});
-                return .@"error";
+                had_error = true;
             },
             .stop => return .stop,
         }
     }
-    return .normal;
+    return if (had_error) .@"error" else .normal;
 }
 
 pub fn cmdq_run_immediate(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) T.CmdRetval {

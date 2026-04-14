@@ -538,18 +538,63 @@ fn spawnShellProcess(shell_command: []const u8, options: ShellRunOptions) !Spawn
         xm.xstrdup(shell_command);
     defer xm.allocator.free(command_to_run);
 
+    // Build child environment: process env + global/session environ.
+    // This mirrors tmux's job_run which calls environ_for_session() then
+    // environ_push() in the forked child, ensuring run-shell commands
+    // see variables set via set-environment -g.
+    var env_map = if (options.env_map) |m| m.* else buildGlobalEnvMap();
+    defer if (options.env_map == null) env_map.deinit();
+
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", command_to_run }, xm.allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = if (options.capture_output) .Pipe else .Ignore;
     child.stderr_behavior = .Ignore;
     child.cwd = options.cwd;
-    child.env_map = options.env_map;
+    child.env_map = &env_map;
 
     try child.spawn();
     return .{
         .pid = @intCast(child.id),
         .stdout_fd = if (options.capture_output) child.stdout.?.handle else -1,
     };
+}
+
+/// Build an EnvMap containing the process environment merged with the zmux
+/// global environ.  This matches tmux's environ_for_session + environ_push
+/// pattern that propagates set-environment -g variables to job children.
+fn buildGlobalEnvMap() std.process.EnvMap {
+    const env_mod = @import("environ.zig");
+    const cfg_mod = @import("cfg.zig");
+
+    var map = std.process.EnvMap.init(xm.allocator);
+
+    // Copy the process environment.
+    {
+        const envp = std.c.environ;
+        var i: usize = 0;
+        while (envp[i]) |entry_ptr| : (i += 1) {
+            const entry = std.mem.span(entry_ptr);
+            if (std.mem.indexOfScalar(u8, entry, '=')) |eq| {
+                map.put(entry[0..eq], entry[eq + 1 ..]) catch continue;
+            }
+        }
+    }
+
+    // Layer the zmux global environ on top.
+    const global_env = env_mod.environ_for_session(null, !cfg_mod.cfg_finished);
+    defer env_mod.environ_free(global_env);
+    var it = global_env.entries.valueIterator();
+    while (it.next()) |entry| {
+        if (entry.name.len == 0) continue;
+        if (entry.flags & 0x01 != 0) continue; // ENVIRON_HIDDEN
+        if (entry.value) |val| {
+            map.put(entry.name, val) catch continue;
+        } else {
+            map.remove(entry.name);
+        }
+    }
+
+    return map;
 }
 
 fn async_shell_register(async_s: *AsyncShell) void {

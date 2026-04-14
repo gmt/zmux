@@ -1396,16 +1396,14 @@ fn resolve_direct_key(alloc: std.mem.Allocator, key: []const u8, ctx: *const For
 }
 
 fn unresolved_key(alloc: std.mem.Allocator, key: []const u8, short_alias: ?u8) FormatExpandResult {
-    _ = alloc;
-    if (short_alias) |ch| {
-        return .{
-            .text = xm.xasprintf("#{c}", .{ch}),
-            .complete = false,
-        };
-    }
+    // tmux resolves undefined format variables to empty string rather than
+    // preserving the #{...} literal.  Returning complete=true lets parent
+    // expressions (conditionals, T modifier) continue instead of aborting.
+    _ = key;
+    _ = short_alias;
     return .{
-        .text = xm.xasprintf("#{{{s}}}", .{key}),
-        .complete = false,
+        .text = alloc.dupe(u8, "") catch unreachable,
+        .complete = true,
     };
 }
 

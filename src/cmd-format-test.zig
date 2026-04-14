@@ -74,13 +74,15 @@ test "cmd-format: require returns literal text when no variables present" {
     xm.allocator.free(result.?);
 }
 
-test "cmd-format: require returns null for incomplete expansion" {
+test "cmd-format: require returns empty for undefined variable" {
     var item = makeDummyItem();
     var ctx = emptyContext();
 
-    // #{nonexistent_variable} is not resolvable → Incomplete → null.
+    // #{nonexistent_variable} resolves to empty string (tmux behavior).
     const result = cmd_format.require(&item, "#{nonexistent_variable}", &ctx);
-    try std.testing.expectEqual(@as(?[]u8, null), result);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("", result.?);
+    xm.allocator.free(result.?);
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +108,14 @@ test "cmd-format: filter returns false for falsy literal" {
     try std.testing.expect(!result.?);
 }
 
-test "cmd-format: filter returns null for incomplete filter expression" {
+test "cmd-format: filter returns false for undefined variable" {
     var item = makeDummyItem();
     var ctx = emptyContext();
 
+    // #{nonexistent_variable} resolves to empty string, which is falsy.
     const result = cmd_format.filter(&item, "#{nonexistent_variable}", &ctx);
-    try std.testing.expectEqual(@as(?bool, null), result);
+    try std.testing.expect(result != null);
+    try std.testing.expect(!result.?);
 }
 
 // ---------------------------------------------------------------------------

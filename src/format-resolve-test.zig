@@ -545,12 +545,13 @@ test "ctx_session returns null for empty FormatContext" {
     try std.testing.expect(null == fmt_resolve.ctx_session(&FormatContext{}));
 }
 
-test "sixel_support returns null without client and reflects term_features" {
-    // Without a client context, sixel_support should return null (not "0").
+test "sixel_support returns empty without client and reflects term_features" {
+    // Without a client context, sixel_support resolves to empty string (tmux behavior).
     {
         const ctx = FormatContext{};
-        const result = format_require_complete(xm.allocator, "#{sixel_support}", &ctx);
-        try std.testing.expect(result == null);
+        const result = format_require_complete(xm.allocator, "#{sixel_support}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("", result);
     }
 
     // With a client that lacks TERM_SIXEL, should return "0".
@@ -588,12 +589,13 @@ test "sixel_support returns null without client and reflects term_features" {
     }
 }
 
-test "client_written returns null without client and reflects written field" {
-    // Without a client context, client_written should return null.
+test "client_written returns empty without client and reflects written field" {
+    // Without a client context, client_written resolves to empty string (tmux behavior).
     {
         const ctx = FormatContext{};
-        const result = format_require_complete(xm.allocator, "#{client_written}", &ctx);
-        try std.testing.expect(result == null);
+        const result = format_require_complete(xm.allocator, "#{client_written}", &ctx).?;
+        defer xm.allocator.free(result);
+        try std.testing.expectEqualStrings("", result);
     }
 
     // With a client at default (0 written), should return "0".

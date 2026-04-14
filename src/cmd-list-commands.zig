@@ -107,8 +107,10 @@ test "list-commands supports custom format templates" {
     defer std.heap.c_allocator.free(line);
     try std.testing.expectEqualStrings("list-commands:lscm", line);
 
-    const unresolved = render_entry(cmd_mod.cmd_find_entry("list-commands").?, "#{command_name}:#{definitely_missing}");
-    try std.testing.expect(unresolved == null);
+    // Undefined variables resolve to empty string (tmux behavior).
+    const unresolved = render_entry(cmd_mod.cmd_find_entry("list-commands").?, "#{command_name}:#{definitely_missing}").?;
+    defer std.heap.c_allocator.free(unresolved);
+    try std.testing.expectEqualStrings("list-commands:", unresolved);
 }
 
 test "cmd entries include list-commands metadata" {

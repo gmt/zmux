@@ -882,9 +882,12 @@ test "format_expand handles time modifier and incomplete formats" {
 
     const unresolved = format_expand(xm.allocator, "#{definitely_missing}", &ctx);
     defer xm.allocator.free(unresolved.text);
-    try std.testing.expect(!unresolved.complete);
-    try std.testing.expectEqualStrings("#{definitely_missing}", unresolved.text);
-    try std.testing.expect(format_require_complete(xm.allocator, "#{definitely_missing}", &ctx) == null);
+    try std.testing.expect(unresolved.complete);
+    try std.testing.expectEqualStrings("", unresolved.text);
+    const require_result = format_require_complete(xm.allocator, "#{definitely_missing}", &ctx);
+    try std.testing.expect(require_result != null);
+    try std.testing.expectEqualStrings("", require_result.?);
+    xm.allocator.free(require_result.?);
 }
 
 test "format_expand handles pretty message time and explicit message fields" {
@@ -1831,8 +1834,8 @@ test "format_expand preserves missing keys and accepts empty templates" {
 
     const missing = format_expand(xm.allocator, "#{missing_value}", &FormatContext{});
     defer xm.allocator.free(missing.text);
-    try std.testing.expect(!missing.complete);
-    try std.testing.expectEqualStrings("#{missing_value}", missing.text);
+    try std.testing.expect(missing.complete);
+    try std.testing.expectEqualStrings("", missing.text);
 }
 
 test "format_expand stops recursive option expansion at the loop limit" {
@@ -1850,6 +1853,8 @@ test "format_expand stops recursive option expansion at the loop limit" {
 
     const expanded = format_expand(xm.allocator, "#{E:status-left}", &FormatContext{});
     defer xm.allocator.free(expanded.text);
-    try std.testing.expect(!expanded.complete);
-    try std.testing.expectEqualStrings("#{E:status-left}", expanded.text);
+    try std.testing.expect(expanded.complete);
+    // status-left defaults to "[#{session_name}] " from global_s_options;
+    // with no session context, session_name resolves to empty string.
+    try std.testing.expectEqualStrings("[] ", expanded.text);
 }

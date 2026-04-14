@@ -828,12 +828,6 @@ pub fn split_command_words(
 
     for (input) |ch| {
         if (escaped) {
-            // Preserve \; as a literal two-character token so that
-            // cmd_parse_from_argv can recognise it as a command separator
-            // within bind-key command chains.
-            if (ch == ';') {
-                current.append(alloc, '\\') catch unreachable;
-            }
             current.append(alloc, ch) catch unreachable;
             escaped = false;
             token_open = true;

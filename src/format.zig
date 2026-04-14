@@ -504,7 +504,13 @@ fn expand_template(alloc: std.mem.Allocator, template: []const u8, ctx: *const F
                 complete = false;
                 break;
             };
-            const cmd = template[i + 2 .. end];
+            const raw_cmd = template[i + 2 .. end];
+            // Pre-expand format codes inside #() before shell execution,
+            // matching tmux's format_expand1(es, cmd).  This turns
+            // #(sh -s _hostname '#h') into #(sh -s _hostname 'idk').
+            const expanded_cmd = expand_template(alloc, raw_cmd, ctx, depth + 1);
+            defer alloc.free(expanded_cmd.text);
+            const cmd = expanded_cmd.text;
             const result = format_job_get(alloc, cmd, ctx);
             defer alloc.free(result.text);
             out.appendSlice(alloc, result.text) catch unreachable;

@@ -36,7 +36,9 @@ AUTHORIZED_KEY=$(cat "$TMPDIR/id_ed25519.pub")
 CID=$(docker run -d --rm -e AUTHORIZED_KEY="$AUTHORIZED_KEY" -p 127.0.0.1::22 "$IMAGE_TAG")
 PORT=$(docker port "$CID" 22/tcp | tail -n1 | sed 's/.*://')
 
-SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=$TMPDIR/known_hosts -i $TMPDIR/id_ed25519 -p $PORT root@127.0.0.1"
+# Ignore host ssh_config so the smoke script behaves the same inside the
+# namespaced runner, where OpenSSH may reject host-owned include files.
+SSH="ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=$TMPDIR/known_hosts -i $TMPDIR/id_ed25519 -p $PORT root@127.0.0.1"
 
 n=0
 while [ "$n" -lt 30 ]; do

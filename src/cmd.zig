@@ -650,7 +650,9 @@ fn split_commands(
     var state: QuoteState = .none;
     var escaped = false;
 
-    for (input) |ch| {
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        const ch = input[i];
         if (escaped) {
             current.append(alloc, ch) catch unreachable;
             escaped = false;
@@ -664,6 +666,16 @@ fn split_commands(
                     if (trimmed.len != 0)
                         commands.append(alloc, alloc.dupe(u8, trimmed) catch unreachable) catch unreachable;
                     current.clearRetainingCapacity();
+                },
+                '#' => {
+                    // #{...} is a format expansion — keep it.
+                    // Anything else starts a comment that runs to end of line.
+                    if (i + 1 < input.len and input[i + 1] == '{') {
+                        current.append(alloc, ch) catch unreachable;
+                    } else {
+                        while (i + 1 < input.len and input[i + 1] != '\n')
+                            i += 1;
+                    }
                 },
                 '\'' => {
                     state = .single;
@@ -1198,6 +1210,117 @@ test "cmd_parse_from_string: whitespace-only input succeeds with empty list" {
 
     var pi = T.CmdParseInput{};
     const result = cmd_parse_from_string("  \n\t  ", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head == null);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: inline # comment is stripped" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("set-option status on # this is a comment", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+        // Only one command, no extra args from the comment
+        try std.testing.expect(list.head.?.next == null);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: # followed by { is kept as format expansion" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("set-option status-left #{host}", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: format expansion followed by inline comment" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const input = "set-option status-left #{host} # trailing comment";
+    const result = cmd_parse_from_string(input, &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+        try std.testing.expect(list.head.?.next == null);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: # inside double quotes is not a comment" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("set-option status-left \"hello # world\"", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: # inside single quotes is not a comment" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("set-option status-left '# not a comment'", &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: comment after semicolon-separated commands" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const input = "set-option status on ; set-option status-left foo # comment";
+    const result = cmd_parse_from_string(input, &pi);
+    try std.testing.expect(result.status == .success);
+    if (result.cmdlist) |cl_ptr| {
+        const list: *CmdList = @ptrCast(@alignCast(cl_ptr));
+        try std.testing.expect(list.head != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+        try std.testing.expect(list.head.?.next != null);
+        try std.testing.expectEqualStrings("set-option", list.head.?.next.?.entry.name);
+        try std.testing.expect(list.head.?.next.?.next == null);
+        cmd_list_free(list);
+    }
+}
+
+test "cmd_parse_from_string: whole-line comment produces empty list" {
+    setup_test_environ();
+    defer teardown_test_environ();
+
+    var pi = T.CmdParseInput{};
+    const result = cmd_parse_from_string("# this is a whole line comment", &pi);
     try std.testing.expect(result.status == .success);
     if (result.cmdlist) |cl_ptr| {
         const list: *CmdList = @ptrCast(@alignCast(cl_ptr));

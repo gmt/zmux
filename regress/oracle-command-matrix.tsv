@@ -16,7 +16,7 @@ copy-mode	pane	implemented
 customize-mode	pane	implemented
 delete-buffer	none	implemented
 detach-client	client	implemented
-display-menu	client	implemented	oracle-bug	tmux oracle exits the control client during the exercise
+display-menu	client	implemented
 display-message	pane	implemented
 display-popup	client	implemented
 display-panes	client	implemented

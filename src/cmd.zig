@@ -45,6 +45,8 @@ pub const CmdEntry = struct {
 pub const Cmd = struct {
     entry: *const CmdEntry,
     args: args_mod.Arguments,
+    file: ?[]const u8 = null,
+    line: u32 = 0,
     next: ?*Cmd = null,
 };
 
@@ -539,7 +541,8 @@ pub fn cmd_parse_one(
     return cmd;
 }
 
-/// Parse a full semicolon/newline-separated command string into a CmdList.
+/// Parse a full argument vector into a CmdList, splitting on `\;` to
+/// chain multiple commands — matching tmux's `cmd_parse_from_arguments`.
 pub fn cmd_parse_from_argv_with_cause(
     argv: []const []const u8,
     cl: ?*T.Client,
@@ -547,9 +550,28 @@ pub fn cmd_parse_from_argv_with_cause(
 ) !*CmdList {
     const list = xm.allocator.create(CmdList) catch unreachable;
     list.* = .{};
+    errdefer cmd_list_free(list);
 
-    const cmd = try cmd_parse_one(argv, cl, cause);
-    list.append(cmd);
+    // Split argv on standalone "\;" tokens into command groups.
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        if (std.mem.eql(u8, argv[i], "\\;")) {
+            if (i > start) {
+                const cmd = try cmd_parse_one(argv[start..i], cl, cause);
+                list.append(cmd);
+            }
+            start = i + 1;
+        }
+    }
+    if (start < argv.len) {
+        const cmd = try cmd_parse_one(argv[start..], cl, cause);
+        list.append(cmd);
+    }
+    if (list.head == null) {
+        cmd_list_free(list);
+        return ParseError.ParseFailed;
+    }
     return list;
 }
 
@@ -598,11 +620,11 @@ pub fn cmd_parse_from_string(
             .@"error" = msg,
         };
     };
-    defer free_split_command_words(&commands);
+    defer free_commands_with_lines(&commands);
 
     for (commands.items) |part| {
         // Tokenise into argv, preserving quoted segments.
-        var argv = split_command_words(xm.allocator, part) catch |err| {
+        var argv = split_command_words(xm.allocator, part.text) catch |err| {
             const msg = switch (err) {
                 ParseError.UnterminatedQuote => xm.xstrdup("unterminated quote"),
                 else => xm.xstrdup("parse error"),
@@ -623,25 +645,48 @@ pub fn cmd_parse_from_string(
         for (argv.items, 0..) |word, idx| argv_const[idx] = word;
 
         const cmd = cmd_parse_one(argv_const, null, &cause) catch {
-            const err = cause orelse xm.xstrdup("parse error");
+            const raw_err = cause orelse xm.xstrdup("parse error");
             cmd_list_free(list);
+            // Include the source line in the error when file info is available,
+            // matching tmux's "file:line: error" convention that tools like
+            // oh-my-tmux rely on for error recovery.
+            if (pi.file != null) {
+                const line_err = xm.xasprintf("{d}: {s}", .{ pi.line + part.line, raw_err });
+                xm.allocator.free(raw_err);
+                return .{
+                    .status = .@"error",
+                    .@"error" = line_err,
+                };
+            }
             return .{
                 .status = .@"error",
-                .@"error" = err,
+                .@"error" = raw_err,
             };
         };
+        cmd.file = if (pi.file) |f| xm.xstrdup(f) else null;
+        cmd.line = pi.line + part.line;
         list.append(cmd);
     }
 
     return .{ .status = .success, .cmdlist = @ptrCast(list) };
 }
 
+const CommandWithLine = struct {
+    text: []u8,
+    line: u32,
+};
+
+fn free_commands_with_lines(list: *std.ArrayList(CommandWithLine)) void {
+    for (list.items) |item| xm.allocator.free(item.text);
+    list.deinit(xm.allocator);
+}
+
 fn split_commands(
     alloc: std.mem.Allocator,
     input: []const u8,
-) ParseError!std.ArrayList([]u8) {
-    var commands: std.ArrayList([]u8) = .{};
-    errdefer free_split_command_words(&commands);
+) ParseError!std.ArrayList(CommandWithLine) {
+    var commands: std.ArrayList(CommandWithLine) = .{};
+    errdefer free_commands_with_lines(&commands);
 
     var current: std.ArrayList(u8) = .{};
     defer current.deinit(alloc);
@@ -649,6 +694,8 @@ fn split_commands(
     const QuoteState = enum { none, single, double };
     var state: QuoteState = .none;
     var escaped = false;
+    var line_number: u32 = 1;
+    var cmd_start_line: u32 = 1;
 
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
@@ -664,8 +711,13 @@ fn split_commands(
                 ';', '\n' => {
                     const trimmed = std.mem.trim(u8, current.items, " \t\r\n");
                     if (trimmed.len != 0)
-                        commands.append(alloc, alloc.dupe(u8, trimmed) catch unreachable) catch unreachable;
+                        commands.append(alloc, .{
+                            .text = alloc.dupe(u8, trimmed) catch unreachable,
+                            .line = cmd_start_line,
+                        }) catch unreachable;
                     current.clearRetainingCapacity();
+                    if (ch == '\n') line_number += 1;
+                    cmd_start_line = line_number;
                 },
                 '#' => {
                     // #{...} is a format expansion — keep it.
@@ -712,7 +764,10 @@ fn split_commands(
 
     const trimmed = std.mem.trim(u8, current.items, " \t\r\n");
     if (trimmed.len != 0)
-        commands.append(alloc, alloc.dupe(u8, trimmed) catch unreachable) catch unreachable;
+        commands.append(alloc, .{
+            .text = alloc.dupe(u8, trimmed) catch unreachable,
+            .line = cmd_start_line,
+        }) catch unreachable;
     return commands;
 }
 
@@ -733,6 +788,12 @@ pub fn split_command_words(
 
     for (input) |ch| {
         if (escaped) {
+            // Preserve \; as a literal two-character token so that
+            // cmd_parse_from_argv can recognise it as a command separator
+            // within bind-key command chains.
+            if (ch == ';') {
+                current.append(alloc, '\\') catch unreachable;
+            }
             current.append(alloc, ch) catch unreachable;
             escaped = false;
             token_open = true;
@@ -798,6 +859,7 @@ pub fn free_split_command_words(words: *std.ArrayList([]u8)) void {
 }
 
 pub fn cmd_free(cmd: *Cmd) void {
+    if (cmd.file) |f| xm.allocator.free(f);
     cmd.args.deinit();
     xm.allocator.destroy(cmd);
 }

@@ -725,6 +725,16 @@ pub fn cmdq_error(item: *CmdqItem, comptime fmt: []const u8, args: anytype) void
         return;
     }
 
+    // No client: if the command has source file info (from source-file),
+    // record the error with file:line: prefix so tools like oh-my-tmux
+    // can parse and remove failing lines.
+    if (item.cmd) |cmd| {
+        if (cmd.file) |file| {
+            cfg_mod.cfg_add_cause(xm.xasprintf("{s}:{d}: {s}", .{ file, cmd.line, msg }));
+            return;
+        }
+    }
+
     status_runtime.present_client_message(null, msg);
 }
 

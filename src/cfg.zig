@@ -162,7 +162,7 @@ fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags:
     const result = cmd_mod.cmd_parse_from_string(stripped.items, &pi);
     switch (result.status) {
         .@"error" => {
-            cfg_note_cause("{s}: {s}", .{ path, result.@"error" orelse "parse error" }, flags.quiet);
+            cfg_note_cause("{s}:{s}", .{ path, result.@"error" orelse "parse error" }, flags.quiet);
             return false;
         },
         .success => {
@@ -193,6 +193,11 @@ fn cfg_clear_causes() void {
 fn cfg_note_cause(comptime fmt: []const u8, args: anytype, quiet: bool) void {
     if (quiet) return;
     cfg_causes.append(xm.allocator, xm.xasprintf(fmt, args)) catch unreachable;
+}
+
+/// Append a pre-formatted cause string, taking ownership of the allocation.
+pub fn cfg_add_cause(msg: []u8) void {
+    cfg_causes.append(xm.allocator, msg) catch unreachable;
 }
 
 /// Resolve the user's home directory, matching tmux's find_home() behavior.

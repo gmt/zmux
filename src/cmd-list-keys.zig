@@ -179,7 +179,10 @@ fn render_binding_command(binding: *T.KeyBinding) []u8 {
     var first = true;
     var cmd = list.head;
     while (cmd) |current| : (cmd = current.next) {
-        if (!first) out.appendSlice(xm.allocator, "; ") catch unreachable;
+        // Use escaped semicolons so list-keys output can be fed back to
+        // source-file without the semicolons being treated as command
+        // separators.  Matches tmux CMD_LIST_PRINT_ESCAPED behaviour.
+        if (!first) out.appendSlice(xm.allocator, " \\; ") catch unreachable;
         first = false;
         append_rendered_cmd(&out, current);
     }

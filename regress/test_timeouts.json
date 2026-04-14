@@ -3226,6 +3226,7 @@
     "zig-stress:zmux-protocol-test.test.zmux protocol version and enum numbering stay C-compatible": 180.0,
     "zig-stress:zmux-protocol-test.test.zmux wire envelopes preserve empty and max payloads": 180.0,
     "zig-stress:zmux-protocol-test.test.zmux wire structs match tmux layout exactly": 180.0,
-    "zig-stress:zmux-protocol-test.test.zmux wire structs round-trip through raw bytes": 180.0
+    "zig-stress:zmux-protocol-test.test.zmux wire structs round-trip through raw bytes": 180.0,
+    "smoke-shell:ohmytmux-apply-theme": 15.0
   }
 }

@@ -43,7 +43,12 @@ MUSEUM_BUILD = ROOT_DIR / "tmux-museum" / "out" / "gdb" / "tmux"
 MUSEUM_REFRESH = ROOT_DIR / "tmux-museum" / "bin" / "refresh-museum.sh"
 DEFAULT_ZMUX = ROOT_DIR / "zig-out" / "bin" / "zmux"
 DEFAULT_HELPER = ROOT_DIR / "zig-out" / "bin" / "hello-shell-ansi"
+DEFAULT_INPUT_FUZZER = ROOT_DIR / "zig-out" / "bin" / "zmux-input-fuzzer"
+DEFAULT_CMD_PREPROCESS_FUZZER = (
+    ROOT_DIR / "zig-out" / "bin" / "zmux-cmd-preprocess-fuzzer"
+)
 MUX_NAMES = {"tmux", "zmux"}
+FUZZ_MODES = ("auto", "require", "off")
 FAST_SMOKE_SHELLS = (
     "new-session-no-client.sh",
     "has-session-return.sh",
@@ -74,6 +79,14 @@ RECURSIVE_CASES = (
     "tmux-in-tmux",
     "zmux-in-zmux",
 )
+
+
+def normalize_fuzz_mode(raw: str | None) -> str:
+    value = (raw or "auto").strip().lower()
+    if value not in FUZZ_MODES:
+        valid = ", ".join(FUZZ_MODES)
+        raise HarnessError(f"invalid fuzz mode {value!r}; expected one of {valid}")
+    return value
 
 
 class HarnessError(RuntimeError):
@@ -505,9 +518,10 @@ class SuiteRunner:
                 + self.build_smoke_oracle_cases()
                 + self.build_recursive_cases()
                 + self.build_soak_cases()
+                + self.build_fuzz_cases()
                 + self.build_docker_cases()
             )
-        if suite == "fuzz-smoke":
+        if suite == "smoke-fuzz":
             return self.build_fuzz_cases()
         raise HarnessError(f"unknown suite: {suite}")
 
@@ -662,29 +676,36 @@ class SuiteRunner:
         ]
 
     def build_fuzz_cases(self) -> list[Case]:
+        fuzz_mode = normalize_fuzz_mode(self.args.fuzz_mode)
+        if fuzz_mode == "off":
+            return []
         binaries: list[tuple[str, pathlib.Path]] = []
-        if self.args.input_fuzzer is not None:
+        input_fuzzer = self.args.input_fuzzer or str(DEFAULT_INPUT_FUZZER)
+        cmd_preprocess_fuzzer = self.args.cmd_preprocess_fuzzer or str(
+            DEFAULT_CMD_PREPROCESS_FUZZER
+        )
+        if pathlib.Path(input_fuzzer).is_file():
             binaries.append(
                 (
                     "input",
-                    ensure_executable(
-                        pathlib.Path(self.args.input_fuzzer), "input fuzzer"
-                    ),
+                    ensure_executable(pathlib.Path(input_fuzzer), "input fuzzer"),
                 )
             )
-        if self.args.cmd_preprocess_fuzzer is not None:
+        if pathlib.Path(cmd_preprocess_fuzzer).is_file():
             binaries.append(
                 (
                     "cmd-preprocess",
                     ensure_executable(
-                        pathlib.Path(self.args.cmd_preprocess_fuzzer),
+                        pathlib.Path(cmd_preprocess_fuzzer),
                         "cmd preprocess fuzzer",
                     ),
                 )
             )
         if not binaries:
+            if fuzz_mode == "auto":
+                return []
             raise HarnessError(
-                "fuzz-smoke requires --input-fuzzer and/or --cmd-preprocess-fuzzer"
+                "smoke-fuzz requires --input-fuzzer and/or --cmd-preprocess-fuzzer"
             )
 
         corpus_root = ROOT_DIR / "fuzz" / "corpus"
@@ -975,12 +996,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "smoke-docker",
             "smoke-most",
             "smoke-all",
-            "fuzz-smoke",
+            "smoke-fuzz",
         ),
     )
     parser.add_argument("--zig-test-binary")
     parser.add_argument("--input-fuzzer")
     parser.add_argument("--cmd-preprocess-fuzzer")
+    parser.add_argument("--fuzz-mode", choices=FUZZ_MODES, default="auto")
     parser.add_argument("--zmux-binary")
     parser.add_argument("--oracle-binary")
     parser.add_argument("--helper-binary")

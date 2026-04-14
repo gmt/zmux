@@ -26,7 +26,7 @@ TMP_LOG_SUFFIX = ".log"
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="remove zmux smoke artifacts from /tmp"
+        description="remove managed zmux smoke artifacts under ZMUX_TMP_ROOT and ZMUX_TEST_ROOT plus legacy /tmp entries"
     )
     parser.add_argument(
         "--dry-run",
@@ -95,8 +95,11 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
     current_root = artifact_root_module.default_tmp_root()
+    sandbox_root = artifact_root_module.default_sandbox_root()
     roots_to_scan = [LEGACY_TMP_ROOT]
     managed_roots = [current_root]
+    if sandbox_root != current_root:
+        managed_roots.append(sandbox_root)
     if OLD_MANAGED_ROOT != current_root:
         managed_roots.append(OLD_MANAGED_ROOT)
 

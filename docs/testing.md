@@ -37,10 +37,12 @@ Testing lanes:
 - `zig build test-stress-compile`
   Compile the Zig stress test binary without running it.
 
-- `zig build -Dfuzzing=true fuzz`
-  Build the fuzz targets.
+- `zig build fuzz`
+  Build the fuzz targets. They are also built by default as part of `install` so
+  the replay lane can run without a feature flag; use `-Dfuzzing=false` to omit
+  them when needed.
 
-- `zig build -Dfuzzing=true fuzz-smoke`
+- `zig build smoke-fuzz`
   Timed corpus replay for each fuzz target and each seed in `fuzz/corpus/`.
 
 Current intent:

@@ -19,9 +19,9 @@
 
 //! fuzz/input-fuzzer.zig – Zig fuzz target for the terminal input parser.
 //!
-//! Build with: `zig build -Dfuzzing=true install`
+//! Build with: `zig build install` (or disable with `zig build -Dfuzzing=false`)
 //! LibFuzzer:   `zig-out/bin/zmux-input-fuzzer fuzz/corpus/ fuzz/input-fuzzer.dict`
-//! Stdin smoke: `sh fuzz/run-corpus.sh zig-out/bin/zmux-input-fuzzer` or `zig build -Dfuzzing=true fuzz-smoke`
+//! Stdin smoke: `sh fuzz/run-corpus.sh zig-out/bin/zmux-input-fuzzer` or `zig build smoke-fuzz`
 
 const std = @import("std");
 const zmux = @import("zmux");

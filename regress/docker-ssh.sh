@@ -16,7 +16,9 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-TMPDIR=$(mktemp -d "${SMOKE_ARTIFACT_ROOT:-/tmp}/zmux-docker-ssh.XXXXXX")
+ARTIFACT_ROOT=${SMOKE_ARTIFACT_ROOT:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/zmux}
+mkdir -p "$ARTIFACT_ROOT"
+TMPDIR=$(mktemp -d "${ARTIFACT_ROOT%/}/zmux-docker-ssh.XXXXXX")
 IMAGE_TAG=${SMOKE_DOCKER_IMAGE:-zmux-smoke:ssh}
 TERM_MATRIX=${SMOKE_TERM_SET:-"tmux-256color screen-256color xterm-256color linux"}
 

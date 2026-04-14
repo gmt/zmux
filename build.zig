@@ -29,8 +29,7 @@ pub fn build(b: *std.Build) void {
         (target.result.os.tag == .linux);
     const opt_sixel = b.option(bool, "sixel", "Enable sixel image support [default: true]") orelse true;
     const opt_utf8proc = b.option(bool, "utf8proc", "Enable utf8proc for Unicode width [default: false]") orelse false;
-    const opt_fuzzing = b.option(bool, "fuzzing", "Build fuzz targets [default: false]") orelse false;
-
+    const opt_fuzzing = b.option(bool, "fuzzing", "Build fuzz targets [default: true]") orelse true;
     // --------------------------------------------------
     // Build-options module
     // --------------------------------------------------
@@ -168,16 +167,23 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     // `zig build smoke-all` – all smoke suites, including soak
     // --------------------------------------------------
-    const smoke_all_step = b.step("smoke-all", "Run all smoke suites, including soak");
+    const smoke_all_step = b.step("smoke-all", "Run all smoke suites, including soak and fuzz replay");
     smoke_all_step.dependOn(b.getInstallStep());
     const smoke_all_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-all" });
     smoke_all_cmd.step.dependOn(b.getInstallStep());
+    if (opt_fuzzing) {
+        smoke_all_cmd.addArg("--fuzz-mode");
+        smoke_all_cmd.addArg("require");
+    } else {
+        smoke_all_cmd.addArg("--fuzz-mode");
+        smoke_all_cmd.addArg("off");
+    }
     smoke_all_step.dependOn(&smoke_all_cmd.step);
 
     // --------------------------------------------------
-    // `zig build smoke-cleanup` – remove smoke artifacts from /tmp
+    // `zig build smoke-cleanup` – remove managed smoke artifacts under ZMUX_TMP_ROOT and ZMUX_TEST_ROOT plus legacy /tmp entries
     // --------------------------------------------------
-    const smoke_cleanup_step = b.step("smoke-cleanup", "Remove managed and legacy smoke artifacts from /tmp");
+    const smoke_cleanup_step = b.step("smoke-cleanup", "Remove managed smoke artifacts under ZMUX_TMP_ROOT and ZMUX_TEST_ROOT plus legacy /tmp entries");
     const smoke_cleanup_cmd = b.addSystemCommand(&.{ "python3", "regress/cleanup-artifacts.py" });
     smoke_cleanup_step.dependOn(&smoke_cleanup_cmd.step);
 
@@ -262,7 +268,8 @@ pub fn build(b: *std.Build) void {
     // `zig build fuzz`
     // --------------------------------------------------
     if (opt_fuzzing) {
-        // The fuzz target imports from the zmux source tree
+        // The fuzz targets import from the zmux source tree and are built by
+        // default so smoke-fuzz can run without a separate feature flag.
         const zmux_mod = b.createModule(.{
             .root_source_file = b.path("src/zmux.zig"),
             .target = target,
@@ -308,22 +315,24 @@ pub fn build(b: *std.Build) void {
         fuzz_cmd_preprocess.linkSystemLibrary("ncursesw");
         b.installArtifact(fuzz_cmd_preprocess);
 
-        const fuzz_step = b.step("fuzz", "Build fuzz targets (-Dfuzzing=true required)");
+        const fuzz_step = b.step("fuzz", "Build fuzz targets");
         fuzz_step.dependOn(&fuzz_input.step);
         fuzz_step.dependOn(&fuzz_cmd_preprocess.step);
 
-        const fuzz_smoke = b.step("fuzz-smoke", "Timed corpus replay for the fuzz targets (requires install + -Dfuzzing=true)");
-        const fuzz_smoke_cmd = b.addSystemCommand(&.{
+        const smoke_fuzz = b.step("smoke-fuzz", "Timed corpus replay for the fuzz targets");
+        const smoke_fuzz_cmd = b.addSystemCommand(&.{
             "python3",
             "regress/test_orchestrator.py",
-            "fuzz-smoke",
+            "smoke-fuzz",
+            "--fuzz-mode",
+            "require",
             "--input-fuzzer",
         });
-        fuzz_smoke_cmd.step.dependOn(b.getInstallStep());
-        fuzz_smoke_cmd.addFileArg(fuzz_input.getEmittedBin());
-        fuzz_smoke_cmd.addArg("--cmd-preprocess-fuzzer");
-        fuzz_smoke_cmd.addFileArg(fuzz_cmd_preprocess.getEmittedBin());
-        fuzz_smoke.dependOn(&fuzz_smoke_cmd.step);
+        smoke_fuzz_cmd.step.dependOn(b.getInstallStep());
+        smoke_fuzz_cmd.addFileArg(fuzz_input.getEmittedBin());
+        smoke_fuzz_cmd.addArg("--cmd-preprocess-fuzzer");
+        smoke_fuzz_cmd.addFileArg(fuzz_cmd_preprocess.getEmittedBin());
+        smoke_fuzz.dependOn(&smoke_fuzz_cmd.step);
     }
 }
 

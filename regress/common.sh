@@ -24,7 +24,7 @@ SMOKE_ROOT_DIR=$(CDPATH= cd -- "$SMOKE_SCRIPT_DIR/.." && pwd)
 : "${TEST_ZMUX:=$SMOKE_ROOT_DIR/zig-out/bin/zmux}"
 : "${TEST_ZMUX_HELPER:=$SMOKE_ROOT_DIR/zig-out/bin/hello-shell-ansi}"
 : "${TEST_ORACLE_TMUX:=/usr/bin/tmux}"
-: "${ZMUX_TMP_ROOT:=/tmp/zmux}"
+: "${ZMUX_TMP_ROOT:=${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/zmux}"
 : "${SMOKE_ARTIFACT_ROOT:=$ZMUX_TMP_ROOT}"
 : "${SMOKE_MATRIX:=$SMOKE_SCRIPT_DIR/oracle-command-matrix.tsv}"
 
@@ -67,6 +67,7 @@ smoke_env_shell() {
 
 smoke_init() {
 	TEST_NAME=${1:-smoke}
+	mkdir -p "$SMOKE_ARTIFACT_ROOT"
 	TEST_TMPDIR=$(mktemp -d "${SMOKE_ARTIFACT_ROOT%/}/zmux-${TEST_NAME}.XXXXXX") || exit 1
 	TEST_SOCKET="$TEST_TMPDIR/socket"
 	SMOKE_HOME="$TEST_TMPDIR/home"

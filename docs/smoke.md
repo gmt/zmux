@@ -8,14 +8,14 @@ management, control mode, rendering, and clean exit behavior.
 All smoke infrastructure lives in `regress/`, but runnable smoke commands now
 go through one root timed runner: `regress/test_orchestrator.py`.
 `run-all.sh` is only a compatibility shim. The root runner gives every smoke
-case its own timer and sandbox under `$ZMUX_TMP_ROOT/zmux_test_<hex>` (default
-`/tmp/zmux/zmux_test_<hex>`), forces `HOME`,
+case its own timer and sandbox under `$ZMUX_TEST_ROOT/zmux_test_<hex>` (default:
+`$ZMUX_TMP_ROOT-test`, usually `/tmp/zmux-test`), forces `HOME`,
 `TMPDIR`, and XDG state into that sandbox, prepends a per-case `bin/` to
 `PATH`, and verifies that no net-new `tmux` or `zmux` process survives the
 case. The checked-in timeout policy in `regress/test_timeouts.json` is explicit
 per case; default family values are only a bootstrap aid for calibration work.
 Before a timed smoke run starts, the runner prunes stale children under
-`$ZMUX_TMP_ROOT`; set `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS=0` to disable that aging
+`$ZMUX_TEST_ROOT`; set `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS=0` to disable that aging
 pass.
 
 When user namespaces are available, each case runs inside a user+pid namespace
@@ -30,10 +30,11 @@ reaping.
 | `zig build smoke` | fast | Quick end-to-end pass against `zig-out/bin/zmux`. Runs ~16 shell tests plus a command sweep and inside-session check. Finishes in under a minute. |
 | `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests, but run against `/usr/bin/tmux`. Verifies that the test expectations themselves are correct. |
 | `zig build smoke-soak` | soak | Long-running stress-oriented tests against zmux. Checks for resource leaks (memory, FDs, client count) over sustained operation. |
+| `zig build smoke-fuzz` | fuzz | Timed corpus replay for the built-in fuzz targets against every seed in `fuzz/corpus/`. |
 | `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior. Included in `smoke-most` and `smoke-all`; still useful standalone when working on client/attach semantics. |
 | `zig build smoke-docker` | docker | Docker + SSH harness against system tmux. Requires Docker. |
 | `zig build smoke-most` | most | Runs fast + oracle + recursive + docker suites together, but leaves out soak. |
-| `zig build smoke-all` | all | Runs all smoke suites, including soak. |
+| `zig build smoke-all` | all | Runs all smoke suites, including soak and fuzz replay. |
 
 The oracle lane uses system tmux when available. If it is missing, the runner
 builds and uses `tmux-museum/out/gdb/tmux`.
@@ -51,6 +52,7 @@ Oracle-known-bad policy:
 - **Pre-merge**: `zig build smoke-most` for broader coverage including oracle comparison and recursive attach coverage without the soak wait.
 - **Soak / stability work**: `zig build smoke-soak` when investigating leaks or long-running behavior.
 - **Full smoke matrix**: `zig build smoke-all` when you really do want every smoke lane.
+- **Corpus replay**: `zig build smoke-fuzz` when working on fuzz regressions or new seeds.
 - **Attach/detach work**: `zig build smoke-recursive-attach` for nested mux edge cases.
 
 ## Pass / fail
@@ -78,14 +80,17 @@ Host capability policy:
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
 | `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
 | `SMOKE_ARTIFACT_ROOT` | `$ZMUX_TMP_ROOT` | Base directory for ephemeral test sockets and logs |
-| `ZMUX_TMP_ROOT` | `/tmp/zmux` | Default parent for smoke artifacts and timed-runner sandboxes when `SMOKE_ARTIFACT_ROOT` is unset |
-| `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS` | `72` | Remove stale children under `ZMUX_TMP_ROOT` older than this many hours before a timed smoke run |
+| `ZMUX_TMP_ROOT` | system temp dir + `/zmux` | Default parent for managed smoke artifacts and direct-entrypoint sandboxes when `SMOKE_ARTIFACT_ROOT` is unset |
+| `ZMUX_TEST_ROOT` | `$ZMUX_TMP_ROOT-test` | Default parent for timed-runner outer sandboxes |
+| `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS` | `72` | Remove stale children under `ZMUX_TEST_ROOT` older than this many hours before a timed smoke run |
 | `SMOKE_AF_UNIX` | `auto` | Host capability policy for UNIX-domain sockets: `auto` probes and skips smoke cases if unavailable, `require` fails instead of skipping, `skip` forces an environment skip without probing |
 | `ZMUX_TEST_TIMEOUT_MULTIPLIER` | `1.0` | Multiply the checked-in case timers when a slower host needs more slack |
 | `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `auto`, `systemd`, `disciplined`, `systemd-disciplined`, or `off` |
 | `SMOKE_TEST_SHELL` | (system default) | Override the shell used in deterministic-env tests |
 
 The root runner exposes the same knob as `python3 regress/test_orchestrator.py --af-unix {auto,require,skip}`.
+Build-time fuzz coverage is enabled by default; pass `-Dfuzzing=false` to omit
+the fuzz binaries and keep `smoke-all` from pulling in `smoke-fuzz`.
 
 ## Running tests directly
 

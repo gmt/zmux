@@ -35,7 +35,7 @@ CALIBRATABLE_SUITES = (
     "smoke-recursive",
     "smoke-soak",
     "smoke-docker",
-    "fuzz-smoke",
+    "smoke-fuzz",
 )
 
 DEFAULT_SAMPLE_TIMEOUTS = {
@@ -46,7 +46,7 @@ DEFAULT_SAMPLE_TIMEOUTS = {
     "smoke-recursive": 300.0,
     "smoke-soak": 1800.0,
     "smoke-docker": 3600.0,
-    "fuzz-smoke": 300.0,
+    "smoke-fuzz": 300.0,
 }
 
 
@@ -127,7 +127,9 @@ def load_report(path: pathlib.Path) -> dict[str, object]:
 
 def write_report(path: pathlib.Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def write_tsv(path: pathlib.Path, payload: dict[str, object]) -> None:
@@ -148,14 +150,18 @@ def write_tsv(path: pathlib.Path, payload: dict[str, object]) -> None:
 
 def merge_policy(policy_path: pathlib.Path, case_timeouts: dict[str, int]) -> None:
     payload = json.loads(policy_path.read_text(encoding="utf-8"))
-    merged_cases = {str(key): float(value) for key, value in payload.get("cases", {}).items()}
+    merged_cases = {
+        str(key): float(value) for key, value in payload.get("cases", {}).items()
+    }
     for case_id, timeout_s in case_timeouts.items():
         merged_cases[case_id] = float(timeout_s)
     new_payload = {
         "defaults": payload["defaults"],
         "cases": {key: merged_cases[key] for key in sorted(merged_cases)},
     }
-    policy_path.write_text(json.dumps(new_payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    policy_path.write_text(
+        json.dumps(new_payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )
 
 
 def build_runner_args(args: argparse.Namespace, suite: str) -> argparse.Namespace:
@@ -183,7 +189,9 @@ def build_runner_args(args: argparse.Namespace, suite: str) -> argparse.Namespac
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="calibrate per-case test timeouts")
-    parser.add_argument("--suite", action="append", required=True, choices=CALIBRATABLE_SUITES)
+    parser.add_argument(
+        "--suite", action="append", required=True, choices=CALIBRATABLE_SUITES
+    )
     parser.add_argument("--zig-unit-binary")
     parser.add_argument("--zig-stress-binary")
     parser.add_argument("--input-fuzzer")
@@ -207,7 +215,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     json_report = pathlib.Path(args.json_report)
-    tsv_report = pathlib.Path(args.tsv_report) if args.tsv_report else json_report.with_suffix(".tsv")
+    tsv_report = (
+        pathlib.Path(args.tsv_report)
+        if args.tsv_report
+        else json_report.with_suffix(".tsv")
+    )
     payload = load_report(json_report)
     payload["meta"] = {
         "generated_at": now_utc(),
@@ -223,7 +235,9 @@ def main(argv: list[str]) -> int:
         runner = orch.SuiteRunner(build_runner_args(args, suite))
         cases = runner.selected_cases()
         timeout_s = sample_timeout_for_suite(args, suite)
-        print(f"calibrate: suite={suite} cases={len(cases)} sample_timeout={timeout_s:.1f}s")
+        print(
+            f"calibrate: suite={suite} cases={len(cases)} sample_timeout={timeout_s:.1f}s"
+        )
         for case in cases:
             if case.case_id in results and not args.force:
                 print(f"skip {case.case_id}")
@@ -234,7 +248,9 @@ def main(argv: list[str]) -> int:
             target_count = sample_target(case, first_sample)
             samples = [first_sample]
             while len(samples) < target_count:
-                samples.append(serialize_sample(runner.run_case(case, timeout_s=timeout_s)))
+                samples.append(
+                    serialize_sample(runner.run_case(case, timeout_s=timeout_s))
+                )
 
             mean_s, stdev_s, max_s, proposal_seconds = compute_proposal(
                 samples,

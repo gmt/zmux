@@ -5,11 +5,20 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import tempfile
 import time
 
 
-DEFAULT_ROOT = "/tmp/zmux"
+DEFAULT_ROOT_NAME = "zmux"
 DEFAULT_PRUNE_MAX_AGE_HOURS = 72.0
+
+
+def _default_root() -> pathlib.Path:
+    return pathlib.Path(tempfile.gettempdir()) / DEFAULT_ROOT_NAME
+
+
+def _default_sandbox_root() -> pathlib.Path:
+    return pathlib.Path(f"{default_tmp_root()}-test")
 
 
 def _path_from_env(var_name: str, fallback: str) -> pathlib.Path:
@@ -20,7 +29,7 @@ def _path_from_env(var_name: str, fallback: str) -> pathlib.Path:
 
 
 def default_tmp_root() -> pathlib.Path:
-    return _path_from_env("ZMUX_TMP_ROOT", DEFAULT_ROOT)
+    return _path_from_env("ZMUX_TMP_ROOT", str(_default_root()))
 
 
 def default_artifact_root() -> pathlib.Path:
@@ -38,7 +47,9 @@ def default_sandbox_root() -> pathlib.Path:
         path = pathlib.Path(raw)
         path.mkdir(parents=True, exist_ok=True)
         return path
-    return default_tmp_root()
+    path = _default_sandbox_root()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def prune_stale_children(

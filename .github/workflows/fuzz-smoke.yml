@@ -1,11 +1,11 @@
 # Fast fuzz harness smoke: build fuzz targets and replay stdin seeds from fuzz/corpus/.
-name: fuzz-smoke
+name: smoke-fuzz
 on:
   push:
   pull_request:
 
 jobs:
-  fuzz-smoke:
+  smoke-fuzz:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -20,5 +20,5 @@ jobs:
         run: zig build test
       - name: Build fuzz targets and replay corpus (stdin mode)
         run: |
-          zig build -Dfuzzing=true install
-          zig build -Dfuzzing=true fuzz-smoke
+          zig build install
+          zig build smoke-fuzz

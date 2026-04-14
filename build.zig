@@ -327,7 +327,7 @@ fn addBuildOptions(b: *std.Build, config: BuildOptionsConfig) *std.Build.Step.Op
     options.addOption(bool, "enable_sixel", config.opt_sixel);
     options.addOption(bool, "have_utf8proc", config.opt_utf8proc);
     options.addOption(bool, "stress_tests", config.stress_tests);
-    options.addOption([]const u8, "version", "3.6a-dev");
+    options.addOption([]const u8, "version", "3.6a");
     options.addOption([]const u8, "zmux_conf", "/etc/zmux.conf:~/.zmux.conf:$XDG_CONFIG_HOME/zmux/zmux.conf:~/.config/zmux/zmux.conf");
     options.addOption([]const u8, "zmux_sock", "$ZMUX_TMPDIR:/tmp");
     options.addOption([]const u8, "zmux_term", "tmux-256color");

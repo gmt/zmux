@@ -15,11 +15,11 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## Format expansion in set-option values
+## display-message -p breaks after oh-my-tmux config loading
 
-- `tmux:` `set -g extended-keys #{?#{||:...},on,off}` expands the format string before validating the option value, so the result is `on` or `off`
-- `zmux:` the format string is passed literally as the option value, producing "invalid choice" errors for choice-type options
-- `likely files:` `src/cmd-set-option.zig` (option execution), `src/format.zig` (format expansion)
+- `tmux:` `display-message -p` works at all times for detached clients, including after oh-my-tmux config loads
+- `zmux:` `display-message -p` works at t=1s after server start, but by t=3s (after oh-my-tmux run-shell commands execute) it returns exit 1 with no output. `show-options` and `show-environment` continue to work — only the `-p` print path is affected
+- `likely files:` `src/cmd-display-message.zig`, `src/file-write.zig`, `src/server-print.zig` — something in the run-shell execution or config sourcing path corrupts the detached stdout write channel
 
 ## Command-line \; command chaining
 

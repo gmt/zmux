@@ -25,6 +25,8 @@ import tempfile
 import threading
 from dataclasses import dataclass
 
+import artifact_root as artifact_root_module
+
 
 AF_UNIX_ENV = "SMOKE_AF_UNIX"
 AF_UNIX_MODES = ("auto", "require", "skip")
@@ -48,7 +50,9 @@ def normalize_af_unix_mode(raw: str | None) -> str:
     value = (raw or os.environ.get(AF_UNIX_ENV, "auto")).strip().lower()
     if value not in AF_UNIX_MODES:
         valid = ", ".join(AF_UNIX_MODES)
-        raise ValueError(f"invalid {AF_UNIX_ENV} mode {value!r}; expected one of {valid}")
+        raise ValueError(
+            f"invalid {AF_UNIX_ENV} mode {value!r}; expected one of {valid}"
+        )
     return value
 
 
@@ -57,7 +61,9 @@ def capability_reason(capability: str, status: CapabilityStatus) -> str:
     return f"{capability} unavailable: {detail}"
 
 
-def af_unix_status(*, mode: str | None = None, artifact_root: pathlib.Path | None = None) -> CapabilityStatus:
+def af_unix_status(
+    *, mode: str | None = None, artifact_root: pathlib.Path | None = None
+) -> CapabilityStatus:
     selected_mode = normalize_af_unix_mode(mode)
     if selected_mode == "skip":
         return CapabilityStatus("af_unix", False, "disabled by override")
@@ -80,9 +86,9 @@ def enforce_af_unix(
 
 
 def probe_af_unix(*, artifact_root: pathlib.Path | None = None) -> CapabilityStatus:
-    root = artifact_root or pathlib.Path(os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp"))
+    root = artifact_root or artifact_root_module.default_artifact_root()
     root.mkdir(parents=True, exist_ok=True)
-    probe_dir = pathlib.Path(tempfile.mkdtemp(prefix="zmux-af-unix-probe-", dir=str(root)))
+    probe_dir = pathlib.Path(tempfile.mkdtemp(prefix="zaf-", dir=str(root)))
     socket_path = probe_dir / "probe.sock"
 
     server_ready = threading.Event()
@@ -115,7 +121,9 @@ def probe_af_unix(*, artifact_root: pathlib.Path | None = None) -> CapabilitySta
                 payload = conn.recv(8)
                 conn.sendall(b"ok")
             except OSError as exc:
-                server_result["error"] = f"server exchange failed: {format_os_error(exc)}"
+                server_result["error"] = (
+                    f"server exchange failed: {format_os_error(exc)}"
+                )
                 return
             server_result["payload"] = payload
         finally:
@@ -138,12 +146,16 @@ def probe_af_unix(*, artifact_root: pathlib.Path | None = None) -> CapabilitySta
             try:
                 client.connect(str(socket_path))
             except OSError as exc:
-                return CapabilityStatus("af_unix", False, f"connect failed: {format_os_error(exc)}")
+                return CapabilityStatus(
+                    "af_unix", False, f"connect failed: {format_os_error(exc)}"
+                )
             try:
                 client.sendall(b"ping")
                 reply = client.recv(8)
             except OSError as exc:
-                return CapabilityStatus("af_unix", False, f"client exchange failed: {format_os_error(exc)}")
+                return CapabilityStatus(
+                    "af_unix", False, f"client exchange failed: {format_os_error(exc)}"
+                )
         finally:
             client.close()
 
@@ -175,7 +187,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    ok, _status, message = enforce_af_unix(mode=args.af_unix, artifact_root=args.artifact_root)
+    ok, _status, message = enforce_af_unix(
+        mode=args.af_unix, artifact_root=args.artifact_root
+    )
     if ok:
         return 0
     print(message, file=sys.stderr)

@@ -28,6 +28,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 
+import artifact_root
 import host_caps
 import smoke_owner
 
@@ -235,8 +236,8 @@ def resolve_oracle_tmux(explicit: str | None) -> pathlib.Path:
     return ensure_museum_tmux()
 
 
-def make_sandbox() -> pathlib.Path:
-    root = pathlib.Path("/tmp") / f"zmux_test_{secrets.token_hex(6)}"
+def make_sandbox(root_dir: pathlib.Path) -> pathlib.Path:
+    root = root_dir / f"zmux_test_{secrets.token_hex(6)}"
     root.mkdir(parents=True, exist_ok=False)
     return root
 
@@ -421,6 +422,8 @@ class SuiteRunner:
             raise HarnessError(
                 host_caps.capability_reason("af_unix", self.af_unix_status)
             )
+        self.sandbox_root = artifact_root.default_sandbox_root()
+        artifact_root.prune_stale_children(self.sandbox_root)
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self.results: list[CaseResult] = []
         self.interrupted_by: int | None = None
@@ -791,7 +794,7 @@ class SuiteRunner:
             )
         if timeout_s is None:
             timeout_s = self.timeout_policy.for_case(case)
-        sandbox = make_sandbox()
+        sandbox = make_sandbox(self.sandbox_root)
         prepare_sandbox_tools(
             sandbox,
             zmux_binary=self.zmux_binary,

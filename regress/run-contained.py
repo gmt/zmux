@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 
+import artifact_root
 import smoke_owner
 
 
@@ -134,7 +135,9 @@ def choose_backend(requested: str) -> tuple[str, str | None]:
         return "disciplined", reason
 
     if requested in {"systemd", "systemd-disciplined"} and not available:
-        raise RuntimeError(f"{requested} containment backend requested but unavailable: {reason}")
+        raise RuntimeError(
+            f"{requested} containment backend requested but unavailable: {reason}"
+        )
 
     return requested, None
 
@@ -144,9 +147,10 @@ class ContainedRun:
         self.command = command
         self.backend = backend
         self.keep_run_root = keep_run_root
-        artifact_parent = pathlib.Path(os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp"))
-        artifact_parent.mkdir(parents=True, exist_ok=True)
-        self.run_root = pathlib.Path(tempfile.mkdtemp(prefix="zmux-contained-", dir=str(artifact_parent)))
+        artifact_parent = artifact_root.default_artifact_root()
+        self.run_root = pathlib.Path(
+            tempfile.mkdtemp(prefix="zmux-contained-", dir=str(artifact_parent))
+        )
         self.artifact_root = self.run_root / "artifacts"
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.owner_dir = self.run_root / "owned-pids"
@@ -177,7 +181,9 @@ class ContainedRun:
             nested_command.extend(["--", *self.command])
 
             nested_env = os.environ.copy()
-            nested_env["SMOKE_ARTIFACT_ROOT"] = os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp")
+            nested_env["SMOKE_ARTIFACT_ROOT"] = str(
+                artifact_root.default_artifact_root()
+            )
             nested_env["SMOKE_CONTAINMENT_BACKEND"] = "disciplined"
             return self._run_systemd(nested_command, nested_env)
         if self.backend in {"disciplined", "off"}:
@@ -219,7 +225,10 @@ class ContainedRun:
             return
         self._stopped = True
 
-        if self.backend in {"systemd", "systemd-disciplined"} and self.unit_name is not None:
+        if (
+            self.backend in {"systemd", "systemd-disciplined"}
+            and self.unit_name is not None
+        ):
             subprocess.run(
                 ["systemctl", "--user", "stop", self.unit_name],
                 stdout=subprocess.DEVNULL,
@@ -247,7 +256,9 @@ class ContainedRun:
                 self.process.wait(timeout=2)
 
     def finalize(self) -> list[smoke_owner.OwnedPid]:
-        leaked = smoke_owner.cleanup_registered(self.owner_dir, grace_seconds=GRACE_SECONDS)
+        leaked = smoke_owner.cleanup_registered(
+            self.owner_dir, grace_seconds=GRACE_SECONDS
+        )
         if not self.keep_run_root:
             shutil.rmtree(self.run_root, ignore_errors=True)
         return leaked
@@ -291,7 +302,9 @@ def main() -> int:
     def signal_handler(signum: int, _frame: object) -> None:
         raise ContainedSignal(signum)
 
-    handled_signals = [sig for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM) if sig is not None]
+    handled_signals = [
+        sig for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM) if sig is not None
+    ]
     previous_handlers = {sig: signal.getsignal(sig) for sig in handled_signals}
     for sig in handled_signals:
         signal.signal(sig, signal_handler)
@@ -303,7 +316,9 @@ def main() -> int:
     finally:
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)
-        if received_signal is not None or (runner.process is not None and runner.process.poll() is None):
+        if received_signal is not None or (
+            runner.process is not None and runner.process.poll() is None
+        ):
             runner.stop()
         leaked = runner.finalize()
 

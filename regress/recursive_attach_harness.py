@@ -27,6 +27,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import artifact_root
 import host_caps
 import smoke_env
 import smoke_owner
@@ -61,9 +62,19 @@ class RecursiveCase:
 
 
 class RecursiveAttachHarness:
-    def __init__(self, artifact_root: pathlib.Path, zmux_binary: str, oracle_binary: str, timeout_seconds: float) -> None:
-        self.artifact_dir = pathlib.Path(tempfile.mkdtemp(prefix="zmux-recursive-attach-", dir=str(artifact_root)))
-        self.owner_dir = smoke_owner.resolve_owner_dir() or (self.artifact_dir / "owned-pids")
+    def __init__(
+        self,
+        artifact_root: pathlib.Path,
+        zmux_binary: str,
+        oracle_binary: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.artifact_dir = pathlib.Path(
+            tempfile.mkdtemp(prefix="zmux-recursive-attach-", dir=str(artifact_root))
+        )
+        self.owner_dir = smoke_owner.resolve_owner_dir() or (
+            self.artifact_dir / "owned-pids"
+        )
         self.zmux_binary = zmux_binary
         self.oracle_binary = oracle_binary
         self.timeout_seconds = timeout_seconds
@@ -76,7 +87,9 @@ class RecursiveAttachHarness:
 
     def require_host_capabilities(self) -> None:
         mode = host_caps.normalize_af_unix_mode(None)
-        ok, _status, message = host_caps.enforce_af_unix(mode=mode, artifact_root=self.artifact_dir)
+        ok, _status, message = host_caps.enforce_af_unix(
+            mode=mode, artifact_root=self.artifact_dir
+        )
         if ok:
             return
         if mode == "require":
@@ -120,8 +133,12 @@ class RecursiveAttachHarness:
             if case.exception_policy == "skip-global":
                 print(f"skip {case.name}: {case.note}", file=sys.stderr)
         waves = (
-            tuple(case for case in cases[0:2] if case.exception_policy != "skip-global"),
-            tuple(case for case in cases[2:4] if case.exception_policy != "skip-global"),
+            tuple(
+                case for case in cases[0:2] if case.exception_policy != "skip-global"
+            ),
+            tuple(
+                case for case in cases[2:4] if case.exception_policy != "skip-global"
+            ),
         )
 
         for wave in waves:
@@ -136,7 +153,9 @@ class RecursiveAttachHarness:
         for case in self.build_cases():
             if case.name == name:
                 if case.exception_policy == "skip-global":
-                    raise RecursiveAttachSkip(f"{case.name}: {case.note or 'skipped globally'}")
+                    raise RecursiveAttachSkip(
+                        f"{case.name}: {case.note or 'skipped globally'}"
+                    )
                 self.run_case(case)
                 return
         raise RecursiveAttachError(f"unknown recursive case {name}")
@@ -195,12 +214,16 @@ class RecursiveAttachHarness:
             if results_path.exists():
                 return
             time.sleep(0.1)
-        raise RecursiveAttachError(f"timed out waiting for recursive attach probe results: {results_path}")
+        raise RecursiveAttachError(
+            f"timed out waiting for recursive attach probe results: {results_path}"
+        )
 
     def verify_case(self, case: RecursiveCase, result: dict[str, object]) -> None:
         outcome = result["attach_outcome"]
         if not isinstance(outcome, dict):
-            raise RecursiveAttachError(f"{case.name}: malformed result payload: {result}")
+            raise RecursiveAttachError(
+                f"{case.name}: malformed result payload: {result}"
+            )
 
         actual_kind = outcome.get("kind")
         if actual_kind != case.expectation.kind:
@@ -237,7 +260,9 @@ class RecursiveAttachHarness:
         )
 
 
-def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_seconds: float) -> None:
+def run_inner_probe(
+    inner_binary: str, output_json: pathlib.Path, timeout_seconds: float
+) -> None:
     output_json.parent.mkdir(parents=True, exist_ok=True)
     owner_dir = smoke_owner.resolve_owner_dir() or (output_json.parent / "owned-pids")
     env = smoke_env.build_smoke_env(
@@ -306,7 +331,9 @@ def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_second
         "attach_outcome": outcome,
     }
     try:
-        output_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        output_json.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
     finally:
         try:
             subprocess.run(
@@ -328,20 +355,36 @@ def run_inner_probe(inner_binary: str, output_json: pathlib.Path, timeout_second
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="recursive attach characterization harness")
+    parser = argparse.ArgumentParser(
+        description="recursive attach characterization harness"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_parser = sub.add_parser("run")
-    run_parser.add_argument("--artifact-root", default=os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp"))
-    run_parser.add_argument("--zmux-binary", default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")))
-    run_parser.add_argument("--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"))
+    run_parser.add_argument(
+        "--artifact-root", default=str(artifact_root.default_artifact_root())
+    )
+    run_parser.add_argument(
+        "--zmux-binary",
+        default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")),
+    )
+    run_parser.add_argument(
+        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux")
+    )
     run_parser.add_argument("--timeout-seconds", type=float, default=2.0)
 
     run_case_parser = sub.add_parser("run-case")
     run_case_parser.add_argument("case_name")
-    run_case_parser.add_argument("--artifact-root", default=os.environ.get("SMOKE_ARTIFACT_ROOT", "/tmp"))
-    run_case_parser.add_argument("--zmux-binary", default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")))
-    run_case_parser.add_argument("--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"))
+    run_case_parser.add_argument(
+        "--artifact-root", default=str(artifact_root.default_artifact_root())
+    )
+    run_case_parser.add_argument(
+        "--zmux-binary",
+        default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")),
+    )
+    run_case_parser.add_argument(
+        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux")
+    )
     run_case_parser.add_argument("--timeout-seconds", type=float, default=2.0)
 
     inner = sub.add_parser("inner-probe")

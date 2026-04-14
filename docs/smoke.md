@@ -8,11 +8,15 @@ management, control mode, rendering, and clean exit behavior.
 All smoke infrastructure lives in `regress/`, but runnable smoke commands now
 go through one root timed runner: `regress/test_orchestrator.py`.
 `run-all.sh` is only a compatibility shim. The root runner gives every smoke
-case its own timer and sandbox under `/tmp/zmux_test_<hex>`, forces `HOME`,
+case its own timer and sandbox under `$ZMUX_TMP_ROOT/zmux_test_<hex>` (default
+`/tmp/zmux/zmux_test_<hex>`), forces `HOME`,
 `TMPDIR`, and XDG state into that sandbox, prepends a per-case `bin/` to
 `PATH`, and verifies that no net-new `tmux` or `zmux` process survives the
 case. The checked-in timeout policy in `regress/test_timeouts.json` is explicit
 per case; default family values are only a bootstrap aid for calibration work.
+Before a timed smoke run starts, the runner prunes stale children under
+`$ZMUX_TMP_ROOT`; set `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS=0` to disable that aging
+pass.
 
 When user namespaces are available, each case runs inside a user+pid namespace
 so descendant processes are torn down with the namespace. Otherwise the root
@@ -71,7 +75,9 @@ Host capability policy:
 |---|---|---|
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
 | `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
-| `SMOKE_ARTIFACT_ROOT` | `/tmp` | Base directory for ephemeral test sockets and logs |
+| `SMOKE_ARTIFACT_ROOT` | `$ZMUX_TMP_ROOT` | Base directory for ephemeral test sockets and logs |
+| `ZMUX_TMP_ROOT` | `/tmp/zmux` | Default parent for smoke artifacts and timed-runner sandboxes when `SMOKE_ARTIFACT_ROOT` is unset |
+| `ZMUX_SMOKE_PRUNE_MAX_AGE_HOURS` | `72` | Remove stale children under `ZMUX_TMP_ROOT` older than this many hours before a timed smoke run |
 | `SMOKE_AF_UNIX` | `auto` | Host capability policy for UNIX-domain sockets: `auto` probes and skips smoke cases if unavailable, `require` fails instead of skipping, `skip` forces an environment skip without probing |
 | `ZMUX_TEST_TIMEOUT_MULTIPLIER` | `1.0` | Multiply the checked-in case timers when a slower host needs more slack |
 | `SMOKE_CONTAINMENT_BACKEND` | `auto` | Containment backend for `run-contained.py`: `auto`, `systemd`, `disciplined`, `systemd-disciplined`, or `off` |

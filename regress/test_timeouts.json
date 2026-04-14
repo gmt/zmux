@@ -29,6 +29,8 @@
     "zig-unit:format-resolve-test.test.lookup_option_value handles orphan window scope and empty custom scopes": 5.0,
     "zig-unit:format-resolve-test.test.child_context_for_pane preserves inherited metadata and extras": 5.0,
     "zig-unit:format-resolve-test.test.child_context_for_client without attached session keeps parent scope chain": 5.0,
+    "zig-unit:format-resolve-test.test.server_name format resolves to compat_name": 5.0,
+    "zig-unit:format-resolve-test.test.server_name format in compat mode resolves to tmux": 5.0,
     "zig-unit:server-client-test.test.server_client_dispatch_for_test unlock resumes tty and redraws attached client": 5.0,
     "zig-unit:server-client-test.test.server_client_attach reattaches after detach and sends ready for the new peer state": 5.0,
     "zig-unit:server-client-test.test.server_client_dispatch_for_test exiting on a detached client sends exited and marks it dead": 5.0,

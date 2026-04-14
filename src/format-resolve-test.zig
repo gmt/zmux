@@ -629,3 +629,23 @@ test "client_written returns null without client and reflects written field" {
         try std.testing.expectEqualStrings("42567", result);
     }
 }
+
+test "server_name format resolves to compat_name" {
+    const ctx = FormatContext{};
+    const result = format_require_complete(xm.allocator, "#{server_name}", &ctx).?;
+    defer xm.allocator.free(result);
+    const zmux_mod = @import("zmux.zig");
+    try std.testing.expectEqualStrings(zmux_mod.compat_name, result);
+}
+
+test "server_name format in compat mode resolves to tmux" {
+    const zmux_mod = @import("zmux.zig");
+    const saved = zmux_mod.compat_name;
+    zmux_mod.compat_name = "tmux";
+    defer zmux_mod.compat_name = saved;
+
+    const ctx = FormatContext{};
+    const result = format_require_complete(xm.allocator, "#{server_name}", &ctx).?;
+    defer xm.allocator.free(result);
+    try std.testing.expectEqualStrings("tmux", result);
+}

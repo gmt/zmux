@@ -141,6 +141,7 @@ const resolver_table_unsorted = [_]Resolver{
     .{ .name = "pid", .func = resolve_pid },
     .{ .name = "next_session_id", .func = resolve_next_session_id },
     .{ .name = "origin_flag", .func = resolve_origin_flag },
+    .{ .name = "server_name", .func = resolve_server_name },
     .{ .name = "server_sessions", .func = resolve_server_sessions },
     .{ .name = "socket_path", .func = resolve_socket_path },
     .{ .name = "start_time", .func = resolve_start_time },
@@ -1651,6 +1652,12 @@ fn resolve_next_session_id(alloc: std.mem.Allocator, ctx: *const FormatContext) 
 fn resolve_origin_flag(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const wp = ctx_pane(ctx) orelse return null;
     return alloc.dupe(u8, if ((pane_state_screen(wp).mode & T.MODE_ORIGIN) != 0) "1" else "0") catch unreachable;
+}
+
+fn resolve_server_name(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
+    _ = ctx;
+    const zmux_mod = @import("zmux.zig");
+    return alloc.dupe(u8, zmux_mod.compat_name) catch unreachable;
 }
 
 fn resolve_server_sessions(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

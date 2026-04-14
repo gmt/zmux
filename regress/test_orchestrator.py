@@ -55,6 +55,7 @@ FAST_SMOKE_SHELLS = (
     "alerts-smoke.sh",
     "session-group-resize.sh",
     "second-socket-attach.sh",
+    "semicolon-chaining.sh",
     "command-order.sh",
     "attach-detach-client.sh",
     "startup-status-width.sh",

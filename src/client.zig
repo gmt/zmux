@@ -343,6 +343,26 @@ fn client_set_shell_command(shell_command: ?[]const u8) void {
     if (shell_command) |cmd| client_shell_command = xm.xstrdup(cmd);
 }
 
+fn client_exit_message() []const u8 {
+    return switch (client_exitreason) {
+        .detached => if (client_exitsession) |s|
+            xm.xasprintf("detached (from session {s})", .{s})
+        else
+            "detached",
+        .detached_hup => if (client_exitsession) |s|
+            xm.xasprintf("detached and SIGHUP (from session {s})", .{s})
+        else
+            "detached and SIGHUP",
+        .lost_tty => "lost tty",
+        .terminated => "terminated",
+        .lost_server => "server exited unexpectedly",
+        .exited => "exited",
+        .server_exited => "server exited",
+        .message_provided => client_exitmessage orelse "unknown reason",
+        .none => "",
+    };
+}
+
 fn client_record_detach(msg_type: protocol.MsgType, data: []const u8) bool {
     if (data.len == 0 or data[data.len - 1] != 0) return false;
 
@@ -610,6 +630,12 @@ pub fn client_main(
         client_exec_shell = null;
         client_exec_command = null;
         client_exec(shell, command);
+    }
+
+    if (client_exitreason != .none) {
+        const msg = client_exit_message();
+        _ = std.fs.File.stderr().writeAll(msg) catch {};
+        _ = std.fs.File.stderr().writeAll("\n") catch {};
     }
 
     if (client_exitreason == .detached_hup) {

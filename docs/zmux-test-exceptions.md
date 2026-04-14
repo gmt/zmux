@@ -18,7 +18,6 @@ Use this file for deliberate test exceptions only.
 | `format-async` shell job cases (`format async shell collects output…`, `…reports slow commands…`, `…completion order…`, `…rapid re-expansion…`, `…refreshes cached output…`, `…caches completed no-output jobs…`) | `zig-stress` | `stress-only` | These cases spawn real child processes via libevent and poll for async completion. | Leave in `zig-stress` unless a deterministic mock harness replaces the live job loop. |
 | `cmd-pipe-pane` directionality and lifecycle cases (`pipe direction flags control write routing…`, `pane_pipe_close terminates child…`, `writing to a pipe whose remote end is closed…`, `rapid pipe open and close cycles…`, `pipe read direction feeds child output…`, `pane_pipe_read_ready is harmless when pipe_fd is already closed`) | `zig-stress` | `stress-only` | These cases exercise child-process pipe I/O through pane-io primitives. | Leave in `zig-stress`. |
 | `smoke-sweep-oracle:display-menu` | `smoke-oracle` | `oracle-bug` | The tmux oracle control client still exits during the display-menu exercise, so the oracle lane is not a trustworthy baseline for this command today. | Tighten the oracle control-client exercise and restore the case once tmux is green. |
-| `smoke-sweep-oracle:show-messages` | `smoke-oracle` | `oracle-bug` | The tmux oracle control client still exits during the show-messages exercise, so the oracle lane is not a trustworthy baseline for this command today. | Tighten the oracle control-client exercise and restore the case once tmux is green. |
 
 ## Notes
 

@@ -76,7 +76,7 @@ set-window-option	window	implemented
 show-buffer	none	implemented
 show-environment	session	implemented
 show-hooks	pane	implemented
-show-messages	client	implemented	oracle-bug	tmux oracle exits the control client during the exercise
+show-messages	client	implemented
 show-options	pane	implemented
 show-prompt-history	none	implemented
 show-window-options	window	implemented

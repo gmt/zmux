@@ -475,7 +475,11 @@ pub fn cmdq_append(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList) void {
 }
 
 pub fn cmdq_append_event(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, event: ?*const T.key_event) void {
-    const state = cmdq_new_state(null, event, 0);
+    cmdq_append_event_flags(cl, cmdlist, event, 0);
+}
+
+pub fn cmdq_append_event_flags(cl: ?*T.Client, cmdlist: *cmd_mod.CmdList, event: ?*const T.key_event, state_flags: u32) void {
+    const state = cmdq_new_state(null, event, state_flags);
     defer cmdq_free_state(state);
     _ = cmdq_append_item(cl, cmdq_get_command(@ptrCast(cmdlist), state));
 }

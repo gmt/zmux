@@ -25,6 +25,7 @@ const cmd_mod = @import("cmd.zig");
 const cmdq = @import("cmd-queue.zig");
 const file_mod = @import("file.zig");
 const opts = @import("options.zig");
+const proc_mod = @import("proc.zig");
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
@@ -72,8 +73,21 @@ pub fn cfg_load(cl: ?*T.Client) void {
     for (cfg_file_paths.items) |path| {
         _ = cfg_source_path(cl, path, .{ .quiet = cfg_quiet });
     }
+    if (proc_mod.libevent != null) {
+        // Server context: config commands are on the server queue.
+        // Append a callback that fires after all of them.
+        _ = cmdq.cmdq_append_item(null, cmdq.cmdq_get_callback1("cfg-done", cfg_done_callback, null));
+    } else {
+        // Test/sync context: commands ran immediately above.
+        cfg_finished = true;
+        cfg_show_causes(cl);
+    }
+}
+
+fn cfg_done_callback(_: *cmdq.CmdqItem, _: ?*anyopaque) T.CmdRetval {
     cfg_finished = true;
-    cfg_show_causes(cl);
+    cfg_show_causes(null);
+    return .normal;
 }
 
 pub fn cfg_source_path(cl: ?*T.Client, raw_path: []const u8, flags: CfgFlags) bool {
@@ -156,9 +170,14 @@ fn cfg_load_buffer(cl: ?*T.Client, path: []const u8, content: []const u8, flags:
                 const list: *cmd_mod.CmdList = @ptrCast(@alignCast(cl_ptr));
                 if (flags.parse_only) {
                     cmd_mod.cmd_list_free(list);
+                } else if (proc_mod.libevent != null) {
+                    // Event loop available (server context): enqueue
+                    // for async execution so run-shell and if-shell
+                    // commands work during config loading.
+                    cmdq.cmdq_append_event_flags(cl, list, null, T.CMDQ_STATE_NOATTACH);
                 } else {
-                    if (cmdq.cmdq_run_immediate_flags(cl, list, T.CMDQ_STATE_NOATTACH) == .@"error")
-                        return false;
+                    // No event loop (tests): execute synchronously.
+                    _ = cmdq.cmdq_run_immediate_flags(cl, list, T.CMDQ_STATE_NOATTACH);
                 }
             }
             return true;

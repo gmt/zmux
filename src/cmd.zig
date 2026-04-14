@@ -539,17 +539,77 @@ pub fn cmd_parse_one(
     return cmd;
 }
 
-/// Parse a full semicolon/newline-separated command string into a CmdList.
+/// Parse a full semicolon-separated command list from argv into a CmdList.
+/// Splits on bare ";" tokens and tokens ending with unescaped ";", matching
+/// tmux's cmd_parse_from_arguments behaviour. Backslash-semicolon (\;) is
+/// treated as a literal semicolon within the token.
 pub fn cmd_parse_from_argv_with_cause(
     argv: []const []const u8,
     cl: ?*T.Client,
     cause: *?[]u8,
 ) !*CmdList {
-    const list = xm.allocator.create(CmdList) catch unreachable;
-    list.* = .{};
+    const alloc = xm.allocator;
 
-    const cmd = try cmd_parse_one(argv, cl, cause);
-    list.append(cmd);
+    const list = alloc.create(CmdList) catch unreachable;
+    list.* = .{};
+    errdefer cmd_list_free(list);
+
+    // Tokens we allocate when stripping backslash from \;
+    var modified: std.ArrayList([]u8) = .{};
+    defer {
+        for (modified.items) |m| alloc.free(m);
+        modified.deinit(alloc);
+    }
+
+    // Args accumulated for the current command.
+    var cur_args: std.ArrayList([]const u8) = .{};
+    defer cur_args.deinit(alloc);
+
+    for (argv) |token| {
+        var end = false;
+
+        if (token.len > 0 and token[token.len - 1] == ';') {
+            const stripped = token[0 .. token.len - 1];
+            if (stripped.len > 0 and stripped[stripped.len - 1] == '\\') {
+                // Backslash-semicolon: replace '\;' with ';'.
+                const new_tok = alloc.alloc(u8, stripped.len) catch unreachable;
+                @memcpy(new_tok[0 .. stripped.len - 1], stripped[0 .. stripped.len - 1]);
+                new_tok[stripped.len - 1] = ';';
+                modified.append(alloc, new_tok) catch unreachable;
+                cur_args.append(alloc, new_tok) catch unreachable;
+            } else {
+                // Unescaped trailing semicolon: split here.
+                if (stripped.len > 0) {
+                    cur_args.append(alloc, stripped) catch unreachable;
+                }
+                end = true;
+            }
+        } else {
+            cur_args.append(alloc, token) catch unreachable;
+        }
+
+        if (end) {
+            if (cur_args.items.len > 0) {
+                const cmd = try cmd_parse_one(cur_args.items, cl, cause);
+                list.append(cmd);
+            }
+            cur_args.clearRetainingCapacity();
+        }
+    }
+
+    // Remaining args form the last command.
+    if (cur_args.items.len > 0) {
+        const cmd = try cmd_parse_one(cur_args.items, cl, cause);
+        list.append(cmd);
+    }
+
+    // Empty argv with no semicolons: cur_args is empty, list is empty.
+    // Fall through to cmd_parse_one which will report "empty command".
+    if (list.head == null) {
+        const cmd = try cmd_parse_one(argv, cl, cause);
+        list.append(cmd);
+    }
+
     return list;
 }
 
@@ -882,6 +942,75 @@ test "cmd_parse_from_argv_with_cause preserves parse cause" {
         cmd_parse_from_argv_with_cause(&.{"definitely-not-real"}, null, &cause),
     );
     try std.testing.expectEqualStrings("unknown command: definitely-not-real", cause.?);
+}
+
+fn count_cmds(list: *CmdList) usize {
+    var n: usize = 0;
+    var it = list.head;
+    while (it) |c| : (it = c.next) n += 1;
+    return n;
+}
+
+test "cmd_parse_from_argv splits on bare semicolon" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const list = try cmd_parse_from_argv_with_cause(
+        &.{ "set-option", "status-left", "foo", ";", "set-option", "status-right", "bar" },
+        null,
+        &cause,
+    );
+    defer cmd_list_free(list);
+
+    try std.testing.expectEqual(@as(usize, 2), count_cmds(list));
+    try std.testing.expectEqualStrings("set-option", list.head.?.entry.name);
+    try std.testing.expectEqualStrings("set-option", list.head.?.next.?.entry.name);
+}
+
+test "cmd_parse_from_argv treats backslash-semicolon as literal" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const list = try cmd_parse_from_argv_with_cause(
+        &.{ "display-message", "hello\\;" },
+        null,
+        &cause,
+    );
+    defer cmd_list_free(list);
+
+    try std.testing.expectEqual(@as(usize, 1), count_cmds(list));
+    try std.testing.expectEqualStrings("display-message", list.head.?.entry.name);
+    const args = list.head.?.args;
+    try std.testing.expectEqual(@as(usize, 1), args.count());
+    try std.testing.expectEqualStrings("hello;", args.value_at(0).?);
+}
+
+test "cmd_parse_from_argv handles multiple semicolons" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const list = try cmd_parse_from_argv_with_cause(
+        &.{ "send-keys", "C-l", ";", "run-shell", "echo hi", ";", "clear-history" },
+        null,
+        &cause,
+    );
+    defer cmd_list_free(list);
+
+    try std.testing.expectEqual(@as(usize, 3), count_cmds(list));
+    try std.testing.expectEqualStrings("send-keys", list.head.?.entry.name);
+    try std.testing.expectEqualStrings("run-shell", list.head.?.next.?.entry.name);
+    try std.testing.expectEqualStrings("clear-history", list.head.?.next.?.next.?.entry.name);
+}
+
+test "cmd_parse_from_argv ignores semicolons in the middle of tokens" {
+    var cause: ?[]u8 = null;
+    defer if (cause) |msg| xm.allocator.free(msg);
+    const list = try cmd_parse_from_argv_with_cause(
+        &.{ "display-message", "foo;bar" },
+        null,
+        &cause,
+    );
+    defer cmd_list_free(list);
+
+    try std.testing.expectEqual(@as(usize, 1), count_cmds(list));
+    try std.testing.expectEqualStrings("display-message", list.head.?.entry.name);
 }
 
 // ── Preprocessor / directive tests ───────────────────────────────────────

@@ -166,6 +166,13 @@ pub fn build(b: *std.Build) void {
     smoke_all_step.dependOn(&smoke_all_cmd.step);
 
     // --------------------------------------------------
+    // `zig build smoke-cleanup` – remove smoke artifacts from /tmp
+    // --------------------------------------------------
+    const smoke_cleanup_step = b.step("smoke-cleanup", "Remove managed and legacy smoke artifacts from /tmp");
+    const smoke_cleanup_cmd = b.addSystemCommand(&.{ "python3", "regress/cleanup-artifacts.py" });
+    smoke_cleanup_step.dependOn(&smoke_cleanup_cmd.step);
+
+    // --------------------------------------------------
     // `zig build test`
     // --------------------------------------------------
     const unit_tests = b.addTest(.{

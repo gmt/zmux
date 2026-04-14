@@ -104,6 +104,7 @@ Or call the root runner directly:
 python3 regress/test_orchestrator.py smoke-fast
 python3 regress/test_orchestrator.py smoke-fast --case-filter smoke-shell:session-group-resize
 python3 regress/test_orchestrator.py smoke-oracle
+zig build smoke-cleanup
 ```
 
 To regenerate the checked-in case timers from local measurements, use:
@@ -114,6 +115,14 @@ python3 regress/calibrate_timeouts.py --suite smoke-fast --json-report /tmp/zmux
 
 For ad hoc repros outside the root runner, `run-contained.py` is still
 available, but it is no longer the normal smoke entrypoint.
+
+To remove managed smoke artifacts and legacy top-level `zmux_test_*` sandboxes
+from `/tmp`, use:
+
+```
+zig build smoke-cleanup
+python3 regress/cleanup-artifacts.py --dry-run
+```
 
 For layered gdb/strace work on the grouped-session repro, see
 [docs/session-group-lab.md](./session-group-lab.md).

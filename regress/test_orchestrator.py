@@ -63,6 +63,7 @@ FAST_SMOKE_SHELLS = (
     "formatter-smoke.sh",
     "kill-server-cleanup.sh",
     "sixel-roundtrip.sh",
+    "ohmytmux-smoke.sh",
 )
 RECURSIVE_CASES = (
     "tmux-in-zmux",

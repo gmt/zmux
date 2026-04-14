@@ -59,6 +59,7 @@
     "smoke-shell:list-and-display": 65.0,
     "smoke-shell:new-session-no-client": 20.0,
     "smoke-shell:new-session-size": 30.0,
+    "smoke-shell:ohmytmux-smoke": 120.0,
     "smoke-shell:second-socket-attach": 12.0,
     "smoke-shell:session-group-resize": 75.0,
     "smoke-shell:shell-exit-cleanup": 45.0,

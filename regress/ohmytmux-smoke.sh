@@ -22,27 +22,35 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 smoke_init ohmytmux-smoke
 smoke_use_real_shell || exit $?
 
-OHMYTMUX_SRC="$HOME/.tmux/.tmux.conf"
+OHMYTMUX_FIXTURE_DIR="$SCRIPT_DIR/fixtures/ohmytmux"
+OHMYTMUX_SRC="$OHMYTMUX_FIXTURE_DIR/.tmux.conf"
+OHMYTMUX_LOCAL_SRC="$OHMYTMUX_FIXTURE_DIR/.tmux.conf.local"
 [ -f "$OHMYTMUX_SRC" ] || {
-    echo "SKIP: oh-my-tmux not found at $OHMYTMUX_SRC"
-    exit 77
+	echo "missing vendored oh-my-tmux fixture: $OHMYTMUX_SRC"
+	exit 1
+}
+[ -f "$OHMYTMUX_LOCAL_SRC" ] || {
+	echo "missing vendored oh-my-tmux fixture: $OHMYTMUX_LOCAL_SRC"
+	exit 1
 }
 
 python3 -c 'import pty, pexpect.ANSI' 2>/dev/null || {
-    echo "SKIP: python3 pty or pexpect unavailable"
-    exit 77
+	echo "SKIP: python3 pty or pexpect unavailable"
+	exit 77
 }
 
 # -- oh-my-tmux sandbox -------------------------------------------------------
 
 mkdir -p "$SMOKE_HOME/.tmux"
 cp "$OHMYTMUX_SRC" "$SMOKE_HOME/.tmux/.tmux.conf"
+cp "$OHMYTMUX_LOCAL_SRC" "$SMOKE_HOME/.tmux/.tmux.conf.local"
 ln -sf "$SMOKE_HOME/.tmux/.tmux.conf" "$SMOKE_HOME/.tmux.conf"
+ln -sf "$SMOKE_HOME/.tmux/.tmux.conf.local" "$SMOKE_HOME/.tmux.conf.local"
 
 # The .local file is sourced both as tmux config (via `tmux source`) and as
 # shell (via `cut -c3- | sh`) by oh-my-tmux's _apply_configuration.  Shell
 # variable overrides must be plain assignments; tmux commands work as-is.
-cat > "$SMOKE_HOME/.tmux.conf.local" <<'LOCALEOF'
+cat >"$SMOKE_HOME/.tmux.conf.local" <<'LOCALEOF'
 tmux_conf_theme_colour_1="#080808"
 tmux_conf_theme_colour_2="#303030"
 tmux_conf_theme_colour_3="#8a8a8a"
@@ -207,6 +215,7 @@ if not prompt_seen:
 
 # -- inspect the rendered screen -----------------------------------------------
 
+os.chdir(root)
 screen = ANSI.ANSI(rows, cols)
 screen.write(output.decode("utf-8", "ignore"))
 

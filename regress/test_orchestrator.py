@@ -110,8 +110,12 @@ class TimeoutPolicy:
         allow_default_timeouts: bool,
     ) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        self.defaults = {str(key): float(value) for key, value in payload["defaults"].items()}
-        self.case_timeouts = {str(key): float(value) for key, value in payload.get("cases", {}).items()}
+        self.defaults = {
+            str(key): float(value) for key, value in payload["defaults"].items()
+        }
+        self.case_timeouts = {
+            str(key): float(value) for key, value in payload.get("cases", {}).items()
+        }
         self.multiplier = multiplier
         self.override_seconds = override_seconds
         self.allow_default_timeouts = allow_default_timeouts
@@ -176,11 +180,15 @@ def discover_zig_tests(binary: pathlib.Path) -> list[dict[str, object]]:
         try:
             index_text, name = raw_line.split("\t", 1)
         except ValueError as exc:
-            raise HarnessError(f"bad --list-tests line from {binary}: {raw_line!r}") from exc
-        payload.append({
-            "index": int(index_text),
-            "name": name,
-        })
+            raise HarnessError(
+                f"bad --list-tests line from {binary}: {raw_line!r}"
+            ) from exc
+        payload.append(
+            {
+                "index": int(index_text),
+                "name": name,
+            }
+        )
     return payload
 
 
@@ -207,7 +215,9 @@ def ensure_museum_tmux() -> pathlib.Path:
         timeout=1800.0,
     )
     if proc.returncode != 0:
-        raise HarnessError(f"unable to build museum tmux:\n{proc.stdout}\n{proc.stderr}")
+        raise HarnessError(
+            f"unable to build museum tmux:\n{proc.stdout}\n{proc.stderr}"
+        )
     return ensure_executable(MUSEUM_BUILD, "museum tmux")
 
 
@@ -216,6 +226,9 @@ def resolve_oracle_tmux(explicit: str | None) -> pathlib.Path:
         path = pathlib.Path(explicit)
         if path.is_file() and os.access(path, os.X_OK):
             return path
+    system_tmux_path = pathlib.Path("/usr/bin/tmux")
+    if system_tmux_path.is_file() and os.access(system_tmux_path, os.X_OK):
+        return system_tmux_path
     system_tmux = shutil.which("tmux")
     if system_tmux is not None:
         return pathlib.Path(system_tmux)
@@ -293,7 +306,11 @@ def prepare_sandbox_tools(
     (sandbox / "owned-pids").mkdir(parents=True, exist_ok=True)
     (sandbox / "logs").mkdir(parents=True, exist_ok=True)
 
-    for name, target in (("zmux", zmux_binary), ("tmux", oracle_tmux), ("hello-shell-ansi", helper_binary)):
+    for name, target in (
+        ("zmux", zmux_binary),
+        ("tmux", oracle_tmux),
+        ("hello-shell-ansi", helper_binary),
+    ):
         if target is None:
             continue
         link_path = bin_dir / name
@@ -390,7 +407,9 @@ class SuiteRunner:
             override_seconds=args.timeout_override,
             allow_default_timeouts=args.allow_default_timeouts,
         )
-        self.zmux_binary = ensure_executable(pathlib.Path(args.zmux_binary or DEFAULT_ZMUX), "zmux binary")
+        self.zmux_binary = ensure_executable(
+            pathlib.Path(args.zmux_binary or DEFAULT_ZMUX), "zmux binary"
+        )
         self.oracle_tmux = resolve_oracle_tmux(args.oracle_binary)
         self.helper_binary = None
         helper_path = pathlib.Path(args.helper_binary or DEFAULT_HELPER)
@@ -399,7 +418,9 @@ class SuiteRunner:
         self.af_unix_mode = host_caps.normalize_af_unix_mode(args.af_unix)
         self.af_unix_status = host_caps.af_unix_status(mode=self.af_unix_mode)
         if self.af_unix_mode == "require" and not self.af_unix_status.available:
-            raise HarnessError(host_caps.capability_reason("af_unix", self.af_unix_status))
+            raise HarnessError(
+                host_caps.capability_reason("af_unix", self.af_unix_status)
+            )
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self.results: list[CaseResult] = []
         self.interrupted_by: int | None = None
@@ -449,11 +470,15 @@ class SuiteRunner:
         if suite == "zig-unit":
             if self.args.zig_test_binary is None:
                 raise HarnessError("zig-unit requires --zig-test-binary")
-            return self.build_zig_cases(pathlib.Path(self.args.zig_test_binary), "zig-unit")
+            return self.build_zig_cases(
+                pathlib.Path(self.args.zig_test_binary), "zig-unit"
+            )
         if suite == "zig-stress":
             if self.args.zig_test_binary is None:
                 raise HarnessError("zig-stress requires --zig-test-binary")
-            return self.build_zig_cases(pathlib.Path(self.args.zig_test_binary), "zig-stress")
+            return self.build_zig_cases(
+                pathlib.Path(self.args.zig_test_binary), "zig-stress"
+            )
         if suite == "smoke-fast":
             return self.build_smoke_fast_cases()
         if suite == "smoke-oracle":
@@ -465,7 +490,11 @@ class SuiteRunner:
         if suite == "smoke-docker":
             return self.build_docker_cases()
         if suite == "smoke-all":
-            return self.build_smoke_fast_cases() + self.build_smoke_oracle_cases() + self.build_docker_cases()
+            return (
+                self.build_smoke_fast_cases()
+                + self.build_smoke_oracle_cases()
+                + self.build_docker_cases()
+            )
         if suite == "fuzz-smoke":
             return self.build_fuzz_cases()
         raise HarnessError(f"unknown suite: {suite}")
@@ -507,7 +536,14 @@ class SuiteRunner:
                     case_id=f"smoke-sweep:{command}",
                     label=command,
                     family="smoke-sweep",
-                    argv=[sys.executable, str(SMOKE_HARNESS), "run-case", f"sweep:{command}", "--mode", "implemented"],
+                    argv=[
+                        sys.executable,
+                        str(SMOKE_HARNESS),
+                        "run-case",
+                        f"sweep:{command}",
+                        "--mode",
+                        "implemented",
+                    ],
                     required_capabilities=frozenset({"af_unix"}),
                 )
             )
@@ -516,7 +552,14 @@ class SuiteRunner:
                 case_id="smoke-inside:inside",
                 label="inside",
                 family="smoke-inside",
-                argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "inside", "--mode", "implemented"],
+                argv=[
+                    sys.executable,
+                    str(SMOKE_HARNESS),
+                    "run-case",
+                    "inside",
+                    "--mode",
+                    "implemented",
+                ],
                 required_capabilities=frozenset({"af_unix"}),
             )
         )
@@ -534,7 +577,14 @@ class SuiteRunner:
                     case_id=f"smoke-sweep-oracle:{command}",
                     label=command,
                     family="smoke-sweep",
-                    argv=[sys.executable, str(SMOKE_HARNESS), "run-case", f"sweep:{command}", "--mode", "oracle"],
+                    argv=[
+                        sys.executable,
+                        str(SMOKE_HARNESS),
+                        "run-case",
+                        f"sweep:{command}",
+                        "--mode",
+                        "oracle",
+                    ],
                     env_overrides=env,
                     required_capabilities=frozenset({"af_unix"}),
                 )
@@ -544,7 +594,14 @@ class SuiteRunner:
                 case_id="smoke-inside-oracle:inside",
                 label="inside-oracle",
                 family="smoke-inside",
-                argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "inside", "--mode", "oracle"],
+                argv=[
+                    sys.executable,
+                    str(SMOKE_HARNESS),
+                    "run-case",
+                    "inside",
+                    "--mode",
+                    "oracle",
+                ],
                 env_overrides=env,
                 required_capabilities=frozenset({"af_unix"}),
             )
@@ -557,7 +614,14 @@ class SuiteRunner:
                 case_id="smoke-soak:soak",
                 label="soak",
                 family="smoke-soak",
-                argv=[sys.executable, str(SMOKE_HARNESS), "run-case", "soak", "--mode", "implemented"],
+                argv=[
+                    sys.executable,
+                    str(SMOKE_HARNESS),
+                    "run-case",
+                    "soak",
+                    "--mode",
+                    "implemented",
+                ],
                 required_capabilities=frozenset({"af_unix"}),
             )
         ]
@@ -588,15 +652,34 @@ class SuiteRunner:
     def build_fuzz_cases(self) -> list[Case]:
         binaries: list[tuple[str, pathlib.Path]] = []
         if self.args.input_fuzzer is not None:
-            binaries.append(("input", ensure_executable(pathlib.Path(self.args.input_fuzzer), "input fuzzer")))
+            binaries.append(
+                (
+                    "input",
+                    ensure_executable(
+                        pathlib.Path(self.args.input_fuzzer), "input fuzzer"
+                    ),
+                )
+            )
         if self.args.cmd_preprocess_fuzzer is not None:
-            binaries.append(("cmd-preprocess", ensure_executable(pathlib.Path(self.args.cmd_preprocess_fuzzer), "cmd preprocess fuzzer")))
+            binaries.append(
+                (
+                    "cmd-preprocess",
+                    ensure_executable(
+                        pathlib.Path(self.args.cmd_preprocess_fuzzer),
+                        "cmd preprocess fuzzer",
+                    ),
+                )
+            )
         if not binaries:
-            raise HarnessError("fuzz-smoke requires --input-fuzzer and/or --cmd-preprocess-fuzzer")
+            raise HarnessError(
+                "fuzz-smoke requires --input-fuzzer and/or --cmd-preprocess-fuzzer"
+            )
 
         corpus_root = ROOT_DIR / "fuzz" / "corpus"
         corpus_files = sorted(
-            path for path in corpus_root.iterdir() if path.is_file() and not path.name.endswith(".sh")
+            path
+            for path in corpus_root.iterdir()
+            if path.is_file() and not path.name.endswith(".sh")
         )
         cases: list[Case] = []
         for target_name, binary in binaries:
@@ -619,12 +702,18 @@ class SuiteRunner:
             cases = [
                 case
                 for case in cases
-                if any(filter_text in case.case_id or filter_text in case.label for filter_text in self.args.case_filter)
+                if any(
+                    filter_text in case.case_id or filter_text in case.label
+                    for filter_text in self.args.case_filter
+                )
             ]
         return cases
 
     def missing_capability_reason(self, case: Case) -> str | None:
-        if "af_unix" in case.required_capabilities and not self.af_unix_status.available:
+        if (
+            "af_unix" in case.required_capabilities
+            and not self.af_unix_status.available
+        ):
             return host_caps.capability_reason("af_unix", self.af_unix_status)
         return None
 
@@ -633,9 +722,13 @@ class SuiteRunner:
         if self.args.list_cases:
             for case in cases:
                 timeout_s, source = self.timeout_policy.lookup_case(case)
-                timeout_text = f"{timeout_s:.1f}" if timeout_s is not None else "MISSING"
+                timeout_text = (
+                    f"{timeout_s:.1f}" if timeout_s is not None else "MISSING"
+                )
                 caps_text = ",".join(sorted(case.required_capabilities)) or "-"
-                print(f"{case.case_id}\t{timeout_text}\t{source}\t{caps_text}\t{case.argv[0]}")
+                print(
+                    f"{case.case_id}\t{timeout_text}\t{source}\t{caps_text}\t{case.argv[0]}"
+                )
             return 0
 
         if not cases:
@@ -653,7 +746,9 @@ class SuiteRunner:
                     "Use --allow-default-timeouts only while calibrating."
                 )
 
-        namespace_text = "enabled" if self.use_namespaces else f"disabled ({self.namespace_reason})"
+        namespace_text = (
+            "enabled" if self.use_namespaces else f"disabled ({self.namespace_reason})"
+        )
         print(
             "orchestrator: "
             f"suite={self.args.suite} "
@@ -663,16 +758,27 @@ class SuiteRunner:
         for case in cases:
             result = self.run_case(case)
             self.results.append(result)
-            suffix = f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
+            suffix = (
+                f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
+            )
             detail = f" {result.detail}" if result.detail else ""
-            print(f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}")
+            print(
+                f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
+            )
             if self.interrupted_by is not None:
                 break
 
         self.print_summary()
         if self.interrupted_by is not None:
             return 128 + self.interrupted_by
-        return 0 if all(result.status in {"PASS", "SKIP"} and not result.cleanup_failed for result in self.results) else 1
+        return (
+            0
+            if all(
+                result.status in {"PASS", "SKIP"} and not result.cleanup_failed
+                for result in self.results
+            )
+            else 1
+        )
 
     def run_case(self, case: Case, timeout_s: float | None = None) -> CaseResult:
         missing_reason = self.missing_capability_reason(case)
@@ -724,7 +830,10 @@ class SuiteRunner:
 
         stdin_handle = None
         try:
-            with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+            with (
+                stdout_path.open("wb") as stdout_handle,
+                stderr_path.open("wb") as stderr_handle,
+            ):
                 if case.stdin_path is not None:
                     stdin_handle = open(case.stdin_path, "rb")
                 proc = subprocess.Popen(
@@ -751,7 +860,9 @@ class SuiteRunner:
                     self.active_namespaced = False
 
                 if status != "TIMEOUT":
-                    status, detail = self.classify_case_exit(case, proc.returncode, stdout_path, stderr_path)
+                    status, detail = self.classify_case_exit(
+                        case, proc.returncode, stdout_path, stderr_path
+                    )
         finally:
             if stdin_handle is not None:
                 stdin_handle.close()
@@ -759,7 +870,9 @@ class SuiteRunner:
         cleanup_failed = False
         survivors: list[smoke_owner.OwnedPid] = []
         if not namespaced:
-            survivors = smoke_owner.cleanup_registered(sandbox / "owned-pids", grace_seconds=0.2)
+            survivors = smoke_owner.cleanup_registered(
+                sandbox / "owned-pids", grace_seconds=0.2
+            )
         if survivors:
             cleanup_failed = True
             detail = f"{detail} owned={','.join(str(item.pid) for item in survivors)}".strip()
@@ -804,7 +917,9 @@ class SuiteRunner:
                 key, value = raw_line.split("=", 1)
                 payload[key] = value
             if "status" not in payload:
-                stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+                stderr_text = stderr_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).strip()
                 return "ERROR", f"(bad result) {stderr_text[:160]}".strip()
             status = payload["status"].upper()
             detail = ""

@@ -105,8 +105,6 @@ class RecursiveAttachHarness:
                 root_binary=self.oracle_binary,
                 inner_binary=self.oracle_binary,
                 expectation=Expectation(kind="timeout"),
-                exception_policy="skip-global",
-                note="tmux recursive attach does not hold a stable oracle baseline here",
             ),
             RecursiveCase(
                 name="zmux-in-zmux",

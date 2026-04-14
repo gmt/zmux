@@ -116,7 +116,10 @@ fn exec(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
     }
 
     const raw_value = args.value_at(1);
-    const expanded = if (args.has('F') and raw_value != null) blk: {
+    const needs_expand = args.has('F') or
+        (oe != null and oe.?.type == .choice and raw_value != null and
+        std.mem.indexOf(u8, raw_value.?, "#{") != null);
+    const expanded = if (needs_expand and raw_value != null) blk: {
         const ctx = format_mod.FormatContext{
             .item = @ptrCast(item),
             .client = cmdq.cmdq_get_client(item),
@@ -1082,4 +1085,78 @@ test "set-window-option marks active panes changed when automatic rename is enab
     try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
     try std.testing.expectEqual(@as(i64, 1), opts.options_get_number(opts.global_w_options, "automatic-rename"));
     try std.testing.expect(pane.flags & T.PANE_CHANGED != 0);
+}
+
+test "set-option expands format in choice value" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    // #{?1,on,off} should expand to "on" (true branch).
+    // extended-keys is a server option (off=0, on=1, always=2).
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "extended-keys", "#{?1,on,off}" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(i64, 1), opts.options_get_number(opts.global_options, "extended-keys"));
+}
+
+test "set-option expands format in choice value false branch" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    // Set to "on" first so we can verify the false branch actually changes the value.
+    opts.options_set_number(opts.global_options, "extended-keys", 1);
+
+    // #{?0,on,off} should expand to "off" (false branch).
+    // extended-keys is a server option (off=0, on=1, always=2).
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "extended-keys", "#{?0,on,off}" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqual(@as(i64, 0), opts.options_get_number(opts.global_options, "extended-keys"));
+}
+
+test "set-option preserves literal string values" {
+    opts.global_options = opts.options_create(null);
+    defer opts.options_free(opts.global_options);
+    opts.global_s_options = opts.options_create(null);
+    defer opts.options_free(opts.global_s_options);
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
+    opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+
+    // String options should NOT expand format strings (user may want literal #{host})
+    var cause: ?[]u8 = null;
+    const cmd = try cmd_mod.cmd_parse_one(&.{ "set-option", "-g", "status-left", "#{host}" }, null, &cause);
+    defer cmd_mod.cmd_free(cmd);
+    defer if (cause) |msg| xm.allocator.free(msg);
+
+    var list: cmd_mod.CmdList = .{};
+    var item = cmdq.CmdqItem{ .client = null, .cmdlist = &list };
+    try std.testing.expectEqual(T.CmdRetval.normal, cmd_mod.cmd_execute(cmd, &item));
+    try std.testing.expectEqualStrings("#{host}", opts.options_get_string(opts.global_s_options, "status-left"));
 }

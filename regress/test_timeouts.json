@@ -60,6 +60,7 @@
     "smoke-shell:new-session-no-client": 20.0,
     "smoke-shell:new-session-size": 30.0,
     "smoke-shell:second-socket-attach": 12.0,
+    "smoke-shell:semicolon-chaining": 30.0,
     "smoke-shell:session-group-resize": 75.0,
     "smoke-shell:shell-exit-cleanup": 45.0,
     "smoke-shell:shell-size-sentinel": 25.0,

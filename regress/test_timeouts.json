@@ -65,6 +65,7 @@
     "smoke-shell:shell-size-sentinel": 25.0,
     "smoke-shell:sixel-roundtrip": 40.0,
     "smoke-shell:startup-status-width": 20.0,
+    "smoke-shell:tmux-program-bootstrap": 60.0,
     "smoke-soak:soak": 1200.0,
     "smoke-sweep-oracle:attach-session": 5.0,
     "smoke-sweep-oracle:bind-key": 5.0,

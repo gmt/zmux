@@ -492,10 +492,19 @@ class SuiteRunner:
             return self.build_soak_cases()
         if suite == "smoke-docker":
             return self.build_docker_cases()
+        if suite == "smoke-most":
+            return (
+                self.build_smoke_fast_cases()
+                + self.build_smoke_oracle_cases()
+                + self.build_recursive_cases()
+                + self.build_docker_cases()
+            )
         if suite == "smoke-all":
             return (
                 self.build_smoke_fast_cases()
                 + self.build_smoke_oracle_cases()
+                + self.build_recursive_cases()
+                + self.build_soak_cases()
                 + self.build_docker_cases()
             )
         if suite == "fuzz-smoke":
@@ -964,6 +973,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "smoke-recursive",
             "smoke-soak",
             "smoke-docker",
+            "smoke-most",
             "smoke-all",
             "fuzz-smoke",
         ),

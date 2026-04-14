@@ -30,9 +30,10 @@ reaping.
 | `zig build smoke` | fast | Quick end-to-end pass against `zig-out/bin/zmux`. Runs ~16 shell tests plus a command sweep and inside-session check. Finishes in under a minute. |
 | `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests, but run against `/usr/bin/tmux`. Verifies that the test expectations themselves are correct. |
 | `zig build smoke-soak` | soak | Long-running stress-oriented tests against zmux. Checks for resource leaks (memory, FDs, client count) over sustained operation. |
-| `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior. Opt-in; not included in `smoke-all`. Use when working on client/attach semantics. |
+| `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior. Included in `smoke-most` and `smoke-all`; still useful standalone when working on client/attach semantics. |
 | `zig build smoke-docker` | docker | Docker + SSH harness against system tmux. Requires Docker. |
-| `zig build smoke-all` | all | Runs fast + oracle + docker suites together. |
+| `zig build smoke-most` | most | Runs fast + oracle + recursive + docker suites together, but leaves out soak. |
+| `zig build smoke-all` | all | Runs all smoke suites, including soak. |
 
 The oracle lane uses system tmux when available. If it is missing, the runner
 builds and uses `tmux-museum/out/gdb/tmux`.
@@ -47,8 +48,9 @@ Oracle-known-bad policy:
 ## When to use each
 
 - **Dev loop**: `zig build smoke` after any change that touches server, client, or command handling.
-- **Pre-merge**: `zig build smoke-all` for broader coverage including oracle comparison.
+- **Pre-merge**: `zig build smoke-most` for broader coverage including oracle comparison and recursive attach coverage without the soak wait.
 - **Soak / stability work**: `zig build smoke-soak` when investigating leaks or long-running behavior.
+- **Full smoke matrix**: `zig build smoke-all` when you really do want every smoke lane.
 - **Attach/detach work**: `zig build smoke-recursive-attach` for nested mux edge cases.
 
 ## Pass / fail

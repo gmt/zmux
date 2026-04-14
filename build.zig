@@ -149,6 +149,15 @@ pub fn build(b: *std.Build) void {
     soak_step.dependOn(&soak_cmd.step);
 
     // --------------------------------------------------
+    // `zig build smoke-most` – fast local + oracle + recursive + docker suites
+    // --------------------------------------------------
+    const smoke_most_step = b.step("smoke-most", "Run fast local, oracle, recursive-attach, and Docker smoke suites");
+    smoke_most_step.dependOn(b.getInstallStep());
+    const smoke_most_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-most" });
+    smoke_most_cmd.step.dependOn(b.getInstallStep());
+    smoke_most_step.dependOn(&smoke_most_cmd.step);
+
+    // --------------------------------------------------
     // `zig build smoke-docker` – Docker + SSH harness against system tmux
     // --------------------------------------------------
     const docker_step = b.step("smoke-docker", "Run the Docker + SSH smoke harness");
@@ -157,9 +166,9 @@ pub fn build(b: *std.Build) void {
     docker_step.dependOn(&docker_cmd.step);
 
     // --------------------------------------------------
-    // `zig build smoke-all` – fast local + oracle + docker suites
+    // `zig build smoke-all` – all smoke suites, including soak
     // --------------------------------------------------
-    const smoke_all_step = b.step("smoke-all", "Run fast local, oracle, and Docker smoke suites");
+    const smoke_all_step = b.step("smoke-all", "Run all smoke suites, including soak");
     smoke_all_step.dependOn(b.getInstallStep());
     const smoke_all_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-all" });
     smoke_all_cmd.step.dependOn(b.getInstallStep());

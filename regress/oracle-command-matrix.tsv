@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
 # Command	Context	zmux-status	exception-policy	note
-attach-session	client	implemented	skip-global	tmux oracle control attach still leaks cleanup state
+attach-session	client	implemented
 bind-key	none	implemented
 break-pane	pane	implemented
 capture-pane	pane	implemented
@@ -16,10 +16,10 @@ copy-mode	pane	implemented
 customize-mode	pane	implemented
 delete-buffer	none	implemented
 detach-client	client	implemented
-display-menu	client	implemented	skip-global	tmux oracle exits the control client during the exercise
+display-menu	client	implemented	oracle-bug	tmux oracle exits the control client during the exercise
 display-message	pane	implemented
 display-popup	client	implemented
-display-panes	client	implemented	skip-global	tmux oracle leaks cleanup state during the control exercise
+display-panes	client	implemented
 find-window	pane	implemented
 has-session	session	implemented
 if-shell	pane	implemented
@@ -76,7 +76,7 @@ set-window-option	window	implemented
 show-buffer	none	implemented
 show-environment	session	implemented
 show-hooks	pane	implemented
-show-messages	client	implemented	skip-global	tmux oracle exits the control client during the exercise
+show-messages	client	implemented	oracle-bug	tmux oracle exits the control client during the exercise
 show-options	pane	implemented
 show-prompt-history	none	implemented
 show-window-options	window	implemented

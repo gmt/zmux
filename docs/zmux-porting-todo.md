@@ -15,11 +15,17 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## display-message -p breaks after oh-my-tmux config loading
+## oh-my-tmux _hostname #() leaks literal #h
 
-- `tmux:` `display-message -p` works at all times for detached clients, including after oh-my-tmux config loads
-- `zmux:` `display-message -p` works at t=1s after server start, but by t=3s (after oh-my-tmux run-shell commands execute) it returns exit 1 with no output. `show-options` and `show-environment` continue to work — only the `-p` print path is affected
-- `likely files:` `src/cmd-display-message.zig`, `src/file-write.zig`, `src/server-print.zig` — something in the run-shell execution or config sourcing path corrupts the detached stdout write channel
+- `tmux:` oh-my-tmux's `_hostname` shell function runs via `#(cut -c3- "$TMUX_CONF" | sh -s _hostname ...)` and returns the hostname; `#h` in the status bar is replaced
+- `zmux:` the `#()` command appears to fail or return empty in certain environments, causing the literal `#h` argument to leak into the rendered status bar
+- `likely files:` `src/format.zig` (`format_job_get`), investigate why `_hostname` shell function fails
+
+## oh-my-tmux BEL character leaks into terminal
+
+- `tmux:` `set-titles on` sends OSC 0 (set terminal title) which includes `\x07` (BEL) as the terminator; terminals handle this silently
+- `zmux:` the BEL character from the title OSC sequence appears as a visible character in PTY capture tests; may also affect real terminals depending on terminal emulator handling
+- `likely files:` `src/tty.zig` (title output), `src/input.zig` (OSC handling)
 
 ## Command-line \; command chaining
 

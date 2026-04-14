@@ -75,3 +75,10 @@ Host capability policy:
 - `python3 regress/test_orchestrator.py --af-unix {auto,require,skip}` controls
   whether missing `AF_UNIX` support becomes an environment skip or an immediate
   harness failure.
+
+Namespace note:
+
+- The timed zig-unit and zig-stress lanes launch test cases inside `unshare`
+  user and pid namespaces, and now add `--mount-proc` so `/proc` agrees with
+  namespace-local PIDs. This keeps tty foreground-process lookups and
+  `/proc/<pid>` observations coherent inside the isolated test world.

@@ -15,9 +15,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         required=True,
-        choices=("zig-unit", "zig-stress", "smoke-fast", "smoke-oracle"),
+        choices=("zig-unit", "zig-stress", "smoke-fast", "smoke-oracle", "smoke-fuzz"),
     )
     parser.add_argument("--zig-test-binary")
+    parser.add_argument("--input-fuzzer")
+    parser.add_argument("--cmd-preprocess-fuzzer")
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--result-path", required=True)
@@ -69,6 +71,14 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.suite == "smoke-fuzz" and not (
+        args.input_fuzzer or args.cmd_preprocess_fuzzer
+    ):
+        print(
+            "shard runner: smoke-fuzz requires --input-fuzzer and/or --cmd-preprocess-fuzzer",
+            file=sys.stderr,
+        )
+        return 2
 
     runner_argv = [
         args.suite,
@@ -79,6 +89,12 @@ def main(argv: list[str]) -> int:
     ]
     if args.zig_test_binary:
         runner_argv[1:1] = ["--zig-test-binary", args.zig_test_binary]
+    if args.input_fuzzer:
+        runner_argv.extend(["--input-fuzzer", args.input_fuzzer])
+    if args.cmd_preprocess_fuzzer:
+        runner_argv.extend(["--cmd-preprocess-fuzzer", args.cmd_preprocess_fuzzer])
+    if args.suite == "smoke-fuzz":
+        runner_argv.extend(["--fuzz-mode", "require"])
 
     runner_args = orch.parse_args(runner_argv)
 

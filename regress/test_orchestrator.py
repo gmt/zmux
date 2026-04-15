@@ -739,8 +739,16 @@ class WorkerPool:
                 break
             if self._coordinator.shutdown_requested:
                 break
-            timeout_s = self._timeout_policy.for_case(item)
-            result = worker.run(item, timeout_s)
+            try:
+                timeout_s = self._timeout_policy.for_case(item)
+                result = worker.run(item, timeout_s)
+            except Exception as exc:
+                result = CaseResult(
+                    case=item,
+                    status="ERROR",
+                    elapsed_s=0.0,
+                    detail=f"(worker exception) {exc}",
+                )
             self._collector.record(result)
             with self._print_lock:
                 suffix = (

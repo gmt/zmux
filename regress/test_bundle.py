@@ -91,6 +91,7 @@ def main(argv: list[str]) -> int:
         if rc != 0 and overall_rc == 0:
             overall_rc = rc
         if runner.interrupted_by is not None:
+            overall_rc = rc
             break
     if not all_results:
         if overall_rc != 0:

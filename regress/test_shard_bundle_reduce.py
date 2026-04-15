@@ -29,6 +29,14 @@ def read_shard_payload(path: pathlib.Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def shard_index_from_path(path: pathlib.Path) -> int:
+    stem = path.stem
+    prefix = "shard-"
+    if not stem.startswith(prefix):
+        raise ValueError(f"unexpected shard filename: {path.name}")
+    return int(stem[len(prefix) :])
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     all_results: list[orch.CaseResult] = []
@@ -38,11 +46,14 @@ def main(argv: list[str]) -> int:
         try:
             family_name, results_dir_str = family_spec.split(":", 1)
             results_dir = pathlib.Path(results_dir_str)
-            shard_files = sorted(results_dir.glob("shard-*.json"))
+            shard_files = sorted(
+                results_dir.glob("shard-*.json"), key=shard_index_from_path
+            )
             if not shard_files:
                 print(f"warning: no shard files in {results_dir}", file=sys.stderr)
                 continue
-            for shard_index, shard_file in enumerate(shard_files):
+            for shard_file in shard_files:
+                expected_shard_index = shard_index_from_path(shard_file)
                 payload = read_shard_payload(shard_file)
                 payload_suite = cast(str, payload["suite"])
                 if payload_suite != family_name:
@@ -50,7 +61,7 @@ def main(argv: list[str]) -> int:
                         f"unexpected suite {payload_suite!r} in {shard_file.name}"
                     )
                 payload_shard_index = int(cast(int | str, payload["shard_index"]))
-                if payload_shard_index != shard_index:
+                if payload_shard_index != expected_shard_index:
                     raise orch.HarnessError(
                         f"unexpected shard index in {shard_file.name}"
                     )

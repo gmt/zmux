@@ -35,7 +35,7 @@ def print_result(
     if result.status == "PASS" and not result.cleanup_failed:
         if sys.stdout.isatty():
             print(
-                f"\r[{shard_index + 1}/{shard_count}] PASS {position}/{total} {result.case.case_id}",
+                f"\r\033[2K[{shard_index + 1}/{shard_count}] PASS {position}/{total} {result.case.case_id}",
                 end="",
                 flush=True,
             )

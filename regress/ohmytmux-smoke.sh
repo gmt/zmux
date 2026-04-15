@@ -213,6 +213,28 @@ if not prompt_seen:
     os.close(master)
     sys.exit(1)
 
+# Command clients spawned by oh-my-tmux startup helpers must not leave the
+# interactive pane stuck in an empty view-mode.
+try:
+    pane_state = subprocess.check_output(
+        [
+            tmux_bin,
+            "-S",
+            socket_path,
+            "display-message",
+            "-p",
+            "#{pane_in_mode}|#{pane_mode}|#{window_name}",
+        ],
+        env=env,
+        stderr=subprocess.STDOUT,
+        timeout=5,
+        text=True,
+    ).strip()
+except subprocess.CalledProcessError as exc:
+    pane_state = f"command failed: {exc.output!r}"
+except subprocess.TimeoutExpired:
+    pane_state = "command timed out"
+
 # -- inspect the rendered screen -----------------------------------------------
 
 os.chdir(root)
@@ -278,6 +300,10 @@ kill_proc(proc)
 os.close(master)
 
 failures = []
+
+state_parts = pane_state.split("|", 2)
+if len(state_parts) != 3 or state_parts[0] != "0" or state_parts[1] != "":
+    failures.append(f"oh-my-tmux startup left pane in mode: {pane_state!r}")
 
 if not themed:
     msg = "status bar does not show oh-my-tmux themed content"

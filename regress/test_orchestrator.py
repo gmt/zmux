@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Callable, cast
 
 import artifact_root
 import host_caps
@@ -453,6 +453,204 @@ def namespace_probe() -> tuple[bool, str | None]:
     return False, detail
 
 
+def stop_process(proc: subprocess.Popen[bytes], namespaced: bool) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if namespaced:
+            os.kill(proc.pid, signal.SIGTERM)
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=2.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if namespaced:
+            os.kill(proc.pid, signal.SIGKILL)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def classify_case_exit(
+    case: Case,
+    returncode: int,
+    stdout_path: pathlib.Path,
+    stderr_path: pathlib.Path,
+) -> tuple[str, str]:
+    if returncode == 77:
+        return "SKIP", ""
+    if returncode < 0:
+        return "ERROR", f"(signal {-returncode})"
+    if case.family.startswith("zig-"):
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+        payload: dict[str, str] = {}
+        for raw_line in stdout_text.splitlines():
+            if "=" not in raw_line:
+                continue
+            key, value = raw_line.split("=", 1)
+            payload[key] = value
+        if "status" not in payload:
+            stderr_text = stderr_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+            return "ERROR", f"(bad result) {stderr_text[:160]}".strip()
+        status = payload["status"].upper()
+        detail = ""
+        if payload.get("leak") == "1":
+            detail = "leak"
+        elif payload.get("log_err_count") not in {None, "0"}:
+            detail = f"log_err_count={payload['log_err_count']}"
+        if status == "PASS":
+            return "PASS", detail
+        if status == "SKIP":
+            return "SKIP", detail
+        return "FAIL", detail
+    return ("PASS", "") if returncode == 0 else ("FAIL", f"(exit {returncode})")
+
+
+class CaseWorker:
+    def __init__(
+        self,
+        *,
+        sandbox_root: pathlib.Path,
+        zmux_binary: pathlib.Path,
+        oracle_tmux: pathlib.Path,
+        helper_binary: pathlib.Path | None,
+        af_unix_mode: str,
+        use_namespaces: bool,
+        register_active: Callable[[Case, subprocess.Popen[bytes], bool], None],
+        unregister_active: Callable[[], None],
+    ) -> None:
+        self.sandbox_root = sandbox_root
+        self.zmux_binary = zmux_binary
+        self.oracle_tmux = oracle_tmux
+        self.helper_binary = helper_binary
+        self.af_unix_mode = af_unix_mode
+        self.use_namespaces = use_namespaces
+        self.register_active = register_active
+        self.unregister_active = unregister_active
+        self.active_proc: subprocess.Popen[bytes] | None = None
+        self.namespaced = False
+
+    def run(self, case: Case, timeout_s: float) -> CaseResult:
+        sandbox = make_sandbox(self.sandbox_root)
+        prepare_sandbox_tools(
+            sandbox,
+            zmux_binary=self.zmux_binary,
+            oracle_tmux=self.oracle_tmux,
+            helper_binary=self.helper_binary,
+        )
+        env = build_case_env(
+            sandbox,
+            zmux_binary=self.zmux_binary,
+            oracle_tmux=self.oracle_tmux,
+            helper_binary=self.helper_binary,
+            extra_env=case.env_overrides,
+            af_unix_mode=self.af_unix_mode,
+        )
+        stdout_path = sandbox / "logs" / "stdout.log"
+        stderr_path = sandbox / "logs" / "stderr.log"
+        started = time.monotonic()
+        status = "ERROR"
+        detail = ""
+
+        base_argv = list(case.argv)
+        self.namespaced = self.use_namespaces
+        before_mux = snapshot_mux_processes() if not self.namespaced else {}
+        if self.namespaced:
+            base_argv = [
+                shutil.which("unshare") or "unshare",
+                "--user",
+                "--map-current-user",
+                "--pid",
+                "--mount-proc",
+                "--fork",
+                "--kill-child",
+                "--forward-signals",
+                *base_argv,
+            ]
+
+        stdin_handle = None
+        try:
+            with (
+                stdout_path.open("wb") as stdout_handle,
+                stderr_path.open("wb") as stderr_handle,
+            ):
+                if case.stdin_path is not None:
+                    stdin_handle = open(case.stdin_path, "rb")
+                proc = subprocess.Popen(
+                    base_argv,
+                    stdin=stdin_handle,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    cwd=ROOT_DIR,
+                    env=env,
+                    start_new_session=True,
+                )
+                self.active_proc = proc
+                self.register_active(case, proc, self.namespaced)
+                try:
+                    proc.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    status = "TIMEOUT"
+                    detail = f"(limit {timeout_s:.1f}s)"
+                    stop_process(proc, self.namespaced)
+                finally:
+                    self.unregister_active()
+                    self.active_proc = None
+                    self.namespaced = False
+
+                if status != "TIMEOUT":
+                    status, detail = classify_case_exit(
+                        case, proc.returncode, stdout_path, stderr_path
+                    )
+        finally:
+            if stdin_handle is not None:
+                stdin_handle.close()
+
+        cleanup_failed = False
+        survivors: list[smoke_owner.OwnedPid] = []
+        if not self.use_namespaces:
+            survivors = smoke_owner.cleanup_registered(
+                sandbox / "owned-pids", grace_seconds=0.2
+            )
+        if survivors:
+            cleanup_failed = True
+            detail = f"{detail} owned={','.join(str(item.pid) for item in survivors)}".strip()
+        leaked_mux = (
+            cleanup_new_mux_processes(before_mux) if not self.use_namespaces else []
+        )
+        if leaked_mux:
+            cleanup_failed = True
+            detail = f"{detail} mux={','.join(leaked_mux)}".strip()
+        if cleanup_failed and status in {"PASS", "SKIP"}:
+            status = "CLEANUP_FAIL"
+
+        elapsed_s = time.monotonic() - started
+        result = CaseResult(
+            case=case,
+            status=status,
+            elapsed_s=elapsed_s,
+            detail=detail.strip(),
+            cleanup_failed=cleanup_failed,
+            sandbox=sandbox,
+        )
+        if status == "PASS" and not cleanup_failed:
+            shutil.rmtree(sandbox, ignore_errors=True)
+            result.sandbox = None
+        return result
+
+
 class SuiteRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -497,31 +695,7 @@ class SuiteRunner:
             signal.signal(sig, handle)
 
     def stop_process(self, proc: subprocess.Popen[bytes], namespaced: bool) -> None:
-        if proc.poll() is not None:
-            return
-        try:
-            if namespaced:
-                os.kill(proc.pid, signal.SIGTERM)
-            else:
-                os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=2.0)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            if namespaced:
-                os.kill(proc.pid, signal.SIGKILL)
-            else:
-                os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            pass
+        stop_process(proc, namespaced)
 
     def suite_cases(self) -> list[Case]:
         suite = self.args.suite
@@ -867,111 +1041,29 @@ class SuiteRunner:
             )
         if timeout_s is None:
             timeout_s = self.timeout_policy.for_case(case)
-        sandbox = make_sandbox(self.sandbox_root)
-        prepare_sandbox_tools(
-            sandbox,
+        worker = CaseWorker(
+            sandbox_root=self.sandbox_root,
             zmux_binary=self.zmux_binary,
             oracle_tmux=self.oracle_tmux,
             helper_binary=self.helper_binary,
-        )
-        env = build_case_env(
-            sandbox,
-            zmux_binary=self.zmux_binary,
-            oracle_tmux=self.oracle_tmux,
-            helper_binary=self.helper_binary,
-            extra_env=case.env_overrides,
             af_unix_mode=self.af_unix_mode,
+            use_namespaces=self.use_namespaces,
+            register_active=self._register_active,
+            unregister_active=self._unregister_active,
         )
-        stdout_path = sandbox / "logs" / "stdout.log"
-        stderr_path = sandbox / "logs" / "stderr.log"
-        started = time.monotonic()
-        status = "ERROR"
-        detail = ""
+        return worker.run(case, timeout_s)
 
-        base_argv = list(case.argv)
-        namespaced = self.use_namespaces
-        before_mux = snapshot_mux_processes() if not namespaced else {}
-        if namespaced:
-            base_argv = [
-                shutil.which("unshare") or "unshare",
-                "--user",
-                "--map-current-user",
-                "--pid",
-                "--mount-proc",
-                "--fork",
-                "--kill-child",
-                "--forward-signals",
-                *base_argv,
-            ]
+    def _register_active(
+        self, case: Case, proc: subprocess.Popen[bytes], namespaced: bool
+    ) -> None:
+        self.active_case = case
+        self.active_proc = proc
+        self.active_namespaced = namespaced
 
-        stdin_handle = None
-        try:
-            with (
-                stdout_path.open("wb") as stdout_handle,
-                stderr_path.open("wb") as stderr_handle,
-            ):
-                if case.stdin_path is not None:
-                    stdin_handle = open(case.stdin_path, "rb")
-                proc = subprocess.Popen(
-                    base_argv,
-                    stdin=stdin_handle,
-                    stdout=stdout_handle,
-                    stderr=stderr_handle,
-                    cwd=ROOT_DIR,
-                    env=env,
-                    start_new_session=True,
-                )
-                self.active_case = case
-                self.active_proc = proc
-                self.active_namespaced = namespaced
-                try:
-                    proc.wait(timeout=timeout_s)
-                except subprocess.TimeoutExpired:
-                    status = "TIMEOUT"
-                    detail = f"(limit {timeout_s:.1f}s)"
-                    self.stop_process(proc, namespaced)
-                finally:
-                    self.active_case = None
-                    self.active_proc = None
-                    self.active_namespaced = False
-
-                if status != "TIMEOUT":
-                    status, detail = self.classify_case_exit(
-                        case, proc.returncode, stdout_path, stderr_path
-                    )
-        finally:
-            if stdin_handle is not None:
-                stdin_handle.close()
-
-        cleanup_failed = False
-        survivors: list[smoke_owner.OwnedPid] = []
-        if not namespaced:
-            survivors = smoke_owner.cleanup_registered(
-                sandbox / "owned-pids", grace_seconds=0.2
-            )
-        if survivors:
-            cleanup_failed = True
-            detail = f"{detail} owned={','.join(str(item.pid) for item in survivors)}".strip()
-        leaked_mux = cleanup_new_mux_processes(before_mux) if not namespaced else []
-        if leaked_mux:
-            cleanup_failed = True
-            detail = f"{detail} mux={','.join(leaked_mux)}".strip()
-        if cleanup_failed and status in {"PASS", "SKIP"}:
-            status = "CLEANUP_FAIL"
-
-        elapsed_s = time.monotonic() - started
-        result = CaseResult(
-            case=case,
-            status=status,
-            elapsed_s=elapsed_s,
-            detail=detail.strip(),
-            cleanup_failed=cleanup_failed,
-            sandbox=sandbox,
-        )
-        if status == "PASS" and not cleanup_failed:
-            shutil.rmtree(sandbox, ignore_errors=True)
-            result.sandbox = None
-        return result
+    def _unregister_active(self) -> None:
+        self.active_case = None
+        self.active_proc = None
+        self.active_namespaced = False
 
     def classify_case_exit(
         self,
@@ -980,35 +1072,7 @@ class SuiteRunner:
         stdout_path: pathlib.Path,
         stderr_path: pathlib.Path,
     ) -> tuple[str, str]:
-        if returncode == 77:
-            return "SKIP", ""
-        if returncode < 0:
-            return "ERROR", f"(signal {-returncode})"
-        if case.family.startswith("zig-"):
-            stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
-            payload: dict[str, str] = {}
-            for raw_line in stdout_text.splitlines():
-                if "=" not in raw_line:
-                    continue
-                key, value = raw_line.split("=", 1)
-                payload[key] = value
-            if "status" not in payload:
-                stderr_text = stderr_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).strip()
-                return "ERROR", f"(bad result) {stderr_text[:160]}".strip()
-            status = payload["status"].upper()
-            detail = ""
-            if payload.get("leak") == "1":
-                detail = "leak"
-            elif payload.get("log_err_count") not in {None, "0"}:
-                detail = f"log_err_count={payload['log_err_count']}"
-            if status == "PASS":
-                return "PASS", detail
-            if status == "SKIP":
-                return "SKIP", detail
-            return "FAIL", detail
-        return ("PASS", "") if returncode == 0 else ("FAIL", f"(exit {returncode})")
+        return classify_case_exit(case, returncode, stdout_path, stderr_path)
 
     def print_summary(self) -> None:
         print(summarize_results(self.results))

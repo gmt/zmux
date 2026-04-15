@@ -226,6 +226,7 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         null,
     );
 
+    const joining_existing_group = group_name != null and (group_target != null or group != null);
     var spawn_cause: ?[]u8 = null;
     var sc = T.SpawnContext{
         .item = @ptrCast(item),
@@ -241,11 +242,14 @@ fn exec_new_session(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
         sc.argv = slice;
         if (slice.len == 1 and slice[0].len == 0) sc.flags |= T.SPAWN_EMPTY;
     }
-    var wl = spawn_mod.spawn_window(&sc, &spawn_cause);
-    if (wl == null) {
-        cmdq.cmdq_error(item, "create window failed: {s}", .{spawn_cause orelse "unknown"});
-        sess.session_destroy(s, false, "exec_new_session");
-        return .@"error";
+    var wl: ?*T.Winlink = null;
+    if (!joining_existing_group) {
+        wl = spawn_mod.spawn_window(&sc, &spawn_cause);
+        if (wl == null) {
+            cmdq.cmdq_error(item, "create window failed: {s}", .{spawn_cause orelse "unknown"});
+            sess.session_destroy(s, false, "exec_new_session");
+            return .@"error";
+        }
     }
 
     if (group_name) |target_name| {

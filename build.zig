@@ -19,7 +19,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = parseTestFilters(b, b.args);
     const opt_stress_tests = b.option(bool, "stress-tests", "Enable heavyweight Zig stress tests [default: false]") orelse false;
-    const opt_test_workers = b.option(u31, "test-workers", "Number of parallel test workers [default: 1]") orelse 1;
+    const default_test_workers: u31 = @intCast(@max(@as(usize, 1), std.Thread.getCpuCount() catch 1));
+    const opt_test_workers = b.option(u31, "test-workers", "Number of parallel test workers [default: CPU count]") orelse default_test_workers;
 
     // --------------------------------------------------
     // Feature options (mirroring pkgbuild configure flags)

@@ -8,7 +8,8 @@ Testing lanes:
 - `zig build test`
   Fast Zig unit lane for the normal warm-cache developer loop. Runs each
   Zig unit test individually through the root timed runner. This lane should
-  not discover stress-only cases just to skip them.
+  not discover stress-only cases just to skip them. `-Dtest-workers` defaults
+  to CPU count when omitted and is separate from Zig's `-j` build parallelism.
 
 - `zig build test-most`
   Organizational wrapper for `test` + `smoke-most`. Useful for a broad local

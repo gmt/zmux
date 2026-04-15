@@ -179,6 +179,53 @@ pub fn build(b: *std.Build) void {
     oracle_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     oracle_step.dependOn(&oracle_cmd.step);
 
+    const smoke_oracle_sharded_step = b.step(
+        "smoke-oracle-sharded",
+        "Run experimental Zig-scheduled sharded oracle smoke tests",
+    );
+    const oracle_shard_result_dir = ".zig-cache/shard-results/smoke-oracle-sharded";
+    const prepare_oracle_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/smoke-oracle-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_oracle_shard_results.step.dependOn(b.getInstallStep());
+    var oracle_shard_steps = std.ArrayList(*std.Build.Step).empty;
+    var oracle_shard_index: u31 = 0;
+    while (oracle_shard_index < opt_test_workers) : (oracle_shard_index += 1) {
+        const run_oracle_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--suite",
+            "smoke-oracle",
+            "--shard-index",
+        });
+        run_oracle_shard.step.dependOn(&prepare_oracle_shard_results.step);
+        run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{oracle_shard_index}) catch @panic("OOM"));
+        run_oracle_shard.addArg("--shard-count");
+        run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_oracle_shard.addArg("--result-path");
+        run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-oracle-sharded/shard-{d}.json", .{oracle_shard_index}) catch @panic("OOM"));
+        oracle_shard_steps.append(b.allocator, &run_oracle_shard.step) catch @panic("OOM");
+    }
+    const reduce_oracle_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        oracle_shard_result_dir,
+        "--suite",
+        "smoke-oracle",
+        "--shard-count",
+    });
+    reduce_oracle_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_oracle_shards.addArg("--workers");
+    reduce_oracle_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_oracle_shards.step.dependOn(&prepare_oracle_shard_results.step);
+    for (oracle_shard_steps.items) |oracle_shard_step| {
+        reduce_oracle_shards.step.dependOn(oracle_shard_step);
+    }
+    smoke_oracle_sharded_step.dependOn(&reduce_oracle_shards.step);
+
     // --------------------------------------------------
     // `zig build smoke-recursive-attach` – nested recursive attach characterization
     // --------------------------------------------------

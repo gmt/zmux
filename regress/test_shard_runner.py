@@ -13,7 +13,9 @@ import test_orchestrator as orch
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="run one sharded test suite")
     parser.add_argument(
-        "--suite", required=True, choices=("zig-unit", "zig-stress", "smoke-fast")
+        "--suite",
+        required=True,
+        choices=("zig-unit", "zig-stress", "smoke-fast", "smoke-oracle"),
     )
     parser.add_argument("--zig-test-binary")
     parser.add_argument("--shard-index", type=int, required=True)

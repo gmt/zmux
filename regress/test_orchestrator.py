@@ -25,6 +25,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, cast
@@ -651,6 +652,28 @@ class CaseWorker:
         return result
 
 
+class ResultCollector:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._results: list[CaseResult] = []
+
+    def record(self, result: CaseResult) -> None:
+        with self._lock:
+            self._results.append(result)
+
+    @property
+    def results(self) -> list[CaseResult]:
+        with self._lock:
+            return list(self._results)
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._results)
+
+
 class SuiteRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -678,12 +701,16 @@ class SuiteRunner:
         if not getattr(args, "skip_prune", False):
             artifact_root.prune_stale_children(self.sandbox_root)
         self.use_namespaces, self.namespace_reason = namespace_probe()
-        self.results: list[CaseResult] = []
+        self._collector = ResultCollector()
         self.interrupted_by: int | None = None
         self.active_proc: subprocess.Popen[bytes] | None = None
         self.active_namespaced = False
         self.active_case: Case | None = None
         self._install_signal_handlers()
+
+    @property
+    def results(self) -> list[CaseResult]:
+        return self._collector.results
 
     def _install_signal_handlers(self) -> None:
         def handle(signum: int, _frame: object) -> None:
@@ -1006,7 +1033,7 @@ class SuiteRunner:
         )
         for case in cases:
             result = self.run_case(case)
-            self.results.append(result)
+            self._collector.record(result)
             suffix = (
                 f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
             )

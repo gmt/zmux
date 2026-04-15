@@ -11,7 +11,8 @@ import test_orchestrator as orch
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="run one zig-unit test shard")
+    parser = argparse.ArgumentParser(description="run one sharded Zig test suite")
+    parser.add_argument("--suite", required=True, choices=("zig-unit", "zig-stress"))
     parser.add_argument("--zig-test-binary", required=True)
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--shard-count", type=int, required=True)
@@ -60,7 +61,7 @@ def main(argv: list[str]) -> int:
 
     runner_args = orch.parse_args(
         [
-            "zig-unit",
+            args.suite,
             "--zig-test-binary",
             args.zig_test_binary,
             "--summary-format",
@@ -87,7 +88,7 @@ def main(argv: list[str]) -> int:
             )
         clear_progress_line()
         payload = {
-            "suite": "zig-unit",
+            "suite": args.suite,
             "shard_index": args.shard_index,
             "shard_count": args.shard_count,
             "results": results,

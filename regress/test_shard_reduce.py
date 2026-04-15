@@ -12,8 +12,9 @@ import test_orchestrator as orch
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="reduce zig-unit shard results")
+    parser = argparse.ArgumentParser(description="reduce sharded Zig test results")
     parser.add_argument("--results-dir", required=True)
+    parser.add_argument("--suite", required=True, choices=("zig-unit", "zig-stress"))
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args(argv)
@@ -44,6 +45,11 @@ def main(argv: list[str]) -> int:
             if payload_shard_count != args.shard_count:
                 raise orch.HarnessError(
                     f"unexpected shard count in shard-{shard_index}.json"
+                )
+            payload_suite = cast(str, payload["suite"])
+            if payload_suite != args.suite:
+                raise orch.HarnessError(
+                    f"unexpected suite {payload_suite!r} in shard-{shard_index}.json"
                 )
             for item in cast(list[dict[str, object]], payload["results"]):
                 entry = cast(dict[str, object], item)

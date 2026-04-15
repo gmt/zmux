@@ -254,6 +254,8 @@ pub fn build(b: *std.Build) void {
         const run_shard = b.addSystemCommand(&.{
             "python3",
             "regress/test_shard_runner.py",
+            "--suite",
+            "zig-unit",
             "--zig-test-binary",
         });
         run_shard.step.dependOn(&prepare_shard_results.step);
@@ -272,6 +274,8 @@ pub fn build(b: *std.Build) void {
         "regress/test_shard_reduce.py",
         "--results-dir",
         shard_result_dir,
+        "--suite",
+        "zig-unit",
         "--shard-count",
     });
     reduce_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
@@ -324,6 +328,57 @@ pub fn build(b: *std.Build) void {
     run_stress_tests.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(run_stress_tests, test_filters);
     stress_test_step.dependOn(&run_stress_tests.step);
+
+    const test_stress_zig_sharded_step = b.step(
+        "test-stress-zig-sharded",
+        "Run experimental Zig-scheduled sharded stress tests",
+    );
+    const stress_shard_result_dir = ".zig-cache/shard-results/test-stress-zig-sharded";
+    const prepare_stress_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/test-stress-zig-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_stress_shard_results.step.dependOn(b.getInstallStep());
+    prepare_stress_shard_results.step.dependOn(&stress_tests.step);
+    var stress_shard_steps = std.ArrayList(*std.Build.Step).empty;
+    shard_index = 0;
+    while (shard_index < opt_test_workers) : (shard_index += 1) {
+        const run_stress_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--suite",
+            "zig-stress",
+            "--zig-test-binary",
+        });
+        run_stress_shard.step.dependOn(&prepare_stress_shard_results.step);
+        run_stress_shard.addFileArg(stress_tests.getEmittedBin());
+        run_stress_shard.addArg("--shard-index");
+        run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{shard_index}) catch @panic("OOM"));
+        run_stress_shard.addArg("--shard-count");
+        run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_stress_shard.addArg("--result-path");
+        run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-stress-zig-sharded/shard-{d}.json", .{shard_index}) catch @panic("OOM"));
+        addTestFilterArgs(run_stress_shard, test_filters);
+        stress_shard_steps.append(b.allocator, &run_stress_shard.step) catch @panic("OOM");
+    }
+    const reduce_stress_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        stress_shard_result_dir,
+        "--suite",
+        "zig-stress",
+        "--shard-count",
+    });
+    reduce_stress_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_stress_shards.addArg("--workers");
+    reduce_stress_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_stress_shards.step.dependOn(&prepare_stress_shard_results.step);
+    for (stress_shard_steps.items) |stress_shard_step| {
+        reduce_stress_shards.step.dependOn(stress_shard_step);
+    }
+    test_stress_zig_sharded_step.dependOn(&reduce_stress_shards.step);
 
     const stress_test_compile_step = b.step("test-stress-compile", "Compile Zig stress tests without running");
     stress_test_compile_step.dependOn(&stress_tests.step);

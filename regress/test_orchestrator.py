@@ -535,8 +535,9 @@ class SignalCoordinator:
             self.interrupted_by = signum
             self._shutdown.set()
             with self._lock:
-                for proc, namespaced in list(self._active.values()):
-                    stop_process(proc, namespaced)
+                snapshot = list(self._active.values())
+            for proc, namespaced in snapshot:
+                stop_process(proc, namespaced)
 
         for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
             signal.signal(sig, handle)
@@ -737,6 +738,8 @@ class WorkerPool:
                     break
                 continue
             if item is None:
+                break
+            if self._coordinator.shutdown_requested:
                 break
             timeout_s = self._timeout_policy.for_case(item)
             result = worker.run(item, timeout_s)

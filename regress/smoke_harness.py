@@ -224,7 +224,7 @@ class SmokeHarness:
             helper_mode=helper_mode,
             helper_path=helper_path,
             zmux_binary=self.binary_argv[0],
-            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
+            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux")),
         )
 
     def require_host_capabilities(self) -> None:

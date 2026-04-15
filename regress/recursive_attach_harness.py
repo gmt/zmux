@@ -82,7 +82,7 @@ class RecursiveAttachHarness:
             mode=os.environ.get("SMOKE_ENV_MODE", "ambient"),
             home_dir=self.artifact_dir / "home",
             zmux_binary=os.environ.get("TEST_ZMUX"),
-            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
+            oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux")),
         )
 
     def require_host_capabilities(self) -> None:
@@ -269,7 +269,7 @@ def run_inner_probe(
         mode=os.environ.get("SMOKE_ENV_MODE", "ambient"),
         home_dir=output_json.parent / "home",
         zmux_binary=os.environ.get("TEST_ZMUX"),
-        oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"),
+        oracle_tmux=os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux")),
     )
     socket_path = output_json.parent / "inner.socket"
     base = shlex.split(inner_binary) + ["-S", str(socket_path), "-f/dev/null"]
@@ -369,7 +369,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")),
     )
     run_parser.add_argument(
-        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux")
+        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux"))
     )
     run_parser.add_argument("--timeout-seconds", type=float, default=2.0)
 
@@ -383,7 +383,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=os.environ.get("TEST_ZMUX", str(ROOT_DIR / "zig-out/bin/zmux")),
     )
     run_case_parser.add_argument(
-        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux")
+        "--oracle-binary", default=os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux"))
     )
     run_case_parser.add_argument("--timeout-seconds", type=float, default=2.0)
 

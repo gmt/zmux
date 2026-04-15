@@ -340,12 +340,6 @@ def resolve_oracle_tmux(explicit: str | None) -> pathlib.Path:
         path = pathlib.Path(explicit)
         if path.is_file() and os.access(path, os.X_OK):
             return path
-    system_tmux_path = pathlib.Path("/usr/bin/tmux")
-    if system_tmux_path.is_file() and os.access(system_tmux_path, os.X_OK):
-        return system_tmux_path
-    system_tmux = shutil.which("tmux")
-    if system_tmux is not None:
-        return pathlib.Path(system_tmux)
     return ensure_museum_tmux()
 
 

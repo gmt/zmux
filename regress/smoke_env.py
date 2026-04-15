@@ -90,7 +90,7 @@ def build_smoke_env(
     if home_dir is not None:
         xdg_config, xdg_cache, xdg_data, bin_dir, runtime_dir = _prepare_home_dirs(home_dir)
         _link_smoke_tool(bin_dir, "zmux", zmux_binary or os.environ.get("TEST_ZMUX"))
-        _link_smoke_tool(bin_dir, "tmux", oracle_tmux or os.environ.get("TEST_ORACLE_TMUX", "/usr/bin/tmux"))
+        _link_smoke_tool(bin_dir, "tmux", oracle_tmux or os.environ.get("TEST_ORACLE_TMUX", str(ROOT_DIR / "tmux-museum/out/gdb/tmux")))
         path_prefix = f"{bin_dir}:/bin:/usr/bin"
         home = str(home_dir)
 

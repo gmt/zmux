@@ -28,7 +28,7 @@ reaping.
 | Command | Suite | What it does |
 |---|---|---|
 | `zig build smoke` | fast | Quick end-to-end pass against `zig-out/bin/zmux` through the sharded smoke graph. Runs ~16 shell tests plus a command sweep and inside-session check. |
-| `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests through the sharded smoke graph, but run against `/usr/bin/tmux`. |
+| `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests through the sharded smoke graph, but run against the museum tmux build (`tmux-museum/out/gdb/tmux`). |
 | `zig build smoke-soak` | soak | Long-running stress-oriented tests against zmux through a wrapped one-shard smoke path. |
 | `zig build smoke-fuzz` | fuzz | Timed corpus replay for the built-in fuzz targets through the sharded smoke path. |
 | `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior through the sharded smoke path. Included in `smoke-most` and `smoke-all`. |
@@ -79,7 +79,7 @@ Host capability policy:
 | Variable | Default | Purpose |
 |---|---|---|
 | `TEST_ZMUX` | `zig-out/bin/zmux` | Path to the zmux binary under test |
-| `TEST_ORACLE_TMUX` | `/usr/bin/tmux` | Path to the oracle tmux binary |
+| `TEST_ORACLE_TMUX` | `tmux-museum/out/gdb/tmux` | Path to the oracle tmux binary (override to use system tmux for one-off testing) |
 | `SMOKE_ARTIFACT_ROOT` | `$ZMUX_TMP_ROOT` | Base directory for ephemeral test sockets and logs |
 | `ZMUX_TMP_ROOT` | system temp dir + `/zmux` | Default parent for managed smoke artifacts and direct-entrypoint sandboxes when `SMOKE_ARTIFACT_ROOT` is unset |
 | `ZMUX_TEST_ROOT` | `$ZMUX_TMP_ROOT-test` | Default parent for timed-runner outer sandboxes |

@@ -519,8 +519,19 @@ pub fn build(b: *std.Build) void {
         "test-most-sharded",
         "Run experimental sharded unit tests plus sharded fast smoke",
     );
-    test_most_sharded_step.dependOn(test_zig_sharded_step);
-    test_most_sharded_step.dependOn(smoke_fast_sharded_step);
+    const reduce_test_most_sharded = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_bundle_reduce.py",
+        "--workers",
+    });
+    reduce_test_most_sharded.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_test_most_sharded.addArg("--family-result");
+    reduce_test_most_sharded.addArg(std.fmt.allocPrint(b.allocator, "zig-unit:{s}", .{shard_result_dir}) catch @panic("OOM"));
+    reduce_test_most_sharded.addArg("--family-result");
+    reduce_test_most_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fast:{s}", .{smoke_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_most_sharded.step.dependOn(&reduce_shards.step);
+    reduce_test_most_sharded.step.dependOn(&reduce_smoke_shards.step);
+    test_most_sharded_step.dependOn(&reduce_test_most_sharded.step);
 
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
     test_compile_step.dependOn(&unit_tests.step);
@@ -619,13 +630,34 @@ pub fn build(b: *std.Build) void {
         "test-all-sharded",
         "Run experimental sharded unit, stress, and smoke family targets",
     );
-    test_all_sharded_step.dependOn(test_zig_sharded_step);
-    test_all_sharded_step.dependOn(test_stress_zig_sharded_step);
-    test_all_sharded_step.dependOn(smoke_fast_sharded_step);
-    test_all_sharded_step.dependOn(smoke_oracle_sharded_step);
-    test_all_sharded_step.dependOn(smoke_recursive_sharded_step);
-    test_all_sharded_step.dependOn(smoke_docker_sharded_step);
-    test_all_sharded_step.dependOn(smoke_soak_sharded_step);
+    const reduce_test_all_sharded = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_bundle_reduce.py",
+        "--workers",
+    });
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "zig-unit:{s}", .{shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "zig-stress:{s}", .{stress_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fast:{s}", .{smoke_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-oracle:{s}", .{oracle_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-recursive:{s}", .{recursive_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-docker:{s}", .{docker_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.addArg("--family-result");
+    reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-soak:{s}", .{soak_shard_result_dir}) catch @panic("OOM"));
+    reduce_test_all_sharded.step.dependOn(&reduce_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_stress_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_smoke_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_oracle_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_recursive_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_docker_shards.step);
+    reduce_test_all_sharded.step.dependOn(&reduce_soak_shards.step);
+    test_all_sharded_step.dependOn(&reduce_test_all_sharded.step);
 
     const stress_test_compile_step = b.step("test-stress-compile", "Compile Zig stress tests without running");
     stress_test_compile_step.dependOn(&stress_tests.step);
@@ -798,6 +830,9 @@ pub fn build(b: *std.Build) void {
         }
         smoke_fuzz_sharded.dependOn(&reduce_fuzz_shards.step);
         test_all_sharded_step.dependOn(smoke_fuzz_sharded);
+        reduce_test_all_sharded.addArg("--family-result");
+        reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fuzz:{s}", .{fuzz_shard_result_dir}) catch @panic("OOM"));
+        reduce_test_all_sharded.step.dependOn(&reduce_fuzz_shards.step);
     }
 }
 

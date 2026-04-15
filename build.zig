@@ -615,6 +615,18 @@ pub fn build(b: *std.Build) void {
     }
     test_stress_zig_sharded_step.dependOn(&reduce_stress_shards.step);
 
+    const test_all_sharded_step = b.step(
+        "test-all-sharded",
+        "Run experimental sharded unit, stress, and smoke family targets",
+    );
+    test_all_sharded_step.dependOn(test_zig_sharded_step);
+    test_all_sharded_step.dependOn(test_stress_zig_sharded_step);
+    test_all_sharded_step.dependOn(smoke_fast_sharded_step);
+    test_all_sharded_step.dependOn(smoke_oracle_sharded_step);
+    test_all_sharded_step.dependOn(smoke_recursive_sharded_step);
+    test_all_sharded_step.dependOn(smoke_docker_sharded_step);
+    test_all_sharded_step.dependOn(smoke_soak_sharded_step);
+
     const stress_test_compile_step = b.step("test-stress-compile", "Compile Zig stress tests without running");
     stress_test_compile_step.dependOn(&stress_tests.step);
 
@@ -785,6 +797,7 @@ pub fn build(b: *std.Build) void {
             reduce_fuzz_shards.step.dependOn(fuzz_shard_step);
         }
         smoke_fuzz_sharded.dependOn(&reduce_fuzz_shards.step);
+        test_all_sharded_step.dependOn(smoke_fuzz_sharded);
     }
 }
 

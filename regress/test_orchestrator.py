@@ -159,6 +159,61 @@ class CaseResult:
     sandbox: pathlib.Path | None = None
 
 
+def case_to_json(case: Case) -> dict[str, object]:
+    return {
+        "case_id": case.case_id,
+        "label": case.label,
+        "family": case.family,
+        "argv": list(case.argv),
+        "env_overrides": dict(case.env_overrides),
+        "stdin_path": case.stdin_path,
+        "required_capabilities": sorted(case.required_capabilities),
+    }
+
+
+def case_from_json(payload: dict[str, object]) -> Case:
+    return Case(
+        case_id=cast(str, payload["case_id"]),
+        label=cast(str, payload["label"]),
+        family=cast(str, payload["family"]),
+        argv=list(cast(list[str], payload["argv"])),
+        env_overrides=dict(cast(dict[str, str], payload.get("env_overrides", {}))),
+        stdin_path=cast(str | None, payload.get("stdin_path")),
+        required_capabilities=frozenset(
+            cast(list[str], payload.get("required_capabilities", []))
+        ),
+    )
+
+
+def case_result_to_json(
+    result: CaseResult, *, case_order: int | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "case": case_to_json(result.case),
+        "status": result.status,
+        "elapsed_s": result.elapsed_s,
+        "detail": result.detail,
+        "cleanup_failed": result.cleanup_failed,
+        "sandbox": str(result.sandbox) if result.sandbox is not None else None,
+    }
+    if case_order is not None:
+        payload["case_order"] = case_order
+    return payload
+
+
+def case_result_from_json(payload: dict[str, object]) -> CaseResult:
+    sandbox_raw = cast(str | None, payload.get("sandbox"))
+    elapsed_raw = cast(float | int | str, payload["elapsed_s"])
+    return CaseResult(
+        case=case_from_json(cast(dict[str, object], payload["case"])),
+        status=cast(str, payload["status"]),
+        elapsed_s=float(elapsed_raw),
+        detail=cast(str, payload.get("detail", "")),
+        cleanup_failed=bool(payload.get("cleanup_failed", False)),
+        sandbox=pathlib.Path(sandbox_raw) if sandbox_raw is not None else None,
+    )
+
+
 class TimeoutPolicy:
     def __init__(
         self,

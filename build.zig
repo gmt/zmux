@@ -239,6 +239,50 @@ pub fn build(b: *std.Build) void {
     addTestFilterArgs(run_unit_tests, test_filters);
     test_step.dependOn(&run_unit_tests.step);
 
+    const test_zig_sharded_step = b.step("test-zig-sharded", "Run experimental Zig-scheduled sharded unit tests");
+    const shard_result_dir = ".zig-cache/shard-results/test-zig-sharded";
+    const prepare_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/test-zig-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_shard_results.step.dependOn(b.getInstallStep());
+    prepare_shard_results.step.dependOn(&unit_tests.step);
+    var shard_steps = std.ArrayList(*std.Build.Step).empty;
+    var shard_index: u31 = 0;
+    while (shard_index < opt_test_workers) : (shard_index += 1) {
+        const run_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--zig-test-binary",
+        });
+        run_shard.step.dependOn(&prepare_shard_results.step);
+        run_shard.addFileArg(unit_tests.getEmittedBin());
+        run_shard.addArg("--shard-index");
+        run_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{shard_index}) catch @panic("OOM"));
+        run_shard.addArg("--shard-count");
+        run_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_shard.addArg("--result-path");
+        run_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-zig-sharded/shard-{d}.json", .{shard_index}) catch @panic("OOM"));
+        addTestFilterArgs(run_shard, test_filters);
+        shard_steps.append(b.allocator, &run_shard.step) catch @panic("OOM");
+    }
+    const reduce_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        shard_result_dir,
+        "--shard-count",
+    });
+    reduce_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_shards.addArg("--workers");
+    reduce_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_shards.step.dependOn(&prepare_shard_results.step);
+    for (shard_steps.items) |shard_step| {
+        reduce_shards.step.dependOn(shard_step);
+    }
+    test_zig_sharded_step.dependOn(&reduce_shards.step);
+
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
     test_compile_step.dependOn(&unit_tests.step);
 

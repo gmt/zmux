@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const c = @import("c.zig");
+const env_mod = @import("environ.zig");
 const opts = @import("options.zig");
 const proc_mod = @import("proc.zig");
 const xm = @import("xmalloc.zig");
@@ -563,7 +564,6 @@ fn spawnShellProcess(shell_command: []const u8, options: ShellRunOptions) !Spawn
 /// global environ.  This matches tmux's environ_for_session + environ_push
 /// pattern that propagates set-environment -g variables to job children.
 fn buildGlobalEnvMap() std.process.EnvMap {
-    const env_mod = @import("environ.zig");
     const cfg_mod = @import("cfg.zig");
 
     var map = std.process.EnvMap.init(xm.allocator);
@@ -1161,6 +1161,8 @@ pub const StressTests = struct {
         job_enable_server_reaper(true);
         defer job_enable_server_reaper(false);
         defer job_reset_all();
+        env_mod.global_environ = env_mod.environ_create();
+        defer env_mod.environ_free(env_mod.global_environ);
 
         var completed = false;
         const job = job_register("printf 'out'; printf 'err' >&2", 0);

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+import artifact_root
 import test_orchestrator as orch
 
 
@@ -36,6 +37,7 @@ def suite_argvs(args: argparse.Namespace) -> list[list[str]]:
             args.zig_test_binary,
             "--summary-format",
             "none",
+            "--skip-prune",
             *common,
         ]
     ]
@@ -49,6 +51,7 @@ def suite_argvs(args: argparse.Namespace) -> list[list[str]]:
                 args.zig_stress_binary,
                 "--summary-format",
                 "none",
+                "--skip-prune",
                 *common,
             ]
         )
@@ -59,11 +62,14 @@ def suite_argvs(args: argparse.Namespace) -> list[list[str]]:
                 args.fuzz_mode,
                 "--summary-format",
                 "none",
+                "--skip-prune",
                 *common,
             ]
         )
     else:
-        suites.append(["smoke-most", "--summary-format", "none", *common])
+        suites.append(
+            ["smoke-most", "--summary-format", "none", "--skip-prune", *common]
+        )
     return suites
 
 
@@ -71,6 +77,8 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     all_results: list[orch.CaseResult] = []
     overall_rc = 0
+    root = artifact_root.default_sandbox_root()
+    artifact_root.prune_stale_children(root)
     for suite_argv in suite_argvs(args):
         runner_args = orch.parse_args(suite_argv)
         runner = orch.SuiteRunner(runner_args)

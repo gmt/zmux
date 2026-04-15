@@ -475,7 +475,8 @@ class SuiteRunner:
                 host_caps.capability_reason("af_unix", self.af_unix_status)
             )
         self.sandbox_root = artifact_root.default_sandbox_root()
-        artifact_root.prune_stale_children(self.sandbox_root)
+        if not getattr(args, "skip_prune", False):
+            artifact_root.prune_stale_children(self.sandbox_root)
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self.results: list[CaseResult] = []
         self.interrupted_by: int | None = None
@@ -1038,6 +1039,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--oracle-binary")
     parser.add_argument("--helper-binary")
     parser.add_argument("--af-unix", choices=host_caps.AF_UNIX_MODES)
+    parser.add_argument("--skip-prune", action="store_true", default=False)
     parser.add_argument("--test-filter", action="append", default=[])
     parser.add_argument("--case-filter", action="append", default=[])
     parser.add_argument("--timeout-override", type=float)

@@ -148,7 +148,7 @@ pub fn build(b: *std.Build) void {
         run_smoke_shard.addArg("--shard-count");
         run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_smoke_shard.addArg("--result-path");
-        run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-fast-sharded/shard-{d}.json", .{smoke_shard_index}) catch @panic("OOM"));
+        run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-fast-sharded/shard-{d:0>4}.json", .{smoke_shard_index}) catch @panic("OOM"));
         smoke_shard_steps.append(b.allocator, &run_smoke_shard.step) catch @panic("OOM");
     }
     const reduce_smoke_shards = b.addSystemCommand(&.{
@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
         run_oracle_shard.addArg("--shard-count");
         run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_oracle_shard.addArg("--result-path");
-        run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-oracle-sharded/shard-{d}.json", .{oracle_shard_index}) catch @panic("OOM"));
+        run_oracle_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-oracle-sharded/shard-{d:0>4}.json", .{oracle_shard_index}) catch @panic("OOM"));
         oracle_shard_steps.append(b.allocator, &run_oracle_shard.step) catch @panic("OOM");
     }
     const reduce_oracle_shards = b.addSystemCommand(&.{
@@ -266,7 +266,7 @@ pub fn build(b: *std.Build) void {
         run_recursive_shard.addArg("--shard-count");
         run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_recursive_shard.addArg("--result-path");
-        run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-recursive-sharded/shard-{d}.json", .{recursive_shard_index}) catch @panic("OOM"));
+        run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-recursive-sharded/shard-{d:0>4}.json", .{recursive_shard_index}) catch @panic("OOM"));
         recursive_shard_steps.append(b.allocator, &run_recursive_shard.step) catch @panic("OOM");
     }
     const reduce_recursive_shards = b.addSystemCommand(&.{
@@ -319,7 +319,7 @@ pub fn build(b: *std.Build) void {
         "--shard-count",
         "1",
         "--result-path",
-        ".zig-cache/shard-results/smoke-soak-sharded/shard-0.json",
+        ".zig-cache/shard-results/smoke-soak-sharded/shard-0000.json",
     });
     run_soak_shard.step.dependOn(&prepare_soak_shard_results.step);
     const reduce_soak_shards = b.addSystemCommand(&.{
@@ -385,7 +385,7 @@ pub fn build(b: *std.Build) void {
         run_docker_shard.addArg("--shard-count");
         run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_docker_shard.addArg("--result-path");
-        run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-docker-sharded/shard-{d}.json", .{docker_shard_index}) catch @panic("OOM"));
+        run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-docker-sharded/shard-{d:0>4}.json", .{docker_shard_index}) catch @panic("OOM"));
         docker_shard_steps.append(b.allocator, &run_docker_shard.step) catch @panic("OOM");
     }
     const reduce_docker_shards = b.addSystemCommand(&.{
@@ -493,7 +493,7 @@ pub fn build(b: *std.Build) void {
         run_shard.addArg("--shard-count");
         run_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_shard.addArg("--result-path");
-        run_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-zig-sharded/shard-{d}.json", .{shard_index}) catch @panic("OOM"));
+        run_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-zig-sharded/shard-{d:0>4}.json", .{shard_index}) catch @panic("OOM"));
         addTestFilterArgs(run_shard, test_filters);
         shard_steps.append(b.allocator, &run_shard.step) catch @panic("OOM");
     }
@@ -610,7 +610,7 @@ pub fn build(b: *std.Build) void {
         run_stress_shard.addArg("--shard-count");
         run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         run_stress_shard.addArg("--result-path");
-        run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-stress-zig-sharded/shard-{d}.json", .{shard_index}) catch @panic("OOM"));
+        run_stress_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/test-stress-zig-sharded/shard-{d:0>4}.json", .{shard_index}) catch @panic("OOM"));
         addTestFilterArgs(run_stress_shard, test_filters);
         stress_shard_steps.append(b.allocator, &run_stress_shard.step) catch @panic("OOM");
     }
@@ -834,7 +834,7 @@ pub fn build(b: *std.Build) void {
             run_fuzz_shard.addArg("--shard-count");
             run_fuzz_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
             run_fuzz_shard.addArg("--result-path");
-            run_fuzz_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-fuzz-sharded/shard-{d}.json", .{fuzz_shard_index}) catch @panic("OOM"));
+            run_fuzz_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-fuzz-sharded/shard-{d:0>4}.json", .{fuzz_shard_index}) catch @panic("OOM"));
             fuzz_shard_steps.append(b.allocator, &run_fuzz_shard.step) catch @panic("OOM");
         }
         const reduce_fuzz_shards = b.addSystemCommand(&.{
@@ -854,7 +854,6 @@ pub fn build(b: *std.Build) void {
             reduce_fuzz_shards.step.dependOn(fuzz_shard_step);
         }
         smoke_fuzz_sharded.dependOn(&reduce_fuzz_shards.step);
-        test_all_sharded_step.dependOn(smoke_fuzz_sharded);
         reduce_test_all_sharded.addArg("--family-result");
         reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fuzz:{s}", .{fuzz_shard_result_dir}) catch @panic("OOM"));
         reduce_test_all_sharded.step.dependOn(&prepare_fuzz_shard_results.step);

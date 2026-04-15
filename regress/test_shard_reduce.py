@@ -37,6 +37,14 @@ def read_shard_payload(path: pathlib.Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def shard_index_from_path(path: pathlib.Path) -> int:
+    stem = path.stem
+    prefix = "shard-"
+    if not stem.startswith(prefix):
+        raise ValueError(f"unexpected shard filename: {path.name}")
+    return int(stem[len(prefix) :])
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.shard_count <= 0:
@@ -47,22 +55,26 @@ def main(argv: list[str]) -> int:
     results_dir = pathlib.Path(args.results_dir)
 
     try:
-        for shard_index in range(args.shard_count):
-            payload = read_shard_payload(results_dir / f"shard-{shard_index}.json")
+        shard_files = sorted(
+            results_dir.glob("shard-*.json"), key=shard_index_from_path
+        )
+        if len(shard_files) != args.shard_count:
+            raise orch.HarnessError(
+                f"expected {args.shard_count} shard files, found {len(shard_files)}"
+            )
+        for shard_file in shard_files:
+            expected_shard_index = shard_index_from_path(shard_file)
+            payload = read_shard_payload(shard_file)
             payload_shard_index = int(cast(int | str, payload["shard_index"]))
             payload_shard_count = int(cast(int | str, payload["shard_count"]))
-            if payload_shard_index != shard_index:
-                raise orch.HarnessError(
-                    f"unexpected shard index in shard-{shard_index}.json"
-                )
+            if payload_shard_index != expected_shard_index:
+                raise orch.HarnessError(f"unexpected shard index in {shard_file.name}")
             if payload_shard_count != args.shard_count:
-                raise orch.HarnessError(
-                    f"unexpected shard count in shard-{shard_index}.json"
-                )
+                raise orch.HarnessError(f"unexpected shard count in {shard_file.name}")
             payload_suite = cast(str, payload["suite"])
             if payload_suite != args.suite:
                 raise orch.HarnessError(
-                    f"unexpected suite {payload_suite!r} in shard-{shard_index}.json"
+                    f"unexpected suite {payload_suite!r} in {shard_file.name}"
                 )
             for item in cast(list[dict[str, object]], payload["results"]):
                 entry = cast(dict[str, object], item)

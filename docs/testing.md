@@ -10,10 +10,17 @@ Testing lanes:
   Zig unit test individually through the root timed runner. This lane should
   not discover stress-only cases just to skip them.
 
+- `zig build test-most`
+  Organizational wrapper for `test` + `smoke-most`. Useful for a broad local
+  sweep without the stress or full-smoke weight.
+
 - `zig build test-stress`
   Heavy Zig stress lane for subprocess, pipe/socket transport, and async shell
   tests that are too expensive for the main unit loop. Runs each stress
   test individually through the root timed runner.
+
+- `zig build test-all`
+  Organizational wrapper for `test` + `test-stress` + `smoke-all`.
 
 - `zig build smoke`
   Fast end-to-end coverage against `zig-out/bin/zmux`. Shell smoke cases,
@@ -67,6 +74,13 @@ Timeout policy:
 - `python3 regress/calibrate_timeouts.py ...` is the regeneration path for
   the per-case table. It records reports outside the repo and can merge updated
   proposals back into `regress/test_timeouts.json`.
+
+Summary output:
+
+- The timed runner still prints one line per case as it runs.
+- The final summary is now one dense bottom line with total counts plus an
+  `ISSUES=` list for non-pass outcomes.
+- Long issue lists compact after a fixed threshold with a `+N more` suffix.
 
 Host capability policy:
 

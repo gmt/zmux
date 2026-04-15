@@ -11,9 +11,11 @@ import test_orchestrator as orch
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="run one sharded Zig test suite")
-    parser.add_argument("--suite", required=True, choices=("zig-unit", "zig-stress"))
-    parser.add_argument("--zig-test-binary", required=True)
+    parser = argparse.ArgumentParser(description="run one sharded test suite")
+    parser.add_argument(
+        "--suite", required=True, choices=("zig-unit", "zig-stress", "smoke-fast")
+    )
+    parser.add_argument("--zig-test-binary")
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--result-path", required=True)
@@ -59,17 +61,24 @@ def main(argv: list[str]) -> int:
         print("shard runner: --shard-index out of range", file=sys.stderr)
         return 2
 
-    runner_args = orch.parse_args(
-        [
-            args.suite,
-            "--zig-test-binary",
-            args.zig_test_binary,
-            "--summary-format",
-            "none",
-            "--skip-prune",
-            *sum((["--test-filter", item] for item in args.test_filter), []),
-        ]
-    )
+    if args.suite in {"zig-unit", "zig-stress"} and not args.zig_test_binary:
+        print(
+            f"shard runner: --zig-test-binary required for {args.suite}",
+            file=sys.stderr,
+        )
+        return 2
+
+    runner_argv = [
+        args.suite,
+        "--summary-format",
+        "none",
+        "--skip-prune",
+        *sum((["--test-filter", item] for item in args.test_filter), []),
+    ]
+    if args.zig_test_binary:
+        runner_argv[1:1] = ["--zig-test-binary", args.zig_test_binary]
+
+    runner_args = orch.parse_args(runner_argv)
 
     try:
         runner = orch.SuiteRunner(runner_args)

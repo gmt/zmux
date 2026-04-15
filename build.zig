@@ -122,6 +122,53 @@ pub fn build(b: *std.Build) void {
     smoke_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     smoke_step.dependOn(&smoke_cmd.step);
 
+    const smoke_fast_sharded_step = b.step(
+        "smoke-fast-sharded",
+        "Run experimental Zig-scheduled sharded fast smoke tests",
+    );
+    const smoke_shard_result_dir = ".zig-cache/shard-results/smoke-fast-sharded";
+    const prepare_smoke_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/smoke-fast-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_smoke_shard_results.step.dependOn(b.getInstallStep());
+    var smoke_shard_steps = std.ArrayList(*std.Build.Step).empty;
+    var smoke_shard_index: u31 = 0;
+    while (smoke_shard_index < opt_test_workers) : (smoke_shard_index += 1) {
+        const run_smoke_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--suite",
+            "smoke-fast",
+            "--shard-index",
+        });
+        run_smoke_shard.step.dependOn(&prepare_smoke_shard_results.step);
+        run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{smoke_shard_index}) catch @panic("OOM"));
+        run_smoke_shard.addArg("--shard-count");
+        run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_smoke_shard.addArg("--result-path");
+        run_smoke_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-fast-sharded/shard-{d}.json", .{smoke_shard_index}) catch @panic("OOM"));
+        smoke_shard_steps.append(b.allocator, &run_smoke_shard.step) catch @panic("OOM");
+    }
+    const reduce_smoke_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        smoke_shard_result_dir,
+        "--suite",
+        "smoke-fast",
+        "--shard-count",
+    });
+    reduce_smoke_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_smoke_shards.addArg("--workers");
+    reduce_smoke_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_smoke_shards.step.dependOn(&prepare_smoke_shard_results.step);
+    for (smoke_shard_steps.items) |smoke_shard_step| {
+        reduce_smoke_shards.step.dependOn(smoke_shard_step);
+    }
+    smoke_fast_sharded_step.dependOn(&reduce_smoke_shards.step);
+
     // --------------------------------------------------
     // `zig build smoke-oracle` – oracle harness against installed tmux
     // --------------------------------------------------

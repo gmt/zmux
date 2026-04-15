@@ -14,7 +14,9 @@ import test_orchestrator as orch
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="reduce sharded Zig test results")
     parser.add_argument("--results-dir", required=True)
-    parser.add_argument("--suite", required=True, choices=("zig-unit", "zig-stress"))
+    parser.add_argument(
+        "--suite", required=True, choices=("zig-unit", "zig-stress", "smoke-fast")
+    )
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args(argv)

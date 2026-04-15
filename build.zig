@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
     // System libraries  (link_libc + system libs must go on the exe's root_module or the exe directly)
     exe.linkLibC();
     exe.linkSystemLibrary("event_core");
-    exe.linkSystemLibrary("ncursesw");
+    exe.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
 
     if (opt_systemd) exe.linkSystemLibrary("systemd");
     if (opt_utempter) exe.linkSystemLibrary("utempter");
@@ -229,7 +229,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
     unit_tests.linkLibC();
     unit_tests.linkSystemLibrary("event_core");
-    unit_tests.linkSystemLibrary("ncursesw");
+    unit_tests.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
     const test_step = b.step("test", "Run Zig unit tests");
     const run_unit_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-unit", "--zig-test-binary" });
     run_unit_tests.step.dependOn(b.getInstallStep());
@@ -315,7 +315,7 @@ pub fn build(b: *std.Build) void {
     stress_tests.root_module.addCSourceFile(.{ .file = b.path("src/compat/zmux-regex.c"), .flags = common_cflags });
     stress_tests.linkLibC();
     stress_tests.linkSystemLibrary("event_core");
-    stress_tests.linkSystemLibrary("ncursesw");
+    stress_tests.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
     const stress_test_step = b.step("test-stress", "Run heavyweight Zig stress tests");
     const run_stress_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-stress", "--zig-test-binary" });
     run_stress_tests.step.dependOn(b.getInstallStep());
@@ -403,7 +403,7 @@ pub fn build(b: *std.Build) void {
         });
         fuzz_input.linkLibC();
         fuzz_input.linkSystemLibrary("event_core");
-        fuzz_input.linkSystemLibrary("ncursesw");
+        fuzz_input.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
         b.installArtifact(fuzz_input);
 
         const fuzz_cmd_preprocess = b.addExecutable(.{
@@ -419,7 +419,7 @@ pub fn build(b: *std.Build) void {
         });
         fuzz_cmd_preprocess.linkLibC();
         fuzz_cmd_preprocess.linkSystemLibrary("event_core");
-        fuzz_cmd_preprocess.linkSystemLibrary("ncursesw");
+        fuzz_cmd_preprocess.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
         b.installArtifact(fuzz_cmd_preprocess);
 
         const fuzz_step = b.step("fuzz", "Build fuzz targets");

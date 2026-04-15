@@ -519,6 +519,38 @@ def classify_case_exit(
     return ("PASS", "") if returncode == 0 else ("FAIL", f"(exit {returncode})")
 
 
+class SignalCoordinator:
+    def __init__(self) -> None:
+        self._shutdown = threading.Event()
+        self._lock = threading.Lock()
+        self._active: dict[int, tuple[subprocess.Popen[bytes], bool]] = {}
+        self.interrupted_by: int | None = None
+        self._install()
+
+    def _install(self) -> None:
+        def handle(signum: int, _frame: object) -> None:
+            self.interrupted_by = signum
+            self._shutdown.set()
+            with self._lock:
+                for proc, namespaced in list(self._active.values()):
+                    stop_process(proc, namespaced)
+
+        for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+            signal.signal(sig, handle)
+
+    def register(self, proc: subprocess.Popen[bytes], namespaced: bool) -> None:
+        with self._lock:
+            self._active[proc.pid] = (proc, namespaced)
+
+    def unregister(self, proc: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            self._active.pop(proc.pid, None)
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown.is_set()
+
+
 class CaseWorker:
     def __init__(
         self,
@@ -529,8 +561,8 @@ class CaseWorker:
         helper_binary: pathlib.Path | None,
         af_unix_mode: str,
         use_namespaces: bool,
-        register_active: Callable[[Case, subprocess.Popen[bytes], bool], None],
-        unregister_active: Callable[[], None],
+        register_active: Callable[[subprocess.Popen[bytes], bool], None],
+        unregister_active: Callable[[subprocess.Popen[bytes]], None],
     ) -> None:
         self.sandbox_root = sandbox_root
         self.zmux_binary = zmux_binary
@@ -599,7 +631,7 @@ class CaseWorker:
                     start_new_session=True,
                 )
                 self.active_proc = proc
-                self.register_active(case, proc, self.namespaced)
+                self.register_active(proc, self.namespaced)
                 try:
                     proc.wait(timeout=timeout_s)
                 except subprocess.TimeoutExpired:
@@ -607,7 +639,7 @@ class CaseWorker:
                     detail = f"(limit {timeout_s:.1f}s)"
                     stop_process(proc, self.namespaced)
                 finally:
-                    self.unregister_active()
+                    self.unregister_active(proc)
                     self.active_proc = None
                     self.namespaced = False
 
@@ -702,24 +734,15 @@ class SuiteRunner:
             artifact_root.prune_stale_children(self.sandbox_root)
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self._collector = ResultCollector()
-        self.interrupted_by: int | None = None
-        self.active_proc: subprocess.Popen[bytes] | None = None
-        self.active_namespaced = False
-        self.active_case: Case | None = None
-        self._install_signal_handlers()
+        self._coordinator = SignalCoordinator()
 
     @property
     def results(self) -> list[CaseResult]:
         return self._collector.results
 
-    def _install_signal_handlers(self) -> None:
-        def handle(signum: int, _frame: object) -> None:
-            self.interrupted_by = signum
-            if self.active_proc is not None:
-                self.stop_process(self.active_proc, self.active_namespaced)
-
-        for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
-            signal.signal(sig, handle)
+    @property
+    def interrupted_by(self) -> int | None:
+        return self._coordinator.interrupted_by
 
     def stop_process(self, proc: subprocess.Popen[bytes], namespaced: bool) -> None:
         stop_process(proc, namespaced)
@@ -1041,7 +1064,7 @@ class SuiteRunner:
             print(
                 f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
             )
-            if self.interrupted_by is not None:
+            if self._coordinator.shutdown_requested:
                 break
 
         if self.args.summary_format != "none":
@@ -1075,22 +1098,10 @@ class SuiteRunner:
             helper_binary=self.helper_binary,
             af_unix_mode=self.af_unix_mode,
             use_namespaces=self.use_namespaces,
-            register_active=self._register_active,
-            unregister_active=self._unregister_active,
+            register_active=self._coordinator.register,
+            unregister_active=self._coordinator.unregister,
         )
         return worker.run(case, timeout_s)
-
-    def _register_active(
-        self, case: Case, proc: subprocess.Popen[bytes], namespaced: bool
-    ) -> None:
-        self.active_case = case
-        self.active_proc = proc
-        self.active_namespaced = namespaced
-
-    def _unregister_active(self) -> None:
-        self.active_case = None
-        self.active_proc = None
-        self.active_namespaced = False
 
     def classify_case_exit(
         self,

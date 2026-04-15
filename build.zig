@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = parseTestFilters(b, b.args);
     const opt_stress_tests = b.option(bool, "stress-tests", "Enable heavyweight Zig stress tests [default: false]") orelse false;
+    const opt_test_workers = b.option(u31, "test-workers", "Number of parallel test workers [default: 1]") orelse 1;
 
     // --------------------------------------------------
     // Feature options (mirroring pkgbuild configure flags)
@@ -116,6 +117,8 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(b.getInstallStep());
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-fast" });
     smoke_cmd.step.dependOn(b.getInstallStep());
+    smoke_cmd.addArg("--workers");
+    smoke_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     smoke_step.dependOn(&smoke_cmd.step);
 
     // --------------------------------------------------
@@ -124,6 +127,8 @@ pub fn build(b: *std.Build) void {
     const oracle_step = b.step("smoke-oracle", "Run the oracle smoke harness against installed tmux");
     const oracle_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-oracle" });
     oracle_cmd.step.dependOn(b.getInstallStep());
+    oracle_cmd.addArg("--workers");
+    oracle_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     oracle_step.dependOn(&oracle_cmd.step);
 
     // --------------------------------------------------
@@ -136,6 +141,8 @@ pub fn build(b: *std.Build) void {
     recursive_attach_step.dependOn(b.getInstallStep());
     const recursive_attach_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-recursive" });
     recursive_attach_cmd.step.dependOn(b.getInstallStep());
+    recursive_attach_cmd.addArg("--workers");
+    recursive_attach_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     recursive_attach_step.dependOn(&recursive_attach_cmd.step);
 
     // --------------------------------------------------
@@ -145,6 +152,8 @@ pub fn build(b: *std.Build) void {
     soak_step.dependOn(b.getInstallStep());
     const soak_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-soak" });
     soak_cmd.step.dependOn(b.getInstallStep());
+    soak_cmd.addArg("--workers");
+    soak_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     soak_step.dependOn(&soak_cmd.step);
 
     // --------------------------------------------------
@@ -154,6 +163,8 @@ pub fn build(b: *std.Build) void {
     smoke_most_step.dependOn(b.getInstallStep());
     const smoke_most_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-most" });
     smoke_most_cmd.step.dependOn(b.getInstallStep());
+    smoke_most_cmd.addArg("--workers");
+    smoke_most_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     smoke_most_step.dependOn(&smoke_most_cmd.step);
 
     // --------------------------------------------------
@@ -162,6 +173,8 @@ pub fn build(b: *std.Build) void {
     const docker_step = b.step("smoke-docker", "Run the Docker + SSH smoke harness");
     const docker_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-docker" });
     docker_cmd.step.dependOn(b.getInstallStep());
+    docker_cmd.addArg("--workers");
+    docker_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     docker_step.dependOn(&docker_cmd.step);
 
     // --------------------------------------------------
@@ -171,6 +184,8 @@ pub fn build(b: *std.Build) void {
     smoke_all_step.dependOn(b.getInstallStep());
     const smoke_all_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-all" });
     smoke_all_cmd.step.dependOn(b.getInstallStep());
+    smoke_all_cmd.addArg("--workers");
+    smoke_all_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     if (opt_fuzzing) {
         smoke_all_cmd.addArg("--fuzz-mode");
         smoke_all_cmd.addArg("require");
@@ -218,6 +233,8 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-unit", "--zig-test-binary" });
     run_unit_tests.step.dependOn(b.getInstallStep());
     run_unit_tests.addFileArg(unit_tests.getEmittedBin());
+    run_unit_tests.addArg("--workers");
+    run_unit_tests.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(run_unit_tests, test_filters);
     test_step.dependOn(&run_unit_tests.step);
 
@@ -258,6 +275,8 @@ pub fn build(b: *std.Build) void {
     const run_stress_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-stress", "--zig-test-binary" });
     run_stress_tests.step.dependOn(b.getInstallStep());
     run_stress_tests.addFileArg(stress_tests.getEmittedBin());
+    run_stress_tests.addArg("--workers");
+    run_stress_tests.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(run_stress_tests, test_filters);
     stress_test_step.dependOn(&run_stress_tests.step);
 
@@ -276,6 +295,8 @@ pub fn build(b: *std.Build) void {
     });
     test_most_cmd.step.dependOn(b.getInstallStep());
     test_most_cmd.addFileArg(unit_tests.getEmittedBin());
+    test_most_cmd.addArg("--workers");
+    test_most_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(test_most_cmd, test_filters);
     test_most_step.dependOn(&test_most_cmd.step);
 
@@ -293,6 +314,8 @@ pub fn build(b: *std.Build) void {
     test_all_cmd.addFileArg(unit_tests.getEmittedBin());
     test_all_cmd.addArg("--zig-stress-binary");
     test_all_cmd.addFileArg(stress_tests.getEmittedBin());
+    test_all_cmd.addArg("--workers");
+    test_all_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     if (opt_fuzzing) {
         test_all_cmd.addArg("--fuzz-mode");
         test_all_cmd.addArg("require");
@@ -371,6 +394,8 @@ pub fn build(b: *std.Build) void {
         smoke_fuzz_cmd.addFileArg(fuzz_input.getEmittedBin());
         smoke_fuzz_cmd.addArg("--cmd-preprocess-fuzzer");
         smoke_fuzz_cmd.addFileArg(fuzz_cmd_preprocess.getEmittedBin());
+        smoke_fuzz_cmd.addArg("--workers");
+        smoke_fuzz_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
         smoke_fuzz.dependOn(&smoke_fuzz_cmd.step);
     }
 }

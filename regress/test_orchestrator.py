@@ -709,6 +709,7 @@ class ResultCollector:
 class SuiteRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.workers: int = max(1, args.workers)
         self.timeout_policy = TimeoutPolicy(
             TIMEOUTS_PATH,
             multiplier=float(os.environ.get("ZMUX_TEST_TIMEOUT_MULTIPLIER", "1.0")),
@@ -1113,7 +1114,7 @@ class SuiteRunner:
         return classify_case_exit(case, returncode, stdout_path, stderr_path)
 
     def print_summary(self) -> None:
-        print(summarize_results(self.results))
+        print(summarize_results(self.results, workers=self.workers))
         print_kept_sandboxes(self.results)
 
 
@@ -1139,6 +1140,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cmd-preprocess-fuzzer")
     parser.add_argument("--fuzz-mode", choices=FUZZ_MODES, default="auto")
     parser.add_argument("--summary-format", choices=SUMMARY_FORMATS, default="default")
+    parser.add_argument("--workers", type=int, default=1, metavar="N")
     parser.add_argument("--zmux-binary")
     parser.add_argument("--oracle-binary")
     parser.add_argument("--helper-binary")

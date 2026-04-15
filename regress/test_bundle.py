@@ -15,16 +15,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--zig-test-binary", required=True)
     parser.add_argument("--zig-stress-binary")
     parser.add_argument("--fuzz-mode", choices=orch.FUZZ_MODES, default="auto")
+    parser.add_argument("--workers", type=int, default=1, metavar="N")
     parser.add_argument("--test-filter", action="append", default=[])
     parser.add_argument("--case-filter", action="append", default=[])
     parser.add_argument("--af-unix", choices=orch.host_caps.AF_UNIX_MODES)
     return parser.parse_args(argv)
 
 
-def suite_argvs(args: argparse.Namespace) -> list[list[str]]:
+def suite_argvs(args: argparse.Namespace, workers: int) -> list[list[str]]:
     common = []
     if args.af_unix is not None:
         common.extend(["--af-unix", args.af_unix])
+    common.extend(["--workers", str(workers)])
     for test_filter in args.test_filter:
         common.extend(["--test-filter", test_filter])
     for case_filter in args.case_filter:
@@ -79,7 +81,7 @@ def main(argv: list[str]) -> int:
     overall_rc = 0
     root = artifact_root.default_sandbox_root()
     artifact_root.prune_stale_children(root)
-    for suite_argv in suite_argvs(args):
+    for suite_argv in suite_argvs(args, args.workers):
         runner_args = orch.parse_args(suite_argv)
         runner = orch.SuiteRunner(runner_args)
         if not runner.selected_cases():
@@ -91,7 +93,7 @@ def main(argv: list[str]) -> int:
     if not all_results:
         print("no cases selected", file=sys.stderr)
         return 1
-    print(orch.summarize_results(all_results))
+    print(orch.summarize_results(all_results, workers=args.workers))
     orch.print_kept_sandboxes(all_results)
     return overall_rc
 

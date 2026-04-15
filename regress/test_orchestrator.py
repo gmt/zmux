@@ -108,6 +108,7 @@ def summarize_results(results: list["CaseResult"], workers: int = 1) -> str:
     ]
     if not failing:
         parts.append("ISSUES=none")
+        parts.append(f"MODE=serial({workers})")
         return "summary: " + " | ".join(parts)
 
     issue_items = [f"{result.case.case_id}({result.status})" for result in failing]
@@ -117,6 +118,7 @@ def summarize_results(results: list["CaseResult"], workers: int = 1) -> str:
     else:
         issues = ", ".join(issue_items)
     parts.append(f"ISSUES={issues}")
+    parts.append(f"MODE=serial({workers})")
     return "summary: " + " | ".join(parts)
 
 

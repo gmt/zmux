@@ -534,9 +534,7 @@ class SignalCoordinator:
         def handle(signum: int, _frame: object) -> None:
             self.interrupted_by = signum
             self._shutdown.set()
-            with self._lock:
-                snapshot = list(self._active.values())
-            for proc, namespaced in snapshot:
+            for proc, namespaced in list(self._active.values()):
                 stop_process(proc, namespaced)
 
         for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):

@@ -90,7 +90,11 @@ def main(argv: list[str]) -> int:
         all_results.extend(runner.results)
         if rc != 0 and overall_rc == 0:
             overall_rc = rc
+        if runner.interrupted_by is not None:
+            break
     if not all_results:
+        if overall_rc != 0:
+            return overall_rc
         print("no cases selected", file=sys.stderr)
         return 1
     print(orch.summarize_results(all_results, workers=args.workers))

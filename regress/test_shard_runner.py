@@ -15,7 +15,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         required=True,
-        choices=("zig-unit", "zig-stress", "smoke-fast", "smoke-oracle", "smoke-fuzz"),
+        choices=(
+            "zig-unit",
+            "zig-stress",
+            "smoke-fast",
+            "smoke-oracle",
+            "smoke-fuzz",
+            "smoke-recursive",
+        ),
     )
     parser.add_argument("--zig-test-binary")
     parser.add_argument("--input-fuzzer")

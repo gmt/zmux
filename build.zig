@@ -240,6 +240,53 @@ pub fn build(b: *std.Build) void {
     recursive_attach_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     recursive_attach_step.dependOn(&recursive_attach_cmd.step);
 
+    const smoke_recursive_sharded_step = b.step(
+        "smoke-recursive-sharded",
+        "Run experimental Zig-scheduled sharded recursive attach tests",
+    );
+    const recursive_shard_result_dir = ".zig-cache/shard-results/smoke-recursive-sharded";
+    const prepare_recursive_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/smoke-recursive-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_recursive_shard_results.step.dependOn(b.getInstallStep());
+    var recursive_shard_steps = std.ArrayList(*std.Build.Step).empty;
+    var recursive_shard_index: u31 = 0;
+    while (recursive_shard_index < opt_test_workers) : (recursive_shard_index += 1) {
+        const run_recursive_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--suite",
+            "smoke-recursive",
+            "--shard-index",
+        });
+        run_recursive_shard.step.dependOn(&prepare_recursive_shard_results.step);
+        run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{recursive_shard_index}) catch @panic("OOM"));
+        run_recursive_shard.addArg("--shard-count");
+        run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_recursive_shard.addArg("--result-path");
+        run_recursive_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-recursive-sharded/shard-{d}.json", .{recursive_shard_index}) catch @panic("OOM"));
+        recursive_shard_steps.append(b.allocator, &run_recursive_shard.step) catch @panic("OOM");
+    }
+    const reduce_recursive_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        recursive_shard_result_dir,
+        "--suite",
+        "smoke-recursive",
+        "--shard-count",
+    });
+    reduce_recursive_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_recursive_shards.addArg("--workers");
+    reduce_recursive_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_recursive_shards.step.dependOn(&prepare_recursive_shard_results.step);
+    for (recursive_shard_steps.items) |recursive_shard_step| {
+        reduce_recursive_shards.step.dependOn(recursive_shard_step);
+    }
+    smoke_recursive_sharded_step.dependOn(&reduce_recursive_shards.step);
+
     // --------------------------------------------------
     // `zig build smoke-soak` – heavy soak harness against zmux
     // --------------------------------------------------

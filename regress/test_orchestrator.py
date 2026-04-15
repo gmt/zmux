@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import queue
 from dataclasses import dataclass, field
 from typing import Callable, cast
 
@@ -109,7 +110,8 @@ def summarize_results(results: list["CaseResult"], workers: int = 1) -> str:
     ]
     if not failing:
         parts.append("ISSUES=none")
-        parts.append(f"MODE=serial({workers})")
+        mode = f"parallel({workers})" if workers > 1 else f"serial({workers})"
+        parts.append(f"MODE={mode}")
         return "summary: " + " | ".join(parts)
 
     issue_items = [f"{result.case.case_id}({result.status})" for result in failing]
@@ -119,7 +121,8 @@ def summarize_results(results: list["CaseResult"], workers: int = 1) -> str:
     else:
         issues = ", ".join(issue_items)
     parts.append(f"ISSUES={issues}")
-    parts.append(f"MODE=serial({workers})")
+    mode = f"parallel({workers})" if workers > 1 else f"serial({workers})"
+    parts.append(f"MODE={mode}")
     return "summary: " + " | ".join(parts)
 
 
@@ -706,6 +709,64 @@ class ResultCollector:
             return len(self._results)
 
 
+class WorkerPool:
+    def __init__(
+        self,
+        n_workers: int,
+        coordinator: SignalCoordinator,
+        collector: ResultCollector,
+        worker_factory: Callable[[], CaseWorker],
+        print_lock: threading.Lock,
+        timeout_policy: TimeoutPolicy,
+    ) -> None:
+        self._n = n_workers
+        self._coordinator = coordinator
+        self._collector = collector
+        self._worker_factory = worker_factory
+        self._print_lock = print_lock
+        self._timeout_policy = timeout_policy
+        self._queue: queue.Queue[Case | None] = queue.Queue()
+
+    def _worker_thread(self) -> None:
+        worker = self._worker_factory()
+        while True:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._coordinator.shutdown_requested:
+                    break
+                continue
+            if item is None:
+                break
+            timeout_s = self._timeout_policy.for_case(item)
+            result = worker.run(item, timeout_s)
+            self._collector.record(result)
+            with self._print_lock:
+                suffix = (
+                    f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
+                )
+                detail = f" {result.detail}" if result.detail else ""
+                print(
+                    f"{result.status:12s} {item.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
+                )
+
+    def run(self, cases: list[Case]) -> None:
+        threads = [
+            threading.Thread(target=self._worker_thread, daemon=True)
+            for _ in range(self._n)
+        ]
+        for thread in threads:
+            thread.start()
+        for case in cases:
+            if self._coordinator.shutdown_requested:
+                break
+            self._queue.put(case)
+        for _ in threads:
+            self._queue.put(None)
+        for thread in threads:
+            thread.join()
+
+
 class SuiteRunner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -736,6 +797,7 @@ class SuiteRunner:
         self.use_namespaces, self.namespace_reason = namespace_probe()
         self._collector = ResultCollector()
         self._coordinator = SignalCoordinator()
+        self._summary_workers = 1
 
     @property
     def results(self) -> list[CaseResult]:
@@ -1055,18 +1117,19 @@ class SuiteRunner:
             f"namespace={namespace_text} "
             f"{self.af_unix_status.summary()}"
         )
-        for case in cases:
-            result = self.run_case(case)
-            self._collector.record(result)
-            suffix = (
-                f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
-            )
-            detail = f" {result.detail}" if result.detail else ""
+        if self.workers > 1 and self.use_namespaces:
+            self._summary_workers = self.workers
+            self._run_parallel(cases)
+        elif self.workers > 1:
             print(
-                f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
+                f"warning: namespaces unavailable ({self.namespace_reason}), falling back to serial",
+                file=sys.stderr,
             )
-            if self._coordinator.shutdown_requested:
-                break
+            self._summary_workers = 1
+            self._run_serial(cases)
+        else:
+            self._summary_workers = 1
+            self._run_serial(cases)
 
         if self.args.summary_format != "none":
             self.print_summary()
@@ -1104,6 +1167,65 @@ class SuiteRunner:
         )
         return worker.run(case, timeout_s)
 
+    def _run_serial(self, cases: list[Case]) -> None:
+        for case in cases:
+            result = self.run_case(case)
+            self._collector.record(result)
+            suffix = (
+                f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
+            )
+            detail = f" {result.detail}" if result.detail else ""
+            print(
+                f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
+            )
+            if self._coordinator.shutdown_requested:
+                break
+
+    def _run_parallel(self, cases: list[Case]) -> None:
+        runnable_cases: list[Case] = []
+        for case in cases:
+            missing_reason = self.missing_capability_reason(case)
+            if missing_reason is not None:
+                result = CaseResult(
+                    case=case,
+                    status="SKIP",
+                    elapsed_s=0.0,
+                    detail=missing_reason,
+                )
+                self._collector.record(result)
+                suffix = (
+                    f" cleanup={result.cleanup_failed}" if result.cleanup_failed else ""
+                )
+                detail = f" {result.detail}" if result.detail else ""
+                print(
+                    f"{result.status:12s} {case.case_id} {result.elapsed_s:6.2f}s{suffix}{detail}"
+                )
+                if self._coordinator.shutdown_requested:
+                    break
+                continue
+            runnable_cases.append(case)
+        if self._coordinator.shutdown_requested or not runnable_cases:
+            return
+        print_lock = threading.Lock()
+        pool = WorkerPool(
+            n_workers=self.workers,
+            coordinator=self._coordinator,
+            collector=self._collector,
+            worker_factory=lambda: CaseWorker(
+                sandbox_root=self.sandbox_root,
+                zmux_binary=self.zmux_binary,
+                oracle_tmux=self.oracle_tmux,
+                helper_binary=self.helper_binary,
+                af_unix_mode=self.af_unix_mode,
+                use_namespaces=self.use_namespaces,
+                register_active=self._coordinator.register,
+                unregister_active=self._coordinator.unregister,
+            ),
+            print_lock=print_lock,
+            timeout_policy=self.timeout_policy,
+        )
+        pool.run(runnable_cases)
+
     def classify_case_exit(
         self,
         case: Case,
@@ -1114,7 +1236,7 @@ class SuiteRunner:
         return classify_case_exit(case, returncode, stdout_path, stderr_path)
 
     def print_summary(self) -> None:
-        print(summarize_results(self.results, workers=self.workers))
+        print(summarize_results(self.results, workers=self._summary_workers))
         print_kept_sandboxes(self.results)
 
 

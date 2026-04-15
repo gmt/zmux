@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import cast
 
 import artifact_root
 import host_caps
@@ -91,7 +92,7 @@ def normalize_fuzz_mode(raw: str | None) -> str:
     return value
 
 
-def summarize_results(results: list["CaseResult"]) -> str:
+def summarize_results(results: list["CaseResult"], workers: int = 1) -> str:
     counts: dict[str, int] = {}
     for result in results:
         counts[result.status] = counts.get(result.status, 0) + 1
@@ -568,8 +569,8 @@ class SuiteRunner:
         cases: list[Case] = []
         filters = self.args.test_filter or []
         for item in tests:
-            index = int(item["index"])
-            name = str(item["name"])
+            index = cast(int, item["index"])
+            name = cast(str, item["name"])
             if not matches_filters(name, filters):
                 continue
             cases.append(
@@ -880,13 +881,13 @@ class SuiteRunner:
         )
         stdout_path = sandbox / "logs" / "stdout.log"
         stderr_path = sandbox / "logs" / "stderr.log"
-        before_mux = snapshot_mux_processes()
         started = time.monotonic()
         status = "ERROR"
         detail = ""
 
         base_argv = list(case.argv)
         namespaced = self.use_namespaces
+        before_mux = snapshot_mux_processes() if not namespaced else {}
         if namespaced:
             base_argv = [
                 shutil.which("unshare") or "unshare",
@@ -948,7 +949,7 @@ class SuiteRunner:
         if survivors:
             cleanup_failed = True
             detail = f"{detail} owned={','.join(str(item.pid) for item in survivors)}".strip()
-        leaked_mux = cleanup_new_mux_processes(before_mux)
+        leaked_mux = cleanup_new_mux_processes(before_mux) if not namespaced else []
         if leaked_mux:
             cleanup_failed = True
             detail = f"{detail} mux={','.join(leaked_mux)}".strip()

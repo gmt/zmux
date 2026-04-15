@@ -1842,6 +1842,61 @@ test "server_client_check_exit sends detach with session name and clears CLIENT_
     try std.testing.expectEqualStrings("detach-me", std.mem.sliceTo(@as([*:0]const u8, @ptrCast(payload.ptr)), 0));
 }
 
+test "server_client_check_exit sends return status and message in one exit packet" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
+    var proc = T.ZmuxProc{ .name = "sc-check-exit-message" };
+    defer proc.peers.deinit(xm.allocator);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .flags = T.CLIENT_EXIT,
+        .exit_reason = .message_provided,
+        .exit_message = xm.xstrdup("explicit exit"),
+        .retval = 23,
+    };
+    cl.tty = .{ .client = &cl };
+    defer if (cl.exit_message) |msg| xm.allocator.free(msg);
+    cl.peer = proc_mod.proc_add_peer(&proc, pair[0], test_peer_dispatch, null);
+    defer {
+        const peer = cl.peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
+    }
+
+    sc.server_client_check_exit(&cl);
+    try std.testing.expect((cl.flags & T.CLIENT_EXIT) == 0);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var out: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &out) > 0);
+    defer c.imsg.imsg_free(&out);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exit))), c.imsg.imsg_get_type(&out));
+    const data_len = out.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
+    const payload = try xm.allocator.alloc(u8, data_len);
+    defer xm.allocator.free(payload);
+    _ = c.imsg.imsg_get_data(&out, payload.ptr, payload.len);
+    var retval: i32 = 0;
+    @memcpy(std.mem.asBytes(&retval), payload[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 23), retval);
+    try std.testing.expectEqualStrings("explicit exit", std.mem.sliceTo(@as([*:0]const u8, @ptrCast(payload[@sizeOf(i32)..].ptr)), 0));
+}
+
 test "server_client_check_exit waits for queued control output before detach" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);

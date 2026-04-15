@@ -202,6 +202,8 @@ fn showOutputInPane(wp: *T.WindowPane, data: []const u8) void {
 }
 
 fn deliverOutput(state: *RunShellState) void {
+    if (state.output.items.len == 0) return;
+
     const item = state.item;
     var target_pane: ?*T.WindowPane = null;
 
@@ -764,6 +766,37 @@ pub const StressTests = struct {
         defer xm.allocator.free(second);
         try std.testing.expectEqualStrings("pane", first);
         try std.testing.expectEqualStrings("output", second);
+    }
+
+    pub fn runShellWithoutOutputDoesNotEnterViewMode() !void {
+        const old_base = installEventBase();
+        defer restoreEventBase(old_base);
+
+        var setup = testSetup("run-shell-empty-output");
+        defer testTeardown(&setup);
+
+        const output = try captureStdout(&setup.client, struct {
+            fn run(client: *T.Client) !void {
+                try appendCommand(client, &.{
+                    "run-shell",
+                    "/bin/true",
+                });
+                try appendCommand(client, &.{
+                    "rename-window",
+                    "-t",
+                    "run-shell-empty-output:0",
+                    "empty-output-finished",
+                });
+                try std.testing.expectEqual(@as(u32, 0), cmdq.cmdq_next(client));
+                try waitForQueueProgress(client, 1);
+            }
+        }.run);
+        defer xm.allocator.free(output);
+
+        try std.testing.expectEqualStrings("", output);
+        try std.testing.expectEqualStrings("empty-output-finished", setup.window.name);
+        try std.testing.expect(!screen_mod.screen_alternate_active(setup.pane));
+        try std.testing.expect(window_mod.window_pane_mode(setup.pane) == null);
     }
 
     pub fn runShellTShowsShellOutputInTheTargetPaneViewMode() !void {

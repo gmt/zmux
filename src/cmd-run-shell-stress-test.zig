@@ -194,6 +194,10 @@ test "run-shell without -t shows shell output in the attached current pane view 
     try cmd_run_shell.StressTests.runShellWithoutTShowsShellOutputInTheAttachedCurrentPaneViewMode();
 }
 
+test "run-shell without output does not enter view mode" {
+    try cmd_run_shell.StressTests.runShellWithoutOutputDoesNotEnterViewMode();
+}
+
 test "run-shell -t shows shell output in the target pane view mode" {
     try cmd_run_shell.StressTests.runShellTShowsShellOutputInTheTargetPaneViewMode();
 }

@@ -818,8 +818,13 @@ pub fn server_client_check_exit(cl: *T.Client) void {
         },
         .message_provided => {
             const msg = cl.exit_message orelse "";
-            _ = proc_mod.proc_send(peer, .exit, -1, @ptrCast(std.mem.asBytes(&cl.retval)), @sizeOf(i32));
-            _ = proc_mod.proc_send(peer, .detach, -1, msg.ptr, msg.len + 1);
+            const payload_len = @sizeOf(i32) + msg.len + 1;
+            const payload = xm.allocator.alloc(u8, payload_len) catch unreachable;
+            defer xm.allocator.free(payload);
+            @memcpy(payload[0..@sizeOf(i32)], std.mem.asBytes(&cl.retval));
+            @memcpy(payload[@sizeOf(i32) .. @sizeOf(i32) + msg.len], msg);
+            payload[payload.len - 1] = 0;
+            _ = proc_mod.proc_send(peer, .exit, -1, payload.ptr, payload.len);
         },
     }
     cl.flags &= ~@as(u64, T.CLIENT_EXIT);

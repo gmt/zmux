@@ -252,13 +252,28 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             client_exitreason = .lost_server;
             proc_mod.proc_exit(client_proc.?);
         },
-        .exit, .exiting => {
-            client_exitreason = .exited;
+        .exit => {
             const data_len = imsg_msg.hdr.len -% @sizeOf(c.imsg.imsg_hdr);
             if (data_len >= @sizeOf(i32) and imsg_msg.data != null) {
-                const data: *const i32 = @ptrCast(@alignCast(imsg_msg.data.?));
-                client_retval = data.*;
+                const data = @as([*]const u8, @ptrCast(imsg_msg.data.?))[0..data_len];
+                @memcpy(std.mem.asBytes(&client_retval), data[0..@sizeOf(i32)]);
+                if (data_len > @sizeOf(i32)) {
+                    if (client_exitmessage) |old| xm.allocator.free(old);
+                    const raw_message = data[@sizeOf(i32)..];
+                    const message = if (raw_message.len != 0 and raw_message[raw_message.len - 1] == 0)
+                        raw_message[0 .. raw_message.len - 1]
+                    else
+                        raw_message;
+                    client_exitmessage = xm.xstrdup(message);
+                    client_exitreason = .message_provided;
+                } else if (client_attached and client_exitreason == .none) {
+                    client_exitreason = .exited;
+                }
             }
+            proc_mod.proc_exit(client_proc.?);
+        },
+        .exiting => {
+            client_exitreason = .exited;
             proc_mod.proc_exit(client_proc.?);
         },
         .shutdown => {
@@ -1041,7 +1056,7 @@ test "client_dispatch flags replaces client_flags from payload" {
     try std.testing.expect(!proc.exit);
 }
 
-test "client_dispatch exit carries retval and exits proc" {
+test "client_dispatch exit carries retval without a printable reason for detached clients" {
     var proc = T.ZmuxProc{ .name = "client-dispatch-exit" };
     defer clientDispatchTestResetProc(&proc);
     client_proc = &proc;
@@ -1049,10 +1064,12 @@ test "client_dispatch exit carries retval and exits proc" {
         client_proc = null;
         client_retval = 0;
         client_exitreason = .none;
+        client_attached = false;
     }
 
     client_retval = 0;
     client_exitreason = .none;
+    client_attached = false;
     const rv: i32 = 17;
     var imsg: c.imsg.imsg = .{
         .hdr = .{
@@ -1066,7 +1083,74 @@ test "client_dispatch exit carries retval and exits proc" {
     };
     client_dispatch(&imsg, null);
     try std.testing.expectEqual(@as(i32, 17), client_retval);
+    try std.testing.expectEqual(T.ClientExitReason.none, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch attached exit reports exited when no message is provided" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-attached-exit" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_retval = 0;
+        client_exitreason = .none;
+        client_attached = false;
+    }
+
+    client_retval = 0;
+    client_exitreason = .none;
+    client_attached = true;
+    const rv: i32 = 0;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.exit)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + @sizeOf(i32))),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(@constCast(&rv)),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(@as(i32, 0), client_retval);
     try std.testing.expectEqual(T.ClientExitReason.exited, client_exitreason);
+    try std.testing.expect(proc.exit);
+}
+
+test "client_dispatch exit carries an explicit message" {
+    var proc = T.ZmuxProc{ .name = "client-dispatch-exit-message" };
+    defer clientDispatchTestResetProc(&proc);
+    client_proc = &proc;
+    defer {
+        client_proc = null;
+        client_retval = 0;
+        client_exitreason = .none;
+        if (client_exitmessage) |msg| xm.allocator.free(msg);
+        client_exitmessage = null;
+    }
+
+    client_retval = 0;
+    client_exitreason = .none;
+    var payload: [@sizeOf(i32) + "explicit reason".len + 1]u8 = undefined;
+    const rv: i32 = 9;
+    @memcpy(payload[0..@sizeOf(i32)], std.mem.asBytes(&rv));
+    @memcpy(payload[@sizeOf(i32) .. payload.len - 1], "explicit reason");
+    payload[payload.len - 1] = 0;
+    var imsg: c.imsg.imsg = .{
+        .hdr = .{
+            .type = @intCast(@intFromEnum(protocol.MsgType.exit)),
+            .len = @as(u32, @intCast(@sizeOf(c.imsg.imsg_hdr) + payload.len)),
+            .peerid = protocol.PROTOCOL_VERSION,
+            .pid = 0,
+        },
+        .data = @ptrCast(&payload),
+        .buf = null,
+    };
+    client_dispatch(&imsg, null);
+    try std.testing.expectEqual(@as(i32, 9), client_retval);
+    try std.testing.expectEqual(T.ClientExitReason.message_provided, client_exitreason);
+    try std.testing.expectEqualStrings("explicit reason", client_exitmessage.?);
     try std.testing.expect(proc.exit);
 }
 

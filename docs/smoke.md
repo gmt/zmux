@@ -27,14 +27,14 @@ reaping.
 
 | Command | Suite | What it does |
 |---|---|---|
-| `zig build smoke` | fast | Quick end-to-end pass against `zig-out/bin/zmux`. Runs ~16 shell tests plus a command sweep and inside-session check. Finishes in under a minute. |
-| `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests, but run against `/usr/bin/tmux`. Verifies that the test expectations themselves are correct. |
-| `zig build smoke-soak` | soak | Long-running stress-oriented tests against zmux. Checks for resource leaks (memory, FDs, client count) over sustained operation. |
-| `zig build smoke-fuzz` | fuzz | Timed corpus replay for the built-in fuzz targets against every seed in `fuzz/corpus/`. |
-| `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior. Included in `smoke-most` and `smoke-all`; still useful standalone when working on client/attach semantics. |
-| `zig build smoke-docker` | docker | Docker + SSH harness against system tmux. Requires Docker. |
-| `zig build smoke-most` | most | Runs fast + oracle + recursive + docker suites together, but leaves out soak. |
-| `zig build smoke-all` | all | Runs all smoke suites, including soak and fuzz replay. |
+| `zig build smoke` | fast | Quick end-to-end pass against `zig-out/bin/zmux` through the sharded smoke graph. Runs ~16 shell tests plus a command sweep and inside-session check. |
+| `zig build smoke-oracle` | oracle | Same command sweep and inside-session tests through the sharded smoke graph, but run against `/usr/bin/tmux`. |
+| `zig build smoke-soak` | soak | Long-running stress-oriented tests against zmux through a wrapped one-shard smoke path. |
+| `zig build smoke-fuzz` | fuzz | Timed corpus replay for the built-in fuzz targets through the sharded smoke path. |
+| `zig build smoke-recursive-attach` | recursive | Characterization tests for nested recursive attach behavior through the sharded smoke path. Included in `smoke-most` and `smoke-all`. |
+| `zig build smoke-docker` | docker | Docker + SSH harness against system tmux through the wrapped one-shard smoke path. |
+| `zig build smoke-most` | most | Runs sharded fast + oracle + recursive + docker suites together, but leaves out soak. |
+| `zig build smoke-all` | all | Runs all sharded smoke suites, including soak and fuzz replay. |
 
 The oracle lane uses system tmux when available. If it is missing, the runner
 builds and uses `tmux-museum/out/gdb/tmux`.
@@ -54,6 +54,7 @@ Oracle-known-bad policy:
 - **Full smoke matrix**: `zig build smoke-all` when you really do want every smoke lane.
 - **Corpus replay**: `zig build smoke-fuzz` when working on fuzz regressions or new seeds.
 - **Attach/detach work**: `zig build smoke-recursive-attach` for nested mux edge cases.
+- **Legacy path**: `zig build *-deprecated` if you need the old runner-owned targets for comparison or fallback.
 
 ## Pass / fail
 

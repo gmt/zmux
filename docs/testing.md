@@ -6,33 +6,32 @@ Testing lanes:
   and wrapper scripts delegate here.
 
 - `zig build test`
-  Fast Zig unit lane for the normal warm-cache developer loop. Runs each
-  Zig unit test individually through the root timed runner. This lane should
-  not discover stress-only cases just to skip them. `-Dtest-workers` defaults
-  to CPU count when omitted and is separate from Zig's `-j` build parallelism.
+  Fast Zig unit lane for the normal warm-cache developer loop. Runs through the
+  Zig-scheduled sharded graph by default. `-Dtest-workers` defaults to CPU
+  count when omitted and is separate from Zig's `-j` build parallelism.
 
 - `zig build test-most`
-  Organizational wrapper for `test` + `smoke-most`. Useful for a broad local
-  sweep without the stress or full-smoke weight.
+  Organizational wrapper for sharded `test` + sharded `smoke-most`.
 
 - `zig build test-stress`
   Heavy Zig stress lane for subprocess, pipe/socket transport, and async shell
-  tests that are too expensive for the main unit loop. Runs each stress
-  test individually through the root timed runner.
+  tests that are too expensive for the main unit loop. Runs through the
+  Zig-scheduled sharded graph by default.
 
 - `zig build test-all`
-  Organizational wrapper for `test` + `test-stress` + `smoke-all`.
+  Organizational wrapper for sharded `test` + `test-stress` + `smoke-all`.
 
 - `zig build smoke`
-  Fast end-to-end coverage against `zig-out/bin/zmux`. Shell smoke cases,
-  sweep commands, and inside-session checks are all timed one by one.
+  Fast end-to-end coverage against `zig-out/bin/zmux`, routed through the
+  Zig-scheduled sharded smoke graph by default.
 
 - `zig build smoke-oracle`
-  Oracle coverage against system tmux. If system tmux is unavailable, the
-  museum build under `tmux-museum/out/gdb/tmux` is used automatically.
+  Oracle coverage against system tmux through the sharded smoke graph. If
+  system tmux is unavailable, the museum build under `tmux-museum/out/gdb/tmux`
+  is used automatically.
 
 - `zig build smoke-soak`
-  Heavy end-to-end soak coverage for long-lived or stress-oriented behavior.
+  Heavy end-to-end soak coverage through the wrapped sharded smoke path.
 
 - `python3 regress/test-watchdog.py`
   Compatibility wrapper for the timed Zig unit lane. It no longer adds a
@@ -51,7 +50,12 @@ Testing lanes:
   them when needed.
 
 - `zig build smoke-fuzz`
-  Timed corpus replay for each fuzz target and each seed in `fuzz/corpus/`.
+  Timed corpus replay for each fuzz target and each seed in `fuzz/corpus/`
+  through the sharded smoke path.
+
+- `zig build *-deprecated`
+  Legacy runner-owned targets retained as escape hatches while the sharded path
+  settles.
 
 Current intent:
 

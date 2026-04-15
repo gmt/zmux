@@ -114,13 +114,13 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     // `zig build smoke` – fast harness against zmux
     // --------------------------------------------------
-    const smoke_step = b.step("smoke", "Run the fast smoke harness against zig-out/bin/zmux");
-    smoke_step.dependOn(b.getInstallStep());
+    const smoke_deprecated_step = b.step("smoke-deprecated", "Run the deprecated fast smoke harness against zig-out/bin/zmux");
+    smoke_deprecated_step.dependOn(b.getInstallStep());
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-fast" });
     smoke_cmd.step.dependOn(b.getInstallStep());
     smoke_cmd.addArg("--workers");
     smoke_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    smoke_step.dependOn(&smoke_cmd.step);
+    smoke_deprecated_step.dependOn(&smoke_cmd.step);
 
     const smoke_fast_sharded_step = b.step(
         "smoke-fast-sharded",
@@ -168,16 +168,18 @@ pub fn build(b: *std.Build) void {
         reduce_smoke_shards.step.dependOn(smoke_shard_step);
     }
     smoke_fast_sharded_step.dependOn(&reduce_smoke_shards.step);
+    const smoke_step = b.step("smoke", "Run fast smoke tests via the sharded graph");
+    smoke_step.dependOn(smoke_fast_sharded_step);
 
     // --------------------------------------------------
     // `zig build smoke-oracle` – oracle harness against installed tmux
     // --------------------------------------------------
-    const oracle_step = b.step("smoke-oracle", "Run the oracle smoke harness against installed tmux");
+    const oracle_deprecated_step = b.step("smoke-oracle-deprecated", "Run the deprecated oracle smoke harness against installed tmux");
     const oracle_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-oracle" });
     oracle_cmd.step.dependOn(b.getInstallStep());
     oracle_cmd.addArg("--workers");
     oracle_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    oracle_step.dependOn(&oracle_cmd.step);
+    oracle_deprecated_step.dependOn(&oracle_cmd.step);
 
     const smoke_oracle_sharded_step = b.step(
         "smoke-oracle-sharded",
@@ -225,20 +227,22 @@ pub fn build(b: *std.Build) void {
         reduce_oracle_shards.step.dependOn(oracle_shard_step);
     }
     smoke_oracle_sharded_step.dependOn(&reduce_oracle_shards.step);
+    const oracle_step = b.step("smoke-oracle", "Run oracle smoke tests via the sharded graph");
+    oracle_step.dependOn(smoke_oracle_sharded_step);
 
     // --------------------------------------------------
     // `zig build smoke-recursive-attach` – nested recursive attach characterization
     // --------------------------------------------------
-    const recursive_attach_step = b.step(
-        "smoke-recursive-attach",
-        "Run the nested recursive attach characterization harness",
+    const recursive_attach_deprecated_step = b.step(
+        "smoke-recursive-attach-deprecated",
+        "Run the deprecated nested recursive attach characterization harness",
     );
-    recursive_attach_step.dependOn(b.getInstallStep());
+    recursive_attach_deprecated_step.dependOn(b.getInstallStep());
     const recursive_attach_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-recursive" });
     recursive_attach_cmd.step.dependOn(b.getInstallStep());
     recursive_attach_cmd.addArg("--workers");
     recursive_attach_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    recursive_attach_step.dependOn(&recursive_attach_cmd.step);
+    recursive_attach_deprecated_step.dependOn(&recursive_attach_cmd.step);
 
     const smoke_recursive_sharded_step = b.step(
         "smoke-recursive-sharded",
@@ -286,17 +290,22 @@ pub fn build(b: *std.Build) void {
         reduce_recursive_shards.step.dependOn(recursive_shard_step);
     }
     smoke_recursive_sharded_step.dependOn(&reduce_recursive_shards.step);
+    const recursive_attach_step = b.step(
+        "smoke-recursive-attach",
+        "Run recursive attach tests via the sharded graph",
+    );
+    recursive_attach_step.dependOn(smoke_recursive_sharded_step);
 
     // --------------------------------------------------
     // `zig build smoke-soak` – heavy soak harness against zmux
     // --------------------------------------------------
-    const soak_step = b.step("smoke-soak", "Run the heavy soak harness against zig-out/bin/zmux");
-    soak_step.dependOn(b.getInstallStep());
+    const soak_deprecated_step = b.step("smoke-soak-deprecated", "Run the deprecated heavy soak harness against zig-out/bin/zmux");
+    soak_deprecated_step.dependOn(b.getInstallStep());
     const soak_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-soak" });
     soak_cmd.step.dependOn(b.getInstallStep());
     soak_cmd.addArg("--workers");
     soak_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    soak_step.dependOn(&soak_cmd.step);
+    soak_deprecated_step.dependOn(&soak_cmd.step);
 
     const smoke_soak_sharded_step = b.step(
         "smoke-soak-sharded",
@@ -337,27 +346,29 @@ pub fn build(b: *std.Build) void {
     reduce_soak_shards.step.dependOn(&prepare_soak_shard_results.step);
     reduce_soak_shards.step.dependOn(&run_soak_shard.step);
     smoke_soak_sharded_step.dependOn(&reduce_soak_shards.step);
+    const soak_step = b.step("smoke-soak", "Run soak tests via the sharded wrapper");
+    soak_step.dependOn(smoke_soak_sharded_step);
 
     // --------------------------------------------------
     // `zig build smoke-most` – fast local + oracle + recursive + docker suites
     // --------------------------------------------------
-    const smoke_most_step = b.step("smoke-most", "Run fast local, oracle, recursive-attach, and Docker smoke suites");
-    smoke_most_step.dependOn(b.getInstallStep());
+    const smoke_most_deprecated_step = b.step("smoke-most-deprecated", "Run the deprecated fast+oracle+recursive+docker smoke bundle");
+    smoke_most_deprecated_step.dependOn(b.getInstallStep());
     const smoke_most_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-most" });
     smoke_most_cmd.step.dependOn(b.getInstallStep());
     smoke_most_cmd.addArg("--workers");
     smoke_most_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    smoke_most_step.dependOn(&smoke_most_cmd.step);
+    smoke_most_deprecated_step.dependOn(&smoke_most_cmd.step);
 
     // --------------------------------------------------
     // `zig build smoke-docker` – Docker + SSH harness against system tmux
     // --------------------------------------------------
-    const docker_step = b.step("smoke-docker", "Run the Docker + SSH smoke harness");
+    const docker_deprecated_step = b.step("smoke-docker-deprecated", "Run the deprecated Docker + SSH smoke harness");
     const docker_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-docker" });
     docker_cmd.step.dependOn(b.getInstallStep());
     docker_cmd.addArg("--workers");
     docker_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
-    docker_step.dependOn(&docker_cmd.step);
+    docker_deprecated_step.dependOn(&docker_cmd.step);
 
     const smoke_docker_sharded_step = b.step(
         "smoke-docker-sharded",
@@ -405,12 +416,19 @@ pub fn build(b: *std.Build) void {
         reduce_docker_shards.step.dependOn(docker_shard_step);
     }
     smoke_docker_sharded_step.dependOn(&reduce_docker_shards.step);
+    const docker_step = b.step("smoke-docker", "Run Docker smoke tests via the sharded wrapper");
+    docker_step.dependOn(smoke_docker_sharded_step);
+    const smoke_most_step = b.step("smoke-most", "Run sharded fast, oracle, recursive, and docker smoke suites");
+    smoke_most_step.dependOn(smoke_fast_sharded_step);
+    smoke_most_step.dependOn(smoke_oracle_sharded_step);
+    smoke_most_step.dependOn(smoke_recursive_sharded_step);
+    smoke_most_step.dependOn(smoke_docker_sharded_step);
 
     // --------------------------------------------------
     // `zig build smoke-all` – all smoke suites, including soak
     // --------------------------------------------------
-    const smoke_all_step = b.step("smoke-all", "Run all smoke suites, including soak and fuzz replay");
-    smoke_all_step.dependOn(b.getInstallStep());
+    const smoke_all_deprecated_step = b.step("smoke-all-deprecated", "Run the deprecated full smoke bundle, including soak and fuzz replay");
+    smoke_all_deprecated_step.dependOn(b.getInstallStep());
     const smoke_all_cmd = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "smoke-all" });
     smoke_all_cmd.step.dependOn(b.getInstallStep());
     smoke_all_cmd.addArg("--workers");
@@ -422,7 +440,7 @@ pub fn build(b: *std.Build) void {
         smoke_all_cmd.addArg("--fuzz-mode");
         smoke_all_cmd.addArg("off");
     }
-    smoke_all_step.dependOn(&smoke_all_cmd.step);
+    smoke_all_deprecated_step.dependOn(&smoke_all_cmd.step);
 
     // --------------------------------------------------
     // `zig build smoke-cleanup` – remove managed smoke artifacts under ZMUX_TMP_ROOT and ZMUX_TEST_ROOT plus legacy /tmp entries
@@ -458,14 +476,14 @@ pub fn build(b: *std.Build) void {
     unit_tests.linkLibC();
     unit_tests.linkSystemLibrary("event_core");
     unit_tests.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
-    const test_step = b.step("test", "Run Zig unit tests");
+    const test_deprecated_step = b.step("test-deprecated", "Run the deprecated Zig unit runner");
     const run_unit_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-unit", "--zig-test-binary" });
     run_unit_tests.step.dependOn(b.getInstallStep());
     run_unit_tests.addFileArg(unit_tests.getEmittedBin());
     run_unit_tests.addArg("--workers");
     run_unit_tests.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(run_unit_tests, test_filters);
-    test_step.dependOn(&run_unit_tests.step);
+    test_deprecated_step.dependOn(&run_unit_tests.step);
 
     const test_zig_sharded_step = b.step("test-zig-sharded", "Run experimental Zig-scheduled sharded unit tests");
     const shard_result_dir = ".zig-cache/shard-results/test-zig-sharded";
@@ -514,6 +532,8 @@ pub fn build(b: *std.Build) void {
         reduce_shards.step.dependOn(shard_step);
     }
     test_zig_sharded_step.dependOn(&reduce_shards.step);
+    const test_step = b.step("test", "Run Zig unit tests via the sharded graph");
+    test_step.dependOn(test_zig_sharded_step);
 
     const test_most_sharded_step = b.step(
         "test-most-sharded",
@@ -572,14 +592,14 @@ pub fn build(b: *std.Build) void {
     stress_tests.linkLibC();
     stress_tests.linkSystemLibrary("event_core");
     stress_tests.root_module.linkSystemLibrary("ncursesw", .{ .use_pkg_config = .no });
-    const stress_test_step = b.step("test-stress", "Run heavyweight Zig stress tests");
+    const stress_test_deprecated_step = b.step("test-stress-deprecated", "Run the deprecated heavyweight Zig stress runner");
     const run_stress_tests = b.addSystemCommand(&.{ "python3", "regress/test_orchestrator.py", "zig-stress", "--zig-test-binary" });
     run_stress_tests.step.dependOn(b.getInstallStep());
     run_stress_tests.addFileArg(stress_tests.getEmittedBin());
     run_stress_tests.addArg("--workers");
     run_stress_tests.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(run_stress_tests, test_filters);
-    stress_test_step.dependOn(&run_stress_tests.step);
+    stress_test_deprecated_step.dependOn(&run_stress_tests.step);
 
     const test_stress_zig_sharded_step = b.step(
         "test-stress-zig-sharded",
@@ -631,6 +651,8 @@ pub fn build(b: *std.Build) void {
         reduce_stress_shards.step.dependOn(stress_shard_step);
     }
     test_stress_zig_sharded_step.dependOn(&reduce_stress_shards.step);
+    const stress_test_step = b.step("test-stress", "Run Zig stress tests via the sharded graph");
+    stress_test_step.dependOn(test_stress_zig_sharded_step);
 
     const test_all_sharded_step = b.step(
         "test-all-sharded",
@@ -690,7 +712,7 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------
     // `zig build test-most` – unit tests plus smoke-most
     // --------------------------------------------------
-    const test_most_step = b.step("test-most", "Run unit tests plus smoke-most");
+    const test_most_deprecated_step = b.step("test-most-deprecated", "Run the deprecated unit plus smoke-most bundle");
     const test_most_cmd = b.addSystemCommand(&.{
         "python3",
         "regress/test_bundle.py",
@@ -702,12 +724,14 @@ pub fn build(b: *std.Build) void {
     test_most_cmd.addArg("--workers");
     test_most_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     addTestFilterArgs(test_most_cmd, test_filters);
-    test_most_step.dependOn(&test_most_cmd.step);
+    test_most_deprecated_step.dependOn(&test_most_cmd.step);
+    const test_most_step = b.step("test-most", "Run sharded unit tests plus sharded smoke-most");
+    test_most_step.dependOn(test_most_sharded_step);
 
     // --------------------------------------------------
     // `zig build test-all` – unit + stress + smoke-all
     // --------------------------------------------------
-    const test_all_step = b.step("test-all", "Run unit, stress, and smoke-all");
+    const test_all_deprecated_step = b.step("test-all-deprecated", "Run the deprecated unit, stress, and smoke-all bundle");
     const test_all_cmd = b.addSystemCommand(&.{
         "python3",
         "regress/test_bundle.py",
@@ -728,11 +752,14 @@ pub fn build(b: *std.Build) void {
         test_all_cmd.addArg("off");
     }
     addTestFilterArgs(test_all_cmd, test_filters);
-    test_all_step.dependOn(&test_all_cmd.step);
+    test_all_deprecated_step.dependOn(&test_all_cmd.step);
+    const test_all_step = b.step("test-all", "Run sharded unit, stress, and smoke-all");
+    test_all_step.dependOn(test_all_sharded_step);
 
     // --------------------------------------------------
     // `zig build fuzz`
     // --------------------------------------------------
+    var maybe_smoke_fuzz_sharded_step: ?*std.Build.Step = null;
     if (opt_fuzzing) {
         // The fuzz targets import from the zmux source tree and are built by
         // default so smoke-fuzz can run without a separate feature flag.
@@ -854,12 +881,23 @@ pub fn build(b: *std.Build) void {
             reduce_fuzz_shards.step.dependOn(fuzz_shard_step);
         }
         smoke_fuzz_sharded.dependOn(&reduce_fuzz_shards.step);
+        maybe_smoke_fuzz_sharded_step = smoke_fuzz_sharded;
         reduce_test_all_sharded.addArg("--family-result");
         reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fuzz:{s}", .{fuzz_shard_result_dir}) catch @panic("OOM"));
         reduce_test_all_sharded.step.dependOn(&prepare_fuzz_shard_results.step);
         for (fuzz_shard_steps.items) |fuzz_shard_step| {
             reduce_test_all_sharded.step.dependOn(fuzz_shard_step);
         }
+    }
+
+    const smoke_all_step = b.step("smoke-all", "Run all sharded smoke suites, including soak and fuzz replay");
+    smoke_all_step.dependOn(smoke_fast_sharded_step);
+    smoke_all_step.dependOn(smoke_oracle_sharded_step);
+    smoke_all_step.dependOn(smoke_recursive_sharded_step);
+    smoke_all_step.dependOn(smoke_docker_sharded_step);
+    smoke_all_step.dependOn(smoke_soak_sharded_step);
+    if (maybe_smoke_fuzz_sharded_step) |smoke_fuzz_step| {
+        smoke_all_step.dependOn(smoke_fuzz_step);
     }
 }
 

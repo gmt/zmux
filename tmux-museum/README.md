@@ -87,3 +87,28 @@ For a quick one-off search without building the database:
 ```bash
 grep -rn "function_name" src/
 ```
+
+### Protocol tracer
+
+Less 'art-museum' and more 'museum of science and industry' is
+the `museum-trace` script, which provides a way to run the
+tmux and zmux executables in various configurations and spy
+on the socket converstation occuring between the client and the
+server i.e.:
+
+```bash
+bin/museum-trace capture --zmux --verbose --output /tmp/some.spy-log
+```
+
+Which will dump detailed bidirectional protocol conversation
+traces into, of course, `/tmp/some.spy-log`, a text file. These
+conversations are pretty easy to understand and going forward
+this will likely be where much zmux development happens as
+although zmux "appears" to work in many cases, it does so in
+radically different ways to tmux. It is notable that
+already zmux is a competent tmux client and a somewhat OK tmux
+server when this tool is used to force the two programs to talk
+to each other as if to themselves -- this suggests substantial
+feature parity is already in place and behavioral alignment is the
+final parity frontier for the project before it is fully useful
+as a tmux replacement.

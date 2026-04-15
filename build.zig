@@ -381,6 +381,13 @@ pub fn build(b: *std.Build) void {
     }
     test_zig_sharded_step.dependOn(&reduce_shards.step);
 
+    const test_most_sharded_step = b.step(
+        "test-most-sharded",
+        "Run experimental sharded unit tests plus sharded fast smoke",
+    );
+    test_most_sharded_step.dependOn(test_zig_sharded_step);
+    test_most_sharded_step.dependOn(smoke_fast_sharded_step);
+
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
     test_compile_step.dependOn(&unit_tests.step);
 

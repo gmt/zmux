@@ -74,10 +74,15 @@ def main(argv: list[str]) -> int:
     for suite_argv in suite_argvs(args):
         runner_args = orch.parse_args(suite_argv)
         runner = orch.SuiteRunner(runner_args)
+        if not runner.selected_cases():
+            continue
         rc = runner.run()
         all_results.extend(runner.results)
         if rc != 0 and overall_rc == 0:
             overall_rc = rc
+    if not all_results:
+        print("no cases selected", file=sys.stderr)
+        return 1
     print(orch.summarize_results(all_results))
     orch.print_kept_sandboxes(all_results)
     return overall_rc

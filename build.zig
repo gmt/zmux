@@ -298,6 +298,46 @@ pub fn build(b: *std.Build) void {
     soak_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     soak_step.dependOn(&soak_cmd.step);
 
+    const smoke_soak_sharded_step = b.step(
+        "smoke-soak-sharded",
+        "Run experimental Zig-scheduled wrapped soak smoke test",
+    );
+    const soak_shard_result_dir = ".zig-cache/shard-results/smoke-soak-sharded";
+    const prepare_soak_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/smoke-soak-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_soak_shard_results.step.dependOn(b.getInstallStep());
+    const run_soak_shard = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_runner.py",
+        "--suite",
+        "smoke-soak",
+        "--shard-index",
+        "0",
+        "--shard-count",
+        "1",
+        "--result-path",
+        ".zig-cache/shard-results/smoke-soak-sharded/shard-0.json",
+    });
+    run_soak_shard.step.dependOn(&prepare_soak_shard_results.step);
+    const reduce_soak_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        soak_shard_result_dir,
+        "--suite",
+        "smoke-soak",
+        "--shard-count",
+        "1",
+        "--workers",
+        "1",
+    });
+    reduce_soak_shards.step.dependOn(&prepare_soak_shard_results.step);
+    reduce_soak_shards.step.dependOn(&run_soak_shard.step);
+    smoke_soak_sharded_step.dependOn(&reduce_soak_shards.step);
+
     // --------------------------------------------------
     // `zig build smoke-most` – fast local + oracle + recursive + docker suites
     // --------------------------------------------------

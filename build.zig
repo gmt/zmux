@@ -529,8 +529,14 @@ pub fn build(b: *std.Build) void {
     reduce_test_most_sharded.addArg(std.fmt.allocPrint(b.allocator, "zig-unit:{s}", .{shard_result_dir}) catch @panic("OOM"));
     reduce_test_most_sharded.addArg("--family-result");
     reduce_test_most_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fast:{s}", .{smoke_shard_result_dir}) catch @panic("OOM"));
-    reduce_test_most_sharded.step.dependOn(&reduce_shards.step);
-    reduce_test_most_sharded.step.dependOn(&reduce_smoke_shards.step);
+    reduce_test_most_sharded.step.dependOn(&prepare_shard_results.step);
+    for (shard_steps.items) |shard_step| {
+        reduce_test_most_sharded.step.dependOn(shard_step);
+    }
+    reduce_test_most_sharded.step.dependOn(&prepare_smoke_shard_results.step);
+    for (smoke_shard_steps.items) |smoke_shard_step| {
+        reduce_test_most_sharded.step.dependOn(smoke_shard_step);
+    }
     test_most_sharded_step.dependOn(&reduce_test_most_sharded.step);
 
     const test_compile_step = b.step("test-compile", "Compile Zig unit tests without running");
@@ -650,13 +656,32 @@ pub fn build(b: *std.Build) void {
     reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-docker:{s}", .{docker_shard_result_dir}) catch @panic("OOM"));
     reduce_test_all_sharded.addArg("--family-result");
     reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-soak:{s}", .{soak_shard_result_dir}) catch @panic("OOM"));
-    reduce_test_all_sharded.step.dependOn(&reduce_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_stress_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_smoke_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_oracle_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_recursive_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_docker_shards.step);
-    reduce_test_all_sharded.step.dependOn(&reduce_soak_shards.step);
+    reduce_test_all_sharded.step.dependOn(&prepare_shard_results.step);
+    for (shard_steps.items) |shard_step| {
+        reduce_test_all_sharded.step.dependOn(shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_stress_shard_results.step);
+    for (stress_shard_steps.items) |stress_shard_step| {
+        reduce_test_all_sharded.step.dependOn(stress_shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_smoke_shard_results.step);
+    for (smoke_shard_steps.items) |smoke_shard_step| {
+        reduce_test_all_sharded.step.dependOn(smoke_shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_oracle_shard_results.step);
+    for (oracle_shard_steps.items) |oracle_shard_step| {
+        reduce_test_all_sharded.step.dependOn(oracle_shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_recursive_shard_results.step);
+    for (recursive_shard_steps.items) |recursive_shard_step| {
+        reduce_test_all_sharded.step.dependOn(recursive_shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_docker_shard_results.step);
+    for (docker_shard_steps.items) |docker_shard_step| {
+        reduce_test_all_sharded.step.dependOn(docker_shard_step);
+    }
+    reduce_test_all_sharded.step.dependOn(&prepare_soak_shard_results.step);
+    reduce_test_all_sharded.step.dependOn(&run_soak_shard.step);
     test_all_sharded_step.dependOn(&reduce_test_all_sharded.step);
 
     const stress_test_compile_step = b.step("test-stress-compile", "Compile Zig stress tests without running");
@@ -832,7 +857,10 @@ pub fn build(b: *std.Build) void {
         test_all_sharded_step.dependOn(smoke_fuzz_sharded);
         reduce_test_all_sharded.addArg("--family-result");
         reduce_test_all_sharded.addArg(std.fmt.allocPrint(b.allocator, "smoke-fuzz:{s}", .{fuzz_shard_result_dir}) catch @panic("OOM"));
-        reduce_test_all_sharded.step.dependOn(&reduce_fuzz_shards.step);
+        reduce_test_all_sharded.step.dependOn(&prepare_fuzz_shard_results.step);
+        for (fuzz_shard_steps.items) |fuzz_shard_step| {
+            reduce_test_all_sharded.step.dependOn(fuzz_shard_step);
+        }
     }
 }
 

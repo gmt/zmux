@@ -49,6 +49,8 @@ DEFAULT_CMD_PREPROCESS_FUZZER = (
 )
 MUX_NAMES = {"tmux", "zmux"}
 FUZZ_MODES = ("auto", "require", "off")
+SUMMARY_FORMATS = ("default", "none")
+FAILURE_SUMMARY_LIMIT = 8
 FAST_SMOKE_SHELLS = (
     "new-session-no-client.sh",
     "has-session-return.sh",
@@ -87,6 +89,42 @@ def normalize_fuzz_mode(raw: str | None) -> str:
         valid = ", ".join(FUZZ_MODES)
         raise HarnessError(f"invalid fuzz mode {value!r}; expected one of {valid}")
     return value
+
+
+def summarize_results(results: list["CaseResult"]) -> str:
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+    cleanup_failures = sum(1 for result in results if result.cleanup_failed)
+    parts = [f"TOTAL={len(results)}"]
+    parts.extend(f"{key}={counts[key]}" for key in sorted(counts))
+    parts.append(f"CLEANUP={cleanup_failures}")
+
+    failing = [
+        result
+        for result in results
+        if result.status not in {"PASS", "SKIP"} or result.cleanup_failed
+    ]
+    if not failing:
+        parts.append("ISSUES=none")
+        return "summary: " + " | ".join(parts)
+
+    issue_items = [f"{result.case.case_id}({result.status})" for result in failing]
+    if len(issue_items) > FAILURE_SUMMARY_LIMIT:
+        visible = ", ".join(issue_items[:FAILURE_SUMMARY_LIMIT])
+        issues = f"{visible}, +{len(issue_items) - FAILURE_SUMMARY_LIMIT} more"
+    else:
+        issues = ", ".join(issue_items)
+    parts.append(f"ISSUES={issues}")
+    return "summary: " + " | ".join(parts)
+
+
+def print_kept_sandboxes(results: list["CaseResult"]) -> None:
+    for result in results:
+        if result.status in {"PASS", "SKIP"} and not result.cleanup_failed:
+            continue
+        if result.sandbox is not None:
+            print(f"  kept {result.case.case_id}: {result.sandbox}")
 
 
 class HarnessError(RuntimeError):
@@ -801,7 +839,8 @@ class SuiteRunner:
             if self.interrupted_by is not None:
                 break
 
-        self.print_summary()
+        if self.args.summary_format != "none":
+            self.print_summary()
         if self.interrupted_by is not None:
             return 128 + self.interrupted_by
         return (
@@ -968,18 +1007,8 @@ class SuiteRunner:
         return ("PASS", "") if returncode == 0 else ("FAIL", f"(exit {returncode})")
 
     def print_summary(self) -> None:
-        counts: dict[str, int] = {}
-        for result in self.results:
-            counts[result.status] = counts.get(result.status, 0) + 1
-        cleanup_failures = sum(1 for result in self.results if result.cleanup_failed)
-        parts = [f"{key}={counts[key]}" for key in sorted(counts)]
-        parts.append(f"CLEANUP={cleanup_failures}")
-        print("summary: " + " ".join(parts))
-        for result in self.results:
-            if result.status in {"PASS", "SKIP"} and not result.cleanup_failed:
-                continue
-            if result.sandbox is not None:
-                print(f"  kept {result.case.case_id}: {result.sandbox}")
+        print(summarize_results(self.results))
+        print_kept_sandboxes(self.results)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1003,6 +1032,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--input-fuzzer")
     parser.add_argument("--cmd-preprocess-fuzzer")
     parser.add_argument("--fuzz-mode", choices=FUZZ_MODES, default="auto")
+    parser.add_argument("--summary-format", choices=SUMMARY_FORMATS, default="default")
     parser.add_argument("--zmux-binary")
     parser.add_argument("--oracle-binary")
     parser.add_argument("--helper-binary")

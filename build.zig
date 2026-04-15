@@ -265,6 +265,45 @@ pub fn build(b: *std.Build) void {
     stress_test_compile_step.dependOn(&stress_tests.step);
 
     // --------------------------------------------------
+    // `zig build test-most` – unit tests plus smoke-most
+    // --------------------------------------------------
+    const test_most_step = b.step("test-most", "Run unit tests plus smoke-most");
+    const test_most_cmd = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_bundle.py",
+        "test-most",
+        "--zig-test-binary",
+    });
+    test_most_cmd.step.dependOn(b.getInstallStep());
+    test_most_cmd.addFileArg(unit_tests.getEmittedBin());
+    addTestFilterArgs(test_most_cmd, test_filters);
+    test_most_step.dependOn(&test_most_cmd.step);
+
+    // --------------------------------------------------
+    // `zig build test-all` – unit + stress + smoke-all
+    // --------------------------------------------------
+    const test_all_step = b.step("test-all", "Run unit, stress, and smoke-all");
+    const test_all_cmd = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_bundle.py",
+        "test-all",
+        "--zig-test-binary",
+    });
+    test_all_cmd.step.dependOn(b.getInstallStep());
+    test_all_cmd.addFileArg(unit_tests.getEmittedBin());
+    test_all_cmd.addArg("--zig-stress-binary");
+    test_all_cmd.addFileArg(stress_tests.getEmittedBin());
+    if (opt_fuzzing) {
+        test_all_cmd.addArg("--fuzz-mode");
+        test_all_cmd.addArg("require");
+    } else {
+        test_all_cmd.addArg("--fuzz-mode");
+        test_all_cmd.addArg("off");
+    }
+    addTestFilterArgs(test_all_cmd, test_filters);
+    test_all_step.dependOn(&test_all_cmd.step);
+
+    // --------------------------------------------------
     // `zig build fuzz`
     // --------------------------------------------------
     if (opt_fuzzing) {

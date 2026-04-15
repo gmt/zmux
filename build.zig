@@ -319,6 +319,53 @@ pub fn build(b: *std.Build) void {
     docker_cmd.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
     docker_step.dependOn(&docker_cmd.step);
 
+    const smoke_docker_sharded_step = b.step(
+        "smoke-docker-sharded",
+        "Run experimental Zig-scheduled sharded Docker smoke tests",
+    );
+    const docker_shard_result_dir = ".zig-cache/shard-results/smoke-docker-sharded";
+    const prepare_docker_shard_results = b.addSystemCommand(&.{
+        "python3",
+        "-c",
+        "import pathlib, shutil; path = pathlib.Path('.zig-cache/shard-results/smoke-docker-sharded'); shutil.rmtree(path, ignore_errors=True); path.mkdir(parents=True, exist_ok=True)",
+    });
+    prepare_docker_shard_results.step.dependOn(b.getInstallStep());
+    var docker_shard_steps = std.ArrayList(*std.Build.Step).empty;
+    var docker_shard_index: u31 = 0;
+    while (docker_shard_index < opt_test_workers) : (docker_shard_index += 1) {
+        const run_docker_shard = b.addSystemCommand(&.{
+            "python3",
+            "regress/test_shard_runner.py",
+            "--suite",
+            "smoke-docker",
+            "--shard-index",
+        });
+        run_docker_shard.step.dependOn(&prepare_docker_shard_results.step);
+        run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{docker_shard_index}) catch @panic("OOM"));
+        run_docker_shard.addArg("--shard-count");
+        run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+        run_docker_shard.addArg("--result-path");
+        run_docker_shard.addArg(std.fmt.allocPrint(b.allocator, ".zig-cache/shard-results/smoke-docker-sharded/shard-{d}.json", .{docker_shard_index}) catch @panic("OOM"));
+        docker_shard_steps.append(b.allocator, &run_docker_shard.step) catch @panic("OOM");
+    }
+    const reduce_docker_shards = b.addSystemCommand(&.{
+        "python3",
+        "regress/test_shard_reduce.py",
+        "--results-dir",
+        docker_shard_result_dir,
+        "--suite",
+        "smoke-docker",
+        "--shard-count",
+    });
+    reduce_docker_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_docker_shards.addArg("--workers");
+    reduce_docker_shards.addArg(std.fmt.allocPrint(b.allocator, "{d}", .{opt_test_workers}) catch @panic("OOM"));
+    reduce_docker_shards.step.dependOn(&prepare_docker_shard_results.step);
+    for (docker_shard_steps.items) |docker_shard_step| {
+        reduce_docker_shards.step.dependOn(docker_shard_step);
+    }
+    smoke_docker_sharded_step.dependOn(&reduce_docker_shards.step);
+
     // --------------------------------------------------
     // `zig build smoke-all` – all smoke suites, including soak
     // --------------------------------------------------

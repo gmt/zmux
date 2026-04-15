@@ -22,6 +22,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "smoke-oracle",
             "smoke-fuzz",
             "smoke-recursive",
+            "smoke-docker",
         ),
     )
     parser.add_argument("--zig-test-binary")

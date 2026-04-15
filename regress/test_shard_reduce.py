@@ -24,6 +24,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "smoke-oracle",
             "smoke-fuzz",
             "smoke-recursive",
+            "smoke-docker",
         ),
     )
     parser.add_argument("--shard-count", type=int, required=True)

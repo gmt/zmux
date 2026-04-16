@@ -710,6 +710,60 @@ test "sixel_parse empty rejects" {
     try @import("std").testing.expect(si2 == null);
 }
 
+test "sixel_scale preserves dimensions on scroll-crop" {
+    // Build a multi-colour image spanning >2 cell rows.
+    // Two colours, 24 pixels wide, 36 pixels tall at ypixel=16 → 3x3 cells
+    // (cell height rounds up: ceil(36/16)=3).
+    const data = "q\"1;1;24;32#0;2;100;0;0#1;2;0;0;100!24~-!24~-!24~-!24~-#0!12~#1!12~-#0!12?#1!12?";
+    const si = sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;
+    defer sixel_free(si);
+
+    var cx: u32 = 0;
+    var cy: u32 = 0;
+    sixel_size_in_cells(si, &cx, &cy);
+
+    // Crop: skip top 1 cell row, keep 1 cell row of height.
+    const cropped = sixel_scale(si, 0, 0, 0, 1, cx, 1, true) orelse
+        return error.TestUnexpectedResult;
+    defer sixel_free(cropped);
+
+    var ccx: u32 = 0;
+    var ccy: u32 = 0;
+    sixel_size_in_cells(cropped, &ccx, &ccy);
+
+    // Width unchanged, height is exactly 1 cell.
+    try std.testing.expectEqual(cx, ccx);
+    try std.testing.expectEqual(@as(u32, 1), ccy);
+
+    // Pixel dimensions: full width, one cell height.
+    try std.testing.expectEqual(si.x, cropped.x);
+    try std.testing.expectEqual(si.ypixel, cropped.y);
+
+    // Re-serialise the cropped image and verify it produces valid DCS output.
+    const printed = sixel_print(cropped, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(printed);
+    try std.testing.expect(printed.len > 0);
+    // Must start with DCS header and end with ST.
+    try std.testing.expect(std.mem.startsWith(u8, printed, "\x1bP"));
+    try std.testing.expect(std.mem.endsWith(u8, printed, "\x1b\\"));
+
+    // Pixel content: the cropped region should have non-zero pixels
+    // (our source image has colour data in every cell row).
+    var has_colour = false;
+    var y: u32 = 0;
+    while (y < cropped.y) : (y += 1) {
+        var x: u32 = 0;
+        while (x < cropped.x) : (x += 1) {
+            if (sixel_get_pixel(cropped, x, y) != 0) {
+                has_colour = true;
+                break;
+            }
+        }
+        if (has_colour) break;
+    }
+    try std.testing.expect(has_colour);
+}
+
 test "sixel_get_pixel returns zero for out-of-range coordinates" {
     const data = "q#0;2;100;0;0~";
     const si = sixel_parse(data, 0, 8, 16) orelse return error.TestUnexpectedResult;

@@ -1443,6 +1443,9 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const status_needs_draw = redraw_needs_status(redraw_flags, body_needs_draw, overlay_rows);
     const overlay_active = cmd_display_panes.overlay_active(cl) or menu.overlay_active(cl) or popup.overlay_active(cl);
 
+    const tty_features = @import("tty-features.zig");
+    const has_sixel = (cl.term_features & tty_features.TERM_SIXEL) != 0;
+
     var body = BodyRenderResult{};
     if (full_body_needs_draw and viewport.sy != 0) {
         if (canUseCachedPaneDraw(wl.window, wp, viewport)) {
@@ -1451,7 +1454,7 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
             const sx = @min(viewport.sx, pane_width);
             const sy = @min(viewport.sy, wp.base.grid.sy);
             if (sx != 0 and sy != 0) {
-                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
+                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset, has_sixel) catch return null;
                 body.cursor_visible = cl.pane_cache.cursor_visible;
                 body.cursor_x = cl.pane_cache.cursor_x;
                 body.cursor_y = pane_row_offset + cl.pane_cache.cursor_y;
@@ -1464,6 +1467,7 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
                 viewport.sx,
                 viewport.sy,
                 pane_row_offset,
+                has_sixel,
             ) catch return null;
             body = .{
                 .payload = rendered.payload,
@@ -1480,7 +1484,7 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
             const sx = @min(viewport.sx, pane_width);
             const sy = @min(viewport.sy, wp.base.grid.sy);
             if (sx != 0 and sy != 0) {
-                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset) catch return null;
+                body.payload = tty_draw.tty_draw_pane_offset(&cl.pane_cache, wp, sx, sy, pane_row_offset, has_sixel) catch return null;
             }
         } else {
             body.payload = tty_draw.tty_draw_render_dirty_panes_region(
@@ -1490,6 +1494,7 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
                 viewport.sx,
                 viewport.sy,
                 pane_row_offset,
+                has_sixel,
             ) catch return null;
             if (body.payload.len != 0) tty_draw.tty_draw_invalidate(&cl.pane_cache);
         }

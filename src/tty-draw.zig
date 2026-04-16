@@ -63,8 +63,9 @@ pub fn tty_draw_pane(
     wp: *T.WindowPane,
     sx: u32,
     sy: u32,
+    has_sixel: bool,
 ) ![]u8 {
-    return tty_draw_pane_offset(cache, wp, sx, sy, 0);
+    return tty_draw_pane_offset(cache, wp, sx, sy, 0, has_sixel);
 }
 
 pub fn tty_draw_pane_offset(
@@ -73,6 +74,7 @@ pub fn tty_draw_pane_offset(
     sx: u32,
     sy: u32,
     row_offset: u32,
+    has_sixel: bool,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -134,7 +136,7 @@ pub fn tty_draw_pane_offset(
         }
     }
 
-    try append_sixel_images(&out, screen, wp, row_offset, 0, 0);
+    try append_sixel_images(&out, screen, wp, row_offset, 0, 0, has_sixel);
 
     const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
         @min(sx, scrollbar.?.width + scrollbar.?.pad)
@@ -167,8 +169,9 @@ pub fn tty_draw_render_window(
     sx_limit: u32,
     sy_limit: u32,
     row_offset: u32,
+    has_sixel: bool,
 ) !WindowRenderResult {
-    return tty_draw_render_window_region(w, 0, 0, sx_limit, sy_limit, row_offset);
+    return tty_draw_render_window_region(w, 0, 0, sx_limit, sy_limit, row_offset, has_sixel);
 }
 
 pub fn tty_draw_render_window_region(
@@ -178,6 +181,7 @@ pub fn tty_draw_render_window_region(
     sx_limit: u32,
     sy_limit: u32,
     row_offset: u32,
+    has_sixel: bool,
 ) !WindowRenderResult {
     var result = WindowRenderResult{};
     if (sx_limit == 0 or sy_limit == 0) return result;
@@ -216,7 +220,7 @@ pub fn tty_draw_render_window_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, has_sixel);
     }
 
     if (w.active) |active| {
@@ -251,8 +255,9 @@ pub fn tty_draw_render_dirty_panes(
     sx_limit: u32,
     sy_limit: u32,
     row_offset: u32,
+    has_sixel: bool,
 ) ![]u8 {
-    return tty_draw_render_dirty_panes_region(w, 0, 0, sx_limit, sy_limit, row_offset);
+    return tty_draw_render_dirty_panes_region(w, 0, 0, sx_limit, sy_limit, row_offset, has_sixel);
 }
 
 pub fn tty_draw_render_dirty_panes_region(
@@ -262,6 +267,7 @@ pub fn tty_draw_render_dirty_panes_region(
     sx_limit: u32,
     sy_limit: u32,
     row_offset: u32,
+    has_sixel: bool,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(xm.allocator);
@@ -296,7 +302,7 @@ pub fn tty_draw_render_dirty_panes_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, has_sixel);
     }
 
     return out.toOwnedSlice(xm.allocator);
@@ -450,9 +456,9 @@ fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
     try out.appendSlice(xm.allocator, move);
 }
 
-/// Append sixel images for all images on a screen.  When the client
-/// terminal supports sixel, emit real DCS sixel data via sixel_print;
-/// otherwise fall back to text placeholders.
+/// Append images for all images on a screen.  When the client terminal
+/// supports sixel, emit real DCS sixel data via sixel_print; otherwise
+/// fall back to text placeholders.
 fn append_sixel_images(
     out: *std.ArrayList(u8),
     screen: *T.Screen,
@@ -460,6 +466,7 @@ fn append_sixel_images(
     row_offset: u32,
     view_x: u32,
     view_y: u32,
+    has_sixel: bool,
 ) !void {
     const sixel_mod = @import("image-sixel.zig");
     for (screen.images.items) |im| {
@@ -471,11 +478,17 @@ fn append_sixel_images(
 
         try append_move(out, row_offset + y + 1, x + 1);
 
-        // Emit real sixel DCS data; fall back to text placeholder on failure.
-        if (sixel_mod.sixel_print(im.data, null)) |printed| {
-            defer xm.allocator.free(printed);
-            try out.appendSlice(xm.allocator, printed);
-        } else if (im.fallback) |fb| {
+        if (has_sixel) {
+            // Emit real sixel DCS data.
+            if (sixel_mod.sixel_print(im.data, null)) |printed| {
+                defer xm.allocator.free(printed);
+                try out.appendSlice(xm.allocator, printed);
+                continue;
+            }
+        }
+
+        // Non-sixel client or sixel_print failed — text fallback.
+        if (im.fallback) |fb| {
             try out.appendSlice(xm.allocator, fb);
         }
     }
@@ -1061,17 +1074,17 @@ test "tty_draw_pane performs full redraw then row diff" {
     var cache = T.ClientPaneCache{};
     defer tty_draw_free(&cache);
 
-    const first = try tty_draw_pane(&cache, wp, 4, 2);
+    const first = try tty_draw_pane(&cache, wp, 4, 2, false);
     defer xm.allocator.free(first);
     try std.testing.expect(std.mem.indexOf(u8, first, "\x1b[H\x1b[2J") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "\x1b[1;1H") != null);
 
-    const second = try tty_draw_pane(&cache, wp, 4, 2);
+    const second = try tty_draw_pane(&cache, wp, 4, 2, false);
     defer xm.allocator.free(second);
     try std.testing.expect(std.mem.indexOf(u8, second, "\x1b[H\x1b[2J") == null);
 
     pane_io.pane_io_feed(wp, "\nZ");
-    const third = try tty_draw_pane(&cache, wp, 4, 2);
+    const third = try tty_draw_pane(&cache, wp, 4, 2, false);
     defer xm.allocator.free(third);
     try std.testing.expect(std.mem.indexOf(u8, third, "\x1b[2;1H") != null);
     try std.testing.expect(std.mem.indexOf(u8, third, "Z") != null);
@@ -1108,7 +1121,7 @@ test "tty_draw_pane respects hidden cursor state" {
     var cache = T.ClientPaneCache{};
     defer tty_draw_free(&cache);
 
-    const draw = try tty_draw_pane(&cache, wp, 4, 2);
+    const draw = try tty_draw_pane(&cache, wp, 4, 2, false);
     defer xm.allocator.free(draw);
     try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[?25l") != null);
     try std.testing.expect(std.mem.indexOf(u8, draw, "\x1b[?25h") == null);
@@ -1142,10 +1155,10 @@ test "tty_draw_invalidate forces full redraw again" {
     var cache = T.ClientPaneCache{};
     defer tty_draw_free(&cache);
 
-    const first = try tty_draw_pane(&cache, wp, 3, 1);
+    const first = try tty_draw_pane(&cache, wp, 3, 1, false);
     defer xm.allocator.free(first);
     tty_draw_invalidate(&cache);
-    const second = try tty_draw_pane(&cache, wp, 3, 1);
+    const second = try tty_draw_pane(&cache, wp, 3, 1, false);
     defer xm.allocator.free(second);
     try std.testing.expect(std.mem.indexOf(u8, second, "\x1b[H\x1b[2J") != null);
 }
@@ -1179,7 +1192,7 @@ test "tty_draw_pane preserves stored utf8 glyph bytes" {
     var cache = T.ClientPaneCache{};
     defer tty_draw_free(&cache);
 
-    const draw = try tty_draw_pane(&cache, wp, 4, 1);
+    const draw = try tty_draw_pane(&cache, wp, 4, 1, false);
     defer xm.allocator.free(draw);
     try std.testing.expect(std.mem.indexOf(u8, draw, "🙂x") != null);
 }
@@ -1213,7 +1226,7 @@ test "tty_draw_render_window_region clears clipped leading wide-cell padding" {
     var ctx = T.ScreenWriteCtx{ .wp = wp, .s = &wp.base };
     screen_write.putn(&ctx, "🙂x");
 
-    const rendered = try tty_draw_render_window_region(w, 1, 0, 2, 1, 0);
+    const rendered = try tty_draw_render_window_region(w, 1, 0, 2, 1, 0, false);
     defer xm.allocator.free(rendered.payload);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[1;1H\x1b[0m x") != null);
@@ -1273,7 +1286,7 @@ test "tty_draw_render_window paints multiple visible panes at shared offsets" {
     pane_io.pane_io_feed(left, "L1\r\nL2");
     pane_io.pane_io_feed(right, "R1\r\nR2");
 
-    const rendered = try tty_draw_render_window(w, 6, 2, 0);
+    const rendered = try tty_draw_render_window(w, 6, 2, 0, false);
     defer xm.allocator.free(rendered.payload);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered.payload, "\x1b[H\x1b[2J") != null);
@@ -1326,7 +1339,7 @@ test "tty_draw_pane renders attached right scrollbar columns from shared window 
     var cache = T.ClientPaneCache{};
     defer tty_draw_free(&cache);
 
-    const draw = try tty_draw_pane(&cache, wp, win.window_pane_total_width(wp), 4);
+    const draw = try tty_draw_pane(&cache, wp, win.window_pane_total_width(wp), 4, false);
     defer xm.allocator.free(draw);
 
     try std.testing.expect(std.mem.indexOf(u8, draw, "abcd") != null);

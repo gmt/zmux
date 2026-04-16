@@ -98,34 +98,37 @@ PYEOF
     exit 1
 }
 
-# Verify: the rendered output must contain our sixel colour definition
-# and sixel data, proving the full parse → store → re-emit pipeline.
+# Verify: the rendered output must contain either real sixel DCS data
+# (proving parse → store → re-emit) or the text fallback placeholder
+# (proving parse → store → fallback render).  Which one we get depends
+# on whether the client advertised sixel capability.
 if python3 -c "
 import sys
 data = open(sys.argv[1], 'rb').read()
-ok = True
 
-# Must contain DCS sixel header (ESC P ... q)
-if b'\x1bP' not in data:
-    print('FAIL: no DCS (ESC P) in output')
-    ok = False
+has_dcs = b'\x1bP' in data
+has_colour = b';2;100;0;0' in data
+has_sixel_data = b'!4~' in data
+has_fallback = b'SIXEL IMAGE' in data
 
-# Must contain our red colour definition
-if b';2;100;0;0' not in data:
-    print('FAIL: no colour definition ;2;100;0;0 in output')
-    ok = False
+if has_dcs and has_colour and has_sixel_data:
+    print(f'PASS: sixel round-trip verified via DCS ({len(data)} bytes captured)')
+    sys.exit(0)
 
-# Must contain our sixel pixel data
-if b'!4~' not in data:
-    print('FAIL: no sixel data !4~ in output')
-    ok = False
+if has_fallback:
+    print(f'PASS: sixel round-trip verified via fallback ({len(data)} bytes captured)')
+    sys.exit(0)
 
-if ok:
-    print(f'PASS: sixel round-trip verified ({len(data)} bytes captured)')
-sys.exit(0 if ok else 1)
+# Neither format found — the image was lost.
+print('FAIL: no sixel DCS or fallback text in output')
+if not has_dcs:
+    print('  no DCS (ESC P) in output')
+if not has_fallback:
+    print('  no SIXEL IMAGE fallback in output')
+print(f'  capture size: {len(data)} bytes')
+sys.exit(1)
 " "$CAPTURE"; then
     exit 0
 else
-    echo "capture size: $(wc -c <"$CAPTURE") bytes"
     exit 1
 fi

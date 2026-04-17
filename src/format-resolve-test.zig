@@ -554,7 +554,7 @@ test "sixel_support returns empty without client and reflects term_features" {
         try std.testing.expectEqualStrings("", result);
     }
 
-    // With a client that lacks TERM_SIXEL, should return "0".
+    // With a client that lacks the sixel feature, should return "0".
     {
         var client = T.Client{
             .environ = env_mod.environ_create(),
@@ -571,13 +571,13 @@ test "sixel_support returns empty without client and reflects term_features" {
         try std.testing.expectEqualStrings("0", result);
     }
 
-    // With a client that has TERM_SIXEL set, should return "1".
+    // With a client that has the sixel feature bit set, should return "1".
     {
         var client = T.Client{
             .environ = env_mod.environ_create(),
             .tty = undefined,
             .status = .{},
-            .term_features = tty_features.TERM_SIXEL,
+            .term_features = tty_features.featureBit(.sixel),
         };
         defer env_mod.environ_free(client.environ);
         client.tty = .{ .client = &client };

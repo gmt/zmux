@@ -3598,7 +3598,7 @@ pub fn tty_cmd_rawstring(tty: *T.Tty, ctx: *const T.TtyCtx) void {
 /// Uses `ctx.si` plus `sixel_scale`/`sixel_print` on sixel-capable terminals
 /// and falls back to the pre-rendered text in `ctx.ptr` elsewhere.
 pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
-    const has_sixel = (tty.client.term_features & tty_features.TERM_SIXEL) != 0 or
+    const has_sixel = (tty.client.term_features & tty_features.featureBit(.sixel)) != 0 or
         tty_term.hasCapability(tty, "Sxl");
     const has_pixel = tty.xpixel != 0 and tty.ypixel != 0;
     const fallback = !has_sixel or !has_pixel;

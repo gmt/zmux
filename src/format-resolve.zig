@@ -2427,7 +2427,8 @@ fn resolve_session_stack(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[
 
 fn resolve_sixel_support(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {
     const cl = ctx.client orelse return null;
-    return alloc.dupe(u8, if ((cl.term_features & tty_features.TERM_SIXEL) != 0) "1" else "0") catch unreachable;
+    const has = (cl.term_features & tty_features.featureBit(.sixel)) != 0;
+    return alloc.dupe(u8, if (has) "1" else "0") catch unreachable;
 }
 
 fn resolve_start_command(alloc: std.mem.Allocator, ctx: *const FormatContext) ?[]u8 {

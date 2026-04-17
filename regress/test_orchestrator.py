@@ -75,6 +75,7 @@ FAST_SMOKE_SHELLS = (
     "formatter-smoke.sh",
     "kill-server-cleanup.sh",
     "sixel-roundtrip.sh",
+    "sixel-capable-roundtrip.sh",
     "ohmytmux-smoke.sh",
     "tmux-program-bootstrap.sh",
 )

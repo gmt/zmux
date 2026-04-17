@@ -1444,7 +1444,7 @@ pub fn build_client_draw_payload(cl: *T.Client, redraw_flags: u64) ?[]u8 {
     const overlay_active = cmd_display_panes.overlay_active(cl) or menu.overlay_active(cl) or popup.overlay_active(cl);
 
     const tty_features = @import("tty-features.zig");
-    const has_sixel = (cl.term_features & tty_features.TERM_SIXEL) != 0;
+    const has_sixel = (cl.term_features & tty_features.featureBit(.sixel)) != 0;
 
     var body = BodyRenderResult{};
     if (full_body_needs_draw and viewport.sy != 0) {

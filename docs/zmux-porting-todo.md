@@ -15,17 +15,6 @@ Live tmux-parity gaps only.
    - `zmux:` what is currently missing or approximate
    - `likely files:` where the repair probably lives
 
-## Client mis-reports clean `kill-server` as crash
-
-- tmux: on `MSG_SHUTDOWN` the client sets `CLIENT_EXIT_SERVER_EXITED`
-  ("server exited") and acks the server with `MSG_EXITING` so the server can
-  finish its own teardown bookkeeping.
-- zmux: on `.shutdown` the client sets `.lost_server` ("server exited
-  unexpectedly"), making every `kill-server` look like a crash, and skips the
-  `MSG_EXITING` ack entirely.
-- likely files: `src/client.zig` (the `.shutdown` arm of `client_dispatch`,
-  around line 279).
-
 ## Sixel image duplicated in scrollback after partial scroll
 
 - tmux: rendering a sixel (e.g. `chafa --format sixel --size 80x40 ...`) and

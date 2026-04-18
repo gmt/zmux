@@ -26,3 +26,23 @@ Live tmux-parity gaps only.
 - likely files: `src/client.zig` (the `.shutdown` arm of `client_dispatch`,
   around line 279).
 
+## Sixel image duplicated in scrollback after partial scroll
+
+- tmux: rendering a sixel (e.g. `chafa --format sixel --size 80x40 ...`) and
+  then partially scrolling it past the top of the viewport (`yes "" | head
+  -15`) leaves a single intact rendering of the surviving image rows when you
+  scroll back into history.
+- zmux: the same sequence shows two visually distinct copies of the source
+  image in scrollback — the upper copy showing the *lower* rows of the source,
+  the lower copy showing the *upper* rows, separated by a band of
+  image-occupied cells.  Reproduced on `main`; the rgba-uplift branch shows
+  the same artifact, so the bug is pre-existing and not introduced by the RGBA
+  canonical store work.  The dimensional invariant test added in 4d1d29d covers
+  width/height of the cropped image but does not catch the duplication, since
+  the duplication is in the render path rather than in `image_scroll_up`.
+- likely files: `src/image.zig` (`image_scroll_up` only crops, so the
+  duplication is downstream); `src/tty.zig` (`tty_draw_images` around line
+  3675 iterates `s.images.items` and re-emits each — the bug is most likely
+  in how cell-range references into scrollback get re-anchored against the
+  cropped image data).
+

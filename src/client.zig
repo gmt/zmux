@@ -277,8 +277,9 @@ export fn client_dispatch(imsg_ptr: ?*c.imsg.imsg, _arg: ?*anyopaque) void {
             proc_mod.proc_exit(client_proc.?);
         },
         .shutdown => {
-            client_exitreason = .lost_server;
-            proc_mod.proc_exit(client_proc.?);
+            if (client_peer) |peer| _ = proc_mod.proc_send(peer, .exiting, -1, null, 0);
+            client_exitreason = .server_exited;
+            client_retval = 1;
         },
         .write => file_mod.clientHandleWriteData(imsg_msg),
         .read_open => {
@@ -1154,16 +1155,35 @@ test "client_dispatch exit carries an explicit message" {
     try std.testing.expect(proc.exit);
 }
 
-test "client_dispatch shutdown sets lost_server" {
+test "client_dispatch shutdown acks server with exiting and waits" {
+    var pair: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(i32, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair));
+
     var proc = T.ZmuxProc{ .name = "client-dispatch-shutdown" };
-    defer clientDispatchTestResetProc(&proc);
+    defer proc.peers.deinit(xm.allocator);
     client_proc = &proc;
+    client_peer = proc_mod.proc_add_peer(&proc, pair[0], noopDispatch, null);
     defer {
+        const peer = client_peer.?;
+        c.imsg.imsgbuf_clear(&peer.ibuf);
+        std.posix.close(peer.ibuf.fd);
+        xm.allocator.destroy(peer);
+        proc.peers.clearRetainingCapacity();
+        client_peer = null;
         client_proc = null;
         client_exitreason = .none;
+        client_retval = 0;
+    }
+
+    var reader: c.imsg.imsgbuf = undefined;
+    try std.testing.expectEqual(@as(i32, 0), c.imsg.imsgbuf_init(&reader, pair[1]));
+    defer {
+        c.imsg.imsgbuf_clear(&reader);
+        std.posix.close(pair[1]);
     }
 
     client_exitreason = .none;
+    client_retval = 0;
     var imsg: c.imsg.imsg = .{
         .hdr = .{
             .type = @intCast(@intFromEnum(protocol.MsgType.shutdown)),
@@ -1175,8 +1195,17 @@ test "client_dispatch shutdown sets lost_server" {
         .buf = null,
     };
     client_dispatch(&imsg, null);
-    try std.testing.expectEqual(T.ClientExitReason.lost_server, client_exitreason);
-    try std.testing.expect(proc.exit);
+
+    try std.testing.expectEqual(T.ClientExitReason.server_exited, client_exitreason);
+    try std.testing.expectEqual(@as(i32, 1), client_retval);
+    try std.testing.expect(!proc.exit);
+
+    try std.testing.expectEqual(@as(i32, 1), c.imsg.imsgbuf_read(&reader));
+    var ack: c.imsg.imsg = undefined;
+    try std.testing.expect(c.imsg.imsg_get(&reader, &ack) > 0);
+    defer c.imsg.imsg_free(&ack);
+    try std.testing.expectEqual(@as(u32, @intCast(@intFromEnum(protocol.MsgType.exiting))), c.imsg.imsg_get_type(&ack));
+    try std.testing.expectEqual(@as(usize, 0), c.imsg.imsg_get_len(&ack));
 }
 
 test "client_dispatch write to stdout stream ignores short payload" {

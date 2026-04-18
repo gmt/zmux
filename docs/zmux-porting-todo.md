@@ -24,11 +24,15 @@ Live tmux-parity gaps only.
 - zmux: the same sequence shows two visually distinct copies of the source
   image in scrollback — the upper copy showing the *lower* rows of the source,
   the lower copy showing the *upper* rows, separated by a band of
-  image-occupied cells.  Reproduced on `main`; the rgba-uplift branch shows
+  image-occupied cells. Reproduced on `main`; the rgba-uplift branch shows
   the same artifact, so the bug is pre-existing and not introduced by the RGBA
-  canonical store work.  The dimensional invariant test added in 4d1d29d covers
+  canonical store work. The dimensional invariant test added in 4d1d29d covers
   width/height of the cropped image but does not catch the duplication, since
   the duplication is in the render path rather than in `image_scroll_up`.
+  Pinned by `regress/sixel-scroll-deduplication.sh`, which currently fails
+  with two-or-more DCS sixel emits on the post-scroll redraw where exactly
+  one is expected; wire it into `FAST_CASES` once the render path stops
+  emitting the cropped image alongside its pre-crop parent.
 - likely files: `src/image.zig` (`image_scroll_up` only crops, so the
   duplication is downstream); `src/tty.zig` (`tty_draw_images` around line
   3675 iterates `s.images.items` and re-emits each — the bug is most likely

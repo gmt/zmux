@@ -402,14 +402,17 @@ fn build_child_environment(
     env_mod.environ_set(child, zmux_mod.compat_env_pane(), 0, pane_id);
     env_mod.environ_set(child, "SHELL", 0, shell);
 
-    // Set TERM to default-terminal (tmux-256color), overriding any
-    // inherited value from the outer terminal (e.g. TERM=alacritty).
+    // Set terminal identity values after layering inherited/session
+    // environment, matching tmux's child environment contract.
     if (@import("options.zig").options_ready) {
         const term = @import("options.zig").options_get_string(
             @import("options.zig").global_options,
             "default-terminal",
         );
         env_mod.environ_set(child, "TERM", 0, term);
+        env_mod.environ_set(child, "TERM_PROGRAM", 0, zmux_mod.compat_name);
+        env_mod.environ_set(child, "TERM_PROGRAM_VERSION", 0, T.ZMUX_VERSION);
+        env_mod.environ_set(child, "COLORTERM", 0, "truecolor");
     }
     return child;
 }
@@ -578,6 +581,9 @@ test "build_child_environment carries the zmux session marker into pane children
     opts.options_default_all(opts.global_options, T.OPTIONS_TABLE_SERVER);
     opts.options_default_all(opts.global_s_options, T.OPTIONS_TABLE_SESSION);
     opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    const saved_options_ready = opts.options_ready;
+    opts.options_ready = true;
+    defer opts.options_ready = saved_options_ready;
     env_mod.global_environ = env_mod.environ_create();
     defer env_mod.environ_free(env_mod.global_environ);
     sess.session_init_globals(xm.allocator);
@@ -609,4 +615,8 @@ test "build_child_environment carries the zmux session marker into pane children
     try std.testing.expectEqualStrings(expected, env_mod.environ_find(child, "ZMUX").?.value.?);
     try std.testing.expectEqualStrings("/bin/sh", env_mod.environ_find(child, "SHELL").?.value.?);
     try std.testing.expectEqualStrings(expected_pane, env_mod.environ_find(child, "ZMUX_PANE").?.value.?);
+    try std.testing.expectEqualStrings("tmux-256color", env_mod.environ_find(child, "TERM").?.value.?);
+    try std.testing.expectEqualStrings(zmux_mod.compat_name, env_mod.environ_find(child, "TERM_PROGRAM").?.value.?);
+    try std.testing.expectEqualStrings(T.ZMUX_VERSION, env_mod.environ_find(child, "TERM_PROGRAM_VERSION").?.value.?);
+    try std.testing.expectEqualStrings("truecolor", env_mod.environ_find(child, "COLORTERM").?.value.?);
 }

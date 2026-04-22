@@ -525,6 +525,22 @@ fn sixel_print_repeat(buf: *std.ArrayListUnmanaged(u8), count: u32, ch: u8) void
     }
 }
 
+fn sixel_visible_bounds(si: *const T.SixelImage, x: *u32, y: *u32) void {
+    x.* = 0;
+    y.* = 0;
+
+    var yy: u32 = 0;
+    while (yy < si.y) : (yy += 1) {
+        const sl = &si.lines[yy];
+        var xx: u32 = 0;
+        while (xx < sl.x) : (xx += 1) {
+            if (sl.data[xx] == 0) continue;
+            x.* = @max(x.*, xx + 1);
+            y.* = yy + 1;
+        }
+    }
+}
+
 /// Build per-colour run-length chunks for band `y`.
 fn sixel_print_compress_colors(
     si: *const T.SixelImage,
@@ -598,7 +614,14 @@ pub fn sixel_print(si: *const T.SixelImage, map: ?*const T.SixelImage) ?[]u8 {
 
     // Optional raster attributes.
     if (si.set_ra != 0) {
-        const ra = std.fmt.allocPrint(xm.allocator, "\"1;1;{d};{d}", .{ si.ra_x, si.ra_y }) catch unreachable;
+        var visible_x: u32 = 0;
+        var visible_y: u32 = 0;
+        sixel_visible_bounds(si, &visible_x, &visible_y);
+        const bound_x = if (visible_x != 0) visible_x else si.x;
+        const bound_y = if (visible_y != 0) visible_y else si.y;
+        const ra_x = @min(si.ra_x, bound_x);
+        const ra_y = @min(si.ra_y, bound_y);
+        const ra = std.fmt.allocPrint(xm.allocator, "\"1;1;{d};{d}", .{ ra_x, ra_y }) catch unreachable;
         defer xm.allocator.free(ra);
         sixel_print_add(&buf, ra);
     }
@@ -701,6 +724,29 @@ test "sixel_parse minimal" {
     defer sixel_free(si);
     try @import("std").testing.expect(si.x > 0);
     try @import("std").testing.expect(si.y > 0);
+}
+
+test "sixel_print clamps raster attributes to image bounds" {
+    var pixel = [_]u16{1};
+    var lines = [_]T.SixelLine{.{ .x = 1, .data = pixel[0..] }};
+    var colours = [_]u32{(2 << 25) | (100 << 16)};
+    var si = T.SixelImage{
+        .x = 1,
+        .y = 1,
+        .xpixel = 1,
+        .ypixel = 1,
+        .set_ra = 1,
+        .ra_x = 8,
+        .ra_y = 8,
+        .colours = colours[0..],
+        .ncolours = 1,
+        .used_colours = 1,
+        .lines = lines[0..],
+    };
+
+    const printed = sixel_print(&si, null) orelse return error.TestUnexpectedResult;
+    defer xm.allocator.free(printed);
+    try @import("std").testing.expect(std.mem.indexOf(u8, printed, "\"1;1;1;1") != null);
 }
 
 test "sixel_parse empty rejects" {

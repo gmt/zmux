@@ -999,11 +999,9 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     if (dcs.interm.len == 0 and data.len >= 1 and data[0] == 'q') {
         const w = wp.window;
         const sixel_mod = @import("image-sixel.zig");
-        const p2: u32 = blk: {
-            const semi = std.mem.indexOfScalar(u8, dcs.params, ';') orelse break :blk 0;
-            if (semi + 1 >= dcs.params.len) break :blk 0;
-            break :blk std.fmt.parseInt(u32, dcs.params[semi + 1 ..], 10) catch 0;
-        };
+        var params_buf: [24]u32 = undefined;
+        const parsed = parse_csi_params(dcs.params, &params_buf);
+        const p2: u32 = if (parsed.count >= 2) params_buf[1] else 0;
         const si = sixel_mod.sixel_parse(data, p2, w.xpixel, w.ypixel) orelse return;
         const sw = @import("screen-write.zig");
         sw.screen_write_sixelimage(ctx, si, T.grid_default_cell.bg);

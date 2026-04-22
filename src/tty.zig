@@ -2866,39 +2866,54 @@ pub fn tty_clamp_area(
 ) i32 {
     const xoff = ctx.rxoff + px;
     const yoff = ctx.ryoff + py;
+    const wox = ctx.wox;
+    const woy = ctx.woy;
+    const wsx = if (ctx.wsx != 0) ctx.wsx else tty.sx;
+    const wsy = if (ctx.wsy != 0) ctx.wsy else tty.sy;
 
     if (tty_is_visible(tty, ctx, px, py, nx, ny) == 0) return 0;
 
-    if (ctx.bigger) {
-        if (xoff < ctx.wox) {
-            i.* = ctx.wox - xoff;
-            x.* = ctx.wox;
-            rx.* = nx -| i.*;
-        } else {
-            i.* = 0;
-            x.* = xoff;
-            rx.* = nx;
-        }
-        if (xoff + nx > ctx.wox + ctx.wsx)
-            rx.* = (ctx.wox + ctx.wsx) -| x.*;
-
-        if (yoff < ctx.woy) {
-            j.* = ctx.woy - yoff;
-            y.* = ctx.woy;
-            ry.* = ny -| j.*;
-        } else {
-            j.* = 0;
-            y.* = yoff;
-            ry.* = ny;
-        }
-        if (yoff + ny > ctx.woy + ctx.wsy)
-            ry.* = (ctx.woy + ctx.wsy) -| y.*;
+    if (xoff >= wox and xoff + nx <= wox + wsx) {
+        i.* = 0;
+        x.* = ctx.xoff + px -| wox;
+        rx.* = nx;
+    } else if (xoff < wox and xoff + nx > wox + wsx) {
+        i.* = wox;
+        x.* = 0;
+        rx.* = wsx;
+    } else if (xoff < wox) {
+        i.* = wox - (ctx.xoff + px);
+        x.* = 0;
+        rx.* = nx -| i.*;
     } else {
         i.* = 0;
-        x.* = xoff;
+        x.* = (ctx.xoff + px) -| wox;
+        rx.* = wsx -| x.*;
+    }
+    if (rx.* > nx) {
+        log.log_debug("tty_clamp_area: x too big, {d} > {d}", .{ rx.*, nx });
         rx.* = nx;
+    }
+
+    if (yoff >= woy and yoff + ny <= woy + wsy) {
         j.* = 0;
-        y.* = yoff;
+        y.* = ctx.yoff + py -| woy;
+        ry.* = ny;
+    } else if (yoff < woy and yoff + ny > woy + wsy) {
+        j.* = woy;
+        y.* = 0;
+        ry.* = wsy;
+    } else if (yoff < woy) {
+        j.* = woy - (ctx.yoff + py);
+        y.* = 0;
+        ry.* = ny -| j.*;
+    } else {
+        j.* = 0;
+        y.* = (ctx.yoff + py) -| woy;
+        ry.* = wsy -| y.*;
+    }
+    if (ry.* > ny) {
+        log.log_debug("tty_clamp_area: y too big, {d} > {d}", .{ ry.*, ny });
         ry.* = ny;
     }
     return 1;
@@ -3603,15 +3618,25 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     const has_pixel = tty.xpixel != 0 and tty.ypixel != 0;
     const fallback = !has_sixel or !has_pixel;
 
-    // Use ctx.sx/sy as the visible image bounds. Exact pixel-to-cell placement
-    // still depends on the tty geometry available on the client.
+    const sixel_mod = @import("image-sixel.zig");
+    const si: *T.SixelImage = @ptrCast(@alignCast(ctx.si orelse {
+        const data = ctx.ptr orelse return;
+        tty_add(tty, data, ctx.num);
+        tty_invalidate(tty);
+        return;
+    }));
+
+    var sx: u32 = 0;
+    var sy: u32 = 0;
+    sixel_mod.sixel_size_in_cells(si, &sx, &sy);
+
     var i: u32 = 0;
     var j: u32 = 0;
     var x: u32 = 0;
     var y: u32 = 0;
     var rx: u32 = 0;
     var ry: u32 = 0;
-    if (tty_clamp_area(tty, ctx, ctx.ocx, ctx.ocy, ctx.sx, ctx.sy, &i, &j, &x, &y, &rx, &ry) == 0)
+    if (tty_clamp_area(tty, ctx, ctx.ocx, ctx.ocy, sx, sy, &i, &j, &x, &y, &rx, &ry) == 0)
         return;
 
     log.log_debug("tty_cmd_sixelimage: fallback={}, clamp ({d},{d})-({d},{d})", .{ fallback, i, j, rx, ry });
@@ -3622,17 +3647,7 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
     tty.flags |= @as(i32, @intCast(T.TTY_NOBLOCK));
 
     if (!fallback) {
-        // Sixel-capable terminal: scale the image to the visible region
-        // and emit real sixel DCS data.
-        const sixel_mod = @import("image-sixel.zig");
-        const si: *T.SixelImage = @ptrCast(@alignCast(ctx.si orelse {
-            // No sixel data available — fall through to fallback text.
-            const data = ctx.ptr orelse return;
-            tty_add(tty, data, ctx.num);
-            tty_invalidate(tty);
-            return;
-        }));
-        const scaled = sixel_mod.sixel_scale(si, i, j, rx -| i, ry -| j, rx -| i, ry -| j, false) orelse {
+        const scaled = sixel_mod.sixel_scale(si, tty.xpixel, tty.ypixel, i, j, rx, ry, false) orelse {
             // Scale failed — use fallback text.
             const data = ctx.ptr orelse return;
             tty_add(tty, data, ctx.num);
@@ -3640,7 +3655,7 @@ pub fn tty_cmd_sixelimage(tty: *T.Tty, ctx: *const T.TtyCtx) void {
             return;
         };
         defer sixel_mod.sixel_free(scaled);
-        const printed = sixel_mod.sixel_print(scaled, null) orelse {
+        const printed = sixel_mod.sixel_print(scaled, si) orelse {
             const data = ctx.ptr orelse return;
             tty_add(tty, data, ctx.num);
             tty_invalidate(tty);
@@ -3684,12 +3699,10 @@ pub fn tty_draw_images(c: *T.Client, wp: *T.WindowPane, s: *T.Screen) void {
         ttyctx.orlower = s.rlower;
         ttyctx.orupper = s.rupper;
 
-        // Pane offset and image dimensions (the Zig tty_cmd_sixelimage
-        // uses ctx.sx/sy as the area to clamp, so pass image cell size).
         ttyctx.xoff = wp.xoff;
         ttyctx.rxoff = wp.xoff;
-        ttyctx.sx = im.sx;
-        ttyctx.sy = im.sy;
+        ttyctx.sx = wp.sx;
+        ttyctx.sy = wp.sy;
 
         // Sixel data for real rendering, fallback text for non-sixel terms.
         ttyctx.si = im.data;
@@ -4055,6 +4068,54 @@ test "tty_keys_next maps tmux DA1 feature codes" {
     try std.testing.expect((cl.term_features & tty_features.featureBit(.margins)) != 0);
     try std.testing.expect((cl.term_features & tty_features.featureBit(.rectfill)) != 0);
     try std.testing.expect((cl.term_features & tty_features.featureBit(.clipboard)) != 0);
+}
+
+test "tty_clamp_area subtracts viewport offsets for partially visible areas" {
+    var cl = T.Client{
+        .environ = undefined,
+        .tty = undefined,
+        .status = .{},
+    };
+    var tty = T.Tty{ .client = &cl, .sx = 80, .sy = 24 };
+    var ctx = T.TtyCtx{
+        .xoff = 10,
+        .yoff = 4,
+        .rxoff = 10,
+        .ryoff = 4,
+        .bigger = true,
+        .wox = 15,
+        .woy = 6,
+        .wsx = 60,
+        .wsy = 16,
+    };
+
+    var i: u32 = 0;
+    var j: u32 = 0;
+    var x: u32 = 0;
+    var y: u32 = 0;
+    var rx: u32 = 0;
+    var ry: u32 = 0;
+
+    try std.testing.expectEqual(@as(i32, 1), tty_clamp_area(
+        &tty,
+        &ctx,
+        0,
+        0,
+        30,
+        10,
+        &i,
+        &j,
+        &x,
+        &y,
+        &rx,
+        &ry,
+    ));
+    try std.testing.expectEqual(@as(u32, 5), i);
+    try std.testing.expectEqual(@as(u32, 2), j);
+    try std.testing.expectEqual(@as(u32, 0), x);
+    try std.testing.expectEqual(@as(u32, 0), y);
+    try std.testing.expectEqual(@as(u32, 25), rx);
+    try std.testing.expectEqual(@as(u32, 8), ry);
 }
 
 test "tty_cursor updates cx/cy to target position" {

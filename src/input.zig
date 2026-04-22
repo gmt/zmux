@@ -968,6 +968,24 @@ fn parse_dcs_structured(bytes: []const u8) ?DcsParsed {
     return null;
 }
 
+fn dcs_unescape_payload(data: []const u8) []u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(xm.allocator);
+
+    var i: usize = 0;
+    while (i < data.len) {
+        if (data[i] == 0x1b and i + 1 < data.len) {
+            out.append(xm.allocator, data[i + 1]) catch unreachable;
+            i += 2;
+            continue;
+        }
+        out.append(xm.allocator, data[i]) catch unreachable;
+        i += 1;
+    }
+
+    return out.toOwnedSlice(xm.allocator) catch unreachable;
+}
+
 /// Dispatch a fully-parsed DCS sequence, applying side-effects.
 /// Mirrors tmux's input_dcs_dispatch and input_handle_decrqss.
 fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
@@ -996,7 +1014,9 @@ fn apply_dcs(wp: *T.WindowPane, ctx: *T.ScreenWriteCtx, dcs: DcsParsed) void {
     const allow_passthrough = opts.options_get_number(oo, "allow-passthrough");
     if (allow_passthrough != 0 and data.len >= 5 and std.mem.startsWith(u8, data, "tmux;")) {
         const sw = @import("screen-write.zig");
-        sw.rawstring(ctx, data[5..]);
+        const raw = dcs_unescape_payload(data[5..]);
+        defer xm.allocator.free(raw);
+        sw.rawstring(ctx, raw);
         return;
     }
 }
@@ -3102,6 +3122,12 @@ test "input DCS parsed structure has correct params interm and data" {
     // Incomplete sequence
     try testing.expect(parse_dcs_structured("\x1bPpartial") == null);
     try testing.expect(parse_dcs_structured("\x1bPdata\x1b") == null);
+}
+
+test "input DCS passthrough payload unescapes tmux doubled ESC bytes" {
+    const raw = dcs_unescape_payload("\x1b\x1bPqdata\x1b\x1b\\");
+    defer xm.allocator.free(raw);
+    try std.testing.expectEqualStrings("\x1bPqdata\x1b\\", raw);
 }
 
 test "input SOS is consumed cleanly" {

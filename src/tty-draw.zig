@@ -27,7 +27,6 @@ const opts = @import("options.zig");
 const style_mod = @import("style.zig");
 const tty_acs = @import("tty-acs.zig");
 const utf8 = @import("utf8.zig");
-const sixel = @import("image-sixel.zig");
 const hyperlinks_mod = @import("hyperlinks.zig");
 
 pub const WindowRenderResult = struct {
@@ -136,7 +135,7 @@ pub fn tty_draw_pane_offset(
         }
     }
 
-    try append_sixel_images(&out, screen, wp, row_offset, 0, 0, has_sixel);
+    try append_sixel_images(&out, screen, wp, row_offset, 0, 0, sx, sy, has_sixel);
 
     const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
         @min(sx, scrollbar.?.width + scrollbar.?.pad)
@@ -220,7 +219,7 @@ pub fn tty_draw_render_window_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, has_sixel);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel);
     }
 
     if (w.active) |active| {
@@ -302,7 +301,7 @@ pub fn tty_draw_render_dirty_panes_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, has_sixel);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel);
     }
 
     return out.toOwnedSlice(xm.allocator);
@@ -456,9 +455,11 @@ fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
     try out.appendSlice(xm.allocator, move);
 }
 
-/// Append images for all images on a screen.  When the client terminal
-/// supports sixel, emit real DCS sixel data via sixel_print; otherwise
-/// fall back to text placeholders.
+/// Append images intersecting the visible pane/window viewport.
+///
+/// This mirrors the important part of tmux's tty_cmd_sixelimage contract:
+/// draw only the visible cell rectangle, and serialize a freshly clipped
+/// image instead of blindly replaying the full stored DCS at the top-left.
 fn append_sixel_images(
     out: *std.ArrayList(u8),
     screen: *T.Screen,
@@ -466,30 +467,61 @@ fn append_sixel_images(
     row_offset: u32,
     view_x: u32,
     view_y: u32,
+    view_sx: u32,
+    view_sy: u32,
     has_sixel: bool,
 ) !void {
     const sixel_mod = @import("image-sixel.zig");
+
     for (screen.images.items) |im| {
+        if (im.sx == 0 or im.sy == 0 or view_sx == 0 or view_sy == 0)
+            continue;
+
         const abs_x = wp.xoff + im.px;
         const abs_y = wp.yoff + im.py;
-        if (abs_x < view_x or abs_y < view_y) continue;
-        const x = abs_x - view_x;
-        const y = abs_y - view_y;
+        const im_right = abs_x + im.sx;
+        const im_bottom = abs_y + im.sy;
+        const view_right = view_x + view_sx;
+        const view_bottom = view_y + view_sy;
 
-        try append_move(out, row_offset + y + 1, x + 1);
+        if (im_right <= view_x or abs_x >= view_right or
+            im_bottom <= view_y or abs_y >= view_bottom)
+            continue;
+
+        const vis_left = @max(abs_x, view_x);
+        const vis_top = @max(abs_y, view_y);
+        const vis_right = @min(im_right, view_right);
+        const vis_bottom = @min(im_bottom, view_bottom);
+        const clip_sx = vis_right - vis_left;
+        const clip_sy = vis_bottom - vis_top;
+        if (clip_sx == 0 or clip_sy == 0) continue;
+
+        const src_x = vis_left - abs_x;
+        const src_y = vis_top - abs_y;
+        const dst_x = vis_left - view_x;
+        const dst_y = vis_top - view_y;
+
+        try append_move(out, row_offset + dst_y + 1, dst_x + 1);
 
         if (has_sixel) {
-            // Emit real sixel DCS data.
-            if (sixel_mod.sixel_print(im.data, null)) |printed| {
-                defer xm.allocator.free(printed);
-                try out.appendSlice(xm.allocator, printed);
-                continue;
+            const clipped = if (src_x == 0 and src_y == 0 and
+                clip_sx == im.sx and clip_sy == im.sy)
+                im.data
+            else
+                sixel_mod.sixel_scale(im.data, 0, 0, src_x, src_y, clip_sx, clip_sy, false) orelse null;
+
+            if (clipped) |si| {
+                defer if (si != im.data) sixel_mod.sixel_free(si);
+                if (sixel_mod.sixel_print(si, im.data)) |printed| {
+                    defer xm.allocator.free(printed);
+                    try out.appendSlice(xm.allocator, printed);
+                    continue;
+                }
             }
         }
 
-        // Non-sixel client or sixel_print failed — text fallback.
-        if (im.fallback) |fb| {
-            try out.appendSlice(xm.allocator, fb);
+        if (src_x == 0 and src_y == 0) {
+            if (im.fallback) |fb| try out.appendSlice(xm.allocator, fb);
         }
     }
 }

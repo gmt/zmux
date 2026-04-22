@@ -30,12 +30,10 @@ Live tmux-parity gaps only.
   width/height of the cropped image but does not catch the duplication, since
   the duplication is in the render path rather than in `image_scroll_up`.
   Pinned by `regress/sixel-scroll-deduplication.sh`, which currently fails
-  with two-or-more DCS sixel emits on the post-scroll redraw where exactly
-  one is expected; wire it into `FAST_CASES` once the render path stops
-  emitting the cropped image alongside its pre-crop parent.
+  with two-or-more DCS sixel emits on attach/resize redraws where exactly one
+  surviving image emit is expected; wire it into `FAST_CASES` once repeated
+  redraws stop resending the same cropped image into the terminal scrollback.
 - likely files: `src/image.zig` (`image_scroll_up` only crops, so the
-  duplication is downstream); `src/tty.zig` (`tty_draw_images` around line
-  3675 iterates `s.images.items` and re-emits each — the bug is most likely
-  in how cell-range references into scrollback get re-anchored against the
-  cropped image data).
-
+  duplication is downstream); `src/server-client.zig` and `src/tty-draw.zig`
+  (attach/resize redraw sequencing and payload image emission); `src/tty.zig`
+  (`tty_draw_images` is the tmux-shaped reference path for future cleanup).

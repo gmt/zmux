@@ -46,6 +46,7 @@ pub fn tty_draw_invalidate(cache: *T.ClientPaneCache) void {
     cache.scrollbar_pad = 0;
     cache.scrollbar_slider_y = 0;
     cache.scrollbar_slider_h = 0;
+    cache.image_epoch = 0;
     cache.cursor_x = 0;
     cache.cursor_y = 0;
     cache.cursor_visible = true;
@@ -80,6 +81,9 @@ pub fn tty_draw_pane_offset(
     const screen = screen_mod.screen_current(wp);
     const scrollbar = window_mod.window_pane_scrollbar_layout(wp);
     var update_started = false;
+    var rows_changed = false;
+    var changed_top: u32 = std.math.maxInt(u32);
+    var changed_bottom: u32 = 0;
 
     const full_redraw =
         !cache.valid or
@@ -132,10 +136,22 @@ pub fn tty_draw_pane_offset(
 
             xm.allocator.free(cache.rows.items[row_idx]);
             cache.rows.items[row_idx] = try xm.allocator.dupe(u8, rendered);
+            rows_changed = true;
+            const row: u32 = @intCast(row_idx);
+            changed_top = @min(changed_top, row);
+            changed_bottom = @max(changed_bottom, row + 1);
         }
     }
 
-    try append_sixel_images(&out, screen, wp, row_offset, 0, 0, sx, sy, has_sixel);
+    const images_changed = cache.image_epoch != screen.image_epoch;
+    if (full_redraw or rows_changed or images_changed) {
+        const changed = if (!full_redraw and !images_changed and rows_changed)
+            RowRange{ .top = changed_top, .bottom = changed_bottom }
+        else
+            null;
+        try append_sixel_images(&out, screen, wp, row_offset, 0, 0, sx, sy, has_sixel, changed);
+        cache.image_epoch = screen.image_epoch;
+    }
 
     const cursor_prefix = if (scrollbar != null and scrollbar.?.left)
         @min(sx, scrollbar.?.width + scrollbar.?.pad)
@@ -219,7 +235,7 @@ pub fn tty_draw_render_window_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel, null);
     }
 
     if (w.active) |active| {
@@ -301,7 +317,7 @@ pub fn tty_draw_render_dirty_panes_region(
             try out.appendSlice(xm.allocator, rendered);
         }
 
-        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel);
+        try append_sixel_images(&out, screen, wp, row_offset, view_x, view_y, sx_limit, sy_limit, has_sixel, null);
     }
 
     return out.toOwnedSlice(xm.allocator);
@@ -455,6 +471,11 @@ fn append_move(out: *std.ArrayList(u8), row: u32, col: u32) !void {
     try out.appendSlice(xm.allocator, move);
 }
 
+const RowRange = struct {
+    top: u32,
+    bottom: u32,
+};
+
 /// Append images intersecting the visible pane/window viewport.
 ///
 /// This mirrors the important part of tmux's tty_cmd_sixelimage contract:
@@ -470,6 +491,7 @@ fn append_sixel_images(
     view_sx: u32,
     view_sy: u32,
     has_sixel: bool,
+    changed_rows: ?RowRange,
 ) !void {
     const sixel_mod = @import("image-sixel.zig");
 
@@ -500,6 +522,11 @@ fn append_sixel_images(
         const src_y = vis_top - abs_y;
         const dst_x = vis_left - view_x;
         const dst_y = vis_top - view_y;
+
+        if (changed_rows) |changed| {
+            if (dst_y + clip_sy <= changed.top or dst_y >= changed.bottom)
+                continue;
+        }
 
         try append_move(out, row_offset + dst_y + 1, dst_x + 1);
 
@@ -1193,6 +1220,53 @@ test "tty_draw_invalidate forces full redraw again" {
     const second = try tty_draw_pane(&cache, wp, 3, 1, false);
     defer xm.allocator.free(second);
     try std.testing.expect(std.mem.indexOf(u8, second, "\x1b[H\x1b[2J") != null);
+}
+
+test "tty_draw_pane does not re-emit unchanged images" {
+    const win = @import("window.zig");
+    const image_mod = @import("image.zig");
+    const sixel_mod = @import("image-sixel.zig");
+
+    opts.global_w_options = opts.options_create(null);
+    defer opts.options_free(opts.global_w_options);
+    opts.options_default_all(opts.global_w_options, T.OPTIONS_TABLE_WINDOW);
+    win.window_init_globals(xm.allocator);
+
+    const w = win.window_create(4, 2, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+    defer {
+        while (w.panes.items.len > 0) {
+            const pane = w.panes.items[w.panes.items.len - 1];
+            win.window_remove_pane(w, pane);
+        }
+        w.panes.deinit(xm.allocator);
+        w.last_panes.deinit(xm.allocator);
+        opts.options_free(w.options);
+        xm.allocator.free(w.name);
+        _ = win.windows.remove(w.id);
+        xm.allocator.destroy(w);
+    }
+
+    const wp = win.window_add_pane(w, null, 4, 2);
+    const si = sixel_mod.sixel_parse("q#0;2;100;0;0~", 0, 8, 16) orelse return error.TestUnexpectedResult;
+    _ = image_mod.image_store(&wp.base, si);
+
+    var cache = T.ClientPaneCache{};
+    defer tty_draw_free(&cache);
+
+    const first = try tty_draw_pane(&cache, wp, 4, 2, true);
+    defer xm.allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\x1bP") != null);
+
+    const second = try tty_draw_pane(&cache, wp, 4, 2, true);
+    defer xm.allocator.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\x1bP") == null);
+
+    const si2 = sixel_mod.sixel_parse("q#0;2;0;100;0~", 0, 8, 16) orelse return error.TestUnexpectedResult;
+    wp.base.cy = 1;
+    _ = image_mod.image_store(&wp.base, si2);
+    const third = try tty_draw_pane(&cache, wp, 4, 2, true);
+    defer xm.allocator.free(third);
+    try std.testing.expect(std.mem.indexOf(u8, third, "\x1bP") != null);
 }
 
 test "tty_draw_pane preserves stored utf8 glyph bytes" {

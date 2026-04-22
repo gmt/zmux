@@ -1697,6 +1697,70 @@ test "server_client_dispatch_resize reads tty geometry from fd and sets CLIENT_S
     try std.testing.expect((cl.flags & T.CLIENT_SIZECHANGED) != 0);
 }
 
+test "server_client_dispatch_resize treats zero tty geometry as default size" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, null, &ws));
+    defer _ = c.posix_sys.close(master);
+    defer _ = c.posix_sys.close(slave);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+        .flags = T.CLIENT_IDENTIFIED,
+        .fd = slave,
+    };
+    cl.tty = .{ .client = &cl };
+    tty_mod.tty_init(&cl.tty, &cl);
+    tty_mod.tty_set_size(&cl.tty, 10, 5, 0, 0);
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.resize), &.{});
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+
+    try std.testing.expectEqual(@as(u32, 80), cl.tty.sx);
+    try std.testing.expectEqual(@as(u32, 24), cl.tty.sy);
+    try std.testing.expectEqual(T.DEFAULT_XPIXEL, cl.tty.xpixel);
+    try std.testing.expectEqual(T.DEFAULT_YPIXEL, cl.tty.ypixel);
+    try std.testing.expect((cl.flags & T.CLIENT_SIZECHANGED) != 0);
+}
+
+test "server_client_dispatch_resize ignores unchanged zero tty geometry" {
+    const env = env_mod.environ_create();
+    defer env_mod.environ_free(env);
+
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    var ws = std.mem.zeroes(c.posix_sys.struct_winsize);
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, null, &ws));
+    defer _ = c.posix_sys.close(master);
+    defer _ = c.posix_sys.close(slave);
+
+    var cl = T.Client{
+        .environ = env,
+        .tty = undefined,
+        .status = .{},
+        .session = null,
+        .flags = T.CLIENT_IDENTIFIED,
+        .fd = slave,
+    };
+    cl.tty = .{ .client = &cl };
+    tty_mod.tty_init(&cl.tty, &cl);
+    tty_mod.tty_set_size(&cl.tty, 80, 24, T.DEFAULT_XPIXEL, T.DEFAULT_YPIXEL);
+
+    var imsg = buildDispatchImsg(@intFromEnum(protocol.MsgType.resize), &.{});
+    sc.server_client_dispatch_for_test(&imsg, &cl);
+
+    try std.testing.expectEqual(@as(u32, 80), cl.tty.sx);
+    try std.testing.expectEqual(@as(u32, 24), cl.tty.sy);
+    try std.testing.expect((cl.flags & T.CLIENT_SIZECHANGED) == 0);
+}
+
 test "server_client_dispatch_shell with payload marks peer bad" {
     const env = env_mod.environ_create();
     defer env_mod.environ_free(env);

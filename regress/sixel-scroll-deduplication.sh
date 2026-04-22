@@ -20,10 +20,8 @@
 # history must emit exactly one DCS sixel sequence per surviving image
 # region — not two.
 #
-# This test currently FAILS on main (and on rgba-uplift); it captures
-# the bug rather than the fix.  Wire it into FAST_CASES once the render
-# path stops re-emitting the cropped image alongside its pre-crop
-# parent.
+# This pins the scrollback deduplication invariant: attach and resize redraws
+# must not resend the same surviving image into terminal scrollback.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/common.sh"

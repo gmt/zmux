@@ -253,12 +253,18 @@ fn server_client_dispatch_resize(cl: *T.Client, imsg_msg: *c.imsg.imsg) void {
     if (cl.fd >= 0) {
         var ws: c.posix_sys.winsize = undefined;
         if (c.posix_sys.ioctl(cl.fd, c.posix_sys.TIOCGWINSZ, &ws) == 0) {
-            sx = @max(@as(u32, ws.ws_col), 1);
-            sy = @max(@as(u32, ws.ws_row), 1);
-            xpixel = ws.ws_xpixel;
-            ypixel = ws.ws_ypixel;
+            sx = if (ws.ws_col == 0) 80 else @as(u32, ws.ws_col);
+            sy = if (ws.ws_row == 0) 24 else @as(u32, ws.ws_row);
+            xpixel = if (ws.ws_col == 0) 0 else ws.ws_xpixel;
+            ypixel = if (ws.ws_row == 0) 0 else ws.ws_ypixel;
         }
     }
+
+    const next_xpixel = if (sx > 0 and xpixel > 0) xpixel / sx else T.DEFAULT_XPIXEL;
+    const next_ypixel = if (sy > 0 and ypixel > 0) ypixel / sy else T.DEFAULT_YPIXEL;
+    if (sx == cl.tty.sx and sy == cl.tty.sy and
+        next_xpixel == cl.tty.xpixel and next_ypixel == cl.tty.ypixel)
+        return;
 
     tty_mod.tty_resize(&cl.tty, sx, sy, xpixel, ypixel);
     tty_mod.tty_repeat_requests(&cl.tty, 0);

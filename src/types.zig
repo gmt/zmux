@@ -760,6 +760,8 @@ pub const Screen = struct {
     images: std.ArrayListUnmanaged(*Image) = .{},
     /// Saved images (for alternate-screen switch).
     saved_images: std.ArrayListUnmanaged(*Image) = .{},
+    /// Incremented whenever image placement or image data changes.
+    image_epoch: u64 = 0,
 };
 
 // ── Terminal ──────────────────────────────────────────────────────────────
@@ -1391,6 +1393,7 @@ pub const ClientPaneCache = struct {
     scrollbar_slider_y: u32 = 0,
     scrollbar_slider_h: u32 = 0,
     rows: std.ArrayList([]u8) = .{},
+    image_epoch: u64 = 0,
     cursor_x: u32 = 0,
     cursor_y: u32 = 0,
     cursor_visible: bool = true,

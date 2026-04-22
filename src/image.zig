@@ -44,6 +44,10 @@ fn image_log(im: *const T.Image, from: []const u8) void {
     log_mod.log_debug("{s}: {} ({}x{} {},{} )", .{ from, @intFromPtr(im), im.sx, im.sy, im.px, im.py });
 }
 
+fn image_mark_changed(s: *T.Screen) void {
+    s.image_epoch +%= 1;
+}
+
 // ── Text fallback placeholder ─────────────────────────────────────────────
 
 /// Create a text placeholder for an image (mirrors `image_fallback` in image.c).
@@ -113,6 +117,7 @@ fn image_free_internal(im: *T.Image) void {
         if (item == im) break i;
     } else s.images.items.len;
     if (sidx < s.images.items.len) _ = s.images.orderedRemove(sidx);
+    image_mark_changed(s);
 
     sixel_mod.sixel_free(im.data);
     if (im.fallback) |fb| xm.allocator.free(fb);
@@ -155,6 +160,7 @@ pub fn image_store(s: *T.Screen, si: *T.SixelImage) *T.Image {
     image_log(im, "image_store");
 
     s.images.append(xm.allocator, im) catch unreachable;
+    image_mark_changed(s);
 
     all_images.append(xm.allocator, im) catch unreachable;
     all_images_count += 1;
@@ -226,6 +232,7 @@ pub fn image_scroll_up(s: *T.Screen, lines: u32) bool {
             // Image is entirely below the scroll region – shift up.
             log_mod.log_debug("image_scroll_up: {} 1, lines={d}", .{ @intFromPtr(im), lines });
             im.py -= lines;
+            image_mark_changed(s);
             redraw = true;
             i += 1;
             continue;
@@ -257,6 +264,7 @@ pub fn image_scroll_up(s: *T.Screen, lines: u32) bool {
         if (im.fallback) |fb| xm.allocator.free(fb);
         im.fallback = image_fallback(im.sx, im.sy);
 
+        image_mark_changed(s);
         redraw = true;
         i += 1;
     }

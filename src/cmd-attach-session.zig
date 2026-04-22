@@ -112,7 +112,7 @@ fn exec_attach(cmd: *cmd_mod.Cmd, item: *cmdq.CmdqItem) T.CmdRetval {
             if (c.peer) |peer| _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
         }
         notify.notify_client("client-attached", c);
-        c.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAW;
+        c.flags |= T.CLIENT_ATTACHED;
     }
 
     if (cfg_mod.cfg_finished) cfg_mod.cfg_show_causes(c);

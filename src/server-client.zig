@@ -1054,7 +1054,7 @@ pub fn server_client_force_redraw(cl: *T.Client) void {
 pub fn server_client_attach(cl: *T.Client, s: *T.Session) void {
     server_client_set_session(cl, s);
     server_client_set_key_table(cl, null);
-    cl.flags |= T.CLIENT_ATTACHED | T.CLIENT_REDRAW;
+    cl.flags |= T.CLIENT_ATTACHED;
     if (cl.peer) |peer| {
         _ = proc_mod.proc_send(peer, .ready, -1, null, 0);
     }

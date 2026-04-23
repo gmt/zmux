@@ -27,6 +27,76 @@ const server_fn = @import("server-fn.zig");
 const window_mod = @import("window.zig");
 const input_mod = @import("input.zig");
 const alerts = @import("alerts.zig");
+const image_mod = @import("image.zig");
+const screen_mod = @import("screen.zig");
+const client_registry = @import("client-registry.zig");
+
+fn full_window_redraw_pending(wp: *T.WindowPane) bool {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        if (cl.flags & T.CLIENT_REDRAWWINDOW == 0) continue;
+        const s = cl.session orelse continue;
+        const wl = s.curw orelse continue;
+        if (wl.window == wp.window) return true;
+    }
+    return false;
+}
+
+fn has_konsole_client(wp: *T.WindowPane) bool {
+    for (client_registry.clients.items) |cl| {
+        if (cl.flags & T.CLIENT_ATTACHED == 0) continue;
+        const s = cl.session orelse continue;
+        const wl = s.curw orelse continue;
+        if (wl.window != wp.window) continue;
+        const term = cl.term_name orelse continue;
+        if (std.mem.indexOf(u8, term, "konsole") != null) return true;
+    }
+    return false;
+}
+
+fn pane_bytes_have_printable_text(bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const ch = bytes[i];
+        if (ch != 0x1b) {
+            if (ch >= 0x20 and ch != 0x7f) return true;
+            i += 1;
+            continue;
+        }
+
+        if (i + 1 >= bytes.len) return false;
+        const next = bytes[i + 1];
+        switch (next) {
+            '[' => {
+                i += 2;
+                while (i < bytes.len) : (i += 1) {
+                    if (bytes[i] >= 0x40 and bytes[i] <= 0x7e) {
+                        i += 1;
+                        break;
+                    }
+                }
+            },
+            ']', 'P', '_', 'X', '^' => {
+                i += 2;
+                while (i < bytes.len) : (i += 1) {
+                    if (bytes[i] == 0x07) {
+                        i += 1;
+                        break;
+                    }
+                    if (bytes[i] == 0x1b and i + 1 < bytes.len and bytes[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                }
+            },
+            '(', ')', '*', '+', '-', '.', '/', '#', '%', ' ' => {
+                i += if (i + 2 < bytes.len) 3 else bytes.len - i;
+            },
+            else => i += 2,
+        }
+    }
+    return false;
+}
 
 pub fn pane_io_start(wp: *T.WindowPane) void {
     if (wp.fd < 0 or wp.event != null) return;
@@ -121,7 +191,25 @@ pub fn pane_io_feed(wp: *T.WindowPane, bytes: []const u8) void {
 pub fn pane_io_display(wp: *T.WindowPane, bytes: []const u8) void {
     if (bytes.len != 0)
         alerts.alerts_queue(wp.window, T.WINDOW_ACTIVITY);
+    const redraw_already_pending = (wp.flags & T.PANE_REDRAW) != 0;
+    const client_full_redraw_pending = full_window_redraw_pending(wp);
+    const before = screen_mod.screen_current(wp);
+    const before_cx = before.cx;
+    const before_cy = before.cy;
+    const before_hsize = before.grid.hsize;
     input_mod.input_parse_screen(wp, bytes);
+    const screen = screen_mod.screen_current(wp);
+    const screen_moved = screen != before or
+        screen.cx != before_cx or
+        screen.cy != before_cy or
+        screen.grid.hsize != before_hsize;
+    if (bytes.len != 0 and screen.images.items.len != 0 and
+        pane_bytes_have_printable_text(bytes) and
+        screen_moved and !redraw_already_pending and !client_full_redraw_pending and
+        has_konsole_client(wp))
+    {
+        image_mod.image_mark_changed(screen);
+    }
 }
 
 pub fn pane_pipe_read_ready(wp: *T.WindowPane) void {

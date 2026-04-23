@@ -44,7 +44,7 @@ fn image_log(im: *const T.Image, from: []const u8) void {
     log_mod.log_debug("{s}: {} ({}x{} {},{} )", .{ from, @intFromPtr(im), im.sx, im.sy, im.px, im.py });
 }
 
-fn image_mark_changed(s: *T.Screen) void {
+pub fn image_mark_changed(s: *T.Screen) void {
     s.image_epoch +%= 1;
 }
 

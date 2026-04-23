@@ -766,6 +766,15 @@ pub fn server_client_loop() void {
         server_client_check_window_resize(w_ptr.*);
     }
 
+    wit = win_mod.windows.valueIterator();
+    while (wit.next()) |w_ptr| {
+        const w = w_ptr.*;
+        for (w.panes.items) |wp| {
+            if (wp.fd != -1)
+                server_client_check_pane_buffer(wp);
+        }
+    }
+
     for (client_registry.clients.items) |cl| {
         server_client_check_exit(cl);
 

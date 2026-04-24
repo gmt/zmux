@@ -262,6 +262,7 @@
     "zig-stress:format-async-stress-test.test.format async shell caches completed no-output jobs as empty strings": 10.0,
     "zig-stress:format-async-stress-test.test.format async shell collects output and trims trailing newlines": 10.0,
     "zig-stress:format-async-stress-test.test.format async shell completion order keeps concurrent caches isolated": 10.0,
+    "zig-stress:format-async-stress-test.test.format async shell frees completion pipes after cache update": 10.0,
     "zig-stress:format-async-stress-test.test.format async shell refreshes cached output after the one-second launch window": 10.0,
     "zig-stress:format-async-stress-test.test.format async shell rapid re-expansion does not respawn a running job": 10.0,
     "zig-stress:format-async-stress-test.test.format async shell reports slow commands as not ready after one second": 10.0,

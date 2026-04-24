@@ -87,6 +87,16 @@ fn tmpChildPath(alloc: std.mem.Allocator, dir: std.fs.Dir, child: []const u8) ![
     return std.fs.path.join(alloc, &.{ root, child });
 }
 
+fn countOpenFds() !usize {
+    var dir = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
+    defer dir.close();
+
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next()) |_| count += 1;
+    return count;
+}
+
 test "format async shell collects output and trims trailing newlines" {
     if (builtin.os.tag != .linux) return;
 
@@ -265,4 +275,45 @@ test "format async shell caches completed no-output jobs as empty strings" {
     const count = try readFileOrEmpty(std.testing.allocator, count_path);
     defer std.testing.allocator.free(count);
     try std.testing.expectEqualStrings("x", count);
+}
+
+test "format async shell frees completion pipes after cache update" {
+    if (builtin.os.tag != .linux) return;
+
+    const old_base = installEventBase();
+    defer restoreEventBase(old_base);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+
+    var client_ctx: TestClientContext = undefined;
+    client_ctx.init("/");
+    defer client_ctx.deinit();
+
+    const before = try countOpenFds();
+
+    for (0..48) |idx| {
+        const template = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "#(printf '{d}' > '{s}/done-{d}'; printf done-{d})",
+            .{ idx, root, idx, idx },
+        );
+        defer std.testing.allocator.free(template);
+
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "done-{d}", .{idx});
+        defer std.testing.allocator.free(expected);
+
+        try waitForFormatValue(template, &client_ctx.ctx, expected);
+    }
+
+    for (0..10) |_| {
+        pumpAsyncNonblock();
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+
+    const after = try countOpenFds();
+    try std.testing.expect(after <= before + 4);
 }

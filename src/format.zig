@@ -325,6 +325,8 @@ fn format_job_cache_tidy(force: bool) void {
 /// Callback invoked when the async shell job for a #() expression finishes.
 fn format_job_complete_cb(ash: *job_mod.AsyncShell, arg: ?*anyopaque) void {
     _ = arg;
+    defer job_mod.async_shell_free(ash);
+
     format_job_cache_lock.lock();
     defer format_job_cache_lock.unlock();
 
@@ -341,7 +343,6 @@ fn format_job_complete_cb(ash: *job_mod.AsyncShell, arg: ?*anyopaque) void {
         if (fj.out) |old| xm.allocator.free(old);
         fj.out = xm.allocator.dupe(u8, trimmed) catch unreachable;
         fj.async_shell = null;
-        // ash will be freed by the caller (async_shell_event_cb → callback).
         return;
     }
 }

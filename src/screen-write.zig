@@ -535,6 +535,9 @@ pub fn screen_write_collect_end(ctx: *T.ScreenWriteCtx) void {
             const start = ci.x;
             const end = @min(start + ci.used, @as(u32, @intCast(data.len)));
             if (end > start) {
+                if (image_mod.image_check_area(s, s.cx, s.cy, ci.used, 1)) {
+                    if (ctx.wp) |wp| wp.flags |= T.PANE_REDRAW;
+                }
                 grid.set_cells(s.grid, s.cy, s.cx, &ci.gc, data[start..end]);
             }
         }
@@ -1555,6 +1558,56 @@ test "screen-write collect lifecycle: start, add, end, flush, stop" {
     try std.testing.expectEqual(@as(u8, 'B'), grid.ascii_at(s.grid, 0, 1));
     try std.testing.expectEqual(@as(u8, 'C'), grid.ascii_at(s.grid, 0, 2));
     try std.testing.expectEqual(@as(u32, 3), s.cx);
+}
+
+test "screen-write collected cells discard overlapping images" {
+    const screen = @import("screen.zig");
+    const s = screen.screen_init(10, 4, 100);
+    defer {
+        screen.screen_free(s);
+        xm.allocator.destroy(s);
+    }
+
+    var window = T.Window{
+        .id = 101,
+        .name = xm.xstrdup("screen-write-image-overwrite"),
+        .sx = 10,
+        .sy = 4,
+        .options = opts.options_create(opts.global_w_options),
+    };
+    defer xm.allocator.free(window.name);
+    defer opts.options_free(window.options);
+    defer window.panes.deinit(xm.allocator);
+    defer window.last_panes.deinit(xm.allocator);
+    defer window.winlinks.deinit(xm.allocator);
+
+    var pane = T.WindowPane{
+        .id = 102,
+        .window = &window,
+        .options = opts.options_create(window.options),
+        .sx = 10,
+        .sy = 4,
+        .screen = s,
+        .base = s.*,
+    };
+    defer opts.options_free(pane.options);
+
+    const si = sixel.sixel_parse("q#0;2;100;0;0~", 0, 8, 16) orelse return error.TestUnexpectedResult;
+    _ = image_mod.image_store(s, si);
+    try std.testing.expectEqual(@as(usize, 1), s.images.items.len);
+
+    var ctx: T.ScreenWriteCtx = undefined;
+    screen_write_start_pane(&ctx, &pane, s);
+    defer screen_write_stop(&ctx);
+
+    var gc = T.grid_default_cell;
+    gc.bg = 1;
+    utf8.utf8_set(&gc.data, ' ');
+    screen_write_collect_add(&ctx, &gc);
+    screen_write_collect_end(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 0), s.images.items.len);
+    try std.testing.expect(pane.flags & T.PANE_REDRAW != 0);
 }
 
 test "screen-write collect_scroll moves items between lines" {

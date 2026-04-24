@@ -2702,6 +2702,7 @@
     "zig-unit:screen-redraw.test.screen_redraw_screen with full redraw flags": 5.0,
     "zig-unit:screen-write.test.screen-write box_draw draws four corners and borders with ACS charset": 5.0,
     "zig-unit:screen-write.test.screen-write collect lifecycle: start, add, end, flush, stop": 5.0,
+    "zig-unit:screen-write.test.screen-write collected cells discard overlapping images": 5.0,
     "zig-unit:screen-write.test.screen-write collect_clear frees items from a line": 5.0,
     "zig-unit:screen-write.test.screen-write collect_scroll moves items between lines": 5.0,
     "zig-unit:screen-write.test.screen-write collect_trim splits overlapping items": 5.0,

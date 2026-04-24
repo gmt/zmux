@@ -506,6 +506,7 @@ fn append_sixel_images(
         const dst_x = vis_left - view_x;
         const dst_y = vis_top - view_y;
 
+        try out.appendSlice(xm.allocator, "\x1b[r");
         try append_move(out, row_offset + dst_y + 1, dst_x + 1);
 
         if (has_sixel) {
@@ -1233,7 +1234,9 @@ test "tty_draw_pane does not re-emit unchanged images" {
 
     const first = try tty_draw_pane(&cache, wp, 4, 2, true);
     defer xm.allocator.free(first);
-    try std.testing.expect(std.mem.indexOf(u8, first, "\x1bP") != null);
+    const first_region_reset = std.mem.indexOf(u8, first, "\x1b[r") orelse return error.TestUnexpectedResult;
+    const first_dcs = std.mem.indexOf(u8, first, "\x1bP") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_region_reset < first_dcs);
 
     const second = try tty_draw_pane(&cache, wp, 4, 2, true);
     defer xm.allocator.free(second);

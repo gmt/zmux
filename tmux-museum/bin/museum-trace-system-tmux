@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2026 Greg Turner <gmt@be-evil.net>
+#
+# Permission to use, copy, modify, and distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
+# IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+# OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# museum-trace-system-tmux - trace a normal system tmux behind socket-spy
+#
+# Usage:
+#   museum-trace-system-tmux [--output FILE] [--strace FILE] [--verbose] [--tmux BIN] [COMMAND [ARGS...]]
+#
+# With no COMMAND, this starts a configured system tmux server and then runs a
+# normal attaching client through the proxy. This is meant for reproducing
+# terminal/UI behavior with the user's real tmux configuration, not for sterile
+# tmux-vs-zmux protocol comparisons.
+
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$LAB_ROOT/.." && pwd)"
+SOCKET_SPY="${SOCKET_SPY:-$REPO_ROOT/regress/socket_spy.py}"
+TMUX_BIN="$(command -v tmux || true)"
+
+log() { printf '[museum-trace-system-tmux] %s\n' "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+usage() {
+    sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \?//' >&2
+    exit "${1:-0}"
+}
+
+SERVER_PID=""
+PROXY_PID=""
+SERVER_SOCK=""
+PROXY_SOCK=""
+tmpdir=""
+
+run_tmux() {
+    env -u TMUX "$TMUX_BIN" "$@"
+}
+
+cleanup() {
+    if [[ -n "$SERVER_SOCK" ]]; then
+        run_tmux -S "$SERVER_SOCK" kill-server >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$SERVER_PID" ]]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+    if [[ -n "$PROXY_PID" ]]; then
+        kill "$PROXY_PID" 2>/dev/null || true
+        wait "$PROXY_PID" 2>/dev/null || true
+        PROXY_PID=""
+    fi
+    rm -rf "${tmpdir:-}"
+}
+
+output=""
+verbose=""
+strace_output=""
+command_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tmux)
+            [[ $# -ge 2 ]] || die "--tmux requires a binary path"
+            TMUX_BIN="$2"
+            shift 2 ;;
+        --output)
+            [[ $# -ge 2 ]] || die "--output requires a path"
+            output="$2"
+            shift 2 ;;
+        --strace)
+            [[ $# -ge 2 ]] || die "--strace requires a path"
+            strace_output="$2"
+            shift 2 ;;
+        --verbose)
+            verbose=1
+            shift ;;
+        --help|-h)
+            usage 0 ;;
+        --)
+            shift
+            command_args=("$@")
+            break ;;
+        -*)
+            die "unknown option: $1" ;;
+        *)
+            command_args=("$@")
+            break ;;
+    esac
+done
+
+[[ -n "$TMUX_BIN" ]] || die "tmux not found in PATH"
+[[ -x "$TMUX_BIN" ]] || die "tmux binary not executable: $TMUX_BIN"
+[[ -f "$SOCKET_SPY" ]] || die "socket_spy.py not found: $SOCKET_SPY"
+if [[ -n "$strace_output" ]] && ! command -v strace >/dev/null 2>&1; then
+    die "strace not found in PATH"
+fi
+
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/museum-trace-system-tmux.XXXXXXXXXX")"
+SERVER_SOCK="$tmpdir/server.sock"
+PROXY_SOCK="$tmpdir/proxy.sock"
+
+if [[ -z "$output" ]]; then
+    output="$(pwd)/trace-system-tmux-$$.spy-log"
+fi
+
+trap cleanup EXIT INT TERM
+
+log "tmux: $TMUX_BIN"
+log "config: default user/system tmux configuration"
+log "real socket: $SERVER_SOCK"
+log "proxy socket: $PROXY_SOCK"
+[[ -n "$strace_output" ]] && log "strace: $strace_output"
+
+# Start a foreground server so we have a reliable PID, but otherwise let tmux
+# behave normally: no -f /dev/null, no museum build, no synthetic HOME.
+server_cmd=(env -u TMUX "$TMUX_BIN" -D -S "$SERVER_SOCK")
+if [[ -n "$strace_output" ]]; then
+    strace -tt -s 1024 -yy -o "$strace_output" \
+        -e trace=read,readv,recvfrom,recvmsg,sendmsg,ioctl \
+        "${server_cmd[@]}" </dev/null >"$tmpdir/server.stdout" 2>"$tmpdir/server.stderr" &
+else
+    "${server_cmd[@]}" </dev/null >"$tmpdir/server.stdout" 2>"$tmpdir/server.stderr" &
+fi
+SERVER_PID=$!
+
+waited=0
+while [[ ! -S "$SERVER_SOCK" ]]; do
+    sleep 0.1
+    waited=$((waited + 1))
+    if [[ $waited -ge 50 ]]; then
+        sed -n '1,80p' "$tmpdir/server.stderr" >&2 || true
+        die "server socket did not appear after 5s"
+    fi
+done
+log "server ready (pid $SERVER_PID)"
+
+spy_args=(--listen "$PROXY_SOCK" --connect "$SERVER_SOCK" --output "$output")
+[[ -n "$verbose" ]] && spy_args+=(--verbose)
+python3 "$SOCKET_SPY" "${spy_args[@]}" &
+PROXY_PID=$!
+
+waited=0
+while [[ ! -S "$PROXY_SOCK" ]]; do
+    sleep 0.1
+    waited=$((waited + 1))
+    [[ $waited -lt 30 ]] || die "proxy socket did not appear after 3s"
+done
+log "proxy ready"
+
+client_rc=0
+if [[ ${#command_args[@]} -gt 0 ]]; then
+    log "running: ${command_args[*]}"
+    run_tmux -S "$PROXY_SOCK" "${command_args[@]}" || client_rc=$?
+else
+    log "attaching; detach or exit tmux to finish trace"
+    run_tmux -S "$PROXY_SOCK" || client_rc=$?
+fi
+
+log "stopping server (pid $SERVER_PID)"
+run_tmux -S "$SERVER_SOCK" kill-server >/dev/null 2>&1 || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+
+sleep 0.2
+if [[ -n "$PROXY_PID" ]]; then
+    kill "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+    PROXY_PID=""
+fi
+
+log "trace written: $output"
+printf '%s\n' "$output"
+exit "$client_rc"
